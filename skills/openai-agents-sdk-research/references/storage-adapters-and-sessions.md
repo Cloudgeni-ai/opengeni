@@ -55,6 +55,10 @@ Postgres support is through `SQLAlchemySession`, not a separate `PostgresSession
 
 ## TypeScript Session Contract And Adapters
 
+For a focused TypeScript storage/ORM treatment, including conversation item
+representation, first-party examples, Postgres/Drizzle status, and a production
+custom-store data model, see `typescript-storage-and-orms.md`.
+
 TypeScript defines `Session` with `getSessionId()`, `getItems(limit?)`, `addItems(items)`, `popItem()`, and `clearSession()`. `OpenAIResponsesCompactionAwareSession` adds `runCompaction(args)`. Source: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/memory/session.ts`.
 
 | Adapter | First-party status | Backing store | Notes |
@@ -66,7 +70,7 @@ TypeScript defines `Session` with `getSessionId()`, `getItems(limit?)`, `addItem
 
 Sources: TypeScript sessions docs `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/docs/src/content/docs/guides/sessions.mdx`, `MemorySession` `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/memory/memorySession.ts`, `OpenAIConversationsSession` `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-openai/src/memory/openaiConversationsSession.ts`, `OpenAIResponsesCompactionSession` `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-openai/src/memory/openaiResponsesCompactionSession.ts`.
 
-TypeScript durable SQL/Redis/DynamoDB/Prisma-style stores are custom or examples in this snapshot, not first-party packaged adapters unless current source now exports them. Source: TypeScript sessions docs and examples index in `sources-index.md`.
+TypeScript durable SQL/Redis/DynamoDB/Prisma-style stores are custom or examples in this snapshot, not first-party packaged adapters unless current source now exports them. Prisma and file-backed sessions exist as first-party examples under `examples/memory/`, not as exported package adapters. Source: TypeScript sessions docs, examples index in `sources-index.md`, and `typescript-storage-and-orms.md`.
 
 ## RunState And Resume
 

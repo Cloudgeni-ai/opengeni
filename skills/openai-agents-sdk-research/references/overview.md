@@ -10,6 +10,12 @@ sessions, `RunState`, sandbox control flow, and performance/memory pressure
 points at OpenAI Agents Python SDK commit
 `4f3c8a5379c1b44527c9a0a159d20b46755f4eaf`.
 
+The TypeScript storage reference adds a focused source-level audit of
+conversation history representation, the `Session` interface, first-party
+TypeScript session exports, Prisma/file examples, and ORM/Postgres/Drizzle
+support status at OpenAI Agents JS SDK commit
+`d84b541ace6e7be63e7f7b16625526dd3201620b`.
+
 ## Current Ecosystem Snapshot
 
 OpenAI's 2026-04-15 announcement frames the next Agents SDK evolution around Sandbox Agents, Temporal support, and a dedicated Agents SDK model in GPT-5.4. It says Sandbox Agents are Python-first and TypeScript support is coming soon. Source: `https://openai.com/index/the-next-evolution-of-the-agents-sdk/`.
@@ -55,3 +61,4 @@ Use separate stores for separate lifecycles: session store for conversation item
 - Mounts are intentionally skipped by sandbox snapshots; the remote store remains the durable owner.
 - Python has broader first-party storage adapters than TypeScript in this snapshot.
 - TypeScript durable SQL/Redis/Dynamo-style stores are custom implementations or examples unless current source exports new packaged adapters.
+- TypeScript has no first-party packaged Postgres or Drizzle adapter in this snapshot; implement `Session` yourself for app-owned ORM/database storage.

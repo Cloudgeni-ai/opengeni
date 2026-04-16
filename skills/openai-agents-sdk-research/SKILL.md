@@ -7,7 +7,7 @@ description: Use when researching, evaluating, or implementing OpenAI Agents SDK
 
 ## Overview
 
-This skill is a source-grounded field guide for OpenAI Agents SDK architecture and implementation questions. It consolidates the SDK ecosystem, Python internals, Sandbox Agents, Temporal durability, session/storage adapters, conversation and run-state resume, sandbox state, artifacts/blobs, and known gaps.
+This skill is a source-grounded field guide for OpenAI Agents SDK architecture and implementation questions. It consolidates the SDK ecosystem, Python internals, Sandbox Agents, Temporal durability, session/storage adapters, TypeScript storage/ORM extension points, conversation and run-state resume, sandbox state, artifacts/blobs, and known gaps.
 
 Use it before making claims about what the SDK supports, choosing a persistence strategy, designing a sandbox-backed workflow, wiring Temporal into an agent system, or explaining Python/TypeScript differences.
 
@@ -37,6 +37,7 @@ Every important claim should cite a URL, commit-pinned source path, package regi
 - `references/sandbox-agents-and-state.md`: Sandbox Agents, clients, capabilities, manifests, sessions, snapshots, mounts, memory, and hosted shell comparison.
 - `references/temporal-integration.md`: Temporal plugin, workflow restrictions, sandbox support, support matrix, and observability.
 - `references/storage-adapters-and-sessions.md`: Python/TypeScript session contracts, adapters, continuation choices, `RunState`, approvals, streaming, compaction, and adapter selection.
+- `references/typescript-storage-and-orms.md`: focused TypeScript conversation history representation, `Session` contract, first-party packaged adapters, Prisma/file examples, Postgres/Drizzle/ORM status, custom data model, and production persistence guidance.
 - `references/blob-and-artifact-storage.md`: large files, OpenAI file references, sandbox workspace artifacts, snapshots, mounts, and artifact indexing.
 - `references/sources-index.md`: canonical sources, trust levels, source commits, package versions, and provenance of the merged research inputs.
 - `references/open-questions.md`: unresolved gaps, conflicts, and caveats to surface in production guidance.
@@ -50,6 +51,8 @@ For "How does the Python SDK actually run agents/tools/handoffs?", load `python-
 For "Should I use Sandbox Agents, hosted shell, or a normal tool?", load `sandbox-agents-and-state.md`.
 
 For "How do I make this workflow durable?", load `temporal-integration.md` and `storage-adapters-and-sessions.md`.
+
+For "Does TypeScript have Postgres, Drizzle, Prisma, Kysely, Redis, DynamoDB, or ORM storage?", load `typescript-storage-and-orms.md`, then `storage-adapters-and-sessions.md`.
 
 For "Where should state or files live?", load `storage-adapters-and-sessions.md`, `sandbox-agents-and-state.md`, and `blob-and-artifact-storage.md`.
 

@@ -7,6 +7,7 @@ This merged skill consolidates:
 - `openai-agents-sdk-intel` from `/home/jorge/repos/Cloudgeni-ai/infra-agents-openai-agents-sdk-sandbox-research`, commit `b65532953589028398be3b99956281cf6761dfd2`.
 - `openai-agents-sdk-storage-state` from `/home/jorge/repos/Cloudgeni-ai/infra-agents-openai-agents-sdk-storage-state-research`, commit `d640b2f7e418426e8d2745230d6860b97f0be49f`.
 - A local `python-sdk-internals.md` reference present during integration, retained because it is commit-pinned to the same OpenAI Python SDK source snapshot and covers non-duplicative run-loop internals.
+- A local `typescript-storage-and-orms.md` reference added on 2026-04-16 after refreshing the official OpenAI Agents JS SDK HEAD and npm package version.
 
 ## Trust Levels
 
@@ -132,7 +133,17 @@ Important source paths:
 - OpenAI Conversations session: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-openai/src/memory/openaiConversationsSession.ts`
 - OpenAI Responses compaction: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-openai/src/memory/openaiResponsesCompactionSession.ts`
 - Session persistence: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/runner/sessionPersistence.ts`
+- Agent input item alias: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/types/aliases.ts`
+- Run item representations: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/items.ts`
+- Runner input/history helpers: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/runner/items.ts`
 - `RunState`: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/runState.ts`
+- Result history surface: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/result.ts`
+- Runner session wiring: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/packages/agents-core/src/run.ts`
+- Custom session docs example: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/examples/docs/sessions/customSession.ts`
+- File session example: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/examples/memory/sessions/file.ts`
+- Prisma session example: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/examples/memory/sessions/prisma.ts`
+- Prisma example schema: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/examples/memory/prisma/schema.prisma`
+- AI SDK UI demo session map: `https://github.com/openai/openai-agents-js/blob/d84b541ace6e7be63e7f7b16625526dd3201620b/examples/ai-sdk-ui/src/app/lib/session.ts`
 - Examples: `https://github.com/openai/openai-agents-js/tree/d84b541ace6e7be63e7f7b16625526dd3201620b/examples`
 
 Source audit note:
@@ -140,6 +151,12 @@ Source audit note:
 - Trust: tertiary negative source audit.
 - Audit: `rg "SandboxAgent|SandboxRunConfig|temporal_sandbox" /tmp/openai-agents-research-js` returned no Sandbox Agent API matches at commit `d84b541ace6e7be63e7f7b16625526dd3201620b`.
 - Use only alongside the stronger official announcement that TypeScript support was coming soon.
+
+TypeScript ORM/storage audit note:
+
+- Trust: primary source for positive/negative packaged adapter status at the checked commit.
+- Audit: `rg -n "postgres|postgresql|drizzle|prisma|kysely|redis|dynamodb|sqlite|orm|sql" packages docs examples package.json README.md` in the TypeScript repo found first-party Prisma and file examples under `examples/memory/`, docs references to custom Redis/DynamoDB/SQLite-style stores, and no exported first-party TypeScript Postgres, Drizzle, Kysely, Redis, DynamoDB, or raw SQL session adapter.
+- Use `references/typescript-storage-and-orms.md` for the focused TypeScript storage/ORM answer.
 
 ## OpenAI Announcements
 

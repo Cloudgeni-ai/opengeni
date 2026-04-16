@@ -60,7 +60,7 @@ current OpenAI docs before making operational guarantees.
 
 Status: known gap.
 
-The researched TypeScript SDK ships `MemorySession`, `OpenAIConversationsSession`, and `OpenAIResponsesCompactionSession`, but no first-party packaged Redis/Postgres/SQLite/DynamoDB adapter. Implement `Session` against the app datastore or adapt examples, and do not describe example stores as first-party packaged adapters unless current source exports them.
+The researched TypeScript SDK ships `MemorySession`, `OpenAIConversationsSession`, and `OpenAIResponsesCompactionSession`, but no first-party packaged Redis/Postgres/SQLite/DynamoDB/Drizzle/Kysely/raw SQL adapter. Prisma and file-backed sessions exist as first-party examples only. Implement `Session` against the app datastore or adapt examples, and do not describe example stores as first-party packaged adapters unless current source exports them. Source: `typescript-storage-and-orms.md`.
 
 ## Python Postgres Naming
 

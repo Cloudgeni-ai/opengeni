@@ -15,6 +15,7 @@ Use this guide to choose the smallest useful reference, refresh currentness, and
 | Sandbox session state, snapshots, manifests, mounts, memory | `sandbox-agents-and-state.md`, then `blob-and-artifact-storage.md` |
 | Temporal durable execution, workflow restrictions, sandbox clients under Temporal | `temporal-integration.md` |
 | Storage adapters, Postgres support, Redis/Dapr/SQLAlchemy/SQLite | `storage-adapters-and-sessions.md`, then `python-sdk-internals.md` |
+| TypeScript storage, ORM support, Postgres, Drizzle, Prisma, Kysely, Redis, DynamoDB, custom `Session` data model | `typescript-storage-and-orms.md`, then `storage-adapters-and-sessions.md` |
 | Conversation continuation, sessions, `RunState`, approvals, streaming resume | `storage-adapters-and-sessions.md`, then `python-sdk-internals.md` |
 | Large files, OpenAI files, sandbox artifacts, artifact indexes | `blob-and-artifact-storage.md`, then `sandbox-agents-and-state.md` |
 | Currentness, trust levels, source URLs, package versions | `sources-index.md` |
@@ -54,6 +55,7 @@ From a TypeScript SDK checkout:
 ```bash
 rg -n "interface Session|class .*Session|OpenAIResponsesCompaction|RunState|sessionPersistence|Uint8Array|data:" packages docs
 rg -n "MemorySession|OpenAIConversationsSession|examples/memory|SandboxAgent|SandboxRunConfig" packages docs examples
+rg -n "postgres|postgresql|drizzle|prisma|kysely|redis|dynamodb|sqlite|orm|sql" packages docs examples package.json README.md
 ```
 
 ## Answer Pattern
