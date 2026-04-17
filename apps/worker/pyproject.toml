@@ -7,9 +7,6 @@ dependencies = [
     "cloud-agent-platform",
 ]
 
-[project.scripts]
-cloud-agent-worker = "cloud_agent_worker.__main__:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -20,4 +17,3 @@ packages = ["src/cloud_agent_worker"]
 [tool.uv.sources]
 cloud-agent-contracts = { workspace = true }
 cloud-agent-platform = { workspace = true }
-
