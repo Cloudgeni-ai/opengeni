@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 from agents.sandbox import Manifest
@@ -9,7 +10,7 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.snapshot import resolve_snapshot
-from agents.sandbox.types import ExecResult
+from agents.sandbox.types import ExecResult, User
 from cloud_agent_platform.config import Settings
 from cloud_agent_platform.runtime import build_sandbox_agent
 from cloud_agent_platform.sandbox.modal import (
@@ -20,6 +21,7 @@ from cloud_agent_platform.sandbox.modal import (
 )
 from cloud_agent_platform.temporal.contracts import WorkflowRunInput
 from cloud_agent_platform.temporal.worker import create_openai_agents_plugin
+from modal.exception import SandboxFilesystemNotFoundError, SandboxFilesystemPermissionError
 from pydantic import ValidationError
 
 
@@ -65,21 +67,51 @@ def test_workflow_contract_is_primitive_payload() -> None:
 
 
 class _FakeFilesystem:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        read_error: BaseException | None = None,
+        write_error: BaseException | None = None,
+    ) -> None:
         self.read_calls: list[str] = []
         self.write_calls: list[tuple[bytes, str]] = []
+        self._read_error = read_error
+        self._write_error = write_error
 
     def read_bytes(self, remote_path: str) -> bytes:
         self.read_calls.append(remote_path)
+        if self._read_error is not None:
+            raise self._read_error
         return b"hello from sandbox"
 
     def write_bytes(self, data: bytes, remote_path: str) -> None:
         self.write_calls.append((data, remote_path))
+        if self._write_error is not None:
+            raise self._write_error
 
 
 class _FakeSandbox:
-    def __init__(self) -> None:
-        self.filesystem = _FakeFilesystem()
+    def __init__(
+        self,
+        *,
+        process: "_FakeTarProcess | None" = None,
+        read_error: BaseException | None = None,
+        write_error: BaseException | None = None,
+    ) -> None:
+        self.filesystem = _FakeFilesystem(read_error=read_error, write_error=write_error)
+        self.process = process or _FakeTarProcess()
+        self.exec_calls: list[tuple[tuple[str, ...], str | None, bool]] = []
+
+    def exec(
+        self,
+        *command: str,
+        workdir: str | None = None,
+        text: bool = True,
+        timeout: int | None = None,
+    ) -> "_FakeTarProcess":
+        del timeout
+        self.exec_calls.append((command, workdir, text))
+        return self.process
 
 
 class _FakeStreamWriter:
@@ -116,40 +148,30 @@ class _FakeTarProcess:
         return self._exit_code
 
 
-class _FakeHydrationSandbox:
-    def __init__(self, process: _FakeTarProcess) -> None:
-        self.process = process
-        self.exec_calls: list[tuple[tuple[str, ...], str | None, bool]] = []
-
-    def exec(
-        self,
-        *command: str,
-        workdir: str | None = None,
-        text: bool = True,
-        timeout: int | None = None,
-    ) -> _FakeTarProcess:
-        del timeout
-        self.exec_calls.append((command, workdir, text))
-        return self.process
-
-
-class _ValidationTestSession(ModalSandboxSession):
+class _StubModalSandboxSession(ModalSandboxSession):
     def __init__(
         self,
         state: ModalSandboxSessionState,
         *,
-        exec_result: ExecResult,
+        sandbox: Any | None = None,
+        exec_result: ExecResult | None = None,
     ) -> None:
         super().__init__(state, ModalSandboxClientOptions())
-        self._exec_result = exec_result
-        self.exec_calls: list[tuple[tuple[str, ...], bool | list[str], str | None]] = []
+        self._sandbox_stub = sandbox
+        self._exec_result = exec_result or ExecResult(stdout=b"", stderr=b"", exit_code=0)
+        self.exec_calls: list[tuple[tuple[str, ...], bool | list[str], str | User | None]] = []
+
+    def _sandbox_or_raise(self) -> Any:
+        if self._sandbox_stub is not None:
+            return self._sandbox_stub
+        return super()._sandbox_or_raise()
 
     async def exec(
         self,
         *command: str | Path,
         timeout: float | None = None,
         shell: bool | list[str] = True,
-        user: str | None = None,
+        user: str | User | None = None,
     ) -> ExecResult:
         del timeout
         self.exec_calls.append((tuple(str(part) for part in command), shell, user))
@@ -167,30 +189,28 @@ def _modal_state() -> ModalSandboxSessionState:
 
 @pytest.mark.asyncio
 async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> None:
-    session = _ValidationTestSession(
-        _modal_state(),
-        exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
-    )
     fake_sandbox = _FakeSandbox()
-    session._sandbox = fake_sandbox
+    session = _StubModalSandboxSession(
+        _modal_state(),
+        sandbox=fake_sandbox,
+    )
 
     read_back = await session.read(Path("notes/output.txt"))
     await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
 
     assert read_back.read() == b"hello from sandbox"
-    assert len(session.exec_calls) == 2
+    assert session.exec_calls == []
     assert fake_sandbox.filesystem.read_calls == ["/workspace/notes/output.txt"]
     assert fake_sandbox.filesystem.write_calls == [(b"payload", "/workspace/artifacts/result.bin")]
 
 
 @pytest.mark.asyncio
 async def test_modal_read_rejects_paths_outside_workspace() -> None:
-    session = _ValidationTestSession(
-        _modal_state(),
-        exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
-    )
     fake_sandbox = _FakeSandbox()
-    session._sandbox = fake_sandbox
+    session = _StubModalSandboxSession(
+        _modal_state(),
+        sandbox=fake_sandbox,
+    )
 
     with pytest.raises(InvalidManifestPathError):
         await session.read(Path("/tmp/outside.txt"))
@@ -200,49 +220,48 @@ async def test_modal_read_rejects_paths_outside_workspace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_modal_write_surfaces_validation_failures_before_filesystem_write() -> None:
-    session = _ValidationTestSession(
+async def test_modal_read_maps_filesystem_not_found_to_workspace_error() -> None:
+    fake_sandbox = _FakeSandbox(read_error=SandboxFilesystemNotFoundError("missing"))
+    session = _StubModalSandboxSession(
         _modal_state(),
-        exec_result=ExecResult(stdout=b"", stderr=b"permission denied", exit_code=1),
+        sandbox=fake_sandbox,
     )
-    fake_sandbox = _FakeSandbox()
-    session._sandbox = fake_sandbox
-
-    with pytest.raises(WorkspaceArchiveWriteError):
-        await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
-
-    assert fake_sandbox.filesystem.write_calls == []
-
-
-@pytest.mark.asyncio
-async def test_modal_read_surfaces_access_check_failures_before_filesystem_read() -> None:
-    session = _ValidationTestSession(
-        _modal_state(),
-        exec_result=ExecResult(stdout=b"", stderr=b"missing", exit_code=1),
-    )
-    fake_sandbox = _FakeSandbox()
-    session._sandbox = fake_sandbox
 
     with pytest.raises(WorkspaceReadNotFoundError):
         await session.read(Path("notes/output.txt"))
 
-    assert fake_sandbox.filesystem.read_calls == []
+    assert fake_sandbox.filesystem.read_calls == ["/workspace/notes/output.txt"]
 
 
 @pytest.mark.asyncio
-async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin() -> None:
-    session = _ValidationTestSession(
+async def test_modal_write_maps_filesystem_errors_to_workspace_write_error() -> None:
+    fake_sandbox = _FakeSandbox(write_error=SandboxFilesystemPermissionError("permission denied"))
+    session = _StubModalSandboxSession(
         _modal_state(),
+        sandbox=fake_sandbox,
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
+
+    assert fake_sandbox.filesystem.write_calls == [(b"payload", "/workspace/artifacts/result.bin")]
+
+
+@pytest.mark.asyncio
+async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin_without_staging_file() -> None:
+    tar_process = _FakeTarProcess()
+    fake_sandbox = _FakeSandbox(process=tar_process)
+    session = _StubModalSandboxSession(
+        _modal_state(),
+        sandbox=fake_sandbox,
         exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
     )
-    tar_process = _FakeTarProcess()
-    fake_sandbox = _FakeHydrationSandbox(tar_process)
-    session._sandbox = fake_sandbox
 
     await session.hydrate_workspace(io.BytesIO(b"archive-bytes"))
 
     assert session.exec_calls == [(("mkdir", "-p", "/workspace"), False, None)]
     assert fake_sandbox.exec_calls == [(("tar", "-C", "/workspace", "-xf", "-"), "/", False)]
+    assert fake_sandbox.filesystem.write_calls == []
     assert tar_process.stdin.chunks == [b"archive-bytes"]
     assert tar_process.stdin.eof is True
 

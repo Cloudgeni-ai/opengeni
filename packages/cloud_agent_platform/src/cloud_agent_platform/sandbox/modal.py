@@ -8,7 +8,14 @@ from uuid import uuid4
 
 import modal
 from agents.sandbox import Manifest
-from agents.sandbox.errors import ExecNonZeroError, ExecTransportError, ExposedPortUnavailableError
+from agents.sandbox.errors import (
+    ExecNonZeroError,
+    ExecTransportError,
+    ExposedPortUnavailableError,
+    WorkspaceArchiveReadError,
+    WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
+)
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_client import BaseSandboxClient
 from agents.sandbox.session.sandbox_session import SandboxSession
@@ -187,7 +194,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 context={"reason": "per-user file reads are not supported by this adapter"},
             )
 
-        workspace_path = await self._check_read_with_exec(path)
+        workspace_path = await self._normalize_path_for_io(path)
         sandbox = self._sandbox_or_raise()
 
         try:
@@ -196,12 +203,10 @@ class ModalSandboxSession(BaseSandboxSession):
                 str(workspace_path),
             )
             return io.BytesIO(_as_bytes(payload))
+        except modal.exception.SandboxFilesystemNotFoundError as exc:
+            raise WorkspaceReadNotFoundError(path=path, cause=exc) from exc
         except Exception as exc:
-            raise ExecTransportError(
-                command=("modal.Sandbox.filesystem.read_bytes", str(workspace_path)),
-                context={"operation": "read", "requested_path": str(path)},
-                cause=exc,
-            ) from exc
+            raise WorkspaceArchiveReadError(path=workspace_path, cause=exc) from exc
 
     async def write(
         self,
@@ -216,7 +221,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 context={"reason": "per-user file writes are not supported by this adapter"},
             )
 
-        workspace_path = await self._check_write_with_exec(path)
+        workspace_path = await self._normalize_path_for_io(path)
         sandbox = self._sandbox_or_raise()
         payload = _as_bytes(data.read())
 
@@ -227,11 +232,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 str(workspace_path),
             )
         except Exception as exc:
-            raise ExecTransportError(
-                command=("modal.Sandbox.filesystem.write_bytes", str(workspace_path)),
-                context={"operation": "write", "requested_path": str(path)},
-                cause=exc,
-            ) from exc
+            raise WorkspaceArchiveWriteError(path=workspace_path, cause=exc) from exc
 
     async def running(self) -> bool:
         if self._sandbox is None:
