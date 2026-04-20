@@ -181,12 +181,13 @@ class ModalSandboxSession(BaseSandboxSession):
         )
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
-        workspace_path = await self._normalize_path_for_io(path)
         if user is not None:
             raise ExecTransportError(
-                command=("modal.Sandbox.filesystem.read_bytes", str(workspace_path)),
+                command=("modal.Sandbox.filesystem.read_bytes", str(path)),
                 context={"reason": "per-user file reads are not supported by this adapter"},
             )
+
+        workspace_path = await self._check_read_with_exec(path)
         sandbox = self._sandbox_or_raise()
 
         try:
@@ -209,12 +210,13 @@ class ModalSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
-        workspace_path = await self._normalize_path_for_io(path)
         if user is not None:
             raise ExecTransportError(
-                command=("modal.Sandbox.filesystem.write_bytes", str(workspace_path)),
+                command=("modal.Sandbox.filesystem.write_bytes", str(path)),
                 context={"reason": "per-user file writes are not supported by this adapter"},
             )
+
+        workspace_path = await self._check_write_with_exec(path)
         sandbox = self._sandbox_or_raise()
         payload = _as_bytes(data.read())
 
@@ -247,18 +249,41 @@ class ModalSandboxSession(BaseSandboxSession):
         return io.BytesIO(result.stdout)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        archive_path = Path(self.state.manifest.root) / ".infra-agents-workspace.tar"
         root = self.state.manifest.root
-        await self.write(archive_path, data)
         result = await self.exec("mkdir", "-p", root, shell=False)
         if not result.ok():
             raise ExecNonZeroError(result, command=("mkdir", "-p", root))
-        result = await self.exec("tar", "-C", root, "-xf", archive_path, shell=False)
+
+        sandbox = self._sandbox_or_raise()
+        command = ("tar", "-C", root, "-xf", "-")
+
+        try:
+            process = await asyncio.to_thread(
+                sandbox.exec,
+                *command,
+                workdir="/",
+                text=False,
+            )
+            while True:
+                chunk = data.read(64 * 1024)
+                if not chunk:
+                    break
+                process.stdin.write(_as_bytes(chunk))
+                await asyncio.to_thread(process.stdin.drain)
+            process.stdin.write_eof()
+            await asyncio.to_thread(process.stdin.drain)
+            stderr = await asyncio.to_thread(process.stderr.read)
+            exit_code = await asyncio.to_thread(process.wait)
+        except Exception as exc:
+            raise ExecTransportError(
+                command=command,
+                context={"operation": "hydrate_workspace", "workspace_root": root},
+                cause=exc,
+            ) from exc
+
+        result = ExecResult(stdout=b"", stderr=_as_bytes(stderr), exit_code=exit_code)
         if not result.ok():
-            raise ExecNonZeroError(result, command=("tar", "-C", root, "-xf", archive_path))
-        cleanup = await self.exec("rm", "-f", archive_path, shell=False)
-        if not cleanup.ok():
-            raise ExecNonZeroError(cleanup, command=("rm", "-f", archive_path))
+            raise ExecNonZeroError(result, command=command)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         raise ExposedPortUnavailableError(

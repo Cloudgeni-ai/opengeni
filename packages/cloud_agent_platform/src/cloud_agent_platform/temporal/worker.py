@@ -23,7 +23,7 @@ def create_openai_agents_plugin(settings: Settings) -> OpenAIAgentsPlugin:
         )
         sandbox_clients.append(
             SandboxClientProvider(
-                settings.require_sandbox_provider_name(),
+                settings.sandbox_provider,
                 ModalSandboxClient(settings.modal_app_name, default_options=modal_options),
             )
         )

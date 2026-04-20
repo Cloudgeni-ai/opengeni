@@ -29,7 +29,7 @@ class TemporalRunDispatcher:
             run_id=str(run.id),
             prompt=run.prompt,
             model=self._settings.openai_model,
-            sandbox_provider=self._settings.require_sandbox_provider_name(),
+            sandbox_provider=self._settings.sandbox_provider,
             metadata=run.metadata,
         )
         client = await self._client_or_connect()

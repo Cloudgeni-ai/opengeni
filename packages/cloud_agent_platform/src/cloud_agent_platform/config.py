@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     openai_model_activity_timeout_seconds: int = Field(default=120, ge=1)
 
     sandbox_backend: Literal["modal", "none"] = "modal"
-    sandbox_provider_name: str | None = None
     modal_app_name: str = "infra-agents-sandbox"
     modal_default_timeout_seconds: int = Field(default=900, ge=1)
     modal_idle_timeout_seconds: int | None = Field(default=300, ge=1)
@@ -35,33 +34,20 @@ class Settings(BaseSettings):
 
     var_dir: Path = Path("var")
 
-    @model_validator(mode="before")
-    @classmethod
-    def _derive_sandbox_provider(cls, values: object) -> object:
-        if not isinstance(values, dict):
-            return values
-
-        normalized = dict(values)
-        backend = normalized.get("sandbox_backend", "modal")
-        provider_name = normalized.get("sandbox_provider_name")
-        expected_provider = None if backend == "none" else str(backend)
-
-        if provider_name in {None, ""}:
-            normalized["sandbox_provider_name"] = expected_provider
-            return normalized
-
-        if provider_name != expected_provider:
+    @model_validator(mode="after")
+    def _validate_dispatch_configuration(self) -> "Settings":
+        if self.enable_temporal_dispatch and self.sandbox_backend == "none":
             raise ValueError(
-                "sandbox_provider_name must match sandbox_backend or be omitted for automatic"
-                " derivation"
+                "enable_temporal_dispatch requires a configured sandbox backend for workflow"
+                " execution"
             )
+        return self
 
-        return normalized
-
-    def require_sandbox_provider_name(self) -> str:
-        if self.sandbox_provider_name is None:
+    @property
+    def sandbox_provider(self) -> str:
+        if self.sandbox_backend == "none":
             raise ValueError("sandbox backend does not expose a provider name")
-        return self.sandbox_provider_name
+        return self.sandbox_backend
 
 
 @lru_cache(maxsize=1)

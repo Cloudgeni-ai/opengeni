@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 from agents.sandbox import Manifest
+from agents.sandbox.errors import (
+    InvalidManifestPathError,
+    WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
+)
 from agents.sandbox.snapshot import resolve_snapshot
+from agents.sandbox.types import ExecResult
 from cloud_agent_platform.config import Settings
 from cloud_agent_platform.runtime import build_sandbox_agent
 from cloud_agent_platform.sandbox.modal import (
@@ -76,15 +82,44 @@ class _FakeSandbox:
         self.filesystem = _FakeFilesystem()
 
 
-@pytest.mark.asyncio
-async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> None:
-    state = ModalSandboxSessionState(
+class _ValidationTestSession(ModalSandboxSession):
+    def __init__(
+        self,
+        state: ModalSandboxSessionState,
+        *,
+        exec_result: ExecResult,
+    ) -> None:
+        super().__init__(state, ModalSandboxClientOptions())
+        self._exec_result = exec_result
+        self.exec_calls: list[tuple[tuple[str, ...], bool | list[str], str | None]] = []
+
+    async def exec(
+        self,
+        *command: str | Path,
+        timeout: float | None = None,
+        shell: bool | list[str] = True,
+        user: str | None = None,
+    ) -> ExecResult:
+        del timeout
+        self.exec_calls.append((tuple(str(part) for part in command), shell, user))
+        return self._exec_result
+
+
+def _modal_state() -> ModalSandboxSessionState:
+    return ModalSandboxSessionState(
         manifest=Manifest(root="/workspace"),
         snapshot=resolve_snapshot(None, "test-session"),
         app_name="infra-agents-test",
         sandbox_id="sb-123",
     )
-    session = ModalSandboxSession(state, ModalSandboxClientOptions())
+
+
+@pytest.mark.asyncio
+async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> None:
+    session = _ValidationTestSession(
+        _modal_state(),
+        exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
+    )
     fake_sandbox = _FakeSandbox()
     session._sandbox = fake_sandbox
 
@@ -92,13 +127,64 @@ async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> No
     await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
 
     assert read_back.read() == b"hello from sandbox"
+    assert len(session.exec_calls) == 2
     assert fake_sandbox.filesystem.read_calls == ["/workspace/notes/output.txt"]
     assert fake_sandbox.filesystem.write_calls == [(b"payload", "/workspace/artifacts/result.bin")]
 
 
-def test_settings_derive_and_validate_sandbox_provider_name() -> None:
-    assert Settings().sandbox_provider_name == "modal"
-    assert Settings(sandbox_backend="none").sandbox_provider_name is None
+@pytest.mark.asyncio
+async def test_modal_read_rejects_paths_outside_workspace() -> None:
+    session = _ValidationTestSession(
+        _modal_state(),
+        exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
+    )
+    fake_sandbox = _FakeSandbox()
+    session._sandbox = fake_sandbox
 
+    with pytest.raises(InvalidManifestPathError):
+        await session.read(Path("/tmp/outside.txt"))
+
+    assert session.exec_calls == []
+    assert fake_sandbox.filesystem.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_modal_write_surfaces_validation_failures_before_filesystem_write() -> None:
+    session = _ValidationTestSession(
+        _modal_state(),
+        exec_result=ExecResult(stdout=b"", stderr=b"permission denied", exit_code=1),
+    )
+    fake_sandbox = _FakeSandbox()
+    session._sandbox = fake_sandbox
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
+
+    assert fake_sandbox.filesystem.write_calls == []
+
+
+@pytest.mark.asyncio
+async def test_modal_read_surfaces_access_check_failures_before_filesystem_read() -> None:
+    session = _ValidationTestSession(
+        _modal_state(),
+        exec_result=ExecResult(stdout=b"", stderr=b"missing", exit_code=1),
+    )
+    fake_sandbox = _FakeSandbox()
+    session._sandbox = fake_sandbox
+
+    with pytest.raises(WorkspaceReadNotFoundError):
+        await session.read(Path("notes/output.txt"))
+
+    assert fake_sandbox.filesystem.read_calls == []
+
+
+def test_settings_expose_sandbox_provider_only_when_backend_exists() -> None:
+    assert Settings().sandbox_provider == "modal"
+
+    with pytest.raises(ValueError):
+        _ = Settings(sandbox_backend="none").sandbox_provider
+
+
+def test_settings_reject_temporal_dispatch_without_sandbox_backend() -> None:
     with pytest.raises(ValidationError):
-        Settings(sandbox_backend="modal", sandbox_provider_name="custom-provider")
+        Settings(enable_temporal_dispatch=True, sandbox_backend="none")
