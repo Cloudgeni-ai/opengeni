@@ -43,13 +43,6 @@ class Settings(BaseSettings):
             )
         return self
 
-    @property
-    def sandbox_provider(self) -> str:
-        if self.sandbox_backend == "none":
-            raise ValueError("sandbox backend does not expose a provider name")
-        return self.sandbox_backend
-
-
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()

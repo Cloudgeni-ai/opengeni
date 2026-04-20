@@ -3,6 +3,7 @@ from temporalio.client import Client
 
 from cloud_agent_platform.config import Settings
 from cloud_agent_platform.errors import DispatchError
+from cloud_agent_platform.temporal.bootstrap import require_temporal_sandbox_provider
 from cloud_agent_platform.temporal.contracts import WorkflowRunInput
 
 
@@ -29,7 +30,7 @@ class TemporalRunDispatcher:
             run_id=str(run.id),
             prompt=run.prompt,
             model=self._settings.openai_model,
-            sandbox_provider=self._settings.sandbox_provider,
+            sandbox_provider=require_temporal_sandbox_provider(self._settings),
             metadata=run.metadata,
         )
         client = await self._client_or_connect()
