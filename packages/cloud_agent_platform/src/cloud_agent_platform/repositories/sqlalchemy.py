@@ -1,19 +1,20 @@
 import asyncio
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from cloud_agent_contracts import AgentRun, AgentRunCreate, AgentRunStatus, EventType, RunEvent
+from cloud_agent_contracts import AgentRun, AgentRunCreate, EventType, RunEvent
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from cloud_agent_platform.db.models import EventRecord, RunRecord
 from cloud_agent_platform.errors import RunNotFoundError
+from cloud_agent_platform.repositories.lifecycle import (
+    RunLifecycleUpdate,
+    dispatched_run_lifecycle,
+    queued_run_lifecycle,
+    utcnow,
+)
 from cloud_agent_platform.repositories.mappers import event_from_record, run_from_record
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class SqlAlchemyRunRepository:
@@ -24,27 +25,27 @@ class SqlAlchemyRunRepository:
         return await asyncio.to_thread(self._create_run, request)
 
     def _create_run(self, request: AgentRunCreate) -> AgentRun:
-        now = _utcnow()
+        lifecycle = queued_run_lifecycle()
         run_id = uuid4()
         resource = request.resource
         record = RunRecord(
             id=str(run_id),
-            status=AgentRunStatus.QUEUED.value,
+            status=lifecycle.status.value,
             prompt=request.prompt,
             resource_kind=resource.kind.value if resource else None,
             resource_uri=resource.uri if resource else None,
             resource_metadata=resource.metadata if resource else None,
             metadata_=request.metadata,
-            created_at=now,
-            updated_at=now,
+            created_at=lifecycle.updated_at,
+            updated_at=lifecycle.updated_at,
         )
         event = EventRecord(
             id=str(uuid4()),
             run_id=str(run_id),
             sequence=1,
-            type=EventType.RUN_CREATED.value,
-            payload={"status": AgentRunStatus.QUEUED.value},
-            created_at=now,
+            type=lifecycle.event_type.value,
+            payload=lifecycle.event_payload,
+            created_at=lifecycle.updated_at,
         )
         with self._session_factory() as session:
             session.add(record)
@@ -64,22 +65,23 @@ class SqlAlchemyRunRepository:
             return run_from_record(record)
 
     async def mark_dispatched(self, run_id: UUID, workflow_id: str) -> AgentRun:
-        await asyncio.to_thread(self._mark_dispatched, run_id, workflow_id)
+        lifecycle = dispatched_run_lifecycle(workflow_id)
+        await asyncio.to_thread(self._mark_dispatched, run_id, lifecycle)
         await self.append_event(
             run_id,
-            EventType.RUN_DISPATCHED,
-            {"workflow_id": workflow_id, "status": AgentRunStatus.DISPATCHED.value},
+            lifecycle.event_type,
+            lifecycle.event_payload,
         )
         return await self.get_run(run_id)
 
-    def _mark_dispatched(self, run_id: UUID, workflow_id: str) -> None:
+    def _mark_dispatched(self, run_id: UUID, lifecycle: RunLifecycleUpdate) -> None:
         with self._session_factory() as session:
             record = session.get(RunRecord, str(run_id))
             if record is None:
                 raise RunNotFoundError(str(run_id))
-            record.status = AgentRunStatus.DISPATCHED.value
-            record.temporal_workflow_id = workflow_id
-            record.updated_at = _utcnow()
+            record.status = lifecycle.status.value
+            record.temporal_workflow_id = lifecycle.temporal_workflow_id
+            record.updated_at = lifecycle.updated_at
             session.commit()
 
     async def append_event(
@@ -110,7 +112,7 @@ class SqlAlchemyRunRepository:
                 sequence=sequence,
                 type=event_type.value,
                 payload=payload or {},
-                created_at=_utcnow(),
+                created_at=utcnow(),
             )
             session.add(event)
             session.commit()

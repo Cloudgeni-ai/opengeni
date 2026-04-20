@@ -1,14 +1,14 @@
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from cloud_agent_contracts import AgentRun, AgentRunCreate, AgentRunStatus, EventType, RunEvent
+from cloud_agent_contracts import AgentRun, AgentRunCreate, EventType, RunEvent
 
 from cloud_agent_platform.errors import RunNotFoundError
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
+from cloud_agent_platform.repositories.lifecycle import (
+    dispatched_run_lifecycle,
+    queued_run_lifecycle,
+    utcnow,
+)
 
 
 class InMemoryRunRepository:
@@ -17,15 +17,15 @@ class InMemoryRunRepository:
         self._events: dict[UUID, list[RunEvent]] = {}
 
     async def create_run(self, request: AgentRunCreate) -> AgentRun:
-        now = _utcnow()
+        lifecycle = queued_run_lifecycle()
         run = AgentRun(
             id=uuid4(),
-            status=AgentRunStatus.QUEUED,
+            status=lifecycle.status,
             prompt=request.prompt,
             resource=request.resource,
             metadata=request.metadata,
-            created_at=now,
-            updated_at=now,
+            created_at=lifecycle.updated_at,
+            updated_at=lifecycle.updated_at,
         )
         self._runs[run.id] = run
         self._events[run.id] = [
@@ -33,9 +33,9 @@ class InMemoryRunRepository:
                 id=uuid4(),
                 run_id=run.id,
                 sequence=1,
-                type=EventType.RUN_CREATED,
-                payload={"status": run.status.value},
-                created_at=now,
+                type=lifecycle.event_type,
+                payload=lifecycle.event_payload,
+                created_at=lifecycle.updated_at,
             )
         ]
         return run
@@ -47,19 +47,20 @@ class InMemoryRunRepository:
             raise RunNotFoundError(str(run_id)) from exc
 
     async def mark_dispatched(self, run_id: UUID, workflow_id: str) -> AgentRun:
+        lifecycle = dispatched_run_lifecycle(workflow_id)
         run = await self.get_run(run_id)
         updated = run.model_copy(
             update={
-                "status": AgentRunStatus.DISPATCHED,
-                "temporal_workflow_id": workflow_id,
-                "updated_at": _utcnow(),
+                "status": lifecycle.status,
+                "temporal_workflow_id": lifecycle.temporal_workflow_id,
+                "updated_at": lifecycle.updated_at,
             }
         )
         self._runs[run_id] = updated
         await self.append_event(
             run_id,
-            EventType.RUN_DISPATCHED,
-            {"workflow_id": workflow_id, "status": AgentRunStatus.DISPATCHED.value},
+            lifecycle.event_type,
+            lifecycle.event_payload,
         )
         return updated
 
@@ -77,7 +78,7 @@ class InMemoryRunRepository:
             sequence=len(events) + 1,
             type=event_type,
             payload=payload or {},
-            created_at=_utcnow(),
+            created_at=utcnow(),
         )
         events.append(event)
         return event
