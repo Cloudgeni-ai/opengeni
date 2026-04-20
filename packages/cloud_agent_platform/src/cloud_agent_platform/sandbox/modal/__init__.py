@@ -1,11 +1,14 @@
-from cloud_agent_platform.sandbox.modal.client import ModalSandboxClient
-from cloud_agent_platform.sandbox.modal.models import (
+from agents.extensions.sandbox.modal import (
+    ModalImageSelector,
     ModalSandboxClientOptions,
+    ModalSandboxSession,
     ModalSandboxSessionState,
 )
-from cloud_agent_platform.sandbox.modal.session import ModalSandboxSession
+
+from cloud_agent_platform.sandbox.modal.client import ModalSandboxClient
 
 __all__ = [
+    "ModalImageSelector",
     "ModalSandboxClient",
     "ModalSandboxClientOptions",
     "ModalSandboxSession",

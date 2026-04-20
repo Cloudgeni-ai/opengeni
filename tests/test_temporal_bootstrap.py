@@ -1,4 +1,5 @@
 import pytest
+from agents.extensions.sandbox.modal import ModalImageSelector
 from cloud_agent_platform.config import Settings
 from cloud_agent_platform.sandbox.modal import ModalSandboxClient, ModalSandboxClientOptions
 from cloud_agent_platform.temporal.bootstrap import (
@@ -20,7 +21,6 @@ def test_temporal_sandbox_provider_follows_backend_selection() -> None:
     settings = Settings(
         modal_app_name="infra-agents-modal",
         modal_default_timeout_seconds=123,
-        modal_idle_timeout_seconds=45,
         modal_image_ref="ghcr.io/cloudgeni/modal:latest",
     )
 
@@ -31,11 +31,12 @@ def test_temporal_sandbox_provider_follows_backend_selection() -> None:
     assert provider is not None
     assert provider.name == "modal"
     assert isinstance(provider._client, ModalSandboxClient)
-    assert provider._client._app_name == "infra-agents-modal"
     assert provider._client._default_options == ModalSandboxClientOptions(
-        timeout_seconds=123,
-        idle_timeout_seconds=45,
-        image_ref="ghcr.io/cloudgeni/modal:latest",
+        app_name="infra-agents-modal",
+        timeout=123,
+    )
+    assert provider._client._default_image == ModalImageSelector.from_tag(
+        "ghcr.io/cloudgeni/modal:latest"
     )
 
 

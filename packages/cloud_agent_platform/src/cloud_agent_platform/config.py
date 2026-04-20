@@ -29,7 +29,6 @@ class Settings(BaseSettings):
     sandbox_backend: Literal["modal", "none"] = "modal"
     modal_app_name: str = "infra-agents-sandbox"
     modal_default_timeout_seconds: int = Field(default=900, ge=1)
-    modal_idle_timeout_seconds: int | None = Field(default=300, ge=1)
     modal_image_ref: str | None = None
 
     var_dir: Path = Path("var")
@@ -42,6 +41,7 @@ class Settings(BaseSettings):
                 " execution"
             )
         return self
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -39,10 +39,11 @@ history surface.
 
 ## Modal Sandbox Boundary
 
-`cloud_agent_platform.sandbox.modal` provides an OpenAI Agents SDK sandbox-client adapter
-backed by Modal Sandboxes. It can create, resume, execute commands, read/write files, and
-persist/hydrate workspaces through tar streams. Provider-specific capabilities are kept in
-that module instead of adding a broad provider abstraction hierarchy.
+`cloud_agent_platform.sandbox.modal` no longer carries a repo-local Modal backend. The real
+Modal implementation comes from the OpenAI Agents SDK first-party sandbox module. The only
+repo-local code that remains is a tiny compatibility shim that injects default Modal client
+options for the current Temporal workflow contract, which passes a sandbox provider name but
+not provider-specific create options.
 
 ## Deferred Deliberately
 
@@ -82,4 +83,3 @@ Run the Temporal worker:
 ```bash
 uv run python -m cloud_agent_worker
 ```
-

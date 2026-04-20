@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from agents.extensions.sandbox.modal import ModalImageSelector
 from temporalio.contrib.openai_agents import (
     ModelActivityParameters,
     OpenAIAgentsPlugin,
@@ -31,13 +32,17 @@ def build_temporal_sandbox_client_provider(
         return None
 
     modal_options = ModalSandboxClientOptions(
-        timeout_seconds=settings.modal_default_timeout_seconds,
-        idle_timeout_seconds=settings.modal_idle_timeout_seconds,
-        image_ref=settings.modal_image_ref,
+        app_name=settings.modal_app_name,
+        timeout=settings.modal_default_timeout_seconds,
+    )
+    image = (
+        ModalImageSelector.from_tag(settings.modal_image_ref)
+        if settings.modal_image_ref is not None
+        else None
     )
     return SandboxClientProvider(
         provider,
-        ModalSandboxClient(settings.modal_app_name, default_options=modal_options),
+        ModalSandboxClient(default_options=modal_options, image=image),
     )
 
 
