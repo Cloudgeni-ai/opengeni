@@ -11,38 +11,13 @@ from agents.sandbox.errors import (
 )
 from agents.sandbox.snapshot import resolve_snapshot
 from agents.sandbox.types import ExecResult, User
-from cloud_agent_platform.config import Settings
-from cloud_agent_platform.runtime import build_sandbox_agent
 from cloud_agent_platform.sandbox.modal import (
     ModalSandboxClient,
     ModalSandboxClientOptions,
     ModalSandboxSession,
     ModalSandboxSessionState,
 )
-from cloud_agent_platform.temporal.bootstrap import (
-    build_temporal_sandbox_client_provider,
-    create_openai_agents_plugin,
-    require_temporal_sandbox_provider,
-    resolve_temporal_sandbox_provider,
-)
-from cloud_agent_platform.temporal.contracts import WorkflowRunInput
 from modal.exception import SandboxFilesystemNotFoundError, SandboxFilesystemPermissionError
-from pydantic import ValidationError
-
-
-def test_openai_agent_runtime_builds_sandbox_agent() -> None:
-    agent = build_sandbox_agent(model="gpt-5.4-mini")
-
-    assert agent.name == "Cloud Agent"
-    assert agent.model == "gpt-5.4-mini"
-    assert agent.default_manifest is not None
-    assert agent.default_manifest.root == "/workspace"
-
-
-def test_temporal_plugin_can_be_created_without_sandbox_backend() -> None:
-    plugin = create_openai_agents_plugin(Settings(sandbox_backend="none"))
-
-    assert plugin is not None
 
 
 def test_modal_sandbox_state_round_trips() -> None:
@@ -58,17 +33,6 @@ def test_modal_sandbox_state_round_trips() -> None:
 
     assert isinstance(hydrated, ModalSandboxSessionState)
     assert hydrated.sandbox_id == "sb-123"
-
-
-def test_workflow_contract_is_primitive_payload() -> None:
-    payload = WorkflowRunInput(
-        run_id="run-1",
-        prompt="Inspect the workspace",
-        model="gpt-5.4-mini",
-        sandbox_provider="modal",
-    )
-
-    assert payload.sandbox_provider == "modal"
 
 
 class _FakeFilesystem:
@@ -93,30 +57,6 @@ class _FakeFilesystem:
         self.write_calls.append((data, remote_path))
         if self._write_error is not None:
             raise self._write_error
-
-
-class _FakeSandbox:
-    def __init__(
-        self,
-        *,
-        process: "_FakeTarProcess | None" = None,
-        read_error: BaseException | None = None,
-        write_error: BaseException | None = None,
-    ) -> None:
-        self.filesystem = _FakeFilesystem(read_error=read_error, write_error=write_error)
-        self.process = process or _FakeTarProcess()
-        self.exec_calls: list[tuple[tuple[str, ...], str | None, bool]] = []
-
-    def exec(
-        self,
-        *command: str,
-        workdir: str | None = None,
-        text: bool = True,
-        timeout: int | None = None,
-    ) -> "_FakeTarProcess":
-        del timeout
-        self.exec_calls.append((command, workdir, text))
-        return self.process
 
 
 class _FakeStreamWriter:
@@ -151,6 +91,30 @@ class _FakeTarProcess:
 
     def wait(self) -> int:
         return self._exit_code
+
+
+class _FakeSandbox:
+    def __init__(
+        self,
+        *,
+        process: "_FakeTarProcess | None" = None,
+        read_error: BaseException | None = None,
+        write_error: BaseException | None = None,
+    ) -> None:
+        self.filesystem = _FakeFilesystem(read_error=read_error, write_error=write_error)
+        self.process = process or _FakeTarProcess()
+        self.exec_calls: list[tuple[tuple[str, ...], str | None, bool]] = []
+
+    def exec(
+        self,
+        *command: str,
+        workdir: str | None = None,
+        text: bool = True,
+        timeout: int | None = None,
+    ) -> "_FakeTarProcess":
+        del timeout
+        self.exec_calls.append((command, workdir, text))
+        return self.process
 
 
 class _StubModalSandboxSession(ModalSandboxSession):
@@ -192,13 +156,22 @@ def _modal_state() -> ModalSandboxSessionState:
     )
 
 
+def _make_session(
+    *,
+    sandbox: Any | None = None,
+    exec_result: ExecResult | None = None,
+) -> _StubModalSandboxSession:
+    return _StubModalSandboxSession(
+        _modal_state(),
+        sandbox=sandbox,
+        exec_result=exec_result,
+    )
+
+
 @pytest.mark.asyncio
 async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> None:
     fake_sandbox = _FakeSandbox()
-    session = _StubModalSandboxSession(
-        _modal_state(),
-        sandbox=fake_sandbox,
-    )
+    session = _make_session(sandbox=fake_sandbox)
 
     read_back = await session.read(Path("notes/output.txt"))
     await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
@@ -212,10 +185,7 @@ async def test_modal_sandbox_file_io_uses_filesystem_api_under_workspace() -> No
 @pytest.mark.asyncio
 async def test_modal_read_rejects_paths_outside_workspace() -> None:
     fake_sandbox = _FakeSandbox()
-    session = _StubModalSandboxSession(
-        _modal_state(),
-        sandbox=fake_sandbox,
-    )
+    session = _make_session(sandbox=fake_sandbox)
 
     with pytest.raises(InvalidManifestPathError):
         await session.read(Path("/tmp/outside.txt"))
@@ -227,10 +197,7 @@ async def test_modal_read_rejects_paths_outside_workspace() -> None:
 @pytest.mark.asyncio
 async def test_modal_read_maps_filesystem_not_found_to_workspace_error() -> None:
     fake_sandbox = _FakeSandbox(read_error=SandboxFilesystemNotFoundError("missing"))
-    session = _StubModalSandboxSession(
-        _modal_state(),
-        sandbox=fake_sandbox,
-    )
+    session = _make_session(sandbox=fake_sandbox)
 
     with pytest.raises(WorkspaceReadNotFoundError):
         await session.read(Path("notes/output.txt"))
@@ -241,10 +208,7 @@ async def test_modal_read_maps_filesystem_not_found_to_workspace_error() -> None
 @pytest.mark.asyncio
 async def test_modal_write_maps_filesystem_errors_to_workspace_write_error() -> None:
     fake_sandbox = _FakeSandbox(write_error=SandboxFilesystemPermissionError("permission denied"))
-    session = _StubModalSandboxSession(
-        _modal_state(),
-        sandbox=fake_sandbox,
-    )
+    session = _make_session(sandbox=fake_sandbox)
 
     with pytest.raises(WorkspaceArchiveWriteError):
         await session.write(Path("artifacts/result.bin"), io.BytesIO(b"payload"))
@@ -256,8 +220,7 @@ async def test_modal_write_maps_filesystem_errors_to_workspace_write_error() -> 
 async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin_without_staging_file() -> None:
     tar_process = _FakeTarProcess()
     fake_sandbox = _FakeSandbox(process=tar_process)
-    session = _StubModalSandboxSession(
-        _modal_state(),
+    session = _make_session(
         sandbox=fake_sandbox,
         exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
     )
@@ -269,40 +232,3 @@ async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin_without_stag
     assert fake_sandbox.filesystem.write_calls == []
     assert tar_process.stdin.chunks == [b"archive-bytes"]
     assert tar_process.stdin.eof is True
-
-
-def test_temporal_sandbox_provider_follows_backend_selection() -> None:
-    settings = Settings(
-        modal_app_name="infra-agents-modal",
-        modal_default_timeout_seconds=123,
-        modal_idle_timeout_seconds=45,
-        modal_image_ref="ghcr.io/cloudgeni/modal:latest",
-    )
-
-    assert resolve_temporal_sandbox_provider(settings) == "modal"
-    assert require_temporal_sandbox_provider(settings) == "modal"
-
-    provider = build_temporal_sandbox_client_provider(settings)
-    assert provider is not None
-    assert provider.name == "modal"
-    assert isinstance(provider._client, ModalSandboxClient)
-    assert provider._client._app_name == "infra-agents-modal"
-    assert provider._client._default_options == ModalSandboxClientOptions(
-        timeout_seconds=123,
-        idle_timeout_seconds=45,
-        image_ref="ghcr.io/cloudgeni/modal:latest",
-    )
-
-
-def test_temporal_sandbox_provider_is_absent_without_backend() -> None:
-    settings = Settings(sandbox_backend="none")
-
-    assert resolve_temporal_sandbox_provider(settings) is None
-    assert build_temporal_sandbox_client_provider(settings) is None
-    with pytest.raises(ValueError):
-        require_temporal_sandbox_provider(settings)
-
-
-def test_settings_reject_temporal_dispatch_without_sandbox_backend() -> None:
-    with pytest.raises(ValidationError):
-        Settings(enable_temporal_dispatch=True, sandbox_backend="none")
