@@ -1,6 +1,6 @@
 # Standalone Agent Bootstrap
 
-Snapshot date: 2026-04-17.
+Snapshot date: 2026-04-20.
 
 ## Structure
 
@@ -8,8 +8,7 @@ Snapshot date: 2026-04-17.
 - `apps/worker`: Temporal worker process that registers the agent workflow.
 - `packages/cloud_agent_contracts`: Pydantic contracts for runs, events, resources, and artifacts.
 - `packages/cloud_agent_platform`: shared platform code for settings, SQLAlchemy persistence,
-  Temporal wiring, OpenAI Agents SDK runtime glue, Modal sandbox integration, resources,
-  artifacts, and events.
+  Temporal wiring, OpenAI Agents SDK runtime glue, resources, artifacts, and events.
 - `packages/cloud_agent_testing`: test helpers shared across package and app tests.
 - `alembic`: migration environment and the first runtime-table migration.
 
@@ -39,11 +38,12 @@ history surface.
 
 ## Modal Sandbox Boundary
 
-`cloud_agent_platform.sandbox.modal` no longer carries a repo-local Modal backend. The real
-Modal implementation comes from the OpenAI Agents SDK first-party sandbox module. The only
-repo-local code that remains is a tiny compatibility shim that injects default Modal client
-options for the current Temporal workflow contract, which passes a sandbox provider name but
-not provider-specific create options.
+There is no repo-local Modal sandbox code. The platform uses the first-party OpenAI Agents SDK
+Modal sandbox client (`agents.extensions.sandbox.modal.ModalSandboxClient`) directly.
+
+Sandbox options (`app_name`, `timeout`) are passed through the Temporal workflow via
+`WorkflowRunInput` and constructed into `ModalSandboxClientOptions` on the workflow side, so
+the SDK client always receives proper options without any local shim or wrapper.
 
 ## Deferred Deliberately
 

@@ -31,6 +31,9 @@ class TemporalRunDispatcher:
             prompt=run.prompt,
             model=self._settings.openai_model,
             sandbox_provider=require_temporal_sandbox_provider(self._settings),
+            sandbox_app_name=self._settings.modal_app_name,
+            sandbox_timeout=self._settings.modal_default_timeout_seconds,
+            sandbox_image_ref=self._settings.modal_image_ref,
             metadata=run.metadata,
         )
         client = await self._client_or_connect()

@@ -1,7 +1,6 @@
 import pytest
-from agents.extensions.sandbox.modal import ModalImageSelector
+from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
 from cloud_agent_platform.config import Settings
-from cloud_agent_platform.sandbox.modal import ModalSandboxClient, ModalSandboxClientOptions
 from cloud_agent_platform.temporal.bootstrap import (
     build_temporal_sandbox_client_provider,
     create_openai_agents_plugin,
@@ -31,10 +30,6 @@ def test_temporal_sandbox_provider_follows_backend_selection() -> None:
     assert provider is not None
     assert provider.name == "modal"
     assert isinstance(provider._client, ModalSandboxClient)
-    assert provider._client._default_options == ModalSandboxClientOptions(
-        app_name="infra-agents-modal",
-        timeout=123,
-    )
     assert provider._client._default_image == ModalImageSelector.from_tag(
         "ghcr.io/cloudgeni/modal:latest"
     )
