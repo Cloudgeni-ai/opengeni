@@ -181,23 +181,24 @@ class ModalSandboxSession(BaseSandboxSession):
         )
 
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
+        workspace_path = await self._normalize_path_for_io(path)
         if user is not None:
             raise ExecTransportError(
-                command=("modal.Sandbox.open", str(path)),
+                command=("modal.Sandbox.filesystem.read_bytes", str(workspace_path)),
                 context={"reason": "per-user file reads are not supported by this adapter"},
             )
         sandbox = self._sandbox_or_raise()
 
-        def read_file() -> bytes:
-            with sandbox.open(str(path), "rb") as remote_file:
-                return _as_bytes(remote_file.read())
-
         try:
-            return io.BytesIO(await asyncio.to_thread(read_file))
+            payload = await asyncio.to_thread(
+                sandbox.filesystem.read_bytes,
+                str(workspace_path),
+            )
+            return io.BytesIO(_as_bytes(payload))
         except Exception as exc:
             raise ExecTransportError(
-                command=("modal.Sandbox.open", str(path)),
-                context={"operation": "read"},
+                command=("modal.Sandbox.filesystem.read_bytes", str(workspace_path)),
+                context={"operation": "read", "requested_path": str(path)},
                 cause=exc,
             ) from exc
 
@@ -208,29 +209,25 @@ class ModalSandboxSession(BaseSandboxSession):
         *,
         user: str | User | None = None,
     ) -> None:
+        workspace_path = await self._normalize_path_for_io(path)
         if user is not None:
             raise ExecTransportError(
-                command=("modal.Sandbox.open", str(path)),
+                command=("modal.Sandbox.filesystem.write_bytes", str(workspace_path)),
                 context={"reason": "per-user file writes are not supported by this adapter"},
             )
         sandbox = self._sandbox_or_raise()
-        payload = data.read()
-
-        def write_file() -> None:
-            parent = str(Path(path).parent)
-            process = sandbox.exec("mkdir", "-p", parent, text=False)
-            exit_code = process.wait()
-            if exit_code != 0:
-                raise RuntimeError(f"failed to create remote parent directory: {parent}")
-            with sandbox.open(str(path), "wb") as remote_file:
-                remote_file.write(_as_bytes(payload))
+        payload = _as_bytes(data.read())
 
         try:
-            await asyncio.to_thread(write_file)
+            await asyncio.to_thread(
+                sandbox.filesystem.write_bytes,
+                payload,
+                str(workspace_path),
+            )
         except Exception as exc:
             raise ExecTransportError(
-                command=("modal.Sandbox.open", str(path)),
-                context={"operation": "write"},
+                command=("modal.Sandbox.filesystem.write_bytes", str(workspace_path)),
+                context={"operation": "write", "requested_path": str(path)},
                 cause=exc,
             ) from exc
 
@@ -250,7 +247,7 @@ class ModalSandboxSession(BaseSandboxSession):
         return io.BytesIO(result.stdout)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        archive_path = Path("/tmp/infra-agents-workspace.tar")
+        archive_path = Path(self.state.manifest.root) / ".infra-agents-workspace.tar"
         root = self.state.manifest.root
         await self.write(archive_path, data)
         result = await self.exec("mkdir", "-p", root, shell=False)
