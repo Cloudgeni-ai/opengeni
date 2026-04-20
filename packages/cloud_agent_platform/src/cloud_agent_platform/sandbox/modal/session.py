@@ -1,16 +1,12 @@
 import asyncio
 import io
 from pathlib import Path
-from typing import Any
 
 import modal
 from agents.sandbox.errors import (
     ExecNonZeroError,
     ExecTransportError,
     ExposedPortUnavailableError,
-    WorkspaceArchiveReadError,
-    WorkspaceArchiveWriteError,
-    WorkspaceReadNotFoundError,
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.types import ExecResult, ExposedPortEndpoint, User
@@ -18,6 +14,13 @@ from agents.sandbox.types import ExecResult, ExposedPortEndpoint, User
 from cloud_agent_platform.sandbox.modal.models import (
     ModalSandboxClientOptions,
     ModalSandboxSessionState,
+)
+from cloud_agent_platform.sandbox.modal.workspace import (
+    as_bytes,
+    hydrate_workspace,
+    persist_workspace,
+    read_workspace_bytes,
+    write_workspace_bytes,
 )
 
 
@@ -126,8 +129,8 @@ class ModalSandboxSession(BaseSandboxSession):
                 cause=exc,
             ) from exc
         return ExecResult(
-            stdout=_as_bytes(stdout),
-            stderr=_as_bytes(stderr),
+            stdout=as_bytes(stdout),
+            stderr=as_bytes(stderr),
             exit_code=exit_code,
         )
 
@@ -139,21 +142,12 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         workspace_path = await self._normalize_path_for_io(path)
-        payload = await self._read_workspace_bytes(path=path, workspace_path=workspace_path)
+        payload = await read_workspace_bytes(
+            self._sandbox_or_raise(),
+            path=path,
+            workspace_path=workspace_path,
+        )
         return io.BytesIO(payload)
-
-    async def _read_workspace_bytes(self, *, path: Path, workspace_path: Path) -> bytes:
-        sandbox = self._sandbox_or_raise()
-        try:
-            payload = await asyncio.to_thread(
-                sandbox.filesystem.read_bytes,
-                str(workspace_path),
-            )
-        except modal.exception.SandboxFilesystemNotFoundError as exc:
-            raise WorkspaceReadNotFoundError(path=path, cause=exc) from exc
-        except Exception as exc:
-            raise WorkspaceArchiveReadError(path=workspace_path, cause=exc) from exc
-        return _as_bytes(payload)
 
     async def write(
         self,
@@ -169,21 +163,11 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         workspace_path = await self._normalize_path_for_io(path)
-        await self._write_workspace_bytes(
+        await write_workspace_bytes(
+            self._sandbox_or_raise(),
             workspace_path=workspace_path,
-            payload=_as_bytes(data.read()),
+            payload=as_bytes(data.read()),
         )
-
-    async def _write_workspace_bytes(self, *, workspace_path: Path, payload: bytes) -> None:
-        sandbox = self._sandbox_or_raise()
-        try:
-            await asyncio.to_thread(
-                sandbox.filesystem.write_bytes,
-                payload,
-                str(workspace_path),
-            )
-        except Exception as exc:
-            raise WorkspaceArchiveWriteError(path=workspace_path, cause=exc) from exc
 
     async def running(self) -> bool:
         if self._sandbox is None:
@@ -194,53 +178,10 @@ class ModalSandboxSession(BaseSandboxSession):
             return False
 
     async def persist_workspace(self) -> io.IOBase:
-        root = self.state.manifest.root
-        result = await self.exec("tar", "-C", root, "-cf", "-", ".", shell=False)
-        if not result.ok():
-            raise ExecNonZeroError(result, command=("tar", "-C", root, "-cf", "-", "."))
-        return io.BytesIO(result.stdout)
+        return await persist_workspace(self)
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
-        root = self.state.manifest.root
-        result = await self.exec("mkdir", "-p", root, shell=False)
-        if not result.ok():
-            raise ExecNonZeroError(result, command=("mkdir", "-p", root))
-        await self._extract_workspace_archive(root=root, data=data)
-
-    async def _extract_workspace_archive(self, *, root: str, data: io.IOBase) -> None:
-        sandbox = self._sandbox_or_raise()
-        command = ("tar", "-C", root, "-xf", "-")
-
-        try:
-            process = await asyncio.to_thread(
-                sandbox.exec,
-                *command,
-                workdir="/",
-                text=False,
-            )
-            await self._write_stream_to_stdin(process.stdin, data)
-            stderr = await asyncio.to_thread(process.stderr.read)
-            exit_code = await asyncio.to_thread(process.wait)
-        except Exception as exc:
-            raise ExecTransportError(
-                command=command,
-                context={"operation": "hydrate_workspace", "workspace_root": root},
-                cause=exc,
-            ) from exc
-
-        result = ExecResult(stdout=b"", stderr=_as_bytes(stderr), exit_code=exit_code)
-        if not result.ok():
-            raise ExecNonZeroError(result, command=command)
-
-    async def _write_stream_to_stdin(self, stdin: Any, data: io.IOBase) -> None:
-        while True:
-            chunk = data.read(64 * 1024)
-            if not chunk:
-                break
-            stdin.write(_as_bytes(chunk))
-            await asyncio.to_thread(stdin.drain)
-        stdin.write_eof()
-        await asyncio.to_thread(stdin.drain)
+        await hydrate_workspace(self, data)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         raise ExposedPortUnavailableError(
@@ -261,13 +202,3 @@ class ModalSandboxSession(BaseSandboxSession):
                 await asyncio.to_thread(sandbox.detach)
             finally:
                 self._sandbox = None
-
-
-def _as_bytes(value: Any) -> bytes:
-    if isinstance(value, bytes):
-        return value
-    if isinstance(value, bytearray):
-        return bytes(value)
-    if isinstance(value, str):
-        return value.encode("utf-8")
-    raise TypeError(f"expected bytes-compatible value, got {type(value).__name__}")

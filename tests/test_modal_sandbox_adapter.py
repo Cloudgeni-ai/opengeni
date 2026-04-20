@@ -232,3 +232,15 @@ async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin_without_stag
     assert fake_sandbox.filesystem.write_calls == []
     assert tar_process.stdin.chunks == [b"archive-bytes"]
     assert tar_process.stdin.eof is True
+
+
+@pytest.mark.asyncio
+async def test_modal_persist_workspace_reads_tar_stream_from_workspace() -> None:
+    session = _make_session(
+        exec_result=ExecResult(stdout=b"archive-bytes", stderr=b"", exit_code=0),
+    )
+
+    persisted = await session.persist_workspace()
+
+    assert session.exec_calls == [(("tar", "-C", "/workspace", "-cf", "-", "."), False, None)]
+    assert persisted.read() == b"archive-bytes"
