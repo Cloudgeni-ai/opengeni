@@ -82,6 +82,57 @@ class _FakeSandbox:
         self.filesystem = _FakeFilesystem()
 
 
+class _FakeStreamWriter:
+    def __init__(self) -> None:
+        self.chunks: list[bytes] = []
+        self.eof = False
+
+    def write(self, data: bytes) -> None:
+        self.chunks.append(data)
+
+    def drain(self) -> None:
+        return
+
+    def write_eof(self) -> None:
+        self.eof = True
+
+
+class _FakeStreamReader:
+    def __init__(self, payload: bytes = b"") -> None:
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+class _FakeTarProcess:
+    def __init__(self, stderr: bytes = b"", exit_code: int = 0) -> None:
+        self.stdin = _FakeStreamWriter()
+        self.stderr = _FakeStreamReader(stderr)
+        self.stdout = _FakeStreamReader()
+        self._exit_code = exit_code
+
+    def wait(self) -> int:
+        return self._exit_code
+
+
+class _FakeHydrationSandbox:
+    def __init__(self, process: _FakeTarProcess) -> None:
+        self.process = process
+        self.exec_calls: list[tuple[tuple[str, ...], str | None, bool]] = []
+
+    def exec(
+        self,
+        *command: str,
+        workdir: str | None = None,
+        text: bool = True,
+        timeout: int | None = None,
+    ) -> _FakeTarProcess:
+        del timeout
+        self.exec_calls.append((command, workdir, text))
+        return self.process
+
+
 class _ValidationTestSession(ModalSandboxSession):
     def __init__(
         self,
@@ -176,6 +227,24 @@ async def test_modal_read_surfaces_access_check_failures_before_filesystem_read(
         await session.read(Path("notes/output.txt"))
 
     assert fake_sandbox.filesystem.read_calls == []
+
+
+@pytest.mark.asyncio
+async def test_modal_hydrate_workspace_streams_archive_to_tar_stdin() -> None:
+    session = _ValidationTestSession(
+        _modal_state(),
+        exec_result=ExecResult(stdout=b"", stderr=b"", exit_code=0),
+    )
+    tar_process = _FakeTarProcess()
+    fake_sandbox = _FakeHydrationSandbox(tar_process)
+    session._sandbox = fake_sandbox
+
+    await session.hydrate_workspace(io.BytesIO(b"archive-bytes"))
+
+    assert session.exec_calls == [(("mkdir", "-p", "/workspace"), False, None)]
+    assert fake_sandbox.exec_calls == [(("tar", "-C", "/workspace", "-xf", "-"), "/", False)]
+    assert tar_process.stdin.chunks == [b"archive-bytes"]
+    assert tar_process.stdin.eof is True
 
 
 def test_settings_expose_sandbox_provider_only_when_backend_exists() -> None:
