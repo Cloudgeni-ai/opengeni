@@ -1,13 +1,9 @@
 import asyncio
 import io
-from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
-from uuid import uuid4
+from typing import Any
 
 import modal
-from agents.sandbox import Manifest
 from agents.sandbox.errors import (
     ExecNonZeroError,
     ExecTransportError,
@@ -17,73 +13,12 @@ from agents.sandbox.errors import (
     WorkspaceReadNotFoundError,
 )
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
-from agents.sandbox.session.sandbox_client import BaseSandboxClient
-from agents.sandbox.session.sandbox_session import SandboxSession
-from agents.sandbox.session.sandbox_session_state import SandboxSessionState
-from agents.sandbox.snapshot import SnapshotBase, SnapshotSpec, resolve_snapshot
 from agents.sandbox.types import ExecResult, ExposedPortEndpoint, User
-from pydantic import Field
 
-
-@dataclass(frozen=True)
-class ModalSandboxClientOptions:
-    timeout_seconds: int = 900
-    idle_timeout_seconds: int | None = 300
-    image_ref: str | None = None
-    env: Mapping[str, str | None] = field(default_factory=dict)
-
-
-class ModalSandboxSessionState(SandboxSessionState):
-    type: Literal["modal"] = "modal"
-    sandbox_id: str | None = None
-    app_name: str = Field(min_length=1)
-
-
-class ModalSandboxClient(BaseSandboxClient[ModalSandboxClientOptions | None]):
-    backend_id = "modal"
-    supports_default_options = True
-
-    def __init__(
-        self,
-        app_name: str,
-        *,
-        default_options: ModalSandboxClientOptions | None = None,
-    ) -> None:
-        self._app_name = app_name
-        self._default_options = default_options or ModalSandboxClientOptions()
-
-    async def create(
-        self,
-        *,
-        snapshot: SnapshotSpec | SnapshotBase | None = None,
-        manifest: Manifest | None = None,
-        options: ModalSandboxClientOptions | None = None,
-    ) -> SandboxSession:
-        session_id = uuid4()
-        resolved_manifest = manifest or Manifest(root="/workspace")
-        state = ModalSandboxSessionState(
-            session_id=session_id,
-            manifest=resolved_manifest,
-            snapshot=resolve_snapshot(snapshot, str(session_id)),
-            app_name=self._app_name,
-        )
-        inner = ModalSandboxSession(state, options or self._default_options)
-        return self._wrap_session(inner)
-
-    async def delete(self, session: SandboxSession) -> SandboxSession:
-        inner = getattr(session, "_inner", None)
-        if not isinstance(inner, ModalSandboxSession):
-            raise TypeError("ModalSandboxClient.delete expects a ModalSandboxSession")
-        await inner.shutdown()
-        return session
-
-    async def resume(self, state: SandboxSessionState) -> SandboxSession:
-        if not isinstance(state, ModalSandboxSessionState):
-            raise TypeError("ModalSandboxClient.resume expects a ModalSandboxSessionState")
-        return self._wrap_session(ModalSandboxSession(state, self._default_options))
-
-    def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
-        return ModalSandboxSessionState.model_validate(payload)
+from cloud_agent_platform.sandbox.modal.models import (
+    ModalSandboxClientOptions,
+    ModalSandboxSessionState,
+)
 
 
 class ModalSandboxSession(BaseSandboxSession):
@@ -114,17 +49,26 @@ class ModalSandboxSession(BaseSandboxSession):
     async def _ensure_backend_started(self) -> None:
         if self._sandbox is not None:
             return
-        if self.state.sandbox_id:
-            try:
-                self._sandbox = await asyncio.to_thread(
-                    modal.Sandbox.from_id,
-                    self.state.sandbox_id,
-                )
-                self._set_start_state_preserved(workspace=True)
-                return
-            except Exception:
-                self.state = self.state.model_copy(update={"sandbox_id": None})
+        if await self._resume_backend():
+            return
+        await self._create_backend()
 
+    async def _resume_backend(self) -> bool:
+        if not self.state.sandbox_id:
+            return False
+        try:
+            self._sandbox = await asyncio.to_thread(
+                modal.Sandbox.from_id,
+                self.state.sandbox_id,
+            )
+        except Exception:
+            self.state = self.state.model_copy(update={"sandbox_id": None})
+            return False
+
+        self._set_start_state_preserved(workspace=True)
+        return True
+
+    async def _create_backend(self) -> None:
         app = modal.App(self.state.app_name)
         try:
             sandbox = await asyncio.to_thread(
@@ -195,18 +139,21 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         workspace_path = await self._normalize_path_for_io(path)
-        sandbox = self._sandbox_or_raise()
+        payload = await self._read_workspace_bytes(path=path, workspace_path=workspace_path)
+        return io.BytesIO(payload)
 
+    async def _read_workspace_bytes(self, *, path: Path, workspace_path: Path) -> bytes:
+        sandbox = self._sandbox_or_raise()
         try:
             payload = await asyncio.to_thread(
                 sandbox.filesystem.read_bytes,
                 str(workspace_path),
             )
-            return io.BytesIO(_as_bytes(payload))
         except modal.exception.SandboxFilesystemNotFoundError as exc:
             raise WorkspaceReadNotFoundError(path=path, cause=exc) from exc
         except Exception as exc:
             raise WorkspaceArchiveReadError(path=workspace_path, cause=exc) from exc
+        return _as_bytes(payload)
 
     async def write(
         self,
@@ -222,9 +169,13 @@ class ModalSandboxSession(BaseSandboxSession):
             )
 
         workspace_path = await self._normalize_path_for_io(path)
-        sandbox = self._sandbox_or_raise()
-        payload = _as_bytes(data.read())
+        await self._write_workspace_bytes(
+            workspace_path=workspace_path,
+            payload=_as_bytes(data.read()),
+        )
 
+    async def _write_workspace_bytes(self, *, workspace_path: Path, payload: bytes) -> None:
+        sandbox = self._sandbox_or_raise()
         try:
             await asyncio.to_thread(
                 sandbox.filesystem.write_bytes,
@@ -254,7 +205,9 @@ class ModalSandboxSession(BaseSandboxSession):
         result = await self.exec("mkdir", "-p", root, shell=False)
         if not result.ok():
             raise ExecNonZeroError(result, command=("mkdir", "-p", root))
+        await self._extract_workspace_archive(root=root, data=data)
 
+    async def _extract_workspace_archive(self, *, root: str, data: io.IOBase) -> None:
         sandbox = self._sandbox_or_raise()
         command = ("tar", "-C", root, "-xf", "-")
 
@@ -265,14 +218,7 @@ class ModalSandboxSession(BaseSandboxSession):
                 workdir="/",
                 text=False,
             )
-            while True:
-                chunk = data.read(64 * 1024)
-                if not chunk:
-                    break
-                process.stdin.write(_as_bytes(chunk))
-                await asyncio.to_thread(process.stdin.drain)
-            process.stdin.write_eof()
-            await asyncio.to_thread(process.stdin.drain)
+            await self._write_stream_to_stdin(process.stdin, data)
             stderr = await asyncio.to_thread(process.stderr.read)
             exit_code = await asyncio.to_thread(process.wait)
         except Exception as exc:
@@ -285,6 +231,16 @@ class ModalSandboxSession(BaseSandboxSession):
         result = ExecResult(stdout=b"", stderr=_as_bytes(stderr), exit_code=exit_code)
         if not result.ok():
             raise ExecNonZeroError(result, command=command)
+
+    async def _write_stream_to_stdin(self, stdin: Any, data: io.IOBase) -> None:
+        while True:
+            chunk = data.read(64 * 1024)
+            if not chunk:
+                break
+            stdin.write(_as_bytes(chunk))
+            await asyncio.to_thread(stdin.drain)
+        stdin.write_eof()
+        await asyncio.to_thread(stdin.drain)
 
     async def _resolve_exposed_port(self, port: int) -> ExposedPortEndpoint:
         raise ExposedPortUnavailableError(
