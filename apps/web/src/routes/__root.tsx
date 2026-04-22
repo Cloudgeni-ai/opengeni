@@ -1,16 +1,18 @@
 /// <reference types="vite/client" />
 import type { ReactNode } from "react";
 import type { QueryClient } from "@tanstack/react-query";
+import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import {
   HeadContent,
-  Link,
   Outlet,
   Scripts,
   createRootRouteWithContext,
 } from "@tanstack/react-router";
-import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 
-import styles from "../styles.css?url";
+import { RouterProgress } from "@/components/app/RouterProgress";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
+import styles from "@/styles.css?url";
 
 interface RouterAppContext {
   queryClient: QueryClient;
@@ -21,6 +23,7 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
+      { name: "color-scheme", content: "dark" },
       { title: "Cloud Agent Console" },
     ],
     links: [{ rel: "stylesheet", href: styles }],
@@ -31,21 +34,13 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
 function RootComponent() {
   return (
     <RootDocument>
-      <div className="app-shell">
-        <header className="app-header">
-          <Link to="/" className="app-title">
-            Cloud Agent Console
-          </Link>
-          <nav className="app-nav">
-            <Link to="/" activeOptions={{ exact: true }}>
-              Runs
-            </Link>
-          </nav>
-        </header>
-        <main className="app-main">
+      <TooltipProvider delayDuration={120}>
+        <RouterProgress />
+        <div className="flex min-h-screen flex-col">
           <Outlet />
-        </main>
-      </div>
+        </div>
+        <Toaster position="bottom-right" closeButton richColors={false} />
+      </TooltipProvider>
       {import.meta.env.DEV ? (
         <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-right" />
       ) : null}
@@ -55,7 +50,7 @@ function RootComponent() {
 
 function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <head>
         <HeadContent />
       </head>
