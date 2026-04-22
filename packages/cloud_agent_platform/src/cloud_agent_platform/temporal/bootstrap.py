@@ -1,11 +1,11 @@
 from datetime import timedelta
 
 from agents import OpenAIProvider
+from agents.models.interface import ModelProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
 from openai import AsyncAzureOpenAI
 from temporalio.contrib.openai_agents import (
     ModelActivityParameters,
-    ModelProvider,
     OpenAIAgentsPlugin,
     SandboxClientProvider,
 )
@@ -44,6 +44,12 @@ def build_temporal_sandbox_client_provider(
 
 def build_model_provider(settings: Settings) -> ModelProvider | None:
     if settings.openai_provider == "azure":
+        if (
+            settings.azure_openai_endpoint is None
+            or settings.azure_openai_deployment is None
+            or settings.azure_openai_api_version is None
+        ):
+            raise ValueError("azure openai provider requires endpoint, deployment, and api version")
         azure_client = AsyncAzureOpenAI(
             azure_endpoint=settings.azure_openai_endpoint,
             azure_deployment=settings.azure_openai_deployment,
