@@ -20,6 +20,7 @@ from cloud_agent_platform.errors import DispatchError, RepositoryError, RunNotFo
 from cloud_agent_platform.repositories import RunRepository, SqlAlchemyRunRepository
 from cloud_agent_platform.temporal.dispatcher import TemporalRunDispatcher
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import Engine
 
 
@@ -70,6 +71,14 @@ def create_app(
                 engine.dispose()
 
     app = FastAPI(title="Infra Agents API", version="0.1.0", lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origin_regex=resolved_settings.cors_allow_origin_regex,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/healthz", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:

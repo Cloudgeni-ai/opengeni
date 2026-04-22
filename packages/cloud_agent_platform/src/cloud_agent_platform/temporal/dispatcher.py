@@ -77,15 +77,20 @@ class TemporalRunDispatcher:
         client = await self._client_or_connect()
         handle = client.get_workflow_handle(workflow_id)
         try:
-            response = await handle.query("progress")
-            if not isinstance(response, WorkflowRunProgress):
-                raise DispatchError(f"workflow {workflow_id} returned invalid progress payload")
-            return response
+            response = await handle.query("progress", result_type=WorkflowRunProgress)
         except RPCError as exc:
             if exc.status == RPCStatusCode.NOT_FOUND:
                 raise DispatchError(f"workflow not found: {workflow_id}") from exc
             raise DispatchError(f"failed to query progress for {workflow_id}") from exc
-        except DispatchError:
-            raise
         except Exception as exc:
             raise DispatchError(f"failed to query progress for {workflow_id}") from exc
+        if isinstance(response, WorkflowRunProgress):
+            return response
+        if isinstance(response, dict):
+            try:
+                return WorkflowRunProgress(**response)
+            except TypeError as exc:
+                raise DispatchError(
+                    f"workflow {workflow_id} returned invalid progress payload"
+                ) from exc
+        raise DispatchError(f"workflow {workflow_id} returned invalid progress payload")
