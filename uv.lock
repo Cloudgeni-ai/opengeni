@@ -418,6 +418,7 @@ dependencies = [
     { name = "cloud-agent-contracts" },
     { name = "cloud-agent-platform" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -426,6 +427,7 @@ requires-dist = [
     { name = "cloud-agent-contracts", editable = "packages/cloud_agent_contracts" },
     { name = "cloud-agent-platform", editable = "packages/cloud_agent_platform" },
     { name = "fastapi", specifier = ">=0.136.0,<0.137" },
+    { name = "httpx", specifier = ">=0.28.1,<0.29" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.44.0,<0.45" },
 ]
 

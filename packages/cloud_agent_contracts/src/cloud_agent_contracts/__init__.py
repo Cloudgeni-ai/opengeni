@@ -8,7 +8,10 @@ from cloud_agent_contracts.models import (
     HealthResponse,
     ResourceKind,
     ResourceRef,
+    RunCancelRequest,
     RunEvent,
+    RunFollowUpCreate,
+    RunStreamEnvelope,
 )
 
 __all__ = [
@@ -21,5 +24,8 @@ __all__ = [
     "HealthResponse",
     "ResourceKind",
     "ResourceRef",
+    "RunCancelRequest",
     "RunEvent",
+    "RunFollowUpCreate",
+    "RunStreamEnvelope",
 ]

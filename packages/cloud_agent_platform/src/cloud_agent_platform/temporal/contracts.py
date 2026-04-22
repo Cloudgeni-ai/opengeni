@@ -15,6 +15,17 @@ class WorkflowRunInput:
 
 
 @dataclass(frozen=True)
+class WorkflowRunProgress:
+    run_id: str
+    state: str
+    turn: int
+    queue_depth: int
+    cancellation_requested: bool
+    waiting_for_follow_up: bool
+    last_output: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkflowRunResult:
     run_id: str
     final_output: str
