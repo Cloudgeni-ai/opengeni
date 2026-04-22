@@ -1,8 +1,11 @@
 from datetime import timedelta
 
+from agents import OpenAIProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
+from openai import AsyncAzureOpenAI
 from temporalio.contrib.openai_agents import (
     ModelActivityParameters,
+    ModelProvider,
     OpenAIAgentsPlugin,
     SandboxClientProvider,
 )
@@ -39,12 +42,28 @@ def build_temporal_sandbox_client_provider(
     return SandboxClientProvider(provider, client)
 
 
+def build_model_provider(settings: Settings) -> ModelProvider | None:
+    if settings.openai_provider == "azure":
+        azure_client = AsyncAzureOpenAI(
+            azure_endpoint=settings.azure_openai_endpoint,
+            azure_deployment=settings.azure_openai_deployment,
+            api_version=settings.azure_openai_api_version,
+            api_key=settings.azure_openai_api_key,
+            azure_ad_token=settings.azure_openai_ad_token,
+            max_retries=0,
+        )
+        return OpenAIProvider(openai_client=azure_client)
+    return None
+
+
 def create_openai_agents_plugin(settings: Settings) -> OpenAIAgentsPlugin:
     sandbox_provider = build_temporal_sandbox_client_provider(settings)
     sandbox_clients = () if sandbox_provider is None else (sandbox_provider,)
+    model_provider = build_model_provider(settings)
     return OpenAIAgentsPlugin(
         model_params=ModelActivityParameters(
             start_to_close_timeout=timedelta(seconds=settings.openai_model_activity_timeout_seconds)
         ),
+        model_provider=model_provider,
         sandbox_clients=sandbox_clients,
     )
