@@ -3,7 +3,7 @@ from datetime import timedelta
 from agents import OpenAIProvider
 from agents.models.interface import ModelProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
-from openai import AsyncAzureOpenAI
+from openai import AsyncAzureOpenAI, AsyncOpenAI
 from temporalio.contrib.openai_agents import (
     ModelActivityParameters,
     OpenAIAgentsPlugin,
@@ -44,12 +44,29 @@ def build_temporal_sandbox_client_provider(
 
 def build_model_provider(settings: Settings) -> ModelProvider | None:
     if settings.openai_provider == "azure":
+        if settings.azure_openai_base_url is not None:
+            api_key = settings.azure_openai_api_key or settings.azure_openai_ad_token
+            if api_key is None:
+                raise ValueError(
+                    "azure openai provider using base_url requires"
+                    " azure_openai_api_key or azure_openai_ad_token"
+                )
+            openai_client = AsyncOpenAI(
+                base_url=settings.azure_openai_base_url,
+                api_key=api_key,
+                max_retries=0,
+            )
+            return OpenAIProvider(openai_client=openai_client)
+
         if (
             settings.azure_openai_endpoint is None
             or settings.azure_openai_deployment is None
             or settings.azure_openai_api_version is None
         ):
-            raise ValueError("azure openai provider requires endpoint, deployment, and api version")
+            raise ValueError(
+                "azure openai provider requires either base_url"
+                " or endpoint+deployment+api_version"
+            )
         azure_client = AsyncAzureOpenAI(
             azure_endpoint=settings.azure_openai_endpoint,
             azure_deployment=settings.azure_openai_deployment,

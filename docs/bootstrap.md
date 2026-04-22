@@ -110,3 +110,14 @@ Notes:
 - `CLOUD_AGENT_OPENAI_MODEL` is the model name passed into the agent runtime.
 - Azure routing uses your deployment endpoint (for example, deployment `gpt-5-4-prod`).
 - Keep `CLOUD_AGENT_AZURE_OPENAI_API_VERSION` aligned with your Azure resource/API support.
+
+For Azure's v1-compatible endpoint style (`.../openai/v1`), use:
+
+```bash
+CLOUD_AGENT_OPENAI_PROVIDER=azure
+CLOUD_AGENT_OPENAI_MODEL=gpt-5.4
+CLOUD_AGENT_AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1
+CLOUD_AGENT_AZURE_OPENAI_API_KEY=...
+```
+
+In this mode, API version may be omitted.

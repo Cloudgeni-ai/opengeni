@@ -72,3 +72,19 @@ def test_build_model_provider_uses_azure_client_when_configured() -> None:
 
 def test_build_model_provider_uses_default_openai_when_unset() -> None:
     assert build_model_provider(Settings()) is None
+
+
+def test_build_model_provider_uses_azure_base_url_when_configured() -> None:
+    provider = build_model_provider(
+        Settings(
+            openai_provider="azure",
+            azure_openai_base_url="https://openai-production-neu.openai.azure.com/openai/v1",
+            azure_openai_api_key="test-key",
+        )
+    )
+
+    assert isinstance(provider, OpenAIProvider)
+    model = provider.get_model("gpt-5.4")
+    assert model.model == "gpt-5.4"
+    assert str(model._client.base_url) == "https://openai-production-neu.openai.azure.com/openai/v1/"
+    assert type(model._client).__name__ == "AsyncOpenAI"
