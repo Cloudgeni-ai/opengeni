@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     openai_provider: Literal["openai", "azure"] = "openai"
     openai_model: str = "gpt-5.4-mini"
     openai_model_activity_timeout_seconds: int = Field(default=120, ge=1)
+    disable_openai_tracing: bool = False
     azure_openai_base_url: str | None = None
     azure_openai_endpoint: str | None = None
     azure_openai_deployment: str | None = None

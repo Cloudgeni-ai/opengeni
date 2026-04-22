@@ -12,6 +12,19 @@ from cloud_agent_platform.temporal.bootstrap import (
 from pydantic import ValidationError
 
 
+@pytest.fixture(autouse=True)
+def _clear_cloud_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir("/tmp")
+    monkeypatch.delenv("CLOUD_AGENT_ENABLE_TEMPORAL_DISPATCH", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_OPENAI_PROVIDER", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_API_VERSION", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_AD_TOKEN", raising=False)
+
+
 def test_temporal_plugin_can_be_created_without_sandbox_backend() -> None:
     plugin = create_openai_agents_plugin(Settings(sandbox_backend="none"))
 
