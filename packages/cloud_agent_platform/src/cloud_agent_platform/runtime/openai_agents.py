@@ -2,17 +2,28 @@ from pathlib import Path
 from typing import Any, cast
 
 from agents.sandbox import Manifest, SandboxAgent
-from agents.sandbox.capabilities import Filesystem, Shell, Skills
+from agents.sandbox.capabilities import Filesystem, LocalDirLazySkillSource, Shell, Skills
 from agents.sandbox.capabilities.filesystem import FilesystemToolSet
 from agents.sandbox.entries import LocalDir
 
 
-def _hashicorp_terraform_skills_artifact() -> LocalDir:
-    """Vendored HashiCorp agent-skills: code-generation + module-generation skill folders."""
-    skills_root = (
-        Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills"
+def _bundled_terraform_skills_dir() -> Path:
+    """Absolute path to vendored HashiCorp Terraform skills (sibling `SKILL.md` folders)."""
+    return (Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills").resolve()
+
+
+def _hashicorp_terraform_skills() -> Skills:
+    """Index skills from host + lazy `load_skill` staging. Ensures `## Skills` in instructions.
+
+    `Skills(from_=LocalDir)` only gets names/descriptions from `ls`+`read` in the *remote*
+    sandbox; if that fails, the model sees no skill list. Lazy mode uses `list_skill_metadata`
+    by reading each `SKILL.md` on the host (SDK-native), so the list is always populated.
+    """
+    return Skills(
+        lazy_from=LocalDirLazySkillSource(
+            source=LocalDir(src=_bundled_terraform_skills_dir()),
+        )
     )
-    return LocalDir(src=skills_root)
 
 
 def _configure_filesystem_tools(toolset: FilesystemToolSet) -> None:
@@ -37,6 +48,6 @@ def build_sandbox_agent(*, model: str, name: str = "Cloud Agent") -> SandboxAgen
         capabilities=[
             Filesystem(configure_tools=_configure_filesystem_tools),
             Shell(),
-            Skills(from_=_hashicorp_terraform_skills_artifact()),
+            _hashicorp_terraform_skills(),
         ],
     )
