@@ -5,7 +5,7 @@ from typing import Any
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from agents import Runner
+    from agents import Runner, RunResult
     from agents.extensions.sandbox.modal import ModalSandboxClientOptions
     from agents.run import RunConfig
     from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
@@ -164,7 +164,7 @@ class CloudAgentRunWorkflow:
             )
             raise
 
-    async def _run_agent_turn(self, request: WorkflowRunInput, prompt: str):
+    async def _run_agent_turn(self, request: WorkflowRunInput, prompt: str) -> RunResult:
         agent = build_sandbox_agent(model=request.model)
         sandbox_options = ModalSandboxClientOptions(
             app_name=request.sandbox_app_name,

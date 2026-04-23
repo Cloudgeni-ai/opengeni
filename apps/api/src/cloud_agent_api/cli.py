@@ -4,7 +4,7 @@ import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import httpx
@@ -25,7 +25,7 @@ def _load_session() -> dict[str, Any]:
     if not session_file.exists():
         return {}
     try:
-        return json.loads(session_file.read_text(encoding="utf-8"))
+        return cast(dict[str, Any], json.loads(session_file.read_text(encoding="utf-8")))
     except json.JSONDecodeError:
         return {}
 

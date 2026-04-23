@@ -5,6 +5,8 @@ Snapshot date: 2026-04-20.
 ## Structure
 
 - `apps/api`: FastAPI service for API-facing run creation, run lookup, health, and event reads.
+- `apps/web`: TanStack + Vite + React product UI (`npm run dev` — default `http://127.0.0.1:3000`;
+  see `apps/web/.env.example` for `VITE_API_BASE_URL` → API, usually `http://127.0.0.1:8000`).
 - `apps/worker`: Temporal worker process that registers the agent workflow.
 - `packages/cloud_agent_contracts`: Pydantic contracts for runs, events, resources, and artifacts.
 - `packages/cloud_agent_platform`: shared platform code for settings, SQLAlchemy persistence,
@@ -16,8 +18,8 @@ The workspace uses `uv` with ordinary Python packages. Ruff, mypy, pytest, SQLAl
 Alembic, FastAPI, Temporal, OpenAI Agents SDK, and Modal are configured from the root
 `pyproject.toml`.
 
-To **start the full stack** (migrations, `.env`, API + web UI, Temporal worker, Temporal
-service requirement, and how final workflow output is observed), see
+To **start the full stack** (migrations, `.env`, API, **`apps/web` dev server**, Temporal
+worker, Temporal service requirement, and how final workflow output is observed), see
 [`AGENTS.md`](../AGENTS.md) at the repository root. That is what “spin up everything”
 means in this project.
 
@@ -103,6 +105,15 @@ Run the API service:
 
 ```bash
 uv run python -m cloud_agent_api
+```
+
+Run the web app (Vite, port 3000 by default):
+
+```bash
+cd apps/web
+npm install
+cp .env.example .env  # if needed, then set VITE_API_BASE_URL
+npm run dev
 ```
 
 Run the Temporal worker:
