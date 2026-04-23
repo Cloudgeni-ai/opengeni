@@ -90,3 +90,18 @@ The **React app** in `apps/web` calls the HTTP API; final streaming / progress b
 ## When tests are enough
 
 Unit tests and `uv run pytest` do **not** require Temporal, Modal, or a live model. Full **end-to-end** checks require the full stack above plus valid cloud credentials.
+
+---
+
+## Web: “Failed to start run” (home page toast)
+
+`apps/web` calls `POST {VITE_API_BASE_URL}/v1/runs`. The toast is shown when that request fails. **Read the description line** (it is `API {status}: {detail}` or a network error).
+
+| What you see | Usual cause |
+|--------------|-------------|
+| `Failed to fetch` / `NetworkError` / `Load failed` | The **API is not running** on the URL in `VITE_API_BASE_URL`, a firewall blocks the port, or the URL is wrong (e.g. opened the site at `http://0.0.0.0:3000` while `VITE_API_BASE_URL` is `127.0.0.1:8000` and the request is blocked; prefer **`http://127.0.0.1:3000` or `http://localhost:3000`**) — fix: start `uv run python -m cloud_agent_api`, confirm `curl "$VITE_API_BASE_URL/healthz"`, and use `apps/web/.env` to match. |
+| `API 503: ...Temporal...` or `failed to connect to Temporal` | **Temporal** is not listening at `CLOUD_AGENT_TEMPORAL_HOST` (default `localhost:7233`), or wrong host/namespace. Start a Temporal dev server and retry. `CLOUD_AGENT_ENABLE_TEMPORAL_DISPATCH` must be `true` or the API never tries Temporal (if dispatch is on and Temporal is down, you get 503). |
+| `API 503: failed to start workflow` | Temporal is up but the workflow start failed (permissions, bad payload, or duplicate `workflowId`). |
+| `API 500: ...` | **Database** (e.g. migrations not run: `uv run alembic upgrade head`) or a server bug — check API logs. |
+
+A successful `POST` returns **202** and navigates to `/runs/<id>`. If the request succeeds but the **worker** is not running, the run may sit **dispatched** while the workflow does not make progress; that is a **separate** problem from the toast (start run is “started” in the API/Temporal sense).
