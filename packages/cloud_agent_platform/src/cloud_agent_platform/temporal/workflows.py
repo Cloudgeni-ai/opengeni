@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from temporalio import workflow
@@ -7,7 +8,9 @@ with workflow.unsafe.imports_passed_through():
     from agents import Runner
     from agents.extensions.sandbox.modal import ModalSandboxClientOptions
     from agents.run import RunConfig
-    from agents.sandbox import SandboxRunConfig
+    from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+    from agents.sandbox.entries import BaseEntry
+    from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
     from cloud_agent_contracts import AgentRunStatus, EventType
     from temporalio.contrib.openai_agents.workflow import temporal_sandbox_client
 
@@ -18,6 +21,29 @@ from cloud_agent_platform.temporal.contracts import (
     WorkflowRunProgress,
     WorkflowRunResult,
 )
+
+
+def _normalize_manifest_path_keys(manifest: Manifest) -> Manifest:
+    """Temporal payload decoding turns dict keys into str; re-coerce to Path for `Skills`."""
+    if not manifest.entries:
+        return manifest
+    out: dict[str | Path, BaseEntry] = {}
+    for key, value in manifest.entries.items():
+        coerced = Path(key) if not isinstance(key, Path) else key
+        out[coerced] = value
+    return manifest.model_copy(update={"entries": out})
+
+
+def _processed_sandbox_manifest(agent: SandboxAgent) -> Manifest | None:
+    """Merge capabilities into the default manifest for fresh sandbox session creation."""
+    base = agent.default_manifest
+    if base is None:
+        return None
+    return SandboxRuntimeSessionManager._process_manifest(
+        list(agent.capabilities),
+        base.model_copy(deep=True),
+        run_as_user=None,
+    )
 
 
 @workflow.defn
@@ -144,6 +170,8 @@ class CloudAgentRunWorkflow:
             app_name=request.sandbox_app_name,
             timeout=request.sandbox_timeout,
         )
+        raw = _processed_sandbox_manifest(agent)
+        processed = _normalize_manifest_path_keys(raw) if raw is not None else None
         return await Runner.run(
             agent,
             prompt,
@@ -151,6 +179,7 @@ class CloudAgentRunWorkflow:
                 sandbox=SandboxRunConfig(
                     client=temporal_sandbox_client(request.sandbox_provider),
                     options=sandbox_options,
+                    manifest=processed,
                 )
             ),
         )

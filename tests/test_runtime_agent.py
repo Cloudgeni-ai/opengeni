@@ -10,3 +10,6 @@ def test_openai_agent_runtime_builds_sandbox_agent() -> None:
     assert agent.default_manifest is not None
     assert agent.default_manifest.root == "/workspace"
     assert any(type(c) is Skills for c in agent.capabilities)
+    inst = agent.instructions
+    assert inst is not None
+    assert ".agents/" in str(inst) or ".agents" in str(inst)

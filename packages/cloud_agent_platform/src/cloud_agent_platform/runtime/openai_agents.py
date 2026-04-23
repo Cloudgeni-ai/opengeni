@@ -2,28 +2,20 @@ from pathlib import Path
 from typing import Any, cast
 
 from agents.sandbox import Manifest, SandboxAgent
-from agents.sandbox.capabilities import Filesystem, LocalDirLazySkillSource, Shell, Skills
+from agents.sandbox.capabilities import Filesystem, Shell, Skills
 from agents.sandbox.capabilities.filesystem import FilesystemToolSet
 from agents.sandbox.entries import LocalDir
 
 
 def _bundled_terraform_skills_dir() -> Path:
-    """Absolute path to vendored HashiCorp Terraform skills (sibling `SKILL.md` folders)."""
-    return (Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills").resolve()
+    return (
+        Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills"
+    ).resolve()
 
 
 def _hashicorp_terraform_skills() -> Skills:
-    """Index skills from host + lazy `load_skill` staging. Ensures `## Skills` in instructions.
-
-    `Skills(from_=LocalDir)` only gets names/descriptions from `ls`+`read` in the *remote*
-    sandbox; if that fails, the model sees no skill list. Lazy mode uses `list_skill_metadata`
-    by reading each `SKILL.md` on the host (SDK-native), so the list is always populated.
-    """
-    return Skills(
-        lazy_from=LocalDirLazySkillSource(
-            source=LocalDir(src=_bundled_terraform_skills_dir()),
-        )
-    )
+    # LocalDir: manifest serializes a path only. Worker applies copy from that host path.
+    return Skills(from_=LocalDir(src=_bundled_terraform_skills_dir()))
 
 
 def _configure_filesystem_tools(toolset: FilesystemToolSet) -> None:
@@ -42,7 +34,11 @@ def build_sandbox_agent(*, model: str, name: str = "Cloud Agent") -> SandboxAgen
         instructions=(
             "You are a standalone cloud agent. Work inside the sandbox workspace, "
             "use files and shell commands when they are useful, and return a concise "
-            "summary of completed work and produced artifacts."
+            "summary of completed work and produced artifacts. "
+            "The workspace includes HashiCorp Terraform skills under "
+            "`.agents/<skill-name>/` (for example `.agents/terraform-style-guide/SKILL.md`); "
+            "use a shell `ls` or the filesystem tools to confirm paths before assuming "
+            "files are missing."
         ),
         default_manifest=manifest,
         capabilities=[

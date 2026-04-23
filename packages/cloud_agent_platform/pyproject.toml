@@ -21,6 +21,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cloud_agent_platform"]
+force-include = { "src/cloud_agent_platform/bundled_hashicorp_terraform_skills" = "cloud_agent_platform/bundled_hashicorp_terraform_skills" }
 
 [tool.uv.sources]
 cloud-agent-contracts = { workspace = true }

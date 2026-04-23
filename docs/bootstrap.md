@@ -40,11 +40,14 @@ For a concise reference on enabling **agent skills** via the Python SDK’s `Ski
 capability (vs. Responses API shell skills, vs. Codex), see
 [openai-agents-sdk-skills.md](openai-agents-sdk-skills.md).
 
-`build_sandbox_agent` also enables the OpenAI Agents SDK `Skills` capability: vendored
-[HashiCorp Terraform agent skills](https://github.com/hashicorp/agent-skills) live under
+`build_sandbox_agent` also enables the OpenAI Agents SDK `Skills` capability
+(`from_=LocalDir(absolute)`) and `CloudAgentRunWorkflow` passes the **processed** manifest
+into `SandboxRunConfig` so the merged `.agents` entry (host path to the HashiCorp bundle) is
+used when the sandbox session is created. Vendored
+[HashiCorp Terraform agent skills](https://github.com/hashicorp/agent-skills) are under
 `packages/cloud_agent_platform/src/cloud_agent_platform/bundled_hashicorp_terraform_skills` and
-are copied into the sandbox at `.agents/<skill>` when a run starts. See that folder’s
-`README.md` to update the bundle.
+end up in the remote workspace at `.agents/<skill>`. See that folder’s `README.md` to refresh
+the bundle.
 
 ## Modal Sandbox Boundary
 
