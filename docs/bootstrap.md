@@ -16,6 +16,11 @@ The workspace uses `uv` with ordinary Python packages. Ruff, mypy, pytest, SQLAl
 Alembic, FastAPI, Temporal, OpenAI Agents SDK, and Modal are configured from the root
 `pyproject.toml`.
 
+To **start the full stack** (migrations, `.env`, API + web UI, Temporal worker, Temporal
+service requirement, and how final workflow output is observed), see
+[`AGENTS.md`](../AGENTS.md) at the repository root. That is what “spin up everything”
+means in this project.
+
 ## Why API and Worker Are Separate
 
 The API owns external HTTP contracts and durable run records. It does not execute model
@@ -77,6 +82,8 @@ directly, or use `modal token set` and `~/.modal.toml` if no tokens are in `Sett
   Temporal and leaves persistent status transitions for the next implementation slice.
 
 ## Local Commands
+
+See [AGENTS.md](../AGENTS.md) for a single copy-paste “cold start” and troubleshooting.
 
 ```bash
 uv sync --all-packages --dev
