@@ -1,8 +1,8 @@
 from datetime import timedelta
 
 from agents import OpenAIProvider
-from agents.models.interface import ModelProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
+from agents.models.interface import ModelProvider
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 from temporalio.contrib.openai_agents import (
     ModelActivityParameters,

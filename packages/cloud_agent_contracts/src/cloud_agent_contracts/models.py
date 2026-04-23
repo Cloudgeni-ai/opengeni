@@ -21,8 +21,12 @@ class EventType(StrEnum):
     RUN_DISPATCHED = "run.dispatched"
     RUN_STARTED = "run.started"
     RUN_WAITING = "run.waiting"
+    RUN_FOLLOW_UP_REQUESTED = "run.follow_up_requested"
+    RUN_FOLLOW_UP = "run.follow_up"
+    RUN_CANCEL_REQUESTED = "run.cancel_requested"
     RUN_COMPLETED = "run.completed"
     RUN_FAILED = "run.failed"
+    RUN_CANCELLED = "run.cancelled"
     ARTIFACT_CREATED = "artifact.created"
 
 
@@ -68,6 +72,18 @@ class AgentRunCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RunFollowUpCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(min_length=1)
+
+
+class RunCancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = None
+
+
 class AgentRun(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -96,3 +112,14 @@ class HealthResponse(BaseModel):
     service: str
     environment: str
     ok: bool
+
+
+class RunStreamEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    run: AgentRun | None = None
+    event: RunEvent | None = None
+    progress: dict[str, Any] | None = None
+    error: str | None = None
+    code: int | None = None

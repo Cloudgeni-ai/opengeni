@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from typing import Any, Protocol
 from uuid import UUID
 
-from cloud_agent_contracts import AgentRun, AgentRunCreate, EventType, RunEvent
+from cloud_agent_contracts import AgentRun, AgentRunCreate, AgentRunStatus, EventType, RunEvent
 
 
 class RunRepository(Protocol):
@@ -11,6 +11,8 @@ class RunRepository(Protocol):
     async def get_run(self, run_id: UUID) -> AgentRun: ...
 
     async def mark_dispatched(self, run_id: UUID, workflow_id: str) -> AgentRun: ...
+
+    async def set_run_status(self, run_id: UUID, status: AgentRunStatus) -> AgentRun: ...
 
     async def append_event(
         self,

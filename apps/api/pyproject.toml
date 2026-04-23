@@ -6,8 +6,12 @@ dependencies = [
     "cloud-agent-contracts",
     "cloud-agent-platform",
     "fastapi>=0.136.0,<0.137",
+    "httpx>=0.28.1,<0.29",
     "uvicorn[standard]>=0.44.0,<0.45",
 ]
+
+[project.scripts]
+cloud-agent-cli = "cloud_agent_api.cli:main"
 
 [build-system]
 requires = ["hatchling"]

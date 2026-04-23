@@ -1,10 +1,11 @@
 from cloud_agent_contracts import AgentRun
 from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from cloud_agent_platform.config import Settings
 from cloud_agent_platform.errors import DispatchError
 from cloud_agent_platform.temporal.bootstrap import require_temporal_sandbox_provider
-from cloud_agent_platform.temporal.contracts import WorkflowRunInput
+from cloud_agent_platform.temporal.contracts import WorkflowRunInput, WorkflowRunProgress
 
 
 class TemporalRunDispatcher:
@@ -47,3 +48,49 @@ class TemporalRunDispatcher:
         except Exception as exc:
             raise DispatchError(f"failed to start workflow {workflow_id}") from exc
         return workflow_id
+
+    async def submit_follow_up(self, workflow_id: str, prompt: str) -> None:
+        client = await self._client_or_connect()
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            await handle.signal("submit_follow_up", prompt)
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                raise DispatchError(f"workflow not found: {workflow_id}") from exc
+            raise DispatchError(f"failed to signal follow-up for {workflow_id}") from exc
+        except Exception as exc:
+            raise DispatchError(f"failed to signal follow-up for {workflow_id}") from exc
+
+    async def request_cancel(self, workflow_id: str, reason: str | None = None) -> None:
+        client = await self._client_or_connect()
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            await handle.signal("request_cancel", reason)
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                raise DispatchError(f"workflow not found: {workflow_id}") from exc
+            raise DispatchError(f"failed to signal cancellation for {workflow_id}") from exc
+        except Exception as exc:
+            raise DispatchError(f"failed to signal cancellation for {workflow_id}") from exc
+
+    async def query_progress(self, workflow_id: str) -> WorkflowRunProgress:
+        client = await self._client_or_connect()
+        handle = client.get_workflow_handle(workflow_id)
+        try:
+            response = await handle.query("progress", result_type=WorkflowRunProgress)
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.NOT_FOUND:
+                raise DispatchError(f"workflow not found: {workflow_id}") from exc
+            raise DispatchError(f"failed to query progress for {workflow_id}") from exc
+        except Exception as exc:
+            raise DispatchError(f"failed to query progress for {workflow_id}") from exc
+        if isinstance(response, WorkflowRunProgress):
+            return response
+        if isinstance(response, dict):
+            try:
+                return WorkflowRunProgress(**response)
+            except TypeError as exc:
+                raise DispatchError(
+                    f"workflow {workflow_id} returned invalid progress payload"
+                ) from exc
+        raise DispatchError(f"workflow {workflow_id} returned invalid progress payload")

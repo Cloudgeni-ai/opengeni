@@ -2,7 +2,13 @@ import asyncio
 from typing import Any
 from uuid import UUID, uuid4
 
-from cloud_agent_contracts import AgentRun, AgentRunCreate, EventType, RunEvent
+from cloud_agent_contracts import (
+    AgentRun,
+    AgentRunCreate,
+    AgentRunStatus,
+    EventType,
+    RunEvent,
+)
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -73,6 +79,41 @@ class SqlAlchemyRunRepository:
             lifecycle.event_payload,
         )
         return await self.get_run(run_id)
+
+    async def set_run_status(self, run_id: UUID, status: AgentRunStatus) -> AgentRun:
+        return await asyncio.to_thread(self._set_run_status, run_id, status)
+
+    def _set_run_status(self, run_id: UUID, status: AgentRunStatus) -> AgentRun:
+        with self._session_factory() as session:
+            record = session.get(RunRecord, str(run_id))
+            if record is None:
+                raise RunNotFoundError(str(run_id))
+            record.status = status.value
+            record.updated_at = utcnow()
+            session.commit()
+            session.refresh(record)
+            return run_from_record(record)
+
+    async def save_run(self, run: AgentRun) -> AgentRun:
+        return await asyncio.to_thread(self._save_run, run)
+
+    def _save_run(self, run: AgentRun) -> AgentRun:
+        with self._session_factory() as session:
+            record = session.get(RunRecord, str(run.id))
+            if record is None:
+                raise RunNotFoundError(str(run.id))
+            record.status = run.status.value
+            record.prompt = run.prompt
+            resource = run.resource
+            record.resource_kind = resource.kind.value if resource else None
+            record.resource_uri = resource.uri if resource else None
+            record.resource_metadata = resource.metadata if resource else None
+            record.metadata_ = run.metadata
+            record.temporal_workflow_id = run.temporal_workflow_id
+            record.updated_at = run.updated_at
+            session.commit()
+            session.refresh(record)
+            return run_from_record(record)
 
     def _mark_dispatched(self, run_id: UUID, lifecycle: RunLifecycleUpdate) -> None:
         with self._session_factory() as session:

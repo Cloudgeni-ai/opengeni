@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/inter/wght-italic.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens
+   Dark-only palette. One calm accent. Status hues are muted and desaturated
+   so they inform without shouting. All colors use OKLCH for perceptual
+   consistency.
+   --------------------------------------------------------------------------- */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular,
+    Menlo, monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+
+  /* Core neutrals */
+  --color-bg: oklch(0.16 0.012 260);
+  --color-surface: oklch(0.19 0.014 260);
+  --color-surface-2: oklch(0.22 0.015 260);
+  --color-surface-3: oklch(0.26 0.016 260);
+  --color-border: oklch(0.30 0.015 260);
+  --color-border-strong: oklch(0.42 0.018 260);
+  --color-fg: oklch(0.96 0.005 260);
+  --color-fg-muted: oklch(0.74 0.012 260);
+  --color-fg-subtle: oklch(0.58 0.013 260);
+
+  /* Brand accent */
+  --color-brand: oklch(0.72 0.15 255);
+  --color-brand-strong: oklch(0.62 0.18 255);
+  --color-brand-fg: oklch(0.98 0.005 260);
+
+  /* Status — desaturated so badges stay calm */
+  --color-status-running: oklch(0.78 0.11 80);
+  --color-status-waiting: oklch(0.70 0.02 260);
+  --color-status-success: oklch(0.78 0.12 155);
+  --color-status-failed: oklch(0.72 0.14 20);
+  --color-status-cancelled: oklch(0.62 0.05 260);
+
+  /* shadcn compatibility — map canonical token names to ours */
+  --color-background: var(--color-bg);
+  --color-foreground: var(--color-fg);
+
+  --color-card: var(--color-surface);
+  --color-card-foreground: var(--color-fg);
+
+  --color-popover: var(--color-surface-3);
+  --color-popover-foreground: var(--color-fg);
+
+  --color-primary: var(--color-brand-strong);
+  --color-primary-foreground: var(--color-brand-fg);
+
+  --color-secondary: var(--color-surface-2);
+  --color-secondary-foreground: var(--color-fg);
+
+  --color-muted: var(--color-surface-2);
+  --color-muted-foreground: var(--color-fg-muted);
+
+  --color-accent: var(--color-surface-2);
+  --color-accent-foreground: var(--color-fg);
+
+  --color-destructive: oklch(0.65 0.18 22);
+  --color-destructive-foreground: oklch(0.98 0.005 260);
+
+  --color-input: var(--color-surface-2);
+  --color-ring: var(--color-brand);
+
+  --color-sidebar: var(--color-surface);
+  --color-sidebar-foreground: var(--color-fg);
+  --color-sidebar-primary: var(--color-brand-strong);
+  --color-sidebar-primary-foreground: var(--color-brand-fg);
+  --color-sidebar-accent: var(--color-surface-2);
+  --color-sidebar-accent-foreground: var(--color-fg);
+  --color-sidebar-border: var(--color-border);
+  --color-sidebar-ring: var(--color-brand);
+}
+
+/* ---------------------------------------------------------------------------
+   Base
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01", "ss03";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+::selection {
+  background: color-mix(in oklch, var(--color-brand) 45%, transparent);
+  color: var(--color-fg);
+}
+
+/* Subtle scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Focus ring */
+:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Message entry animation */
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-in {
+  animation: message-in 180ms ease-out both;
+}
+
+/* Pending dots */
+@keyframes pending-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.pending-dot {
+  animation: pending-dot 1.2s infinite ease-in-out both;
+}

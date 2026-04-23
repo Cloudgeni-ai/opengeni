@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID, uuid4
 
-from cloud_agent_contracts import AgentRun, AgentRunCreate, EventType, RunEvent
+from cloud_agent_contracts import AgentRun, AgentRunCreate, AgentRunStatus, EventType, RunEvent
 
 from cloud_agent_platform.errors import RunNotFoundError
 from cloud_agent_platform.repositories.lifecycle import (
@@ -64,6 +64,12 @@ class InMemoryRunRepository:
         )
         return updated
 
+    async def set_run_status(self, run_id: UUID, status: AgentRunStatus) -> AgentRun:
+        run = await self.get_run(run_id)
+        updated = run.model_copy(update={"status": status, "updated_at": utcnow()})
+        self._runs[run_id] = updated
+        return updated
+
     async def append_event(
         self,
         run_id: UUID,
@@ -82,6 +88,11 @@ class InMemoryRunRepository:
         )
         events.append(event)
         return event
+
+    async def save_run(self, run: AgentRun) -> AgentRun:
+        await self.get_run(run.id)
+        self._runs[run.id] = run
+        return run
 
     async def list_events(self, run_id: UUID) -> tuple[RunEvent, ...]:
         await self.get_run(run_id)

@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     modal_image_ref: str | None = None
 
     var_dir: Path = Path("var")
+    api_event_poll_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
+    cors_allow_origin_regex: str = (
+        r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    )
 
     @model_validator(mode="after")
     def _validate_dispatch_configuration(self) -> "Settings":
