@@ -55,6 +55,12 @@ Sandbox options (`app_name`, `timeout`) are passed through the Temporal workflow
 `WorkflowRunInput` and constructed into `ModalSandboxClientOptions` on the workflow side, so
 the SDK client always receives proper options without any local shim or wrapper.
 
+**Modal credentials** are not passed through this repo’s `Settings` type: the worker runs on
+the same machine (or with the same environment) as the [Modal](https://modal.com) client.
+Configure auth with `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` (takes precedence over
+`~/.modal.toml`) or with `modal token set`, plus optional `MODAL_PROFILE` / `MODAL_CONFIG_PATH`.
+See [`.env.example`](../.env.example).
+
 ## Deferred Deliberately
 
 - No CLI product.
