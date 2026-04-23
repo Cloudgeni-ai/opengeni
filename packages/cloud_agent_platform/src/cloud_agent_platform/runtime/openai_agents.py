@@ -1,8 +1,18 @@
+from pathlib import Path
 from typing import Any, cast
 
 from agents.sandbox import Manifest, SandboxAgent
-from agents.sandbox.capabilities import Filesystem, Shell
+from agents.sandbox.capabilities import Filesystem, Shell, Skills
 from agents.sandbox.capabilities.filesystem import FilesystemToolSet
+from agents.sandbox.entries import LocalDir
+
+
+def _hashicorp_terraform_skills_artifact() -> LocalDir:
+    """Vendored HashiCorp agent-skills: code-generation + module-generation skill folders."""
+    skills_root = (
+        Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills"
+    )
+    return LocalDir(src=skills_root)
 
 
 def _configure_filesystem_tools(toolset: FilesystemToolSet) -> None:
@@ -24,5 +34,9 @@ def build_sandbox_agent(*, model: str, name: str = "Cloud Agent") -> SandboxAgen
             "summary of completed work and produced artifacts."
         ),
         default_manifest=manifest,
-        capabilities=[Filesystem(configure_tools=_configure_filesystem_tools), Shell()],
+        capabilities=[
+            Filesystem(configure_tools=_configure_filesystem_tools),
+            Shell(),
+            Skills(from_=_hashicorp_terraform_skills_artifact()),
+        ],
     )
