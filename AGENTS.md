@@ -35,6 +35,20 @@ That includes, in order:
 
 All commands assume the **current working directory is the repo root** so `.env` and `alembic.ini` resolve correctly.
 
+`apps/web` is an npm package: **`http://127.0.0.1:3000` → API `http://127.0.0.1:8000`**. The `dev` script binds Vite to **`0.0.0.0:3000`** so **`127.0.0.1`** and **`localhost`** both work. CORS in `Settings` already allows `localhost` / `127.0.0.1` with any port, so a browser on **:3000** can call the API on **:8000** as long as both processes are up.
+
+### Start the web (what “start the web” means in automation)
+
+Do this when the user only asks to **run the product UI** (Vite) — still create **`apps/web/.env`** if missing:
+
+```bash
+test -f apps/web/.env || cp apps/web/.env.example apps/web/.env
+cd apps/web && npm install && npm run dev
+# Open http://127.0.0.1:3000 — API must be on VITE_API_BASE_URL (default :8000) for the app to work
+```
+
+To exercise runs end-to-end, start the **API** and **worker** in other shells (or background jobs) *before* or *along with* the web, per **Quick copy-paste** below. The API does not serve the SPA: **`GET /` on :8000 is not the app.**
+
 ---
 
 ## Quick copy-paste: cold start
@@ -47,11 +61,11 @@ uv run alembic upgrade head
 set -a; source .env; set +a
 uv run python -m cloud_agent_api &
 uv run python -m cloud_agent_worker &
-# In another shell, after `cd apps/web && npm install` and copying apps/web/.env if needed:
-# (cd apps/web && npm run dev) &
+# Third shell — web (see “Start the web” above)
+# cd apps/web && npm install && npm run dev
 ```
 
-Then verify: `curl -sS http://127.0.0.1:8000/healthz` and open **`http://127.0.0.1:3000`** (web) or `http://127.0.0.1:8000/docs` (OpenAPI only).
+Then verify: `curl -sS http://127.0.0.1:8000/healthz` and open **`http://127.0.0.1:3000`**. The API is **`/docs` or `/healthz` on :8000**, not the home page of the product.
 
 If port 8000 is in use, stop the old Uvicorn process (or use another port by changing the API code / deployment — default is 8000).
 
