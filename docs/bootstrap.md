@@ -36,6 +36,9 @@ configuration. SQLAlchemy runtime tables are intentionally separate from OpenAI
 future serialized run-state references, while SDK session storage remains a conversation
 history surface.
 
+For a concise reference on enabling **agent skills** via the Python SDK’s `Skills`
+capability (vs. Responses API shell skills, vs. Codex), see [openai-agents-sdk-skills.md](openai-agents-sdk-skills.md).
+
 ## Modal Sandbox Boundary
 
 There is no repo-local Modal sandbox code. The platform uses the first-party OpenAI Agents SDK
