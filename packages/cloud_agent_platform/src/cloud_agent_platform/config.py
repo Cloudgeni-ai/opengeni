@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,12 +38,27 @@ class Settings(BaseSettings):
     modal_app_name: str = "infra-agents-sandbox"
     modal_default_timeout_seconds: int = Field(default=900, ge=1)
     modal_image_ref: str | None = None
+    # Map to MODAL_TOKEN_ID / MODAL_TOKEN_SECRET for the official `modal` client (worker applies).
+    modal_token_id: str | None = None
+    modal_token_secret: str | None = None
+    modal_profile: str | None = None
+    modal_config_path: Path | None = None
 
     var_dir: Path = Path("var")
     api_event_poll_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
     cors_allow_origin_regex: str = (
         r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_modal_tokens_to_none(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        for k in ("modal_token_id", "modal_token_secret", "modal_profile", "modal_config_path"):
+            if k in data and data[k] == "":
+                data[k] = None
+        return data
 
     @model_validator(mode="after")
     def _validate_dispatch_configuration(self) -> "Settings":
@@ -55,8 +70,7 @@ class Settings(BaseSettings):
         if self.openai_provider == "azure":
             if self.azure_openai_base_url is None and self.azure_openai_endpoint is None:
                 raise ValueError(
-                    "openai_provider=azure requires azure_openai_base_url or"
-                    " azure_openai_endpoint"
+                    "openai_provider=azure requires azure_openai_base_url or azure_openai_endpoint"
                 )
             if self.azure_openai_base_url is None and self.azure_openai_deployment is None:
                 raise ValueError(
@@ -70,9 +84,13 @@ class Settings(BaseSettings):
                 )
             if self.azure_openai_api_key is None and self.azure_openai_ad_token is None:
                 raise ValueError(
-                    "openai_provider=azure requires azure_openai_api_key or"
-                    " azure_openai_ad_token"
+                    "openai_provider=azure requires azure_openai_api_key or azure_openai_ad_token"
                 )
+        if (self.modal_token_id is None) != (self.modal_token_secret is None):
+            raise ValueError(
+                "modal_token_id and modal_token_secret must both be set or both omitted"
+                " (or use modal token / ~/.modal.toml only)"
+            )
         return self
 
 
