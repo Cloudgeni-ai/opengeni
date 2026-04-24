@@ -5,6 +5,8 @@ Snapshot date: 2026-04-20.
 ## Structure
 
 - `apps/api`: FastAPI service for API-facing run creation, run lookup, health, and event reads.
+- `apps/web`: TanStack + Vite + React product UI (`npm run dev` — default `http://127.0.0.1:3000`;
+  see `apps/web/.env.example` for `VITE_API_BASE_URL` → API, usually `http://127.0.0.1:8000`).
 - `apps/worker`: Temporal worker process that registers the agent workflow.
 - `packages/cloud_agent_contracts`: Pydantic contracts for runs, events, resources, and artifacts.
 - `packages/cloud_agent_platform`: shared platform code for settings, SQLAlchemy persistence,
@@ -15,6 +17,11 @@ Snapshot date: 2026-04-20.
 The workspace uses `uv` with ordinary Python packages. Ruff, mypy, pytest, SQLAlchemy,
 Alembic, FastAPI, Temporal, OpenAI Agents SDK, and Modal are configured from the root
 `pyproject.toml`.
+
+To **start the full stack** (migrations, `.env`, API, **`apps/web` dev server**, Temporal
+worker, Temporal service requirement, and how final workflow output is observed), see
+[`AGENTS.md`](../AGENTS.md) at the repository root. That is what “spin up everything”
+means in this project.
 
 ## Why API and Worker Are Separate
 
@@ -37,7 +44,17 @@ future serialized run-state references, while SDK session storage remains a conv
 history surface.
 
 For a concise reference on enabling **agent skills** via the Python SDK’s `Skills`
-capability (vs. Responses API shell skills, vs. Codex), see [openai-agents-sdk-skills.md](openai-agents-sdk-skills.md).
+capability (vs. Responses API shell skills, vs. Codex), see
+[openai-agents-sdk-skills.md](openai-agents-sdk-skills.md).
+
+`build_sandbox_agent` also enables the OpenAI Agents SDK `Skills` capability
+(`from_=LocalDir(absolute)`) and `CloudAgentRunWorkflow` passes the **processed** manifest
+into `SandboxRunConfig` so the merged `.agents` entry (host path to the HashiCorp bundle) is
+used when the sandbox session is created. Vendored
+[HashiCorp Terraform agent skills](https://github.com/hashicorp/agent-skills) are under
+`packages/cloud_agent_platform/src/cloud_agent_platform/bundled_hashicorp_terraform_skills` and
+end up in the remote workspace at `.agents/<skill>`. See that folder’s `README.md` to refresh
+the bundle.
 
 ## Modal Sandbox Boundary
 
@@ -47,6 +64,13 @@ Modal sandbox client (`agents.extensions.sandbox.modal.ModalSandboxClient`) dire
 Sandbox options (`app_name`, `timeout`) are passed through the Temporal workflow via
 `WorkflowRunInput` and constructed into `ModalSandboxClientOptions` on the workflow side, so
 the SDK client always receives proper options without any local shim or wrapper.
+
+**Modal credentials:** the worker calls `apply_modal_client_environ` on startup, mapping
+`CLOUD_AGENT_MODAL_TOKEN_ID` / `CLOUD_AGENT_MODAL_TOKEN_SECRET` (and optional
+`CLOUD_AGENT_MODAL_PROFILE`, `CLOUD_AGENT_MODAL_CONFIG_PATH`) to the `MODAL_*` environment
+variables the [Modal](https://modal.com) Python client reads. You can also set `MODAL_*`
+directly, or use `modal token set` and `~/.modal.toml` if no tokens are in `Settings`. See
+[`.env.example`](../.env.example).
 
 ## Deferred Deliberately
 
@@ -60,6 +84,8 @@ the SDK client always receives proper options without any local shim or wrapper.
   Temporal and leaves persistent status transitions for the next implementation slice.
 
 ## Local Commands
+
+See [AGENTS.md](../AGENTS.md) for a single copy-paste “cold start” and troubleshooting.
 
 ```bash
 uv sync --all-packages --dev
@@ -79,6 +105,15 @@ Run the API service:
 
 ```bash
 uv run python -m cloud_agent_api
+```
+
+Run the web app (Vite, port 3000 by default):
+
+```bash
+cd apps/web
+npm install
+cp .env.example .env  # if needed, then set VITE_API_BASE_URL
+npm run dev
 ```
 
 Run the Temporal worker:

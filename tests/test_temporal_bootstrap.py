@@ -5,7 +5,6 @@ from cloud_agent_platform.config import Settings
 from cloud_agent_platform.temporal.bootstrap import (
     build_model_provider,
     build_temporal_sandbox_client_provider,
-    build_model_provider,
     create_openai_agents_plugin,
     require_temporal_sandbox_provider,
     resolve_temporal_sandbox_provider,
