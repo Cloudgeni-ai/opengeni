@@ -1,8 +1,8 @@
 from logging.config import fileConfig
 from pathlib import Path
 
-from cloud_agent_platform.config import get_settings
-from cloud_agent_platform.db.models import Base
+from infra_agent_platform.config import get_settings
+from infra_agent_platform.db.models import Base
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
 

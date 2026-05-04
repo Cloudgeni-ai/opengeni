@@ -1,8 +1,9 @@
 import pytest
 from agents import OpenAIProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
-from cloud_agent_platform.config import Settings
-from cloud_agent_platform.temporal.bootstrap import (
+from agents.sandbox.sandboxes.docker import DockerSandboxClient
+from infra_agent_platform.config import Settings
+from infra_agent_platform.temporal.bootstrap import (
     build_model_provider,
     build_temporal_sandbox_client_provider,
     create_openai_agents_plugin,
@@ -13,16 +14,16 @@ from pydantic import ValidationError
 
 
 @pytest.fixture(autouse=True)
-def _clear_cloud_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_infra_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir("/tmp")
-    monkeypatch.delenv("CLOUD_AGENT_ENABLE_TEMPORAL_DISPATCH", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_OPENAI_PROVIDER", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_ENDPOINT", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_DEPLOYMENT", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_API_VERSION", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_API_KEY", raising=False)
-    monkeypatch.delenv("CLOUD_AGENT_AZURE_OPENAI_AD_TOKEN", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_ENABLE_TEMPORAL_DISPATCH", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_OPENAI_PROVIDER", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_API_VERSION", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_AD_TOKEN", raising=False)
 
 
 def test_temporal_plugin_can_be_created_without_sandbox_backend() -> None:
@@ -50,6 +51,18 @@ def test_temporal_sandbox_provider_follows_backend_selection() -> None:
     )
 
 
+def test_temporal_sandbox_provider_supports_docker_backend() -> None:
+    settings = Settings(sandbox_backend="docker")
+
+    assert resolve_temporal_sandbox_provider(settings) == "docker"
+    assert require_temporal_sandbox_provider(settings) == "docker"
+
+    provider = build_temporal_sandbox_client_provider(settings)
+    assert provider is not None
+    assert provider.name == "docker"
+    assert isinstance(provider._client, DockerSandboxClient)
+
+
 def test_temporal_sandbox_provider_is_absent_without_backend() -> None:
     settings = Settings(sandbox_backend="none")
 
@@ -62,6 +75,12 @@ def test_temporal_sandbox_provider_is_absent_without_backend() -> None:
 def test_settings_reject_temporal_dispatch_without_sandbox_backend() -> None:
     with pytest.raises(ValidationError):
         Settings(enable_temporal_dispatch=True, sandbox_backend="none")
+
+
+@pytest.mark.parametrize("value", ["abc", "3000,-1", "65536"])
+def test_settings_reject_invalid_docker_exposed_ports(value: str) -> None:
+    with pytest.raises(ValidationError, match="docker_exposed_ports"):
+        Settings(sandbox_backend="docker", docker_exposed_ports=value)
 
 
 def test_build_model_provider_uses_azure_client_when_configured() -> None:

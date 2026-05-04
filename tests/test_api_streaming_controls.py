@@ -4,18 +4,18 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from cloud_agent_api import create_app
-from cloud_agent_contracts import (
+from fastapi.testclient import TestClient
+from infra_agent_api import create_app
+from infra_agent_contracts import (
     AgentRun,
     AgentRunCreate,
     AgentRunStatus,
     EventType,
     RunEvent,
 )
-from cloud_agent_platform.config import Settings
-from cloud_agent_platform.errors import DispatchError, RunNotFoundError
-from cloud_agent_platform.temporal.contracts import WorkflowRunProgress
-from fastapi.testclient import TestClient
+from infra_agent_platform.config import Settings
+from infra_agent_platform.errors import DispatchError, RunNotFoundError
+from infra_agent_platform.temporal.contracts import WorkflowRunProgress
 
 
 @dataclass
@@ -106,7 +106,7 @@ def _seed_waiting_run(repository: _StreamingRepo) -> tuple[UUID, AgentRun]:
         id=run_id,
         status=AgentRunStatus.WAITING,
         prompt="initial",
-        resource=None,
+        resources=[],
         metadata={},
         temporal_workflow_id=f"workflow-{run_id}",
         created_at=datetime.now(UTC),
@@ -156,7 +156,7 @@ def test_websocket_stream_replays_events_and_progress() -> None:
         id=run_id,
         status=AgentRunStatus.WAITING,
         prompt="initial",
-        resource=None,
+        resources=[],
         metadata={},
         temporal_workflow_id=f"workflow-{run_id}",
         created_at=datetime.now(UTC),

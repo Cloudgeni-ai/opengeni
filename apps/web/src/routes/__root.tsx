@@ -24,7 +24,7 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { name: "color-scheme", content: "dark" },
-      { title: "Cloud Agent Console" },
+      { title: "Infra Agent Console" },
     ],
     links: [{ rel: "stylesheet", href: styles }],
   }),

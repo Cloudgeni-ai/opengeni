@@ -6,8 +6,8 @@ from tempfile import TemporaryDirectory
 from agents.sandbox.capabilities import Skills
 from agents.sandbox.entries import LocalDir
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
-from cloud_agent_platform.runtime import build_sandbox_agent
-from cloud_agent_platform.runtime.openai_agents import _bundled_terraform_skills_dir
+from infra_agent_platform.runtime import build_sandbox_agent
+from infra_agent_platform.runtime.openai_agents import _bundled_terraform_skills_dir
 
 _BUNDLED = (
     "azure-verified-modules",

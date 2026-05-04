@@ -21,7 +21,7 @@ export function TopBar({ children, className }: TopBarProps) {
     >
       <Link
         to="/"
-        aria-label="Cloud Agent Console home"
+        aria-label="Infra Agent Console home"
         className={cn(
           "flex items-center gap-2 rounded-md px-1.5 py-1 text-[15px] font-medium",
           "text-[color:var(--color-fg)] hover:bg-[color:var(--color-surface-2)]",
@@ -36,7 +36,7 @@ export function TopBar({ children, className }: TopBarProps) {
         >
           <SparkleIcon className="size-3.5" />
         </span>
-        <span>Cloud Agent</span>
+        <span>Infra Agent</span>
       </Link>
       <div className="ml-auto flex min-w-0 flex-1 items-center justify-end gap-2">
         {children}

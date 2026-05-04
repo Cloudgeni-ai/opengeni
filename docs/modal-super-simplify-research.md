@@ -16,28 +16,28 @@ Default target should be:
 
 Current local Modal code lives in:
 
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/client.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/models.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/session.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/workspace.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/client.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/models.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/session.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/workspace.py`
 
 What it adds beyond the SDK:
 
 1. **Worker-side default options injection**
    - Local client sets `supports_default_options = True` and stores `_default_options` in the client constructor.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/client.py:18,27`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/client.py:18,27`
 
 2. **Repo-specific config mapping**
    - `temporal/bootstrap.py` maps `Settings.modal_app_name`, `modal_default_timeout_seconds`, `modal_idle_timeout_seconds`, and `modal_image_ref` into the local client/options.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py:33-40`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py:33-40`
 
 3. **Filesystem API reads/writes**
    - Local `read()` and `write()` use `sandbox.filesystem.read_bytes` / `write_bytes` under the workspace root instead of shelling out to `cat`.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/workspace.py:17-45`, `tests/test_modal_sandbox_adapter.py:172-204`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/workspace.py:17-45`, `tests/test_modal_sandbox_adapter.py:172-204`
 
 4. **Tar-only workspace persistence**
    - Local persistence/hydration is just tar stream out / tar stream in.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/workspace.py:48-89`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/workspace.py:48-89`
 
 What it does **not** add:
 
@@ -93,16 +93,16 @@ The repo currently expects this shape:
 
 1. Worker bootstrap creates a named `SandboxClientProvider`.
    - `build_temporal_sandbox_client_provider()` returns `SandboxClientProvider(provider, client)`.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py:25-41`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py:25-41`
 
 2. Workflow only passes the provider name.
    - `SandboxRunConfig(client=temporal_sandbox_client(request.sandbox_provider))`
    - No sandbox `options` are passed.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/workflows.py:20-25`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/temporal/workflows.py:20-25`
 
 3. Dispatcher only serializes `sandbox_provider`, not provider-specific options.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/contracts.py:6-12`
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/dispatcher.py:27-34`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/temporal/contracts.py:6-12`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/temporal/dispatcher.py:27-34`
 
 This is the key reason a tiny shim is useful.
 
@@ -118,7 +118,7 @@ Evidence chain:
    - Evidence: `.venv/lib/python3.12/site-packages/agents/sandbox/runtime_session_manager.py:367-380`
 
 2. Local client explicitly sets `supports_default_options = True`.
-   - Evidence: `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/client.py:18`
+   - Evidence: `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/client.py:18`
 
 3. First-party `ModalSandboxClient` does **not** declare `supports_default_options = True`.
    - Evidence: no override in `.venv/lib/python3.12/site-packages/agents/extensions/sandbox/modal/sandbox.py`
@@ -164,11 +164,11 @@ will break sandbox creation immediately.
 Evidence:
 
 - Local config exposes `modal_idle_timeout_seconds`.
-  - `packages/cloud_agent_platform/src/cloud_agent_platform/config.py:32`
+  - `packages/infra_agent_platform/src/infra_agent_platform/config.py:32`
 - Local session passes it to `modal.Sandbox.create(... idle_timeout=...)`.
-  - `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/session.py:77-86`
+  - `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/session.py:77-86`
 - Local bootstrap wires it through.
-  - `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py:33-40`
+  - `packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py:33-40`
 - Grep for `idle_timeout` in the first-party Modal backend returned no matches.
 
 This is a real capability mismatch, but it does **not** justify keeping the full local backend. The correct native-rails answer is to drop this local config knob unless it is proven necessary, or upstream support for it into the SDK if it truly matters.
@@ -202,7 +202,7 @@ That would require:
 
 - changing `WorkflowRunInput`
 - changing `TemporalRunDispatcher`
-- changing `CloudAgentRunWorkflow`
+- changing `InfraAgentRunWorkflow`
 - deciding how to serialize provider-specific options cleanly
 
 This is more invasive than necessary for this repo.
@@ -238,10 +238,10 @@ Chosen path: **B**
 
 For the preferred path B:
 
-- `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/config.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/__init__.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/__init__.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/config.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/__init__.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/__init__.py`
 - `tests/test_temporal_bootstrap.py`
 - `tests/test_modal_sandbox_adapter.py`
 - `.env.example`
@@ -249,16 +249,16 @@ For the preferred path B:
 
 Files that should be deleted:
 
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/client.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/models.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/session.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/workspace.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/client.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/models.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/session.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/workspace.py`
 
 Files that would also change if you insist on option A instead of B:
 
-- `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/contracts.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/dispatcher.py`
-- `packages/cloud_agent_platform/src/cloud_agent_platform/temporal/workflows.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/temporal/contracts.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/temporal/dispatcher.py`
+- `packages/infra_agent_platform/src/infra_agent_platform/temporal/workflows.py`
 - `tests/test_temporal_contracts.py`
 
 ## Commands Run
@@ -268,17 +268,17 @@ git -C /home/jorge/repos/Cloudgeni-ai/infra-agents worktree add -b feat/modal-su
 ```
 
 ```bash
-sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py
-sed -n '1,260p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/temporal/workflows.py
-sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/temporal/contracts.py
-sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/temporal/dispatcher.py
+sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py
+sed -n '1,260p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/temporal/workflows.py
+sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/temporal/contracts.py
+sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/temporal/dispatcher.py
 ```
 
 ```bash
-sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/client.py
-sed -n '1,260p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/session.py
-sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/models.py
-sed -n '1,240p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/workspace.py
+sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/client.py
+sed -n '1,260p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/session.py
+sed -n '1,220p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/models.py
+sed -n '1,240p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/workspace.py
 sed -n '1,320p' /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/tests/test_modal_sandbox_adapter.py
 ```
 
@@ -321,8 +321,8 @@ PY
 ```bash
 grep -n "idle_timeout" \
   /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/.venv/lib/python3.12/site-packages/agents/extensions/sandbox/modal/sandbox.py \
-  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/config.py \
-  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/session.py \
-  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/sandbox/modal/models.py \
-  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/cloud_agent_platform/src/cloud_agent_platform/temporal/bootstrap.py
+  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/config.py \
+  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/session.py \
+  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/sandbox/modal/models.py \
+  /home/jorge/repos/Cloudgeni-ai/infra-agents-modal-super-simplify/packages/infra_agent_platform/src/infra_agent_platform/temporal/bootstrap.py
 ```

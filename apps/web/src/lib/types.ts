@@ -36,7 +36,7 @@ export interface AgentRun {
   id: string;
   status: AgentRunStatus;
   prompt: string;
-  resource: ResourceRef | null;
+  resources: ResourceRef[];
   metadata: Record<string, unknown>;
   temporal_workflow_id: string | null;
   created_at: string;

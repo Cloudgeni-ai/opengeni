@@ -165,6 +165,34 @@ function OverviewPane({
         <Separator className="bg-[color:var(--color-border)]" />
         <div className="space-y-2">
           <div className="text-[11px] font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+            Repositories
+          </div>
+          {run.resources.length > 0 ? (
+            <div className="space-y-2">
+              {run.resources.map((resource, index) => (
+                <div
+                  key={`${resource.uri}-${index}`}
+                  className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/30 p-2"
+                >
+                  <div className="truncate text-xs font-medium text-[color:var(--color-fg)]">
+                    {String(resource.metadata.mount_path ?? resource.uri)}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-[11px] text-[color:var(--color-fg-subtle)]">
+                    {resource.uri}
+                  </div>
+                  <div className="mt-1 font-mono text-[11px] text-[color:var(--color-fg-muted)]">
+                    ref {String(resource.metadata.ref ?? "unknown")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[color:var(--color-fg-subtle)]">No repository resources.</p>
+          )}
+        </div>
+        <Separator className="bg-[color:var(--color-border)]" />
+        <div className="space-y-2">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
             Workflow progress
           </div>
           {progress ? (

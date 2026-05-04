@@ -1,4 +1,4 @@
-const STORAGE_KEY = "cloud-agent-web:known-runs";
+const STORAGE_KEY = "infra-agent-web:known-runs";
 const MAX_KNOWN_RUNS = 25;
 
 export interface KnownRun {

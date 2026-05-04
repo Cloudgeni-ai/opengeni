@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 
 import pytest
-from cloud_agent_platform.config import Settings
-from cloud_agent_platform.modal_environ import apply_modal_client_environ
+from infra_agent_platform.config import Settings
+from infra_agent_platform.modal_environ import apply_modal_client_environ
 
 
 def test_apply_modal_environ_sets_modal_vars(monkeypatch: pytest.MonkeyPatch) -> None:

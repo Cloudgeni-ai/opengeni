@@ -1,6 +1,6 @@
 # infra-agents
 
-Standalone cloud-agent platform scaffold.
+Standalone infra-agent platform scaffold.
 
 This repo is now structured as a Python monorepo with a thin API app, a thin Temporal
 worker app, and shared packages for contracts, platform runtime code, and tests.

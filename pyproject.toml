@@ -3,11 +3,11 @@ name = "infra-agents-workspace"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "cloud-agent-api",
-    "cloud-agent-contracts",
-    "cloud-agent-platform",
-    "cloud-agent-testing",
-    "cloud-agent-worker",
+    "infra-agent-api",
+    "infra-agent-contracts",
+    "infra-agent-platform",
+    "infra-agent-testing",
+    "infra-agent-worker",
 ]
 
 [dependency-groups]
@@ -27,17 +27,17 @@ package = false
 members = [
     "apps/api",
     "apps/worker",
-    "packages/cloud_agent_contracts",
-    "packages/cloud_agent_platform",
-    "packages/cloud_agent_testing",
+    "packages/infra_agent_contracts",
+    "packages/infra_agent_platform",
+    "packages/infra_agent_testing",
 ]
 
 [tool.uv.sources]
-cloud-agent-api = { workspace = true }
-cloud-agent-contracts = { workspace = true }
-cloud-agent-platform = { workspace = true }
-cloud-agent-testing = { workspace = true }
-cloud-agent-worker = { workspace = true }
+infra-agent-api = { workspace = true }
+infra-agent-contracts = { workspace = true }
+infra-agent-platform = { workspace = true }
+infra-agent-testing = { workspace = true }
+infra-agent-worker = { workspace = true }
 
 [tool.ruff]
 line-length = 100

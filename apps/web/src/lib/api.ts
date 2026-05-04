@@ -1,4 +1,4 @@
-import type { AgentRun, RunEvent } from "./types";
+import type { AgentRun, ResourceRef, RunEvent } from "./types";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8000";
 
@@ -58,10 +58,16 @@ export function fetchRunEvents(runId: string): Promise<RunEvent[]> {
   return request<RunEvent[]>(`/v1/runs/${runId}/events`);
 }
 
-export function createRun(prompt: string): Promise<AgentRun> {
+export function createRun(
+  prompt: string,
+  resources: ResourceRef[] = [],
+): Promise<AgentRun> {
   return request<AgentRun>(`/v1/runs`, {
     method: "POST",
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({
+      prompt,
+      resources,
+    }),
   });
 }
 

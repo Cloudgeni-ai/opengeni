@@ -7,7 +7,7 @@ This note records how **skills** fit into the **Python** OpenAI Agents SDK (`ope
 ## Sandbox agent and capabilities
 
 - **`SandboxAgent`** is a normal `Agent` with a **`default_manifest`** and a **`capabilities`** list. Execution uses **`RunConfig` → `SandboxRunConfig`** (client, session, manifest, etc.).
-- **Capabilities** extend the sandbox: they shape the workspace, append instruction fragments, and can register tools. Platform code: `packages/cloud_agent_platform/.../runtime/openai_agents.py` (`build_sandbox_agent`).
+- **Capabilities** extend the sandbox: they shape the workspace, append instruction fragments, and can register tools. Platform code: `packages/infra_agent_platform/.../runtime/openai_agents.py` (`build_sandbox_agent`).
 
 Canonical docs:
 

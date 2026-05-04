@@ -1,6 +1,7 @@
 from uuid import uuid4
 
-from cloud_agent_contracts import (
+import pytest
+from infra_agent_contracts import (
     AgentRun,
     AgentRunCreate,
     AgentRunStatus,
@@ -10,20 +11,80 @@ from cloud_agent_contracts import (
     RunEvent,
     RunStreamEnvelope,
 )
+from pydantic import ValidationError
 
 
-def test_run_create_contract_accepts_resource_metadata() -> None:
+def test_run_create_contract_normalizes_repository_resources() -> None:
     request = AgentRunCreate(
-        prompt="Prepare a release note",
-        resource=ResourceRef(
-            kind=ResourceKind.REPOSITORY,
-            uri=f"https://example.test/repos/{uuid4()}",
-            metadata={"branch": "main"},
-        ),
+        prompt="Inspect repos",
+        resources=[
+            ResourceRef(
+                kind=ResourceKind.REPOSITORY,
+                uri="https://github.com/cloudgeni-ai/infra-agents",
+                metadata={"ref": "main"},
+            ),
+            ResourceRef(
+                kind=ResourceKind.REPOSITORY,
+                uri="https://git.example.com/platform/modules.git",
+                metadata={"ref": "v1.2.3"},
+            ),
+        ],
     )
 
-    assert request.resource is not None
-    assert request.resource.metadata["branch"] == "main"
+    assert request.resources[0].uri == "https://github.com/cloudgeni-ai/infra-agents.git"
+    assert request.resources[0].metadata == {
+        "host": "github.com",
+        "repo": "cloudgeni-ai/infra-agents",
+        "ref": "main",
+        "subpath": None,
+        "mount_path": "repos/cloudgeni-ai/infra-agents",
+    }
+    assert request.resources[1].metadata["mount_path"] == "repos/platform/modules"
+
+
+def test_run_create_contract_rejects_bad_repository_resources() -> None:
+    with pytest.raises(ValidationError, match="HTTPS Git URL"):
+        AgentRunCreate(
+            prompt="Inspect repos",
+            resources=[
+                ResourceRef(
+                    kind=ResourceKind.REPOSITORY,
+                    uri="git@github.com:cloudgeni-ai/infra-agents.git",
+                    metadata={"ref": "main"},
+                )
+            ],
+        )
+
+    with pytest.raises(ValidationError, match="metadata.ref"):
+        AgentRunCreate(
+            prompt="Inspect repos",
+            resources=[
+                ResourceRef(
+                    kind=ResourceKind.REPOSITORY,
+                    uri="https://github.com/cloudgeni-ai/infra-agents",
+                    metadata={},
+                )
+            ],
+        )
+
+
+def test_run_create_contract_rejects_duplicate_mount_paths() -> None:
+    with pytest.raises(ValidationError, match="duplicate repository mount path"):
+        AgentRunCreate(
+            prompt="Inspect repos",
+            resources=[
+                ResourceRef(
+                    kind=ResourceKind.REPOSITORY,
+                    uri="https://github.com/cloudgeni-ai/infra-agents",
+                    metadata={"ref": "main"},
+                ),
+                ResourceRef(
+                    kind=ResourceKind.REPOSITORY,
+                    uri="https://github.com/cloudgeni-ai/infra-agents.git",
+                    metadata={"ref": "feature"},
+                ),
+            ],
+        )
 
 
 def test_run_stream_envelope_accepts_run_and_event_payloads() -> None:
@@ -32,7 +93,7 @@ def test_run_stream_envelope_accepts_run_and_event_payloads() -> None:
         id=run_id,
         status=AgentRunStatus.RUNNING,
         prompt="Inspect this repository",
-        resource=None,
+        resources=[],
         metadata={},
         temporal_workflow_id="workflow-1",
         created_at="2026-01-01T00:00:00Z",

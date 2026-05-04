@@ -8,15 +8,15 @@ Snapshot date: 2026-04-20.
 - `apps/web`: TanStack + Vite + React product UI (`npm run dev` — default `http://127.0.0.1:3000`;
   see `apps/web/.env.example` for `VITE_API_BASE_URL` → API, usually `http://127.0.0.1:8000`).
 - `apps/worker`: Temporal worker process that registers the agent workflow.
-- `packages/cloud_agent_contracts`: Pydantic contracts for runs, events, resources, and artifacts.
-- `packages/cloud_agent_platform`: shared platform code for settings, SQLAlchemy persistence,
+- `packages/infra_agent_contracts`: Pydantic contracts for runs, events, resources, and artifacts.
+- `packages/infra_agent_platform`: shared platform code for settings, SQLAlchemy persistence,
   Temporal wiring, OpenAI Agents SDK runtime glue, resources, artifacts, and events.
-- `packages/cloud_agent_testing`: test helpers shared across package and app tests.
+- `packages/infra_agent_testing`: test helpers shared across package and app tests.
 - `alembic`: migration environment and the first runtime-table migration.
 
 The workspace uses `uv` with ordinary Python packages. Ruff, mypy, pytest, SQLAlchemy,
-Alembic, FastAPI, Temporal, OpenAI Agents SDK, and Modal are configured from the root
-`pyproject.toml`.
+Alembic, FastAPI, Temporal, OpenAI Agents SDK, Modal, and Docker sandbox support are
+configured from the root `pyproject.toml`.
 
 To **start the full stack** (migrations, `.env`, API, **`apps/web` dev server**, Temporal
 worker, Temporal service requirement, and how final workflow output is observed), see
@@ -26,10 +26,10 @@ means in this project.
 ## Why API and Worker Are Separate
 
 The API owns external HTTP contracts and durable run records. It does not execute model
-calls, create sandboxes, or talk to Modal. When `CLOUD_AGENT_ENABLE_TEMPORAL_DISPATCH=true`,
+calls, create sandboxes, or talk to a sandbox backend. When `INFRA_AGENT_ENABLE_TEMPORAL_DISPATCH=true`,
 it starts a Temporal workflow and records the workflow id.
 
-The worker owns runtime execution. It registers `CloudAgentRunWorkflow`, configures
+The worker owns runtime execution. It registers `InfraAgentRunWorkflow`, configures
 Temporal's `OpenAIAgentsPlugin`, and registers the configured sandbox backend. Model calls
 and sandbox operations are routed through the Temporal/OpenAI integration path instead of
 being handled directly in the API process.
@@ -48,26 +48,41 @@ capability (vs. Responses API shell skills, vs. Codex), see
 [openai-agents-sdk-skills.md](openai-agents-sdk-skills.md).
 
 `build_sandbox_agent` also enables the OpenAI Agents SDK `Skills` capability
-(`from_=LocalDir(absolute)`) and `CloudAgentRunWorkflow` passes the **processed** manifest
+(`from_=LocalDir(absolute)`) and `InfraAgentRunWorkflow` passes the **processed** manifest
 into `SandboxRunConfig` so the merged `.agents` entry (host path to the HashiCorp bundle) is
 used when the sandbox session is created. Vendored
 [HashiCorp Terraform agent skills](https://github.com/hashicorp/agent-skills) are under
-`packages/cloud_agent_platform/src/cloud_agent_platform/bundled_hashicorp_terraform_skills` and
+`packages/infra_agent_platform/src/infra_agent_platform/bundled_hashicorp_terraform_skills` and
 end up in the remote workspace at `.agents/<skill>`. See that folder’s `README.md` to refresh
 the bundle.
 
-## Modal Sandbox Boundary
+## Sandbox Backend Boundary
 
-There is no repo-local Modal sandbox code. The platform uses the first-party OpenAI Agents SDK
-Modal sandbox client (`agents.extensions.sandbox.modal.ModalSandboxClient`) directly.
+There is no repo-local sandbox client code. The platform uses first-party OpenAI Agents SDK
+sandbox clients directly and selects one with `INFRA_AGENT_SANDBOX_BACKEND`:
 
-Sandbox options (`app_name`, `timeout`) are passed through the Temporal workflow via
-`WorkflowRunInput` and constructed into `ModalSandboxClientOptions` on the workflow side, so
-the SDK client always receives proper options without any local shim or wrapper.
+- `modal`: `agents.extensions.sandbox.modal.ModalSandboxClient`
+- `docker`: `agents.sandbox.sandboxes.docker.DockerSandboxClient`
+- `none`: no sandbox client provider
+
+Sandbox options are passed through the Temporal workflow via `WorkflowRunInput` and
+constructed into provider-specific SDK options on the workflow side:
+`ModalSandboxClientOptions` for Modal and `DockerSandboxClientOptions` for Docker. The SDK
+client always receives proper options without any local shim or wrapper.
+
+For Docker, set `INFRA_AGENT_DOCKER_IMAGE` and optionally `INFRA_AGENT_DOCKER_EXPOSED_PORTS`.
+The Docker image must include `git` for repository resources to mount via SDK `GitRepo`
+entries.
+
+Build the local default Docker sandbox image with:
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .
+```
 
 **Modal credentials:** the worker calls `apply_modal_client_environ` on startup, mapping
-`CLOUD_AGENT_MODAL_TOKEN_ID` / `CLOUD_AGENT_MODAL_TOKEN_SECRET` (and optional
-`CLOUD_AGENT_MODAL_PROFILE`, `CLOUD_AGENT_MODAL_CONFIG_PATH`) to the `MODAL_*` environment
+`INFRA_AGENT_MODAL_TOKEN_ID` / `INFRA_AGENT_MODAL_TOKEN_SECRET` (and optional
+`INFRA_AGENT_MODAL_PROFILE`, `INFRA_AGENT_MODAL_CONFIG_PATH`) to the `MODAL_*` environment
 variables the [Modal](https://modal.com) Python client reads. You can also set `MODAL_*`
 directly, or use `modal token set` and `~/.modal.toml` if no tokens are in `Settings`. See
 [`.env.example`](../.env.example).
@@ -104,7 +119,7 @@ uv run alembic upgrade head
 Run the API service:
 
 ```bash
-uv run python -m cloud_agent_api
+uv run python -m infra_agent_api
 ```
 
 Run the web app (Vite, port 3000 by default):
@@ -119,43 +134,43 @@ npm run dev
 Run the Temporal worker:
 
 ```bash
-uv run python -m cloud_agent_worker
+uv run python -m infra_agent_worker
 ```
 
 ## Azure OpenAI model deployments (for example, GPT-5.4)
 
 The worker supports two model providers:
 
-- `CLOUD_AGENT_OPENAI_PROVIDER=openai` (default): uses OpenAI API credentials.
-- `CLOUD_AGENT_OPENAI_PROVIDER=azure`: uses Azure OpenAI via deployment-based routing.
+- `INFRA_AGENT_OPENAI_PROVIDER=openai` (default): uses OpenAI API credentials.
+- `INFRA_AGENT_OPENAI_PROVIDER=azure`: uses Azure OpenAI via deployment-based routing.
 
 When using Azure, set:
 
 ```bash
-CLOUD_AGENT_OPENAI_PROVIDER=azure
-CLOUD_AGENT_OPENAI_MODEL=gpt-5.4
-CLOUD_AGENT_AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
-CLOUD_AGENT_AZURE_OPENAI_DEPLOYMENT=gpt-5-4-prod
-CLOUD_AGENT_AZURE_OPENAI_API_VERSION=2025-04-01-preview
+INFRA_AGENT_OPENAI_PROVIDER=azure
+INFRA_AGENT_OPENAI_MODEL=gpt-5.4
+INFRA_AGENT_AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
+INFRA_AGENT_AZURE_OPENAI_DEPLOYMENT=gpt-5-4-prod
+INFRA_AGENT_AZURE_OPENAI_API_VERSION=2025-04-01-preview
 # One of:
-CLOUD_AGENT_AZURE_OPENAI_API_KEY=...
+INFRA_AGENT_AZURE_OPENAI_API_KEY=...
 # or
-CLOUD_AGENT_AZURE_OPENAI_AD_TOKEN=...
+INFRA_AGENT_AZURE_OPENAI_AD_TOKEN=...
 ```
 
 Notes:
 
-- `CLOUD_AGENT_OPENAI_MODEL` is the model name passed into the agent runtime.
+- `INFRA_AGENT_OPENAI_MODEL` is the model name passed into the agent runtime.
 - Azure routing uses your deployment endpoint (for example, deployment `gpt-5-4-prod`).
-- Keep `CLOUD_AGENT_AZURE_OPENAI_API_VERSION` aligned with your Azure resource/API support.
+- Keep `INFRA_AGENT_AZURE_OPENAI_API_VERSION` aligned with your Azure resource/API support.
 
 For Azure's v1-compatible endpoint style (`.../openai/v1`), use:
 
 ```bash
-CLOUD_AGENT_OPENAI_PROVIDER=azure
-CLOUD_AGENT_OPENAI_MODEL=gpt-5.4
-CLOUD_AGENT_AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1
-CLOUD_AGENT_AZURE_OPENAI_API_KEY=...
+INFRA_AGENT_OPENAI_PROVIDER=azure
+INFRA_AGENT_OPENAI_MODEL=gpt-5.4
+INFRA_AGENT_AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1
+INFRA_AGENT_AZURE_OPENAI_API_KEY=...
 ```
 
 In this mode, API version may be omitted.
