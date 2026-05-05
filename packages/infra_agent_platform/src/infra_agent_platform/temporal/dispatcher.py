@@ -2,7 +2,7 @@ from infra_agent_contracts import AgentRun
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
-from infra_agent_platform.config import Settings
+from infra_agent_platform.config import Settings, collect_sandbox_environment
 from infra_agent_platform.errors import DispatchError
 from infra_agent_platform.temporal.bootstrap import require_temporal_sandbox_provider
 from infra_agent_platform.temporal.contracts import WorkflowRunInput, WorkflowRunProgress
@@ -50,10 +50,8 @@ class TemporalRunDispatcher:
                 else self._settings.modal_image_ref
             ),
             sandbox_exposed_ports=_parse_exposed_ports(self._settings.docker_exposed_ports),
-            resources=[
-                resource.model_dump(mode="json")
-                for resource in run.resources
-            ],
+            sandbox_environment=collect_sandbox_environment(self._settings),
+            resources=[resource.model_dump(mode="json") for resource in run.resources],
             metadata=run.metadata,
         )
         client = await self._client_or_connect()

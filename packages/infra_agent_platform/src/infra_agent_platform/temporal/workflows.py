@@ -10,6 +10,7 @@ with workflow.unsafe.imports_passed_through():
     from agents.run import RunConfig
     from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
     from agents.sandbox.entries import BaseEntry, GitRepo
+    from agents.sandbox.manifest import Environment
     from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
     from infra_agent_contracts import AgentRunStatus, EventType, ResourceKind
@@ -86,6 +87,17 @@ def _manifest_with_repository_resources(
     for path, entry in resource_entries.items():
         entries[path] = entry
     return manifest.model_copy(update={"entries": entries})
+
+
+def _manifest_with_sandbox_environment(
+    manifest: Manifest | None,
+    environment: dict[str, str],
+) -> Manifest | None:
+    if manifest is None or not environment:
+        return manifest
+    merged = dict(manifest.environment.value)
+    merged.update(environment)
+    return manifest.model_copy(update={"environment": Environment(value=merged)})
 
 
 def _sandbox_options_for_request(
@@ -227,6 +239,7 @@ class InfraAgentRunWorkflow:
         raw = _processed_sandbox_manifest(agent)
         processed = _normalize_manifest_path_keys(raw) if raw is not None else None
         processed = _manifest_with_repository_resources(processed, request.resources)
+        processed = _manifest_with_sandbox_environment(processed, request.sandbox_environment)
         return await Runner.run(
             agent,
             prompt,

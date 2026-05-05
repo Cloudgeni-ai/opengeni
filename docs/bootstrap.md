@@ -74,11 +74,51 @@ For Docker, set `INFRA_AGENT_DOCKER_IMAGE` and optionally `INFRA_AGENT_DOCKER_EX
 The Docker image must include `git` for repository resources to mount via SDK `GitRepo`
 entries.
 
-Build the local default Docker sandbox image with:
+The sandbox image is the common capability boundary for both Docker and Modal. Build it from
+the repo Dockerfile and either use it locally:
 
 ```bash
 docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .
 ```
+
+or push the same image to a registry and point both sandbox backends at that tag:
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t ghcr.io/YOUR_ORG/infra-agents-sandbox:dev .
+docker push ghcr.io/YOUR_ORG/infra-agents-sandbox:dev
+
+INFRA_AGENT_DOCKER_IMAGE=ghcr.io/YOUR_ORG/infra-agents-sandbox:dev
+INFRA_AGENT_MODAL_IMAGE_REF=ghcr.io/YOUR_ORG/infra-agents-sandbox:dev
+```
+
+The image installs Terraform, Checkov, Azure CLI, GitHub CLI, and basic shell utilities. The
+agent also receives `.agents/checkov/SKILL.md`, so Checkov remains a normal chat/shell
+capability instead of a custom API or UI workflow.
+
+Sandbox credentials are copied from the API/dispatcher process at run dispatch time, then
+included in the Temporal workflow payload and sandbox manifest. Keep the set narrow and prefer
+short-lived credentials.
+
+Use `INFRA_AGENT_SANDBOX_ENV_PROFILES` for the normal case:
+
+| Profile | Variables copied when present | Use |
+| --- | --- | --- |
+| `azure` | `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_AUTHORITY_HOST` | Terraform Azure provider and Azure CLI/SDK service-principal context |
+| `github` | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub CLI, pushes, and PR creation |
+| `none` | none | Disable profile-based sandbox env pass-through |
+
+Add project-specific names with `INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS`, for example
+`TF_VAR_region,CUSTOM_PROVIDER_TOKEN`. `INFRA_AGENT_SANDBOX_ENV_VARS` is still supported as a
+legacy explicit override; when set, it replaces profiles and extra vars entirely.
+
+Model provider settings such as `INFRA_AGENT_AZURE_OPENAI_API_KEY` are platform credentials.
+They are not passed into the sandbox unless you explicitly add their names, which should not be
+needed for normal agent runs.
+
+The GitHub App manifest helper can run from localhost. When the manifest base URL is not public
+HTTPS, it omits webhook configuration and webhook event subscriptions so GitHub will not reject
+`127.0.0.1` / `localhost` hook URLs. Set `INFRA_AGENT_GITHUB_APP_MANIFEST_BASE_URL` to a public
+HTTPS API URL or tunnel only when webhook delivery is implemented and reachable.
 
 **Modal credentials:** the worker calls `apply_modal_client_environ` on startup, mapping
 `INFRA_AGENT_MODAL_TOKEN_ID` / `INFRA_AGENT_MODAL_TOKEN_SECRET` (and optional

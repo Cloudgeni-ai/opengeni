@@ -13,3 +13,4 @@ def test_openai_agent_runtime_builds_sandbox_agent() -> None:
     inst = agent.instructions
     assert inst is not None
     assert ".agents/" in str(inst) or ".agents" in str(inst)
+    assert ".agents/checkov/SKILL.md" in str(inst)

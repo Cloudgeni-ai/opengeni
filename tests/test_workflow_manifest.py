@@ -6,6 +6,7 @@ from infra_agent_platform.runtime import build_sandbox_agent
 from infra_agent_platform.temporal.contracts import WorkflowRunInput
 from infra_agent_platform.temporal.workflows import (
     _manifest_with_repository_resources,
+    _manifest_with_sandbox_environment,
     _normalize_manifest_path_keys,
     _processed_sandbox_manifest,
     _sandbox_options_for_request,
@@ -69,6 +70,21 @@ def test_repository_resources_merge_into_processed_manifest() -> None:
     assert first.repo == "cloudgeni-ai/infra-agents"
     assert first.ref == "main"
     assert second.subpath == "terraform"
+
+
+def test_sandbox_environment_merges_into_processed_manifest() -> None:
+    agent = build_sandbox_agent(model="gpt-5.4-mini")
+    raw = _processed_sandbox_manifest(agent)
+    assert raw is not None
+
+    manifest = _manifest_with_sandbox_environment(
+        _normalize_manifest_path_keys(raw),
+        {"ARM_SUBSCRIPTION_ID": "sub-1", "GH_TOKEN": "token"},
+    )
+
+    assert manifest is not None
+    assert manifest.environment.value["ARM_SUBSCRIPTION_ID"] == "sub-1"
+    assert manifest.environment.value["GH_TOKEN"] == "token"
 
 
 def test_sandbox_options_follow_provider() -> None:

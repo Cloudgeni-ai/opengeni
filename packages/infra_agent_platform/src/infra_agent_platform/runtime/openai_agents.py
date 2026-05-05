@@ -8,9 +8,7 @@ from agents.sandbox.entries import LocalDir
 
 
 def _bundled_terraform_skills_dir() -> Path:
-    return (
-        Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills"
-    ).resolve()
+    return (Path(__file__).resolve().parent.parent / "bundled_hashicorp_terraform_skills").resolve()
 
 
 def _hashicorp_terraform_skills() -> Skills:
@@ -35,8 +33,9 @@ def build_sandbox_agent(*, model: str, name: str = "Infra Agent") -> SandboxAgen
             "You are a standalone infra agent. Work inside the sandbox workspace, "
             "use files and shell commands when they are useful, and return a concise "
             "summary of completed work and produced artifacts. "
-            "The workspace includes HashiCorp Terraform skills under "
-            "`.agents/<skill-name>/` (for example `.agents/terraform-style-guide/SKILL.md`); "
+            "The workspace includes Terraform and infrastructure skills under "
+            "`.agents/<skill-name>/` (for example `.agents/terraform-style-guide/SKILL.md` "
+            "and `.agents/checkov/SKILL.md`); "
             "repository resources, when provided, are mounted under "
             "`repos/<org-or-path>/<repo-name>/`; "
             "use a shell `ls` or the filesystem tools to confirm paths before assuming "

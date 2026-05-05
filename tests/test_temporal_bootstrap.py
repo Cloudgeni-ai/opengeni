@@ -2,7 +2,7 @@ import pytest
 from agents import OpenAIProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
 from agents.sandbox.sandboxes.docker import DockerSandboxClient
-from infra_agent_platform.config import Settings
+from infra_agent_platform.config import Settings, collect_sandbox_environment
 from infra_agent_platform.temporal.bootstrap import (
     build_model_provider,
     build_temporal_sandbox_client_provider,
@@ -24,6 +24,9 @@ def _clear_infra_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_API_VERSION", raising=False)
     monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("INFRA_AGENT_AZURE_OPENAI_AD_TOKEN", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_SANDBOX_ENV_PROFILES", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS", raising=False)
+    monkeypatch.delenv("INFRA_AGENT_SANDBOX_ENV_VARS", raising=False)
 
 
 def test_temporal_plugin_can_be_created_without_sandbox_backend() -> None:
@@ -118,5 +121,82 @@ def test_build_model_provider_uses_azure_base_url_when_configured() -> None:
     assert isinstance(provider, OpenAIProvider)
     model = provider.get_model("gpt-5.4")
     assert model.model == "gpt-5.4"
-    assert str(model._client.base_url) == "https://openai-production-neu.openai.azure.com/openai/v1/"
+    assert (
+        str(model._client.base_url) == "https://openai-production-neu.openai.azure.com/openai/v1/"
+    )
     assert type(model._client).__name__ == "AsyncOpenAI"
+
+
+def test_collect_sandbox_environment_uses_profiles() -> None:
+    settings = Settings(sandbox_env_profiles="github,azure")
+
+    assert collect_sandbox_environment(
+        settings,
+        {
+            "GH_TOKEN": "gh-test",
+            "ARM_SUBSCRIPTION_ID": "sub-test",
+            "INFRA_AGENT_AZURE_OPENAI_API_KEY": "model-key",
+            "UNLISTED_SECRET": "nope",
+        },
+    ) == {
+        "GH_TOKEN": "gh-test",
+        "ARM_SUBSCRIPTION_ID": "sub-test",
+    }
+
+
+def test_collect_sandbox_environment_adds_extra_vars() -> None:
+    settings = Settings(
+        sandbox_env_profiles="github",
+        sandbox_env_extra_vars="TF_VAR_region,CUSTOM_PROVIDER_TOKEN",
+    )
+
+    assert collect_sandbox_environment(
+        settings,
+        {
+            "GH_TOKEN": "gh-test",
+            "TF_VAR_region": "westeurope",
+            "CUSTOM_PROVIDER_TOKEN": "provider-test",
+            "ARM_SUBSCRIPTION_ID": "not-enabled",
+        },
+    ) == {
+        "GH_TOKEN": "gh-test",
+        "TF_VAR_region": "westeurope",
+        "CUSTOM_PROVIDER_TOKEN": "provider-test",
+    }
+
+
+def test_collect_sandbox_environment_supports_legacy_explicit_override() -> None:
+    settings = Settings(
+        sandbox_env_profiles="github,azure",
+        sandbox_env_extra_vars="CUSTOM_PROVIDER_TOKEN",
+        sandbox_env_vars="GH_TOKEN,ARM_SUBSCRIPTION_ID,MISSING",
+    )
+
+    assert collect_sandbox_environment(
+        settings,
+        {
+            "GH_TOKEN": "gh-test",
+            "ARM_SUBSCRIPTION_ID": "sub-test",
+            "CUSTOM_PROVIDER_TOKEN": "not-enabled",
+            "MISSING": "",
+        },
+    ) == {
+        "GH_TOKEN": "gh-test",
+        "ARM_SUBSCRIPTION_ID": "sub-test",
+    }
+
+
+def test_sandbox_environment_can_disable_profiles() -> None:
+    settings = Settings(sandbox_env_profiles="none")
+
+    assert collect_sandbox_environment(settings, {"GH_TOKEN": "gh-test"}) == {}
+
+
+def test_sandbox_environment_rejects_unknown_profile() -> None:
+    with pytest.raises(ValidationError, match="unknown sandbox_env_profiles value"):
+        Settings(sandbox_env_profiles="aws")
+
+
+def test_sandbox_environment_rejects_invalid_extra_var_name() -> None:
+    with pytest.raises(ValidationError, match="invalid environment variable name"):
+        Settings(sandbox_env_extra_vars="VALID,INVALID-NAME")

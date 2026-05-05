@@ -1,19 +1,38 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { GitBranchIcon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useState } from "react";
+import {
+  ChevronDownIcon,
+  GitBranchIcon,
+  GitPullRequestIcon,
+  LockIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  Trash2Icon,
+} from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Composer } from "@/components/app/Composer";
 import { TopBar } from "@/components/app/TopBar";
 import { RecentRunsList } from "@/components/home/RecentRunsList";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { createRun } from "@/lib/api";
+import {
+  createGitHubAppManifest,
+  createRun,
+  fetchGitHubAppStatus,
+  fetchGitHubRepositories,
+  syncGitHubRepositories,
+} from "@/lib/api";
 import { rememberRun } from "@/lib/known-runs";
 import { runQueryOptions } from "@/lib/queries";
-import type { ResourceRef } from "@/lib/types";
+import type { GitHubRepository, ResourceRef } from "@/lib/types";
 
 const EXAMPLES = [
   "Summarize the top-level structure of /workspace.",
@@ -40,8 +59,51 @@ function HomePage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [pending, setPending] = useState(false);
-  const [repos, setRepos] = useState<RepoDraft[]>([]);
+  const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [nextRepoId, setNextRepoId] = useState(1);
+  const [manualReposOpen, setManualReposOpen] = useState(false);
+  const [githubAppOpen, setGithubAppOpen] = useState<boolean | null>(null);
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
+  const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
+  const [githubOrg, setGithubOrg] = useState("");
+  const [githubAppPending, setGithubAppPending] = useState(false);
+  const githubAppStatus = useQuery({
+    queryKey: ["github-app-status"],
+    queryFn: fetchGitHubAppStatus,
+  });
+  const githubConfigured = githubAppStatus.data?.configured === true;
+  const githubRepositories = useQuery({
+    queryKey: ["github-repositories"],
+    queryFn: fetchGitHubRepositories,
+    enabled: githubConfigured,
+    retry: false,
+  });
+  const syncRepositories = useMutation({
+    mutationFn: syncGitHubRepositories,
+    onSuccess: (data) => {
+      queryClient.setQueryData(["github-repositories"], data);
+      toast.success("Repositories refreshed", {
+        description: `${data.repositories.length} repositories available.`,
+      });
+    },
+    onError: (error: unknown) => {
+      toast.error("Failed to refresh repositories", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const installedRepositories = githubRepositories.data?.repositories ?? [];
+  const selectedInstalledRepositories = installedRepositories.filter((repo) =>
+    selectedRepoIds.has(repo.id),
+  );
+  const resolvedGithubAppOpen =
+    githubAppOpen ?? (githubAppStatus.isSuccess ? !githubConfigured : false);
+
+  useEffect(() => {
+    if (githubAppStatus.isSuccess && githubAppOpen === null) {
+      setGithubAppOpen(!githubConfigured);
+    }
+  }, [githubAppOpen, githubAppStatus.isSuccess, githubConfigured]);
 
   const mutation = useMutation({
     mutationFn: ({ prompt, resources }: CreateRunInput) => createRun(prompt, resources),
@@ -60,26 +122,56 @@ function HomePage() {
   });
 
   function addRepo() {
-    setRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
+    setManualRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
     setNextRepoId((value) => value + 1);
+    setManualReposOpen(true);
   }
 
   function updateRepo(id: number, patch: Partial<RepoDraft>) {
-    setRepos((current) =>
+    setManualRepos((current) =>
       current.map((repo) => (repo.id === id ? { ...repo, ...patch } : repo)),
     );
   }
 
   function removeRepo(id: number) {
-    setRepos((current) => current.filter((repo) => repo.id !== id));
+    setManualRepos((current) => current.filter((repo) => repo.id !== id));
+  }
+
+  function toggleInstalledRepo(repo: GitHubRepository) {
+    setSelectedRepoIds((current) => {
+      const next = new Set(current);
+      if (next.has(repo.id)) {
+        next.delete(repo.id);
+      } else {
+        next.add(repo.id);
+      }
+      return next;
+    });
+    setSelectedRepoRefs((current) => ({
+      ...current,
+      [repo.id]: current[repo.id] ?? repo.default_branch,
+    }));
+  }
+
+  function updateInstalledRepoRef(repoId: number, ref: string) {
+    setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }));
   }
 
   function buildResources(): ResourceRef[] {
-    const resources = repos
-      .map((repo) => ({
+    const resources = [
+      ...selectedInstalledRepositories.map((repo) => ({
+        url: repo.clone_url,
+        ref: (selectedRepoRefs[repo.id] ?? repo.default_branch).trim(),
+        repositoryId: repo.id,
+        installationId: repo.installation_id,
+      })),
+      ...manualRepos.map((repo) => ({
         url: repo.url.trim(),
         ref: repo.ref.trim(),
-      }))
+        repositoryId: null,
+        installationId: null,
+      })),
+    ]
       .filter((repo) => repo.url.length > 0);
     const mountPaths = new Set<string>();
     return resources.map((repo) => {
@@ -101,6 +193,8 @@ function HomePage() {
           ref: repo.ref,
           subpath: null,
           mount_path: mountPath,
+          github_repository_id: repo.repositoryId,
+          github_installation_id: repo.installationId,
         },
       };
     });
@@ -119,10 +213,25 @@ function HomePage() {
     mutation.mutate({ prompt, resources });
   }
 
+  async function startGitHubAppManifestFlow() {
+    setGithubAppPending(true);
+    try {
+      const result = await createGitHubAppManifest({
+        organization: githubOrg.trim() || undefined,
+      });
+      submitGitHubManifestForm(result.action_url, result.manifest);
+    } catch (error) {
+      toast.error("GitHub App setup failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      setGithubAppPending(false);
+    }
+  }
+
   return (
     <>
       <TopBar />
-      <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col px-4 pt-16 pb-24 sm:px-6 sm:pt-24">
+      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pt-16 pb-24 sm:px-6 sm:pt-24">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
@@ -133,68 +242,331 @@ function HomePage() {
         </section>
 
         <section className="mt-8">
-          <div className="mb-4 space-y-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/60 p-3">
+          <div className="mb-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/60 p-3">
             <div className="flex items-center justify-between gap-3">
-              <Label className="text-xs uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
-                Repositories
-              </Label>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={addRepo}
-                disabled={pending}
-                className="h-7 gap-1.5 px-2 text-xs"
-              >
-                <PlusIcon className="size-3.5" />
-                Add repo
-              </Button>
-            </div>
-            {repos.length === 0 ? (
-              <p className="text-xs text-[color:var(--color-fg-subtle)]">
-                Optional. Public HTTPS Git repositories are mounted under /workspace/repos.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {repos.map((repo) => (
-                  <div
-                    key={repo.id}
-                    className="grid grid-cols-[1fr_7.5rem_auto] gap-2 max-sm:grid-cols-[1fr_auto]"
-                  >
-                    <Input
-                      value={repo.url}
-                      onChange={(event) => updateRepo(repo.id, { url: event.target.value })}
-                      disabled={pending}
-                      placeholder="https://github.com/org/repo"
-                      aria-label="Repository URL"
-                      className="h-8 text-xs"
-                    />
-                    <div className="relative max-sm:col-start-1">
-                      <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-[color:var(--color-fg-subtle)]" />
-                      <Input
-                        value={repo.ref}
-                        onChange={(event) => updateRepo(repo.id, { ref: event.target.value })}
-                        disabled={pending}
-                        placeholder="main"
-                        aria-label="Repository ref"
-                        className="h-8 pl-7 text-xs"
-                      />
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      onClick={() => removeRepo(repo.id)}
-                      disabled={pending}
-                      aria-label="Remove repository"
-                      className="size-8 text-[color:var(--color-fg-muted)]"
-                    >
-                      <Trash2Icon className="size-3.5" />
-                    </Button>
-                  </div>
-                ))}
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+                  Repositories
+                </Label>
+                <p className="mt-1 text-xs text-[color:var(--color-fg-subtle)]">
+                  {selectedRepoIds.size > 0
+                    ? `${selectedRepoIds.size} selected for this run`
+                    : "Optional. Select one or more installed GitHub repositories."}
+                </p>
               </div>
-            )}
+              <div className="flex items-center gap-2">
+                {githubAppStatus.data?.install_url ? (
+                  <Button asChild type="button" variant="ghost" size="sm" className="h-7 text-xs">
+                    <a href={githubAppStatus.data.install_url}>
+                      <GitPullRequestIcon className="size-3.5" />
+                      Install
+                    </a>
+                  </Button>
+                ) : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => syncRepositories.mutate()}
+                  disabled={!githubConfigured || syncRepositories.isPending}
+                  className="h-7 gap-1.5 px-2 text-xs"
+                >
+                  <RefreshCwIcon
+                    className={
+                      syncRepositories.isPending ? "size-3.5 animate-spin" : "size-3.5"
+                    }
+                  />
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-3">
+              {!githubConfigured ? (
+                <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  Configure the GitHub App setup below, install it on repositories, then refresh
+                  this list.
+                </div>
+              ) : githubRepositories.isLoading ? (
+                <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3 text-xs text-[color:var(--color-fg-muted)]">
+                  Loading repositories...
+                </div>
+              ) : githubRepositories.isError ? (
+                <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  Repository sync failed. Check that the generated values are in
+                  <code className="mx-1 rounded bg-[color:var(--color-surface-2)] px-1">
+                    .env
+                  </code>
+                  and that the app is installed on at least one account.
+                </div>
+              ) : installedRepositories.length === 0 ? (
+                <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  No installed repositories found. Install the app on selected repositories, then
+                  refresh.
+                </div>
+              ) : (
+                <div className="max-h-64 overflow-auto rounded-md border border-[color:var(--color-border)]">
+                  {installedRepositories.map((repo) => {
+                    const checked = selectedRepoIds.has(repo.id);
+                    return (
+                      <div
+                        key={`${repo.installation_id}:${repo.id}`}
+                        className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-b border-[color:var(--color-border)] p-2 last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_8rem]"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleInstalledRepo(repo)}
+                          disabled={pending}
+                          aria-label={`Select ${repo.full_name}`}
+                          className="mt-1 size-4 accent-[color:var(--color-brand)]"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="truncate text-sm font-medium">{repo.full_name}</span>
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[11px] text-[color:var(--color-fg-subtle)]">
+                              {repo.private ? <LockIcon className="size-3" /> : null}
+                              {repo.private ? "Private" : "Public"}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+                            {repo.account_login}
+                            {repo.account_type ? ` · ${repo.account_type}` : ""} · default{" "}
+                            {repo.default_branch}
+                          </div>
+                        </div>
+                        {checked ? (
+                          <div className="relative col-start-2 sm:col-start-auto">
+                            <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-[color:var(--color-fg-subtle)]" />
+                            <Input
+                              value={selectedRepoRefs[repo.id] ?? repo.default_branch}
+                              onChange={(event) =>
+                                updateInstalledRepoRef(repo.id, event.target.value)
+                              }
+                              disabled={pending}
+                              placeholder={repo.default_branch}
+                              aria-label={`${repo.full_name} ref`}
+                              className="h-8 pl-7 text-xs"
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <Collapsible
+              open={resolvedGithubAppOpen}
+              onOpenChange={setGithubAppOpen}
+              className={
+                githubConfigured
+                  ? "mt-3 border-t border-[color:var(--color-border)] pt-2"
+                  : "mt-3 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3"
+              }
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <CollapsibleTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2 text-xs text-[color:var(--color-fg-muted)]"
+                  >
+                    <ChevronDownIcon
+                      className={
+                        resolvedGithubAppOpen
+                          ? "size-3.5 rotate-180 transition-transform"
+                          : "size-3.5 transition-transform"
+                      }
+                    />
+                    GitHub App setup
+                    <span
+                      className={
+                        githubConfigured
+                          ? "rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-300"
+                          : "rounded-full border border-[color:var(--color-border)] px-1.5 py-0.5 text-[11px] text-[color:var(--color-fg-subtle)]"
+                      }
+                    >
+                      {githubConfigured ? "Configured" : "Needs setup"}
+                    </span>
+                  </Button>
+                </CollapsibleTrigger>
+                {githubConfigured && githubAppStatus.data?.install_url ? (
+                  <Button asChild type="button" variant="ghost" size="sm" className="h-7 text-xs">
+                    <a href={githubAppStatus.data.install_url}>
+                      <GitPullRequestIcon className="size-3.5" />
+                      Install on repos
+                    </a>
+                  </Button>
+                ) : null}
+              </div>
+              <CollapsibleContent className="pt-3">
+                <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                        {githubConfigured
+                          ? `Using ${
+                              githubAppStatus.data?.app_slug ?? "the configured app"
+                            } for repository installs, tokens, pushes, and pull requests.`
+                          : "Create a prefilled app once, add the generated values to .env, then restart the API and worker."}
+                      </p>
+                      {githubConfigured ? (
+                        <div className="mt-2 grid gap-1 text-xs leading-5 text-[color:var(--color-fg-muted)] sm:grid-cols-2">
+                          <div>
+                            <span className="text-[color:var(--color-fg-subtle)]">App ID</span>{" "}
+                            {githubAppStatus.data?.app_id}
+                          </div>
+                          <div>
+                            <span className="text-[color:var(--color-fg-subtle)]">Client ID</span>{" "}
+                            {githubAppStatus.data?.client_id}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      {githubAppStatus.data?.install_url ? (
+                        <Button asChild type="button" variant="outline" size="sm">
+                          <a href={githubAppStatus.data.install_url}>
+                            <GitPullRequestIcon className="size-3.5" />
+                            Install
+                          </a>
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={startGitHubAppManifestFlow}
+                        disabled={githubAppPending}
+                      >
+                        <GitPullRequestIcon className="size-3.5" />
+                        {githubAppPending
+                          ? "Opening GitHub"
+                          : githubConfigured
+                            ? "Create another"
+                            : "Create app"}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="mt-3">
+                    <Label
+                      htmlFor="github-org"
+                      className="text-xs text-[color:var(--color-fg-subtle)]"
+                    >
+                      Organization
+                    </Label>
+                    <Input
+                      id="github-org"
+                      value={githubOrg}
+                      onChange={(event) => setGithubOrg(event.target.value)}
+                      placeholder="Optional org login"
+                      disabled={githubAppPending}
+                      className="mt-1 h-8 text-xs"
+                    />
+                  </div>
+                  {!githubConfigured ? (
+                    <ol className="mt-3 grid gap-2 text-xs leading-5 text-[color:var(--color-fg-muted)] sm:grid-cols-3">
+                      <li className="rounded-md border border-[color:var(--color-border)] p-2">
+                        1. Review the generated app on GitHub.
+                      </li>
+                      <li className="rounded-md border border-[color:var(--color-border)] p-2">
+                        2. Add returned credentials to
+                        <code className="ml-1 rounded bg-[color:var(--color-surface-2)] px-1">
+                          .env
+                        </code>
+                        .
+                      </li>
+                      <li className="rounded-md border border-[color:var(--color-border)] p-2">
+                        3. Install it on selected repositories.
+                      </li>
+                    </ol>
+                  ) : null}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+
+            <Collapsible
+              open={manualReposOpen}
+              onOpenChange={setManualReposOpen}
+              className="mt-3 border-t border-[color:var(--color-border)] pt-2"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <CollapsibleTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1.5 px-2 text-xs text-[color:var(--color-fg-muted)]"
+                  >
+                    <ChevronDownIcon className="size-3.5" />
+                    Add repositories by URL
+                  </Button>
+                </CollapsibleTrigger>
+                {manualReposOpen ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={addRepo}
+                    disabled={pending}
+                    className="h-7 gap-1.5 px-2 text-xs"
+                  >
+                    <PlusIcon className="size-3.5" />
+                    Add URL
+                  </Button>
+                ) : null}
+              </div>
+              <CollapsibleContent className="pt-2">
+                {manualRepos.length === 0 ? (
+                  <p className="px-2 pb-1 text-xs text-[color:var(--color-fg-subtle)]">
+                    Add HTTPS Git repositories alongside any repositories selected from the
+                    GitHub App list.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {manualRepos.map((repo) => (
+                      <div
+                        key={repo.id}
+                        className="grid grid-cols-[1fr_7.5rem_auto] gap-2 max-sm:grid-cols-[1fr_auto]"
+                      >
+                        <Input
+                          value={repo.url}
+                          onChange={(event) => updateRepo(repo.id, { url: event.target.value })}
+                          disabled={pending}
+                          placeholder="https://github.com/org/repo"
+                          aria-label="Repository URL"
+                          className="h-8 text-xs"
+                        />
+                        <div className="relative max-sm:col-start-1">
+                          <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-[color:var(--color-fg-subtle)]" />
+                          <Input
+                            value={repo.ref}
+                            onChange={(event) => updateRepo(repo.id, { ref: event.target.value })}
+                            disabled={pending}
+                            placeholder="main"
+                            aria-label="Repository ref"
+                            className="h-8 pl-7 text-xs"
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => removeRepo(repo.id)}
+                          disabled={pending}
+                          aria-label="Remove repository"
+                          className="size-8 text-[color:var(--color-fg-muted)]"
+                        >
+                          <Trash2Icon className="size-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CollapsibleContent>
+            </Collapsible>
           </div>
           <Composer
             autoFocus
@@ -215,6 +587,25 @@ function HomePage() {
       </main>
     </>
   );
+}
+
+function submitGitHubManifestForm(
+  actionUrl: string,
+  manifest: Record<string, unknown>,
+) {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = actionUrl;
+  form.style.display = "none";
+
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "manifest";
+  input.value = JSON.stringify(manifest);
+  form.appendChild(input);
+
+  document.body.appendChild(form);
+  form.submit();
 }
 
 function normalizeRepositoryUrl(input: string): { host: string; repo: string } {
