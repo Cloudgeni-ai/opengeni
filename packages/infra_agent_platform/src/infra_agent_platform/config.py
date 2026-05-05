@@ -1,9 +1,32 @@
+import os
+import re
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+SANDBOX_ENV_PROFILES: dict[str, tuple[str, ...]] = {
+    "azure": (
+        "ARM_CLIENT_ID",
+        "ARM_CLIENT_SECRET",
+        "ARM_TENANT_ID",
+        "ARM_SUBSCRIPTION_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_TENANT_ID",
+        "AZURE_SUBSCRIPTION_ID",
+        "AZURE_AUTHORITY_HOST",
+    ),
+    "github": (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    ),
+}
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class Settings(BaseSettings):
@@ -45,12 +68,22 @@ class Settings(BaseSettings):
     modal_config_path: Path | None = None
     docker_image: str = "infra-agents-sandbox:local"
     docker_exposed_ports: str = ""
+    sandbox_env_profiles: str = "azure,github"
+    sandbox_env_extra_vars: str = ""
+    # Deprecated compatibility override. When set, it replaces profiles + extra vars.
+    sandbox_env_vars: str | None = None
 
     var_dir: Path = Path("var")
     api_event_poll_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
-    cors_allow_origin_regex: str = (
-        r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
-    )
+    cors_allow_origin_regex: str = r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
+    github_app_manifest_base_url: str | None = None
+    github_app_manifest_state_secret: str | None = None
+    github_app_id: str | None = None
+    github_client_id: str | None = None
+    github_client_secret: str | None = None
+    github_app_slug: str | None = None
+    github_webhook_secret: str | None = None
+    github_app_private_key: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -105,9 +138,65 @@ class Settings(BaseSettings):
                 ) from exc
             if port < 1 or port > 65535:
                 raise ValueError("docker_exposed_ports values must be between 1 and 65535")
+        _sandbox_environment_variable_names(self)
         return self
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def collect_sandbox_environment(
+    settings: Settings,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source = os.environ if environ is None else environ
+    out: dict[str, str] = {}
+    for name in _sandbox_environment_variable_names(settings):
+        value = source.get(name)
+        if value:
+            out[name] = value
+    return out
+
+
+def _sandbox_environment_variable_names(settings: Settings) -> tuple[str, ...]:
+    legacy_override = settings.sandbox_env_vars
+    if legacy_override is not None:
+        return _unique_env_names(_split_csv(legacy_override), field_name="sandbox_env_vars")
+
+    profile_names = [name.lower() for name in _split_csv(settings.sandbox_env_profiles)]
+    if "none" in profile_names:
+        if len(profile_names) > 1:
+            raise ValueError("sandbox_env_profiles cannot combine 'none' with other profiles")
+        profile_names = []
+
+    names: list[str] = []
+    for profile in profile_names:
+        profile_vars = SANDBOX_ENV_PROFILES.get(profile)
+        if profile_vars is None:
+            known = ", ".join(sorted([*SANDBOX_ENV_PROFILES, "none"]))
+            raise ValueError(
+                f"unknown sandbox_env_profiles value {profile!r}; expected one of: {known}"
+            )
+        names.extend(profile_vars)
+
+    names.extend(_split_csv(settings.sandbox_env_extra_vars))
+    return _unique_env_names(names, field_name="sandbox environment")
+
+
+def _split_csv(raw: str) -> list[str]:
+    return [value.strip() for value in raw.split(",") if value.strip()]
+
+
+def _unique_env_names(raw_names: list[str], *, field_name: str) -> tuple[str, ...]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in raw_names:
+        if not _ENV_NAME_RE.fullmatch(name):
+            raise ValueError(f"{field_name} contains invalid environment variable name: {name!r}")
+        if name in seen:
+            continue
+        names.append(name)
+        seen.add(name)
+    return tuple(names)

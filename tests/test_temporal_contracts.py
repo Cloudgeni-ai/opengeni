@@ -50,3 +50,15 @@ def test_workflow_contract_accepts_docker_sandbox_options() -> None:
     assert payload.sandbox_provider == "docker"
     assert payload.sandbox_image_ref == "infra-agents-sandbox:local"
     assert payload.sandbox_exposed_ports == (3000, 8000)
+
+
+def test_workflow_contract_accepts_sandbox_environment() -> None:
+    payload = WorkflowRunInput(
+        run_id="run-1",
+        prompt="Inspect the workspace",
+        model="gpt-5.4-mini",
+        sandbox_provider="docker",
+        sandbox_environment={"GH_TOKEN": "test-token"},
+    )
+
+    assert payload.sandbox_environment == {"GH_TOKEN": "test-token"}

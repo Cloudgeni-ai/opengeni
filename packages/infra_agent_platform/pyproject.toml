@@ -6,11 +6,13 @@ dependencies = [
     "aiosqlite>=0.21.0,<0.22",
     "alembic>=1.18.4,<2",
     "asyncpg>=0.31.0,<0.32",
+    "httpx>=0.28.1,<0.29",
     "infra-agent-contracts",
     "modal>=1.4.2,<2",
     "openai-agents[docker,sqlalchemy]>=0.14.1,<0.15",
     "opentelemetry-sdk>=1.39.0,<2",
     "pydantic-settings>=2.13.1,<3",
+    "pyjwt[crypto]>=2.12.1,<3",
     "sqlalchemy>=2.0.49,<3",
     "temporalio>=1.26.0,<2",
 ]

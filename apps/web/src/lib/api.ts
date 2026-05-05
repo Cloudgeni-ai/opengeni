@@ -1,4 +1,11 @@
-import type { AgentRun, ResourceRef, RunEvent } from "./types";
+import type {
+  AgentRun,
+  GitHubAppManifestStart,
+  GitHubRepositoryList,
+  GitHubAppStatus,
+  ResourceRef,
+  RunEvent,
+} from "./types";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8000";
 
@@ -68,6 +75,35 @@ export function createRun(
       prompt,
       resources,
     }),
+  });
+}
+
+export function createGitHubAppManifest(input: {
+  appName?: string;
+  organization?: string;
+}): Promise<GitHubAppManifestStart> {
+  return request<GitHubAppManifestStart>(`/v1/github/app-manifest`, {
+    method: "POST",
+    body: JSON.stringify({
+      app_name: input.appName,
+      organization: input.organization,
+      include_ci_permissions: true,
+    }),
+  });
+}
+
+export function fetchGitHubAppStatus(): Promise<GitHubAppStatus> {
+  return request<GitHubAppStatus>(`/v1/github/app`);
+}
+
+export function fetchGitHubRepositories(): Promise<GitHubRepositoryList> {
+  return request<GitHubRepositoryList>(`/v1/github/repositories`);
+}
+
+export function syncGitHubRepositories(): Promise<GitHubRepositoryList> {
+  return request<GitHubRepositoryList>(`/v1/github/repositories/sync`, {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
 

@@ -10,6 +10,7 @@ from infra_agent_platform.runtime import build_sandbox_agent
 from infra_agent_platform.runtime.openai_agents import _bundled_terraform_skills_dir
 
 _BUNDLED = (
+    "checkov",
     "azure-verified-modules",
     "refactor-module",
     "terraform-search-import",
@@ -33,7 +34,7 @@ def test_sandbox_skills_uses_local_dir_absolute() -> None:
     assert skills.from_.src is not None
     p = Path(skills.from_.src)
     assert p.is_absolute() and p.is_dir()
-    assert len([d for d in p.iterdir() if d.is_dir()]) == 6
+    assert len([d for d in p.iterdir() if d.is_dir()]) == 7
 
 
 def test_sandbox_skills_merges_dot_agents_in_manifest() -> None:

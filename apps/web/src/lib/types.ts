@@ -62,6 +62,38 @@ export interface RunProgress {
   last_output: string | null;
 }
 
+export interface GitHubAppManifestStart {
+  action_url: string;
+  state: string;
+  manifest: Record<string, unknown>;
+}
+
+export interface GitHubAppStatus {
+  configured: boolean;
+  app_id: string | null;
+  client_id: string | null;
+  app_slug: string | null;
+  install_url: string | null;
+  missing: string[];
+}
+
+export interface GitHubRepository {
+  id: number;
+  installation_id: number;
+  full_name: string;
+  name: string;
+  private: boolean;
+  html_url: string;
+  clone_url: string;
+  default_branch: string;
+  account_login: string;
+  account_type: string | null;
+}
+
+export interface GitHubRepositoryList {
+  repositories: GitHubRepository[];
+}
+
 export type StreamMessage =
   | { type: "run"; run: AgentRun }
   | { type: "event"; event: RunEvent }

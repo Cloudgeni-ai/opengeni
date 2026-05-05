@@ -24,6 +24,11 @@ That includes, in order:
    - `INFRA_AGENT_ENABLE_TEMPORAL_DISPATCH=true` to enqueue workflows
    - Model provider settings (e.g. Azure: `INFRA_AGENT_OPENAI_PROVIDER=azure` and the `INFRA_AGENT_AZURE_OPENAI_*` variables, or OpenAI)
    - Sandbox: `INFRA_AGENT_SANDBOX_BACKEND=modal` or `INFRA_AGENT_SANDBOX_BACKEND=docker`
+   - Sandbox credential pass-through: `INFRA_AGENT_SANDBOX_ENV_PROFILES=azure,github` by default.
+     Values are copied from the **API/dispatcher process environment** into the sandbox only when
+     their profile allows the exact variable name. Add project-specific names with
+     `INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS`; use `INFRA_AGENT_SANDBOX_ENV_PROFILES=none` to pass
+     nothing. Do not expect `INFRA_AGENT_AZURE_OPENAI_*` model credentials to appear in the sandbox.
    - Modal backend: if you use the Settings mapping, set `INFRA_AGENT_MODAL_TOKEN_ID` / `INFRA_AGENT_MODAL_TOKEN_SECRET` (or rely on `MODAL_*` / `~/.modal.toml` after worker startup)
    - Docker backend: build the local image with `docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .` and set `INFRA_AGENT_DOCKER_IMAGE=infra-agents-sandbox:local`
 
@@ -86,6 +91,7 @@ The **React app** in `apps/web` calls the HTTP API; final streaming / progress b
 
 - Agent behavior, repository mounts, and bundled Terraform **Skills** are configured in the platform; see [docs/bootstrap.md](docs/bootstrap.md) (OpenAI Agents SDK boundary, sandbox backends, local commands).
 - Eager `Skills(from_=LocalDir(...))` materialize under `.agents/` in the sandbox as described there.
+- Product sandbox agents should treat code-changing runs as GitOps runs: after making repository changes, create a branch, commit the focused changes, and open a draft PR when `gh` and `GH_TOKEN` / `GITHUB_TOKEN` are available in the sandbox. If credentials are missing, return the exact commands and blocker instead of pretending a PR was created.
 
 ---
 

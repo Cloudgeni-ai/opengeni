@@ -12,6 +12,7 @@ class WorkflowRunInput:
     sandbox_timeout: int = 300
     sandbox_image_ref: str | None = None
     sandbox_exposed_ports: tuple[int, ...] = ()
+    sandbox_environment: dict[str, str] = field(default_factory=dict)
     resources: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 

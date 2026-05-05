@@ -165,6 +165,55 @@ class HealthResponse(BaseModel):
     ok: bool
 
 
+class GitHubAppManifestCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    app_name: str | None = None
+    organization: str | None = None
+    public: bool = False
+    include_ci_permissions: bool = True
+
+
+class GitHubAppManifestStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_url: str
+    state: str
+    manifest: dict[str, Any]
+
+
+class GitHubAppStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    app_id: str | None = None
+    client_id: str | None = None
+    app_slug: str | None = None
+    install_url: str | None = None
+    missing: list[str] = Field(default_factory=list)
+
+
+class GitHubRepository(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    installation_id: int
+    full_name: str
+    name: str
+    private: bool
+    html_url: str
+    clone_url: str
+    default_branch: str
+    account_login: str
+    account_type: str | None = None
+
+
+class GitHubRepositoryList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repositories: list[GitHubRepository] = Field(default_factory=list)
+
+
 class RunStreamEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
