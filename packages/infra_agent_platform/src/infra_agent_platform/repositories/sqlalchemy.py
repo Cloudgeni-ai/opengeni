@@ -34,11 +34,14 @@ class SqlAlchemyRunRepository:
         lifecycle = queued_run_lifecycle()
         run_id = uuid4()
         resources = list(request.resources)
+        metadata = dict(request.metadata)
+        if request.reasoning_effort is not None:
+            metadata["reasoning_effort"] = request.reasoning_effort.value
         record = RunRecord(
             id=str(run_id),
             status=lifecycle.status.value,
             prompt=request.prompt,
-            metadata_=request.metadata,
+            metadata_=metadata,
             created_at=lifecycle.updated_at,
             updated_at=lifecycle.updated_at,
         )

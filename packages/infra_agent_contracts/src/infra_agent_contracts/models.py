@@ -17,6 +17,15 @@ class AgentRunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ReasoningEffort(StrEnum):
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+
+
 class EventType(StrEnum):
     RUN_CREATED = "run.created"
     RUN_DISPATCHED = "run.dispatched"
@@ -108,6 +117,7 @@ class AgentRunCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt: str = Field(min_length=1)
+    reasoning_effort: ReasoningEffort | None = None
     resources: list[ResourceRef] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

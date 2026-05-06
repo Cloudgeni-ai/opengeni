@@ -29,7 +29,7 @@ That includes, in order:
      their profile allows the exact variable name. Add project-specific names with
      `INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS`; use `INFRA_AGENT_SANDBOX_ENV_PROFILES=none` to pass
      nothing. Do not expect `INFRA_AGENT_AZURE_OPENAI_*` model credentials to appear in the sandbox.
-   - Modal backend: if you use the Settings mapping, set `INFRA_AGENT_MODAL_TOKEN_ID` / `INFRA_AGENT_MODAL_TOKEN_SECRET` (or rely on `MODAL_*` / `~/.modal.toml` after worker startup)
+   - Modal backend: if you use the Settings mapping, set `INFRA_AGENT_MODAL_TOKEN_ID` / `INFRA_AGENT_MODAL_TOKEN_SECRET` (or rely on `MODAL_*` / `~/.modal.toml` after worker startup). Modal builds `docker/sandbox.Dockerfile` by default so it gets the same git/gh/Terraform/Checkov/Azure CLI image as Docker.
    - Docker backend: build the local image with `docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .` and set `INFRA_AGENT_DOCKER_IMAGE=infra-agents-sandbox:local`
 
 4. **Three long-running processes** (separate terminals, or `nohup` / a process manager):
@@ -91,7 +91,9 @@ The **React app** in `apps/web` calls the HTTP API; final streaming / progress b
 
 - Agent behavior, repository mounts, and bundled Terraform **Skills** are configured in the platform; see [docs/bootstrap.md](docs/bootstrap.md) (OpenAI Agents SDK boundary, sandbox backends, local commands).
 - Eager `Skills(from_=LocalDir(...))` materialize under `.agents/` in the sandbox as described there.
-- Product sandbox agents should treat code-changing runs as GitOps runs: after making repository changes, create a branch, commit the focused changes, and open a draft PR when `gh` and `GH_TOKEN` / `GITHUB_TOKEN` are available in the sandbox. If credentials are missing, return the exact commands and blocker instead of pretending a PR was created.
+- Product sandbox agents should treat code-changing runs as GitOps runs: after making repository changes, create a branch, commit the focused changes, and open a draft PR when `gh` and `GH_TOKEN` / `GITHUB_TOKEN` are available in the sandbox. Prefer `gh -R owner/repo ...` for selected repositories. If credentials are missing, return the exact commands and blocker instead of pretending a PR was created.
+- The dispatcher injects Git author/committer identity into the sandbox. Do not spend turns setting `git config user.name` / `user.email` unless a command still fails; use the existing identity and proceed with the branch/commit/PR workflow.
+- Azure CLI in the sandbox is the real `az` binary. Run `infra-agent-azure-login` once before Azure CLI work when `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` or matching `ARM_*` service-principal variables are present. If that fails, report the exact auth error. Terraform can use `ARM_*` directly.
 
 ---
 

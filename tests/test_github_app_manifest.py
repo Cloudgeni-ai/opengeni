@@ -5,7 +5,11 @@ import pytest
 from fastapi.testclient import TestClient
 from infra_agent_api import create_app
 from infra_agent_platform.config import Settings
-from infra_agent_platform.github_app import GitHubAppAPIError
+from infra_agent_platform.github_app import (
+    GitHubAppAPIError,
+    _bot_identity_from_payload,
+    _create_installation_token,
+)
 from infra_agent_platform.github_app_manifest import (
     build_github_app_manifest,
     create_signed_state,
@@ -337,3 +341,47 @@ def test_api_reports_missing_github_app_config() -> None:
     body = response.json()
     assert body["configured"] is False
     assert "INFRA_AGENT_GITHUB_APP_PRIVATE_KEY" in body["missing"]
+
+
+@pytest.mark.asyncio
+async def test_github_installation_token_request_scopes_repository_ids() -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"token": "installation-token"}
+
+    class Client:
+        json: dict[str, list[int]] | None = None
+
+        async def post(self, url, *, headers, json=None):  # type: ignore[no-untyped-def]
+            assert url.endswith("/app/installations/7/access_tokens")
+            assert headers["Authorization"] == "Bearer app-jwt"
+            self.json = json
+            return Response()
+
+    client = Client()
+
+    token = await _create_installation_token(
+        client,  # type: ignore[arg-type]
+        "app-jwt",
+        7,
+        repository_ids=[102, 101, 101],
+    )
+
+    assert token == "installation-token"
+    assert client.json == {"repository_ids": [101, 102]}
+
+
+def test_github_app_bot_identity_uses_noreply_email_format() -> None:
+    identity = _bot_identity_from_payload(
+        "infra-agents-test-app[bot]",
+        {"login": "infra-agents-test-app[bot]", "id": 123456},
+    )
+
+    assert identity.name == "infra-agents-test-app[bot]"
+    assert (
+        identity.email
+        == "123456+infra-agents-test-app[bot]@users.noreply.github.com"
+    )

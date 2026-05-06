@@ -74,14 +74,19 @@ For Docker, set `INFRA_AGENT_DOCKER_IMAGE` and optionally `INFRA_AGENT_DOCKER_EX
 The Docker image must include `git` for repository resources to mount via SDK `GitRepo`
 entries.
 
-The sandbox image is the common capability boundary for both Docker and Modal. Build it from
-the repo Dockerfile and either use it locally:
+The sandbox image is the common capability boundary for both Docker and Modal. Modal builds
+from `docker/sandbox.Dockerfile` by default, using `.` as the Docker context. Override with
+`INFRA_AGENT_MODAL_DOCKERFILE` or `INFRA_AGENT_MODAL_DOCKER_CONTEXT_DIR` if the worker starts
+from a different layout. First builds can be slow, so `INFRA_AGENT_MODAL_SANDBOX_CREATE_TIMEOUT_SECONDS`
+defaults to `600`.
+
+For Docker, build the same image locally:
 
 ```bash
 docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .
 ```
 
-or push the same image to a registry and point both sandbox backends at that tag:
+You can also push the same image to a registry and point both sandbox backends at that tag:
 
 ```bash
 docker build -f docker/sandbox.Dockerfile -t ghcr.io/YOUR_ORG/infra-agents-sandbox:dev .
@@ -104,12 +109,36 @@ Use `INFRA_AGENT_SANDBOX_ENV_PROFILES` for the normal case:
 | Profile | Variables copied when present | Use |
 | --- | --- | --- |
 | `azure` | `ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, `ARM_SUBSCRIPTION_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_AUTHORITY_HOST` | Terraform Azure provider and Azure CLI/SDK service-principal context |
-| `github` | `GH_TOKEN`, `GITHUB_TOKEN` | GitHub CLI, pushes, and PR creation |
+| `github` | `GH_TOKEN`, `GITHUB_TOKEN`, `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | GitHub CLI, pushes, PR creation, and commit identity |
 | `none` | none | Disable profile-based sandbox env pass-through |
 
 Add project-specific names with `INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS`, for example
 `TF_VAR_region,CUSTOM_PROVIDER_TOKEN`. `INFRA_AGENT_SANDBOX_ENV_VARS` is still supported as a
 legacy explicit override; when set, it replaces profiles and extra vars entirely.
+
+Runs started with repositories selected from the GitHub App list mint one short-lived
+installation token for that selected installation. The dispatcher injects it as `GH_TOKEN` /
+`GITHUB_TOKEN`, configures git's HTTPS auth header, and sets
+`GIT_ASKPASS=/usr/local/bin/infra-agent-git-askpass`, so SDK `GitRepo` clones and
+`gh -R owner/repo ...` commands can authenticate without tokenized clone URLs. Manual URL
+repositories are not GitHub App-tokenized; they must be public or use credentials supplied by the
+normal sandbox environment profiles.
+
+The dispatcher also ensures every sandbox has a Git commit identity. Explicit raw
+`GIT_AUTHOR_*` / `GIT_COMMITTER_*` values or `INFRA_AGENT_GIT_AUTHOR_*` /
+`INFRA_AGENT_GIT_COMMITTER_*` settings win. Otherwise, when the GitHub App is configured, it
+resolves `<app-slug>[bot]` through GitHub and uses GitHub's noreply format:
+`<bot-id>+<app-slug>[bot]@users.noreply.github.com`. If that cannot be resolved, it falls back
+to `Infra Agent <infra-agent@example.invalid>`.
+
+For Azure CLI, set service-principal credentials before starting API/worker:
+`ARM_CLIENT_ID`, `ARM_CLIENT_SECRET`, `ARM_TENANT_ID`, and usually
+`ARM_SUBSCRIPTION_ID`. `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` are also supported; the sandbox helper falls back to `ARM_*`.
+Run `infra-agent-azure-login` once before Azure CLI work. It performs
+`az login --service-principal` and selects the subscription. Without these env vars,
+`az account show` correctly reports that no Azure login is configured. Terraform does not need
+the helper because the AzureRM provider reads `ARM_*` directly.
 
 Model provider settings such as `INFRA_AGENT_AZURE_OPENAI_API_KEY` are platform credentials.
 They are not passed into the sandbox unless you explicitly add their names, which should not be
@@ -188,7 +217,7 @@ When using Azure, set:
 
 ```bash
 INFRA_AGENT_OPENAI_PROVIDER=azure
-INFRA_AGENT_OPENAI_MODEL=gpt-5.4
+INFRA_AGENT_OPENAI_MODEL=gpt-5.5
 INFRA_AGENT_AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com
 INFRA_AGENT_AZURE_OPENAI_DEPLOYMENT=gpt-5-4-prod
 INFRA_AGENT_AZURE_OPENAI_API_VERSION=2025-04-01-preview
@@ -201,6 +230,8 @@ INFRA_AGENT_AZURE_OPENAI_AD_TOKEN=...
 Notes:
 
 - `INFRA_AGENT_OPENAI_MODEL` is the model name passed into the agent runtime.
+- Per-run `reasoning_effort` controls the model thinking level and accepts `none`,
+  `minimal`, `low`, `medium`, `high`, or `xhigh`.
 - Azure routing uses your deployment endpoint (for example, deployment `gpt-5-4-prod`).
 - Keep `INFRA_AGENT_AZURE_OPENAI_API_VERSION` aligned with your Azure resource/API support.
 
@@ -208,7 +239,7 @@ For Azure's v1-compatible endpoint style (`.../openai/v1`), use:
 
 ```bash
 INFRA_AGENT_OPENAI_PROVIDER=azure
-INFRA_AGENT_OPENAI_MODEL=gpt-5.4
+INFRA_AGENT_OPENAI_MODEL=gpt-5.5
 INFRA_AGENT_AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/openai/v1
 INFRA_AGENT_AZURE_OPENAI_API_KEY=...
 ```

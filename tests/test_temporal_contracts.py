@@ -37,6 +37,18 @@ def test_workflow_contract_accepts_repository_resources() -> None:
     assert payload.resources[0]["metadata"]["mount_path"] == "repos/cloudgeni-ai/infra-agents"
 
 
+def test_workflow_contract_accepts_reasoning_effort() -> None:
+    payload = WorkflowRunInput(
+        run_id="run-1",
+        prompt="Inspect the workspace",
+        model="gpt-5.5",
+        sandbox_provider="modal",
+        reasoning_effort="high",
+    )
+
+    assert payload.reasoning_effort == "high"
+
+
 def test_workflow_contract_accepts_docker_sandbox_options() -> None:
     payload = WorkflowRunInput(
         run_id="run-1",

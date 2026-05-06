@@ -23,6 +23,10 @@ SANDBOX_ENV_PROFILES: dict[str, tuple[str, ...]] = {
     "github": (
         "GH_TOKEN",
         "GITHUB_TOKEN",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
     ),
 }
 
@@ -47,7 +51,7 @@ class Settings(BaseSettings):
     enable_temporal_dispatch: bool = False
 
     openai_provider: Literal["openai", "azure"] = "openai"
-    openai_model: str = "gpt-5.4-mini"
+    openai_model: str = "gpt-5.5"
     openai_model_activity_timeout_seconds: int = Field(default=120, ge=1)
     disable_openai_tracing: bool = False
     azure_openai_base_url: str | None = None
@@ -60,7 +64,10 @@ class Settings(BaseSettings):
     sandbox_backend: Literal["modal", "docker", "none"] = "modal"
     modal_app_name: str = "infra-agents-sandbox"
     modal_default_timeout_seconds: int = Field(default=900, ge=1)
+    modal_sandbox_create_timeout_seconds: float = Field(default=600, ge=1)
     modal_image_ref: str | None = None
+    modal_dockerfile: Path | None = Path("docker/sandbox.Dockerfile")
+    modal_docker_context_dir: Path = Path(".")
     # Map to MODAL_TOKEN_ID / MODAL_TOKEN_SECRET for the official `modal` client (worker applies).
     modal_token_id: str | None = None
     modal_token_secret: str | None = None
@@ -72,6 +79,10 @@ class Settings(BaseSettings):
     sandbox_env_extra_vars: str = ""
     # Deprecated compatibility override. When set, it replaces profiles + extra vars.
     sandbox_env_vars: str | None = None
+    git_author_name: str | None = None
+    git_author_email: str | None = None
+    git_committer_name: str | None = None
+    git_committer_email: str | None = None
 
     var_dir: Path = Path("var")
     api_event_poll_seconds: float = Field(default=0.5, ge=0.1, le=10.0)
@@ -90,7 +101,18 @@ class Settings(BaseSettings):
     def _empty_modal_tokens_to_none(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        for k in ("modal_token_id", "modal_token_secret", "modal_profile", "modal_config_path"):
+        for k in (
+            "modal_token_id",
+            "modal_token_secret",
+            "modal_profile",
+            "modal_config_path",
+            "modal_image_ref",
+            "modal_dockerfile",
+            "git_author_name",
+            "git_author_email",
+            "git_committer_name",
+            "git_committer_email",
+        ):
             if k in data and data[k] == "":
                 data[k] = None
         return data

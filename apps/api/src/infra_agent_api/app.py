@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import os
 import re
 import secrets
 import subprocess
@@ -32,6 +34,7 @@ from infra_agent_platform.errors import DispatchError, RepositoryError, RunNotFo
 from infra_agent_platform.github_app import (
     GitHubAppAPIError,
     GitHubAppConfigurationError,
+    create_github_app_installation_token,
     github_app_missing_settings,
     list_github_app_repositories,
 )
@@ -187,9 +190,16 @@ def create_app(
     async def create_run(request: Request, payload: AgentRunCreate) -> AgentRun:
         repo = _repo(request)
         current_dispatcher = _dispatcher(request)
+        try:
+            _github_app_repository_selection(payload)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
         if current_dispatcher is not None:
             try:
-                await _validate_repository_refs(payload)
+                await _validate_repository_refs(payload, request.app.state.settings)
             except ValueError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -624,29 +634,100 @@ def _dispatcher(request: Request) -> RunDispatcher | None:
     return cast(RunDispatcher | None, dispatcher)
 
 
-async def _validate_repository_refs(payload: AgentRunCreate) -> None:
+def _coerce_positive_int(value: object) -> int | None:
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _github_app_repository_selection(
+    payload: AgentRunCreate,
+) -> tuple[int, tuple[int, ...]] | None:
+    installation_id: int | None = None
+    repository_ids: set[int] = set()
+    for resource in payload.resources:
+        if resource.kind.value != "repository":
+            continue
+        raw_installation_id = resource.metadata.get("github_installation_id")
+        raw_repository_id = resource.metadata.get("github_repository_id")
+        if raw_installation_id is None and raw_repository_id is None:
+            continue
+        current_installation_id = _coerce_positive_int(raw_installation_id)
+        current_repository_id = _coerce_positive_int(raw_repository_id)
+        if current_installation_id is None or current_repository_id is None:
+            raise ValueError(
+                "GitHub App repository resources require github_installation_id "
+                "and github_repository_id"
+            )
+        if installation_id is None:
+            installation_id = current_installation_id
+        elif installation_id != current_installation_id:
+            raise ValueError("selected GitHub App repositories must belong to one installation")
+        repository_ids.add(current_repository_id)
+    if installation_id is None:
+        return None
+    return installation_id, tuple(sorted(repository_ids))
+
+
+async def _github_app_token_for_repository_refs(
+    payload: AgentRunCreate,
+    settings: Settings,
+) -> str | None:
+    selection = _github_app_repository_selection(payload)
+    if selection is None:
+        return None
+    installation_id, repository_ids = selection
+    try:
+        return await create_github_app_installation_token(
+            settings,
+            installation_id=installation_id,
+            repository_ids=repository_ids,
+        )
+    except GitHubAppConfigurationError as exc:
+        raise ValueError(
+            f"GitHub App is not configured for selected repositories: {', '.join(exc.missing)}"
+        ) from exc
+    except GitHubAppAPIError as exc:
+        raise ValueError(f"failed to create GitHub App installation token: {exc}") from exc
+
+
+async def _validate_repository_refs(payload: AgentRunCreate, settings: Settings) -> None:
+    github_app_token = await _github_app_token_for_repository_refs(payload, settings)
     for resource in payload.resources:
         if resource.kind.value != "repository":
             continue
         uri = resource.uri
         ref = str(resource.metadata.get("ref") or "").strip()
         repo = str(resource.metadata.get("repo") or uri)
+        token = github_app_token if resource.metadata.get("github_installation_id") else None
         if _FULL_HEX_SHA_RE.fullmatch(ref):
             continue
-        if not await _repository_ref_exists(uri, ref):
+        if not await _repository_ref_exists(uri, ref, token=token):
             raise ValueError(
                 f"repository ref not found for {repo}: {ref!r}. "
                 "Use an existing branch, tag, or full 40-character commit SHA."
             )
 
 
-async def _repository_ref_exists(uri: str, ref: str) -> bool:
-    return await asyncio.to_thread(_repository_ref_exists_sync, uri, ref)
+async def _repository_ref_exists(uri: str, ref: str, *, token: str | None = None) -> bool:
+    return await asyncio.to_thread(_repository_ref_exists_sync, uri, ref, token=token)
 
 
-def _repository_ref_exists_sync(uri: str, ref: str) -> bool:
+def _repository_ref_exists_sync(uri: str, ref: str, *, token: str | None = None) -> bool:
     if not ref:
         return False
+    env = None
+    if token:
+        encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env = {
+            **os.environ,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {encoded}",
+        }
     result = subprocess.run(
         [
             "git",
@@ -661,6 +742,7 @@ def _repository_ref_exists_sync(uri: str, ref: str) -> bool:
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
     if result.returncode == 0:
         return True

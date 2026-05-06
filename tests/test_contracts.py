@@ -87,6 +87,17 @@ def test_run_create_contract_rejects_duplicate_mount_paths() -> None:
         )
 
 
+def test_run_create_contract_accepts_reasoning_effort() -> None:
+    request = AgentRunCreate(prompt="Inspect repos", reasoning_effort="high")
+
+    assert request.reasoning_effort == "high"
+
+
+def test_run_create_contract_rejects_invalid_reasoning_effort() -> None:
+    with pytest.raises(ValidationError, match="reasoning_effort"):
+        AgentRunCreate(prompt="Inspect repos", reasoning_effort="extreme")
+
+
 def test_run_stream_envelope_accepts_run_and_event_payloads() -> None:
     run_id = uuid4()
     run = AgentRun(

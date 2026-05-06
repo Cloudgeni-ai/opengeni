@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import {
+  CheckIcon,
   ChevronDownIcon,
   GitBranchIcon,
   GitPullRequestIcon,
@@ -21,8 +22,21 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   createGitHubAppManifest,
   createRun,
@@ -32,7 +46,7 @@ import {
 } from "@/lib/api";
 import { rememberRun } from "@/lib/known-runs";
 import { runQueryOptions } from "@/lib/queries";
-import type { GitHubRepository, ResourceRef } from "@/lib/types";
+import type { GitHubRepository, ReasoningEffort, ResourceRef } from "@/lib/types";
 
 const EXAMPLES = [
   "Summarize the top-level structure of /workspace.",
@@ -49,7 +63,17 @@ interface RepoDraft {
 interface CreateRunInput {
   prompt: string;
   resources: ResourceRef[];
+  reasoningEffort: ReasoningEffort;
 }
+
+type IntelligenceEffort = Extract<ReasoningEffort, "low" | "medium" | "high" | "xhigh">;
+
+const INTELLIGENCE_OPTIONS: Array<{ value: IntelligenceEffort; label: string }> = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+];
 
 export const Route = createFileRoute("/")({
   component: HomePage,
@@ -63,6 +87,7 @@ function HomePage() {
   const [nextRepoId, setNextRepoId] = useState(1);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState<boolean | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("high");
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubOrg, setGithubOrg] = useState("");
@@ -96,6 +121,29 @@ function HomePage() {
   const selectedInstalledRepositories = installedRepositories.filter((repo) =>
     selectedRepoIds.has(repo.id),
   );
+  const selectedInstallationId =
+    selectedInstalledRepositories[0]?.installation_id ?? null;
+  const repositoryGroups = installedRepositories.reduce<
+    Array<{
+      installationId: number;
+      label: string;
+      detail: string;
+      repositories: GitHubRepository[];
+    }>
+  >((groups, repo) => {
+    let group = groups.find((item) => item.installationId === repo.installation_id);
+    if (!group) {
+      group = {
+        installationId: repo.installation_id,
+        label: repo.account_login,
+        detail: repo.account_type ?? "GitHub account",
+        repositories: [],
+      };
+      groups.push(group);
+    }
+    group.repositories.push(repo);
+    return groups;
+  }, []);
   const resolvedGithubAppOpen =
     githubAppOpen ?? (githubAppStatus.isSuccess ? !githubConfigured : false);
 
@@ -106,7 +154,8 @@ function HomePage() {
   }, [githubAppOpen, githubAppStatus.isSuccess, githubConfigured]);
 
   const mutation = useMutation({
-    mutationFn: ({ prompt, resources }: CreateRunInput) => createRun(prompt, resources),
+    mutationFn: ({ prompt, resources, reasoningEffort }: CreateRunInput) =>
+      createRun(prompt, resources, reasoningEffort),
     onMutate: () => setPending(true),
     onSuccess: async (run) => {
       rememberRun({ id: run.id, prompt: run.prompt, createdAt: run.created_at });
@@ -138,6 +187,16 @@ function HomePage() {
   }
 
   function toggleInstalledRepo(repo: GitHubRepository) {
+    if (
+      selectedInstallationId !== null &&
+      selectedInstallationId !== repo.installation_id &&
+      !selectedRepoIds.has(repo.id)
+    ) {
+      toast.info("This run uses one GitHub token", {
+        description: "Clear the selected repositories to choose repositories from another account.",
+      });
+      return;
+    }
     setSelectedRepoIds((current) => {
       const next = new Set(current);
       if (next.has(repo.id)) {
@@ -210,7 +269,7 @@ function HomePage() {
       });
       return;
     }
-    mutation.mutate({ prompt, resources });
+    mutation.mutate({ prompt, resources, reasoningEffort });
   }
 
   async function startGitHubAppManifestFlow() {
@@ -305,54 +364,85 @@ function HomePage() {
                   refresh.
                 </div>
               ) : (
-                <div className="max-h-64 overflow-auto rounded-md border border-[color:var(--color-border)]">
-                  {installedRepositories.map((repo) => {
-                    const checked = selectedRepoIds.has(repo.id);
-                    return (
-                      <div
-                        key={`${repo.installation_id}:${repo.id}`}
-                        className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-b border-[color:var(--color-border)] p-2 last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_8rem]"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleInstalledRepo(repo)}
-                          disabled={pending}
-                          aria-label={`Select ${repo.full_name}`}
-                          className="mt-1 size-4 accent-[color:var(--color-brand)]"
-                        />
-                        <div className="min-w-0">
-                          <div className="flex min-w-0 flex-wrap items-center gap-2">
-                            <span className="truncate text-sm font-medium">{repo.full_name}</span>
-                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[11px] text-[color:var(--color-fg-subtle)]">
-                              {repo.private ? <LockIcon className="size-3" /> : null}
-                              {repo.private ? "Private" : "Public"}
-                            </span>
-                          </div>
-                          <div className="mt-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
-                            {repo.account_login}
-                            {repo.account_type ? ` · ${repo.account_type}` : ""} · default{" "}
-                            {repo.default_branch}
-                          </div>
-                        </div>
-                        {checked ? (
-                          <div className="relative col-start-2 sm:col-start-auto">
-                            <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-[color:var(--color-fg-subtle)]" />
-                            <Input
-                              value={selectedRepoRefs[repo.id] ?? repo.default_branch}
-                              onChange={(event) =>
-                                updateInstalledRepoRef(repo.id, event.target.value)
-                              }
-                              disabled={pending}
-                              placeholder={repo.default_branch}
-                              aria-label={`${repo.full_name} ref`}
-                              className="h-8 pl-7 text-xs"
-                            />
-                          </div>
-                        ) : null}
+                <div className="max-h-72 overflow-auto rounded-md border border-[color:var(--color-border)]">
+                  {repositoryGroups.map((group) => (
+                    <div key={group.installationId}>
+                      <div className="flex items-center justify-between border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1.5 text-xs text-[color:var(--color-fg-subtle)]">
+                        <span className="truncate font-medium text-[color:var(--color-fg-muted)]">
+                          {group.label}
+                        </span>
+                        <span className="shrink-0">
+                          {group.detail} · {group.repositories.length} repo
+                          {group.repositories.length === 1 ? "" : "s"}
+                        </span>
                       </div>
-                    );
-                  })}
+                      {group.repositories.map((repo) => {
+                        const checked = selectedRepoIds.has(repo.id);
+                        const blocked =
+                          selectedInstallationId !== null &&
+                          selectedInstallationId !== repo.installation_id &&
+                          !checked;
+                        const row = (
+                          <div
+                            className={
+                              blocked
+                                ? "grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-b border-[color:var(--color-border)] p-2 opacity-50 last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_8rem]"
+                                : "grid grid-cols-[auto_minmax(0,1fr)] gap-3 border-b border-[color:var(--color-border)] p-2 last:border-b-0 sm:grid-cols-[auto_minmax(0,1fr)_8rem]"
+                            }
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleInstalledRepo(repo)}
+                              disabled={pending || blocked}
+                              aria-label={`Select ${repo.full_name}`}
+                              className="mt-1 size-4 accent-[color:var(--color-brand)]"
+                            />
+                            <div className="min-w-0">
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <span className="truncate text-sm font-medium">
+                                  {repo.full_name}
+                                </span>
+                                <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[11px] text-[color:var(--color-fg-subtle)]">
+                                  {repo.private ? <LockIcon className="size-3" /> : null}
+                                  {repo.private ? "Private" : "Public"}
+                                </span>
+                              </div>
+                              <div className="mt-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+                                default {repo.default_branch}
+                              </div>
+                            </div>
+                            {checked ? (
+                              <div className="relative col-start-2 sm:col-start-auto">
+                                <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-[color:var(--color-fg-subtle)]" />
+                                <Input
+                                  value={selectedRepoRefs[repo.id] ?? repo.default_branch}
+                                  onChange={(event) =>
+                                    updateInstalledRepoRef(repo.id, event.target.value)
+                                  }
+                                  disabled={pending}
+                                  placeholder={repo.default_branch}
+                                  aria-label={`${repo.full_name} ref`}
+                                  className="h-8 pl-7 text-xs"
+                                />
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                        return blocked ? (
+                          <Tooltip key={`${repo.installation_id}:${repo.id}`}>
+                            <TooltipTrigger asChild>{row}</TooltipTrigger>
+                            <TooltipContent className="max-w-xs">
+                              This run uses one GitHub token. Start another run to use
+                              repositories from this account.
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <div key={`${repo.installation_id}:${repo.id}`}>{row}</div>
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -521,8 +611,9 @@ function HomePage() {
               <CollapsibleContent className="pt-2">
                 {manualRepos.length === 0 ? (
                   <p className="px-2 pb-1 text-xs text-[color:var(--color-fg-subtle)]">
-                    Add HTTPS Git repositories alongside any repositories selected from the
-                    GitHub App list.
+                    Add public or externally authenticated HTTPS Git repositories alongside
+                    GitHub App selections. App token auth only applies to installed repositories
+                    selected above.
                   </p>
                 ) : (
                   <div className="space-y-2">
@@ -574,6 +665,13 @@ function HomePage() {
             placeholder="Describe a task for the agent..."
             submitLabel={pending ? "Starting" : "Send"}
             examples={EXAMPLES}
+            controlsBeforeSubmit={
+              <ModelPicker
+                value={reasoningEffort}
+                disabled={pending}
+                onChange={setReasoningEffort}
+              />
+            }
             onSubmit={submitRun}
           />
         </section>
@@ -586,6 +684,71 @@ function HomePage() {
         </section>
       </main>
     </>
+  );
+}
+
+function ModelPicker({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: IntelligenceEffort;
+  disabled?: boolean;
+  onChange: (value: IntelligenceEffort) => void;
+}) {
+  const selected = INTELLIGENCE_OPTIONS.find((option) => option.value === value);
+  const label = selected?.label ?? "High";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={disabled}
+          aria-label="Model and intelligence"
+          className="h-8 gap-1 rounded-full px-2.5 text-xs text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]"
+        >
+          <span className="font-medium text-[color:var(--color-fg)]">5.5</span>
+          <span>{label}</span>
+          <ChevronDownIcon className="size-3" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        side="top"
+        sideOffset={8}
+        className="w-52 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl"
+      >
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">
+          Intelligence
+        </DropdownMenuLabel>
+        {INTELLIGENCE_OPTIONS.map((option) => (
+          <DropdownMenuItem
+            key={option.value}
+            onSelect={() => onChange(option.value)}
+            className="h-8 cursor-pointer rounded-md px-2 text-sm text-[color:var(--color-fg)] focus:bg-[color:var(--color-surface-2)]"
+          >
+            <span>{option.label}</span>
+            {option.value === value ? (
+              <CheckIcon className="ml-auto size-4 text-[color:var(--color-fg)]" />
+            ) : null}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator className="my-2 bg-[color:var(--color-border)]" />
+        <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">
+          Model
+        </DropdownMenuLabel>
+        <DropdownMenuItem
+          disabled
+          className="h-8 rounded-md px-2 text-sm text-[color:var(--color-fg)] opacity-100"
+        >
+          <span>GPT-5.5</span>
+          <CheckIcon className="ml-auto size-4 text-[color:var(--color-fg)]" />
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

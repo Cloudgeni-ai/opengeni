@@ -7,6 +7,7 @@ from infra_agent_platform.temporal.contracts import WorkflowRunInput
 from infra_agent_platform.temporal.workflows import (
     _manifest_with_repository_resources,
     _manifest_with_sandbox_environment,
+    _next_turn_input,
     _normalize_manifest_path_keys,
     _processed_sandbox_manifest,
     _sandbox_options_for_request,
@@ -87,6 +88,13 @@ def test_sandbox_environment_merges_into_processed_manifest() -> None:
     assert manifest.environment.value["GH_TOKEN"] == "token"
 
 
+def test_workflow_agent_applies_reasoning_effort() -> None:
+    agent = build_sandbox_agent(model="gpt-5.5", reasoning_effort="xhigh")
+
+    assert agent.model_settings.reasoning is not None
+    assert agent.model_settings.reasoning.effort == "xhigh"
+
+
 def test_sandbox_options_follow_provider() -> None:
     modal = _sandbox_options_for_request(
         WorkflowRunInput(
@@ -96,6 +104,7 @@ def test_sandbox_options_follow_provider() -> None:
             sandbox_provider="modal",
             sandbox_app_name="infra-agents",
             sandbox_timeout=123,
+            sandbox_create_timeout=456,
         )
     )
     docker = _sandbox_options_for_request(
@@ -112,6 +121,7 @@ def test_sandbox_options_follow_provider() -> None:
     assert modal.type == "modal"
     assert modal.app_name == "infra-agents"
     assert modal.timeout == 123
+    assert modal.sandbox_create_timeout_s == 456
     assert docker.type == "docker"
     assert docker.image == "infra-agents-sandbox:local"
     assert docker.exposed_ports == (3000,)
@@ -129,3 +139,14 @@ def test_docker_sandbox_options_default_to_local_image() -> None:
 
     assert docker.type == "docker"
     assert docker.image == "infra-agents-sandbox:local"
+
+
+def test_next_turn_input_preserves_previous_conversation() -> None:
+    assert _next_turn_input(None, "start") == "start"
+
+    previous = [{"role": "user", "content": "first"}]
+    assert _next_turn_input(previous, "follow up") == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "follow up"},
+    ]
+    assert previous == [{"role": "user", "content": "first"}]

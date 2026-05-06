@@ -73,9 +73,10 @@ def test_api_creates_run_with_repository_resources() -> None:
 def test_api_rejects_missing_repository_ref_before_dispatch(
     monkeypatch,
 ) -> None:
-    async def ref_exists(uri: str, ref: str) -> bool:
+    async def ref_exists(uri: str, ref: str, *, token: str | None = None) -> bool:
         assert uri == "https://github.com/langchain-ai/langchain.git"
         assert ref == "main"
+        assert token is None
         return False
 
     monkeypatch.setattr(api_app, "_repository_ref_exists", ref_exists)
@@ -103,6 +104,144 @@ def test_api_rejects_missing_repository_ref_before_dispatch(
 
     assert created.status_code == 422
     assert "repository ref not found" in created.json()["detail"]
+
+
+def test_api_rejects_mixed_github_app_installations_before_dispatch() -> None:
+    repository = InMemoryRunRepository()
+    app = create_app(
+        settings=Settings(environment="test", enable_temporal_dispatch=True),
+        repository=repository,
+        dispatcher=_DispatchingStub(),
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/runs",
+            json={
+                "prompt": "Inspect these repositories",
+                "resources": [
+                    {
+                        "kind": "repository",
+                        "uri": "https://github.com/cloudgeni-ai/infra-one",
+                        "metadata": {
+                            "ref": "main",
+                            "github_installation_id": 7,
+                            "github_repository_id": 101,
+                        },
+                    },
+                    {
+                        "kind": "repository",
+                        "uri": "https://github.com/cloudgeni-ai/infra-two",
+                        "metadata": {
+                            "ref": "main",
+                            "github_installation_id": 8,
+                            "github_repository_id": 102,
+                        },
+                    },
+                ],
+            },
+        )
+
+    assert created.status_code == 422
+    assert "must belong to one installation" in created.json()["detail"]
+
+
+def test_api_rejects_mixed_github_app_installations_without_dispatch() -> None:
+    repository = InMemoryRunRepository()
+    app = create_app(
+        settings=Settings(environment="test", enable_temporal_dispatch=False),
+        repository=repository,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/runs",
+            json={
+                "prompt": "Inspect these repositories",
+                "resources": [
+                    {
+                        "kind": "repository",
+                        "uri": "https://github.com/cloudgeni-ai/infra-one",
+                        "metadata": {
+                            "ref": "main",
+                            "github_installation_id": 7,
+                            "github_repository_id": 101,
+                        },
+                    },
+                    {
+                        "kind": "repository",
+                        "uri": "https://github.com/cloudgeni-ai/infra-two",
+                        "metadata": {
+                            "ref": "main",
+                            "github_installation_id": 8,
+                            "github_repository_id": 102,
+                        },
+                    },
+                ],
+            },
+        )
+
+    assert created.status_code == 422
+    assert "must belong to one installation" in created.json()["detail"]
+
+
+def test_api_validates_github_app_repository_refs_with_installation_token(
+    monkeypatch,
+) -> None:
+    async def create_token(
+        settings: Settings,
+        *,
+        installation_id: int,
+        repository_ids: tuple[int, ...],
+    ) -> str:
+        assert settings.github_app_id == "123"
+        assert installation_id == 7
+        assert repository_ids == (101,)
+        return "installation-token"
+
+    async def ref_exists(uri: str, ref: str, *, token: str | None = None) -> bool:
+        assert uri == "https://github.com/cloudgeni-ai/infra-one.git"
+        assert ref == "main"
+        assert token == "installation-token"
+        return True
+
+    monkeypatch.setattr(api_app, "create_github_app_installation_token", create_token)
+    monkeypatch.setattr(api_app, "_repository_ref_exists", ref_exists)
+    repository = InMemoryRunRepository()
+    app = create_app(
+        settings=Settings(
+            environment="test",
+            enable_temporal_dispatch=True,
+            github_app_id="123",
+            github_client_id="Iv1.client",
+            github_client_secret="client-secret",
+            github_app_slug="infra-agents",
+            github_app_private_key="private-key",
+        ),
+        repository=repository,
+        dispatcher=_DispatchingStub(),
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/v1/runs",
+            json={
+                "prompt": "Inspect this repository",
+                "resources": [
+                    {
+                        "kind": "repository",
+                        "uri": "https://github.com/cloudgeni-ai/infra-one",
+                        "metadata": {
+                            "ref": "main",
+                            "github_installation_id": 7,
+                            "github_repository_id": 101,
+                        },
+                    }
+                ],
+            },
+        )
+
+    assert created.status_code == 202
 
 
 def test_api_returns_404_for_missing_run() -> None:

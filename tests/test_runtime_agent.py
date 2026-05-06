@@ -14,3 +14,12 @@ def test_openai_agent_runtime_builds_sandbox_agent() -> None:
     assert inst is not None
     assert ".agents/" in str(inst) or ".agents" in str(inst)
     assert ".agents/checkov/SKILL.md" in str(inst)
+    assert "gh pr create" in str(inst)
+
+
+def test_openai_agent_runtime_applies_reasoning_effort() -> None:
+    agent = build_sandbox_agent(model="gpt-5.5", reasoning_effort="high")
+
+    assert agent.model == "gpt-5.5"
+    assert agent.model_settings.reasoning is not None
+    assert agent.model_settings.reasoning.effort == "high"

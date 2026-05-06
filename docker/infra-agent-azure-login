@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+client_id="${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}"
+client_secret="${AZURE_CLIENT_SECRET:-${ARM_CLIENT_SECRET:-}}"
+tenant_id="${AZURE_TENANT_ID:-${ARM_TENANT_ID:-}}"
+subscription_id="${AZURE_SUBSCRIPTION_ID:-${ARM_SUBSCRIPTION_ID:-}}"
+
+if [[ -z "$client_id" || -z "$client_secret" || -z "$tenant_id" ]]; then
+  echo "Azure service-principal env vars are not set. Provide AZURE_CLIENT_ID/AZURE_CLIENT_SECRET/AZURE_TENANT_ID or matching ARM_* values." >&2
+  exit 2
+fi
+
+if ! az account show --only-show-errors >/dev/null 2>&1; then
+  az login \
+    --service-principal \
+    --username "$client_id" \
+    --password "$client_secret" \
+    --tenant "$tenant_id" \
+    --allow-no-subscriptions \
+    --only-show-errors \
+    --output none
+fi
+
+if [[ -n "$subscription_id" ]]; then
+  az account set --subscription "$subscription_id" --only-show-errors
+fi

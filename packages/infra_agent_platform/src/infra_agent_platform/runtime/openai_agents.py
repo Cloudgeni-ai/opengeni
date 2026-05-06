@@ -1,6 +1,8 @@
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
+from agents import ModelSettings
+from agents.model_settings import Reasoning
 from agents.sandbox import Manifest, SandboxAgent
 from agents.sandbox.capabilities import Filesystem, Shell, Skills
 from agents.sandbox.capabilities.filesystem import FilesystemToolSet
@@ -24,11 +26,26 @@ def _configure_filesystem_tools(toolset: FilesystemToolSet) -> None:
     toolset.apply_patch = cast(Any, toolset.view_image)
 
 
-def build_sandbox_agent(*, model: str, name: str = "Infra Agent") -> SandboxAgent[None]:
+ReasoningEffortValue = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def build_sandbox_agent(
+    *,
+    model: str,
+    reasoning_effort: str | None = None,
+    name: str = "Infra Agent",
+) -> SandboxAgent[None]:
     manifest = Manifest(root="/workspace")
+    effort = cast(ReasoningEffortValue, reasoning_effort)
+    model_settings = (
+        ModelSettings(reasoning=Reasoning(effort=effort))
+        if reasoning_effort is not None
+        else ModelSettings()
+    )
     return SandboxAgent(
         name=name,
         model=model,
+        model_settings=model_settings,
         instructions=(
             "You are a standalone infra agent. Work inside the sandbox workspace, "
             "use files and shell commands when they are useful, and return a concise "
@@ -39,7 +56,13 @@ def build_sandbox_agent(*, model: str, name: str = "Infra Agent") -> SandboxAgen
             "repository resources, when provided, are mounted under "
             "`repos/<org-or-path>/<repo-name>/`; "
             "use a shell `ls` or the filesystem tools to confirm paths before assuming "
-            "files are missing."
+            "files are missing. When asked to create a pull request, complete the full "
+            "workflow yourself: make the requested change, create a branch, commit, push, "
+            "and run `gh pr create` with `gh -R owner/repo` when needed. Do not stop by "
+            "printing commands for the user unless a command fails because a required "
+            "credential or permission is unavailable. Before using Azure CLI, run "
+            "`infra-agent-azure-login` once when AZURE_* or ARM_* service-principal "
+            "environment variables are present; Terraform can use ARM_* directly."
         ),
         default_manifest=manifest,
         capabilities=[

@@ -32,6 +32,8 @@ export interface ResourceRef {
   metadata: Record<string, unknown>;
 }
 
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface AgentRun {
   id: string;
   status: AgentRunStatus;

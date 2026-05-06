@@ -8,8 +8,10 @@ class WorkflowRunInput:
     prompt: str
     model: str
     sandbox_provider: str
+    reasoning_effort: str | None = None
     sandbox_app_name: str = ""
     sandbox_timeout: int = 300
+    sandbox_create_timeout: float | None = None
     sandbox_image_ref: str | None = None
     sandbox_exposed_ports: tuple[int, ...] = ()
     sandbox_environment: dict[str, str] = field(default_factory=dict)

@@ -1,6 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from temporalio import workflow
 
@@ -23,6 +23,8 @@ from infra_agent_platform.temporal.contracts import (
     WorkflowRunProgress,
     WorkflowRunResult,
 )
+
+RUNNER_INPUT = str | list[dict[str, Any]]
 
 
 def _normalize_manifest_path_keys(manifest: Manifest) -> Manifest:
@@ -111,8 +113,27 @@ def _sandbox_options_for_request(
         )
     return ModalSandboxClientOptions(
         app_name=request.sandbox_app_name,
+        sandbox_create_timeout_s=request.sandbox_create_timeout,
         timeout=request.sandbox_timeout,
     )
+
+
+def _next_turn_input(
+    previous_input: list[dict[str, Any]] | None,
+    prompt: str,
+) -> RUNNER_INPUT:
+    if previous_input is None:
+        return prompt
+    return [*previous_input, {"role": "user", "content": prompt}]
+
+
+def _input_list_from_result(result: RunResult) -> list[dict[str, Any]]:
+    return [dict(item) for item in result.to_input_list()]
+
+
+def _sandbox_resume_state_from_result(result: RunResult) -> dict[str, object] | None:
+    resume_state = getattr(result, "_sandbox_resume_state", None)
+    return dict(resume_state) if isinstance(resume_state, dict) else None
 
 
 @workflow.defn
@@ -125,6 +146,8 @@ class InfraAgentRunWorkflow:
         self._turn = 0
         self._last_output: str | None = None
         self._run_id: str | None = None
+        self._input_items: list[dict[str, Any]] | None = None
+        self._sandbox_resume_state: dict[str, object] | None = None
 
     @workflow.signal
     def submit_follow_up(self, prompt: str) -> None:
@@ -152,6 +175,7 @@ class InfraAgentRunWorkflow:
     @workflow.run
     async def run(self, request: WorkflowRunInput) -> WorkflowRunResult:
         self._run_id = request.run_id
+        stateful_followups = workflow.patched("stateful-sandbox-followups-v1")
         await self._publish_event(
             request.run_id,
             EventType.RUN_STARTED,
@@ -176,7 +200,17 @@ class InfraAgentRunWorkflow:
                     )
                     return WorkflowRunResult(run_id=request.run_id, final_output=last_output)
                 self._turn += 1
-                result = await self._run_agent_turn(request, prompt)
+                turn_input = (
+                    _next_turn_input(self._input_items, prompt)
+                    if stateful_followups
+                    else prompt
+                )
+                result = await self._run_agent_turn(request, turn_input)
+                if stateful_followups:
+                    self._input_items = _input_list_from_result(result)
+                    resume_state = _sandbox_resume_state_from_result(result)
+                    if resume_state is not None:
+                        self._sandbox_resume_state = resume_state
                 last_output = str(result.final_output)
                 self._last_output = last_output
                 await self._publish_event(
@@ -233,20 +267,32 @@ class InfraAgentRunWorkflow:
             )
             raise
 
-    async def _run_agent_turn(self, request: WorkflowRunInput, prompt: str) -> RunResult:
-        agent = build_sandbox_agent(model=request.model)
+    async def _run_agent_turn(self, request: WorkflowRunInput, prompt: RUNNER_INPUT) -> RunResult:
+        agent = build_sandbox_agent(
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+        )
         sandbox_options = _sandbox_options_for_request(request)
-        raw = _processed_sandbox_manifest(agent)
-        processed = _normalize_manifest_path_keys(raw) if raw is not None else None
-        processed = _manifest_with_repository_resources(processed, request.resources)
-        processed = _manifest_with_sandbox_environment(processed, request.sandbox_environment)
+        sandbox_client = temporal_sandbox_client(request.sandbox_provider)
+        processed = None
+        session_state = None
+        if self._sandbox_resume_state is None:
+            raw = _processed_sandbox_manifest(agent)
+            processed = _normalize_manifest_path_keys(raw) if raw is not None else None
+            processed = _manifest_with_repository_resources(processed, request.resources)
+            processed = _manifest_with_sandbox_environment(processed, request.sandbox_environment)
+        else:
+            raw_session_state = self._sandbox_resume_state.get("session_state")
+            if isinstance(raw_session_state, dict):
+                session_state = sandbox_client.deserialize_session_state(raw_session_state)
         return await Runner.run(
             agent,
-            prompt,
+            cast(Any, prompt),
             run_config=RunConfig(
                 sandbox=SandboxRunConfig(
-                    client=temporal_sandbox_client(request.sandbox_provider),
+                    client=sandbox_client,
                     options=sandbox_options,
+                    session_state=session_state,
                     manifest=processed,
                 )
             ),

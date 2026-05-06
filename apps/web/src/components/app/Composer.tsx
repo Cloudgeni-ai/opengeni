@@ -1,6 +1,7 @@
 import { ArrowUpIcon, CommandIcon } from "lucide-react";
 import {
   forwardRef,
+  type ReactNode,
   useImperativeHandle,
   useRef,
   useState,
@@ -24,6 +25,7 @@ interface ComposerProps {
   pending?: boolean;
   autoFocus?: boolean;
   examples?: ReadonlyArray<string>;
+  controlsBeforeSubmit?: ReactNode;
   onSubmit: (prompt: string) => void;
 }
 
@@ -41,6 +43,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     pending = false,
     autoFocus = false,
     examples,
+    controlsBeforeSubmit,
     onSubmit,
   },
   handleRef,
@@ -115,21 +118,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               </>
             )}
           </span>
-          <Button
-            type="button"
-            onClick={submit}
-            disabled={!canSubmit}
-            aria-label={submitLabel}
-            size="sm"
-            className={cn(
-              "pointer-events-auto h-8 gap-1.5 rounded-md px-3",
-              "bg-[color:var(--color-brand-strong)] text-[color:var(--color-brand-fg)]",
-              "hover:bg-[color:var(--color-brand)]",
-            )}
-          >
-            <ArrowUpIcon className="size-3.5" />
-            <span className="text-xs font-medium">{submitLabel}</span>
-          </Button>
+          <div className="pointer-events-auto flex items-center gap-1.5">
+            {controlsBeforeSubmit}
+            <Button
+              type="button"
+              onClick={submit}
+              disabled={!canSubmit}
+              aria-label={submitLabel}
+              size="sm"
+              className={cn(
+                "h-8 gap-1.5 rounded-md px-3",
+                "bg-[color:var(--color-brand-strong)] text-[color:var(--color-brand-fg)]",
+                "hover:bg-[color:var(--color-brand)]",
+              )}
+            >
+              <ArrowUpIcon className="size-3.5" />
+              <span className="text-xs font-medium">{submitLabel}</span>
+            </Button>
+          </div>
         </div>
       </div>
       {examples && examples.length > 0 ? (

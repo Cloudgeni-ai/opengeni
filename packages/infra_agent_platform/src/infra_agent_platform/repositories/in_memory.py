@@ -18,12 +18,15 @@ class InMemoryRunRepository:
 
     async def create_run(self, request: AgentRunCreate) -> AgentRun:
         lifecycle = queued_run_lifecycle()
+        metadata = dict(request.metadata)
+        if request.reasoning_effort is not None:
+            metadata["reasoning_effort"] = request.reasoning_effort.value
         run = AgentRun(
             id=uuid4(),
             status=lifecycle.status,
             prompt=request.prompt,
             resources=request.resources,
-            metadata=request.metadata,
+            metadata=metadata,
             created_at=lifecycle.updated_at,
             updated_at=lifecycle.updated_at,
         )

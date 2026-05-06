@@ -4,6 +4,9 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
 ARG TARGETARCH
 
+COPY docker/infra-agent-git-askpass /usr/local/bin/infra-agent-git-askpass
+COPY docker/infra-agent-azure-login /usr/local/bin/infra-agent-azure-login
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash \
@@ -17,6 +20,8 @@ RUN apt-get update \
         unzip \
         wget \
     && rm -rf /var/lib/apt/lists/*
+
+RUN chmod 0755 /usr/local/bin/infra-agent-git-askpass /usr/local/bin/infra-agent-azure-login
 
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \

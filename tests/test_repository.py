@@ -20,6 +20,23 @@ async def test_sqlalchemy_repository_persists_runs_and_events(tmp_path) -> None:
     assert [event.type for event in events] == [EventType.RUN_CREATED, EventType.RUN_STARTED]
 
 
+async def test_sqlalchemy_repository_persists_reasoning_effort_in_metadata(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    engine = create_engine(f"sqlite:///{tmp_path / 'reasoning.db'}")
+    with engine.begin() as connection:
+        Base.metadata.create_all(connection)
+
+    repository = SqlAlchemyRunRepository(create_session_factory(engine))
+
+    run = await repository.create_run(
+        AgentRunCreate(prompt="Run the smoke check", reasoning_effort="high")
+    )
+    loaded = await repository.get_run(run.id)
+
+    engine.dispose()
+
+    assert loaded.metadata["reasoning_effort"] == "high"
+
+
 async def test_sqlalchemy_repository_marks_run_dispatched(tmp_path) -> None:  # type: ignore[no-untyped-def]
     engine = create_engine(f"sqlite:///{tmp_path / 'dispatch.db'}")
     with engine.begin() as connection:

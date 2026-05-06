@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 
 from agents import OpenAIProvider
 from agents.extensions.sandbox.modal import ModalImageSelector, ModalSandboxClient
@@ -11,6 +12,10 @@ from temporalio.contrib.openai_agents import (
 )
 
 from infra_agent_platform.config import Settings
+
+
+def _resolve_path_from_cwd(path: Path) -> Path:
+    return path if path.is_absolute() else Path.cwd() / path
 
 
 def resolve_temporal_sandbox_provider(settings: Settings) -> str | None:
@@ -39,11 +44,22 @@ def build_temporal_sandbox_client_provider(
 
         return SandboxClientProvider(provider, DockerSandboxClient(docker_from_env()))
 
-    image = (
-        ModalImageSelector.from_tag(settings.modal_image_ref)
-        if settings.modal_image_ref is not None
-        else None
-    )
+    image = None
+    if settings.modal_image_ref is not None:
+        image = ModalImageSelector.from_tag(settings.modal_image_ref)
+    elif settings.modal_dockerfile is not None:
+        import modal
+
+        dockerfile = _resolve_path_from_cwd(settings.modal_dockerfile)
+        context_dir = _resolve_path_from_cwd(settings.modal_docker_context_dir)
+        if not dockerfile.is_file():
+            raise ValueError(f"modal Dockerfile does not exist: {dockerfile}")
+        image = ModalImageSelector.from_image(
+            modal.Image.from_dockerfile(
+                dockerfile,
+                context_dir=context_dir,
+            )
+        )
     client = ModalSandboxClient(image=image)
     return SandboxClientProvider(provider, client)
 

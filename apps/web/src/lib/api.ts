@@ -3,6 +3,7 @@ import type {
   GitHubAppManifestStart,
   GitHubRepositoryList,
   GitHubAppStatus,
+  ReasoningEffort,
   ResourceRef,
   RunEvent,
 } from "./types";
@@ -68,12 +69,14 @@ export function fetchRunEvents(runId: string): Promise<RunEvent[]> {
 export function createRun(
   prompt: string,
   resources: ResourceRef[] = [],
+  reasoningEffort?: ReasoningEffort,
 ): Promise<AgentRun> {
   return request<AgentRun>(`/v1/runs`, {
     method: "POST",
     body: JSON.stringify({
       prompt,
       resources,
+      reasoning_effort: reasoningEffort,
     }),
   });
 }

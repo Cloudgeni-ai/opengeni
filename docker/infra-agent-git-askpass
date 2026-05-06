@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+prompt="${1:-}"
+
+case "$prompt" in
+  *Username*)
+    printf '%s\n' "${GIT_USERNAME:-x-access-token}"
+    ;;
+  *Password*)
+    printf '%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    ;;
+  *)
+    printf '%s\n' "${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    ;;
+esac
