@@ -1,6 +1,6 @@
 # Agent / automation notes (Infra Agents)
 
-This repository is a clean TypeScript/Bun stack. There is no Python API, Python worker, Alembic, or legacy run API.
+This repository is a clean TypeScript/Bun stack. The public API is session-based.
 
 When the user says **"start the dev server"**, **"spin it up"**, or **"run the full stack"**, they mean the steps under **Full local stack**.
 
@@ -50,6 +50,7 @@ Default URLs:
 - API health: `http://127.0.0.1:8000/healthz`
 - Web: `http://127.0.0.1:3000`
 - NATS monitor: `http://127.0.0.1:8222`
+- Temporal gRPC: `127.0.0.1:7233`
 
 ## Architecture Notes
 

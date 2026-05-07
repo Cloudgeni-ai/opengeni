@@ -1,4 +1,0 @@
-interface:
-  display_name: "OpenAI Agents SDK Research"
-  short_description: "Agents SDK source-grounded field guide"
-  default_prompt: "Use $openai-agents-sdk-research to answer with canonical sources, trust levels, current gaps, and implementation implications for OpenAI Agents SDK work."
