@@ -1,0 +1,19 @@
+{
+  "name": "@infra-agents/events",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@infra-agents/contracts": "workspace:*",
+    "@infra-agents/db": "workspace:*",
+    "nats": "^2.29.3"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

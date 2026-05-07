@@ -96,6 +96,7 @@ body {
   background-color: var(--color-bg);
   color: var(--color-fg);
   min-height: 100vh;
+  overflow-x: hidden;
   font-family: var(--font-sans);
   font-feature-settings: "cv11", "ss01", "ss03";
   -webkit-font-smoothing: antialiased;
@@ -136,6 +137,19 @@ body {
   outline: 2px solid var(--color-brand);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
+}
+
+:where(button, a[href], [role="button"], [role="menuitem"], [role="option"], summary):not(:disabled, [aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+:where(button, [role="button"], [role="menuitem"], [role="option"]):disabled,
+:where([aria-disabled="true"]) {
+  cursor: not-allowed;
+}
+
+:where(input, textarea) {
+  cursor: text;
 }
 
 /* Respect reduced motion */

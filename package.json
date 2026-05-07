@@ -1,0 +1,42 @@
+{
+  "name": "infra-agents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/api && bun run dev",
+    "dev:worker": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/worker && bun run dev",
+    "dev:web": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/web && bun run dev",
+    "db:migrate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run migrate",
+    "db:generate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run generate",
+    "typecheck": "cd packages/contracts && bun run typecheck && cd ../config && bun run typecheck && cd ../db && bun run typecheck && cd ../events && bun run typecheck && cd ../github && bun run typecheck && cd ../runtime && bun run typecheck && cd ../testing && bun run typecheck && cd ../../apps/api && bun run typecheck && cd ../worker && bun run typecheck && cd ../web && bun run typecheck",
+    "test": "bun test",
+    "test:unit": "bun test",
+    "test:integration": "bun test ./test/integration/api.integration.ts && bun test ./test/integration/db.integration.ts && bun test ./test/integration/nats.integration.ts && bun test ./test/integration/temporal-workflow.integration.ts && bun test ./test/integration/worker-activity.integration.ts",
+    "test:e2e": "bun test ./test/e2e/browser.e2e.ts && bun test ./test/e2e/sandbox.e2e.ts",
+    "test:live": "bun test ./test/live/*.live.ts",
+    "test:all": "bun run test:unit && bun run test:integration && bun run test:e2e",
+    "check": "bun run typecheck && bun run test:unit && cd apps/web && bun run build",
+    "check:full": "bun run check && bun run test:integration && bun run test:e2e"
+  },
+  "devDependencies": {
+    "@infra-agents/api": "workspace:*",
+    "@infra-agents/config": "workspace:*",
+    "@infra-agents/contracts": "workspace:*",
+    "@infra-agents/db": "workspace:*",
+    "@infra-agents/events": "workspace:*",
+    "@infra-agents/github": "workspace:*",
+    "@infra-agents/runtime": "workspace:*",
+    "@infra-agents/testing": "workspace:*",
+    "@infra-agents/worker": "workspace:*",
+    "@temporalio/client": "^1.17.0",
+    "@temporalio/worker": "^1.17.0",
+    "@types/bun": "^1.3.4",
+    "playwright": "^1.57.0",
+    "typescript": "^6.0.3"
+  }
+}

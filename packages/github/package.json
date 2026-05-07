@@ -1,0 +1,19 @@
+{
+  "name": "@infra-agents/github",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@infra-agents/config": "workspace:*",
+    "@infra-agents/contracts": "workspace:*",
+    "jose": "^6.1.3"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

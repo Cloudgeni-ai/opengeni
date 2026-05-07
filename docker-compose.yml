@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: infra_agents
+      POSTGRES_USER: infra_agents
+      POSTGRES_PASSWORD: infra_agents
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infra_agents -d infra_agents"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2-alpine
+    command: ["-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.28
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: infra_agents
+      POSTGRES_PWD: infra_agents
+      POSTGRES_SEEDS: postgres
+      BIND_ON_IP: 0.0.0.0
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "7233:7233"
+
+volumes:
+  postgres-data:

@@ -1,0 +1,121 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Connection, Client } from "@temporalio/client";
+import { NativeConnection, Worker } from "@temporalio/worker";
+import { startTestServices, type TestServices, waitFor } from "@infra-agents/testing";
+
+describe("Temporal workflow integration", () => {
+  let services: TestServices;
+  let connection: Connection;
+  let nativeConnection: NativeConnection;
+
+  beforeAll(async () => {
+    services = await startTestServices({ temporal: true });
+    connection = await Connection.connect({ address: services.temporalHost });
+    nativeConnection = await NativeConnection.connect({ address: services.temporalHost });
+  }, 300_000);
+
+  afterAll(async () => {
+    await connection?.close();
+    await nativeConnection?.close();
+    await services?.down();
+  }, 60_000);
+
+  test("dispatches initial and follow-up user message activities", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const calls: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      runAgentSegment: async (input: unknown) => {
+        calls.push(input);
+        return { status: "idle" };
+      },
+      failSession: async () => undefined,
+      cancelSession: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await waitFor(() => calls.length === 1);
+      await handle.signal("userMessage", "event-2");
+      await waitFor(() => calls.length === 2);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
+
+  test("waits for approval before resuming a requires_action segment", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const calls: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      runAgentSegment: async (input: unknown) => {
+        calls.push(input);
+        return { status: calls.length === 1 ? "requires_action" : "idle" };
+      },
+      failSession: async () => undefined,
+      cancelSession: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await waitFor(() => calls.length === 1);
+      await Bun.sleep(300);
+      expect(calls).toHaveLength(1);
+      await handle.signal("approvalDecision", "approval-event");
+      await waitFor(() => calls.length === 2);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
+
+  test("does not retry failed agent activities", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    let attempts = 0;
+    const failures: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      runAgentSegment: async () => {
+        attempts += 1;
+        throw new Error("boom");
+      },
+      failSession: async (input: unknown) => {
+        failures.push(input);
+      },
+      cancelSession: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(attempts).toBe(1);
+      expect(failures).toHaveLength(1);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
+});
+
+async function testWorker(nativeConnection: NativeConnection, taskQueue: string, activities: Record<string, (...args: any[]) => Promise<unknown>>): Promise<Worker> {
+  return await Worker.create({
+    connection: nativeConnection,
+    namespace: "default",
+    taskQueue,
+    workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+    activities,
+  });
+}

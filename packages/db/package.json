@@ -1,0 +1,22 @@
+{
+  "name": "@infra-agents/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "generate": "drizzle-kit generate",
+    "migrate": "bun src/migrate.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@infra-agents/contracts": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.31.8",
+    "typescript": "^6.0.3"
+  }
+}
