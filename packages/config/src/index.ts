@@ -35,7 +35,7 @@ const SettingsSchema = z.object({
   temporalTaskQueue: z.string().default("infra-agent-runs-ts"),
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
-  corsAllowOriginRegex: z.string().default(String.raw`https?://(localhost|127\.0\.0\.1)(:\d+)?`),
+  corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),

@@ -68,7 +68,7 @@ export function createApp(deps: AppDependencies): Hono {
       if (!origin) {
         return null;
       }
-      return new RegExp(settings.corsAllowOriginRegex).test(origin) ? origin : null;
+      return allowedCorsOrigin(settings.corsAllowOriginRegex, origin) ? origin : null;
     },
   }));
 
@@ -295,9 +295,7 @@ export async function sseSessionStream(db: Database, bus: EventBus, sessionId: s
         }
       });
 
-      for (const event of await listSessionEvents(db, sessionId, after, 1000)) {
-        await send(event);
-      }
+      await replaySessionEvents((cursor, limit) => listSessionEvents(db, sessionId, cursor, limit), send, after);
       replaying = false;
       for (const event of buffered.sort((a, b) => a.sequence - b.sequence)) {
         await send(event);
@@ -321,6 +319,32 @@ export async function sseSessionStream(db: Database, bus: EventBus, sessionId: s
       Connection: "keep-alive",
     },
   });
+}
+
+export function allowedCorsOrigin(pattern: string, origin: string): boolean {
+  return new RegExp(`^(?:${pattern})$`).test(origin);
+}
+
+export async function replaySessionEvents(
+  loadPage: (after: number, limit: number) => Promise<SessionEvent[]>,
+  send: (event: SessionEvent) => Promise<void>,
+  after: number,
+  pageSize = 1000,
+): Promise<void> {
+  let cursor = after;
+  while (true) {
+    const page = await loadPage(cursor, pageSize);
+    if (page.length === 0) {
+      return;
+    }
+    for (const event of page.sort((a, b) => a.sequence - b.sequence)) {
+      await send(event);
+      cursor = Math.max(cursor, event.sequence);
+    }
+    if (page.length < pageSize) {
+      return;
+    }
+  }
 }
 
 export function workflowIdForSession(sessionId: string): string {
