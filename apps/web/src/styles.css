@@ -3,6 +3,8 @@
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 
+@source "../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------------------------------------------------------------------
@@ -80,6 +82,18 @@
   --color-sidebar-accent-foreground: var(--color-fg);
   --color-sidebar-border: var(--color-border);
   --color-sidebar-ring: var(--color-brand);
+
+  --background: var(--color-bg);
+  --foreground: var(--color-fg);
+  --card: var(--color-surface);
+  --card-foreground: var(--color-fg);
+  --muted: var(--color-surface-2);
+  --muted-foreground: var(--color-fg-muted);
+  --border: var(--color-border);
+  --input: var(--color-surface-2);
+  --primary: var(--color-brand);
+  --primary-foreground: var(--color-brand-fg);
+  --radius: var(--radius-md);
 }
 
 /* ---------------------------------------------------------------------------
@@ -178,6 +192,35 @@ body {
 
 .message-in {
   animation: message-in 180ms ease-out both;
+}
+
+.markdown-stream {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.markdown-stream > :first-child {
+  margin-top: 0;
+}
+
+.markdown-stream > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-stream-compact {
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+}
+
+.markdown-stream [data-streamdown-table-wrapper],
+.markdown-stream [data-sd-table-wrapper] {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown-stream table {
+  width: max-content;
+  min-width: min(100%, 32rem);
 }
 
 /* Pending dots */

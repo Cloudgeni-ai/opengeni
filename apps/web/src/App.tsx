@@ -68,6 +68,7 @@ import type {
   SessionStatus,
 } from "./types";
 import { cn } from "@/lib/utils";
+import { Streamdown, type StreamdownComponents } from "./vendor/streamdown-runtime.js";
 
 const streamEventTypes = [
   "session.created",
@@ -886,7 +887,7 @@ function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
   }, [turns]);
 
   return (
-    <div className="space-y-6" data-testid="session-timeline">
+    <div className="space-y-3.5" data-testid="session-timeline">
       {turns.map((turn) => turn.kind === "user"
         ? <UserMessage key={turn.id} turn={turn} />
         : turn.kind === "assistant"
@@ -899,9 +900,9 @@ function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
 
 function UserMessage({ turn }: { turn: ConversationUserTurn }) {
   return (
-    <article className="message-in flex justify-end gap-3">
-      <div className="max-w-[82%] rounded-2xl rounded-br-sm border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)] px-4 py-2.5 text-[15px] leading-relaxed">
-        <ProseText text={turn.text} />
+    <article className="message-in flex justify-end gap-2.5" data-testid="timeline-user">
+      <div className="max-w-[82%] rounded-xl rounded-br-sm border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/75 px-3 py-2 text-[14px] leading-6">
+        <MarkdownText text={turn.text} compact />
       </div>
       <AvatarBubble variant="user" />
     </article>
@@ -911,12 +912,12 @@ function UserMessage({ turn }: { turn: ConversationUserTurn }) {
 function AssistantMessage({ turn }: { turn: ConversationAssistantTurn }) {
   const hasText = turn.text.trim().length > 0;
   return (
-    <article className="message-in flex justify-start gap-3">
+    <article className="message-in flex justify-start gap-2.5" data-testid="timeline-assistant">
       <AvatarBubble variant="assistant" />
-      <div className="min-w-0 max-w-[88%] space-y-3 text-[15px] leading-relaxed">
+      <div className="min-w-0 max-w-[88%] pt-0.5 text-[15px] leading-7">
         {hasText ? (
-          <div className="rounded-2xl rounded-bl-sm border border-transparent px-1 py-1 text-[color:var(--color-fg)]">
-            <ProseText text={turn.text} />
+          <div className="text-[color:var(--color-fg)]" data-testid="assistant-markdown">
+            <MarkdownText text={turn.text} streaming={turn.status === "running" || turn.status === "pending"} />
             {(turn.status === "running" || turn.status === "pending") ? <StreamingCursor /> : null}
           </div>
         ) : turn.status === "failed" ? (
@@ -935,7 +936,7 @@ function AssistantMessage({ turn }: { turn: ConversationAssistantTurn }) {
 
 function ActivityMessage({ turn }: { turn: ConversationActivityTurn }) {
   return (
-    <article className="message-in flex justify-start gap-3">
+    <article className="message-in flex justify-start gap-2.5" data-testid="timeline-activity" data-activity-status={turn.status}>
       <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center">
         <span className="size-1.5 rounded-full bg-[color:var(--color-border-strong)]" />
       </div>
@@ -966,33 +967,33 @@ function TracePanel(props: {
   const summary = traceSummary(props.trace);
 
   return (
-    <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/50">
+    <div className="min-w-0">
       <button
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-3 px-3 py-2 text-left"
+        className="flex w-full items-center gap-2.5 py-1 text-left text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]"
       >
         <span className={cn(
-          "flex size-6 shrink-0 items-center justify-center rounded-full border",
+          "flex size-5 shrink-0 items-center justify-center rounded-full border",
           failed
             ? "border-red-400/35 bg-red-500/10 text-red-300"
             : running
               ? "border-amber-400/35 bg-amber-500/10 text-amber-300"
               : "border-emerald-400/35 bg-emerald-500/10 text-emerald-300",
         )}>
-          {failed ? <AlertTriangleIcon className="size-3.5" /> : running ? <CircleDashedIcon className="size-3.5 animate-spin" /> : <CheckCircle2Icon className="size-3.5" />}
+          {failed ? <AlertTriangleIcon className="size-3" /> : running ? <CircleDashedIcon className="size-3 animate-spin" /> : <CheckCircle2Icon className="size-3" />}
         </span>
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-xs font-medium text-[color:var(--color-fg)]">
+        <span className="min-w-0 flex flex-1 items-baseline gap-2">
+          <span className="shrink-0 text-xs font-medium text-[color:var(--color-fg)]">
             {running ? "Working" : failed ? "Action failed" : "Agent activity"}
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-[color:var(--color-fg-subtle)]">{summary}</span>
+          <span className="truncate text-[11px] text-[color:var(--color-fg-subtle)]">{summary}</span>
         </span>
-        <ChevronDownIcon className={cn("size-4 shrink-0 text-[color:var(--color-fg-subtle)] transition-transform", open && "rotate-180")} />
+        <ChevronDownIcon className={cn("size-3.5 shrink-0 text-[color:var(--color-fg-subtle)] transition-transform", open && "rotate-180")} />
       </button>
       {open ? (
-        <div className="space-y-2 border-t border-[color:var(--color-border)] px-3 py-3">
+        <div className="mt-1.5 space-y-1.5 border-l border-[color:var(--color-border)] pl-3">
           {props.trace.map((item) => <TraceItemView key={item.id} item={item} />)}
         </div>
       ) : null}
@@ -1002,11 +1003,11 @@ function TracePanel(props: {
 
 function TraceItemView({ item }: { item: ConversationTraceItem }) {
   return (
-    <div className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2">
+    <div className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2">
       <div className="flex justify-center pt-0.5">
         <TraceIcon item={item} />
       </div>
-      <div className="min-w-0 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
+      <div className="min-w-0 py-0.5">
         <div className="flex items-center justify-between gap-3">
           <div className="truncate text-xs font-medium text-[color:var(--color-fg)]">{item.title}</div>
           <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium", traceStatusClass(item.status))}>
@@ -1014,12 +1015,12 @@ function TraceItemView({ item }: { item: ConversationTraceItem }) {
           </span>
         </div>
         {item.detail ? (
-          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-[color:var(--color-surface)]/70 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
+          <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[color:var(--color-surface)]/70 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
             {item.detail}
           </pre>
         ) : null}
         {item.output ? (
-          <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/45 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
+          <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/45 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
             {item.output}
           </pre>
         ) : null}
@@ -1059,9 +1060,61 @@ function AvatarBubble({ variant }: { variant: "assistant" | "user" }) {
   );
 }
 
-function ProseText({ text }: { text: string }) {
-  return <p className="whitespace-pre-wrap break-words">{text}</p>;
+function MarkdownText({ text, compact = false, streaming = false }: { text: string; compact?: boolean; streaming?: boolean }) {
+  return (
+    <Streamdown
+      mode={streaming ? "streaming" : "static"}
+      parseIncompleteMarkdown={streaming}
+      controls={{
+        table: { copy: true, download: false, fullscreen: false },
+        code: { copy: true, download: false },
+        mermaid: false,
+      }}
+      components={markdownComponents}
+      className={cn("markdown-stream", compact && "markdown-stream-compact")}
+    >
+      {text}
+    </Streamdown>
+  );
 }
+
+const markdownComponents: StreamdownComponents = {
+  p: ({ className, ...props }) => <p className={cn("my-1.5 first:mt-0 last:mb-0", className)} {...props} />,
+  h1: ({ className, ...props }) => <h1 className={cn("mb-2 mt-4 text-xl font-semibold leading-7 first:mt-0", className)} {...props} />,
+  h2: ({ className, ...props }) => <h2 className={cn("mb-2 mt-4 text-lg font-semibold leading-7 first:mt-0", className)} {...props} />,
+  h3: ({ className, ...props }) => <h3 className={cn("mb-1.5 mt-3 text-base font-semibold leading-6 first:mt-0", className)} {...props} />,
+  h4: ({ className, ...props }) => <h4 className={cn("mb-1 mt-3 text-sm font-semibold leading-6 first:mt-0", className)} {...props} />,
+  ul: ({ className, ...props }) => <ul className={cn("my-1.5 list-disc space-y-0.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
+  ol: ({ className, ...props }) => <ol className={cn("my-1.5 list-decimal space-y-0.5 pl-5 first:mt-0 last:mb-0", className)} {...props} />,
+  li: ({ className, ...props }) => <li className={cn("pl-0.5", className)} {...props} />,
+  blockquote: ({ className, ...props }) => (
+    <blockquote className={cn("my-2 border-l-2 border-[color:var(--color-border-strong)] pl-3 text-[color:var(--color-fg-muted)]", className)} {...props} />
+  ),
+  a: ({ className, ...props }) => (
+    <a
+      className={cn("font-medium text-[color:var(--color-brand)] underline decoration-[color:var(--color-brand)]/40 underline-offset-2 hover:decoration-[color:var(--color-brand)]", className)}
+      target="_blank"
+      rel="noreferrer noopener"
+      {...props}
+    />
+  ),
+  inlineCode: ({ className, ...props }) => (
+    <code className={cn("rounded bg-[color:var(--color-surface-2)] px-1 py-0.5 font-mono text-[0.86em] text-[color:var(--color-fg)]", className)} {...props} />
+  ),
+  pre: ({ className, ...props }) => (
+    <pre className={cn("my-2 max-w-full overflow-x-auto rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3 font-mono text-xs leading-5 text-[color:var(--color-fg-muted)] first:mt-0 last:mb-0", className)} {...props} />
+  ),
+  table: ({ className, ...props }) => (
+    <div className="my-2 max-w-full overflow-x-auto">
+      <table className={cn("min-w-full border-collapse text-left text-xs", className)} {...props} />
+    </div>
+  ),
+  thead: ({ className, ...props }) => <thead className={cn("border-b border-[color:var(--color-border)] text-[color:var(--color-fg)]", className)} {...props} />,
+  tbody: ({ className, ...props }) => <tbody className={cn("divide-y divide-[color:var(--color-border)]/70", className)} {...props} />,
+  th: ({ className, ...props }) => <th className={cn("whitespace-nowrap px-2 py-1.5 font-medium", className)} {...props} />,
+  td: ({ className, ...props }) => <td className={cn("px-2 py-1.5 align-top text-[color:var(--color-fg-muted)]", className)} {...props} />,
+  hr: ({ className, ...props }) => <hr className={cn("my-3 border-[color:var(--color-border)]", className)} {...props} />,
+};
 
 function PendingBubble() {
   return (
@@ -1439,7 +1492,7 @@ function normalizeRepositoryUrl(value: string): { host: string; repo: string } {
   return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
 }
 
-function projectConversation(session: Session, events: SessionEvent[]): ConversationTurn[] {
+export function projectConversation(session: Session, events: SessionEvent[]): ConversationTurn[] {
   const out: ConversationTurn[] = [];
   let currentMessage: ConversationAssistantTurn | null = null;
   let currentActivity: ConversationActivityTurn | null = null;

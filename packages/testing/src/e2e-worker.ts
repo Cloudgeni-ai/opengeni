@@ -60,8 +60,17 @@ function scriptedModelForScenario(scenario: string): ScriptedModel {
   if (scenario === "slow") {
     return new ScriptedModel([
       {
-        chunks: ["slow ", "stream ", "still ", "running"],
-        outputText: "slow stream still running",
+        chunks: [
+          "slow **stream**\n\n",
+          "| Name | Value |\n| --- | --- |\n| inline code | `ok` |\n\n",
+          "```ts\nconst ok = true;\n```\n\n",
+          "still ",
+          "running ",
+          "long ",
+          "enough ",
+          "to interrupt",
+        ],
+        outputText: "slow **stream**\n\n| Name | Value |\n| --- | --- |\n| inline code | `ok` |\n\n```ts\nconst ok = true;\n```\n\nstill running long enough to interrupt",
         delayMs: 1_000,
       },
     ]);

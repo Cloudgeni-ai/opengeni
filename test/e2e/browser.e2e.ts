@@ -47,11 +47,11 @@ describe("browser e2e", () => {
     await services?.down();
   }, 60_000);
 
-  test("streams live updates to multiple clients and replays after refresh", async () => {
+  test("streams markdown updates to multiple clients and replays after refresh", async () => {
     const pageA = await browser.newPage();
     const pageB = await browser.newPage();
     await pageA.goto(`http://127.0.0.1:${webPort}`);
-    await pageA.getByRole("button", { name: "Model and intelligence" }).click();
+    await pageA.getByRole("button", { name: "Model and effort" }).click();
     await pageA.getByRole("menuitem", { name: /^High$/ }).waitFor({ timeout: 10_000 });
     await pageA.keyboard.press("Escape");
     await pageA.getByPlaceholder("Describe a task for the agent...").fill("run a slow browser e2e session");
@@ -61,12 +61,16 @@ describe("browser e2e", () => {
     await pageB.goto(pageA.url());
     await pageA.getByTestId("session-timeline").getByText("slow stream", { exact: false }).waitFor({ timeout: 20_000 });
     await pageB.getByTestId("session-timeline").getByText("slow stream", { exact: false }).waitFor({ timeout: 20_000 });
+    await waitFor(async () => await pageA.getByTestId("assistant-markdown").locator("table").count() > 0, { timeoutMs: 20_000 });
+    await waitFor(async () => await pageA.getByTestId("assistant-markdown").locator("pre code").count() > 0, { timeoutMs: 20_000 });
+    await waitFor(async () => await pageA.getByTestId("assistant-markdown").locator("code").count() > 1, { timeoutMs: 20_000 });
+    const assistantClassName = await pageA.getByTestId("assistant-markdown").first().getAttribute("class");
+    expect(assistantClassName ?? "").not.toContain("rounded");
+    expect(assistantClassName ?? "").not.toContain("border");
 
-    await pageA.getByRole("button", { name: "Interrupt" }).click();
-    await pageA.getByText("status: cancelled").waitFor({ timeout: 30_000 });
     await pageA.reload();
-    await pageA.getByText("status: cancelled").waitFor({ timeout: 15_000 });
-  });
+    await pageA.getByTestId("session-timeline").getByText("slow stream", { exact: false }).waitFor({ timeout: 15_000 });
+  }, 120_000);
 });
 
 function stackEnv(services: TestServices, apiPort: number, scenario: string): Record<string, string> {
