@@ -1,4 +1,4 @@
-import type { ResourceRef, SandboxBackend, Session, SessionEvent, SessionEventType, SessionStatus } from "@infra-agents/contracts";
+import type { FileAsset, FileStatus, FileUploadStatus, ResourceRef, SandboxBackend, Session, SessionEvent, SessionEventType, SessionStatus, ToolRef } from "@infra-agents/contracts";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -31,9 +31,118 @@ export type AppendEventInput = {
   occurredAt?: Date;
 };
 
+export async function createFileUpload(db: Database, input: {
+  fileId: string;
+  filename: string;
+  safeFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256?: string | null;
+  bucket: string;
+  objectKey: string;
+  expiresAt: Date;
+}): Promise<{ file: FileAsset; uploadId: string; expiresAt: string }> {
+  return await db.transaction(async (tx) => {
+    const [fileRow] = await tx.insert(schema.files).values({
+      id: input.fileId,
+      filename: input.filename,
+      safeFilename: input.safeFilename,
+      contentType: input.contentType,
+      sizeBytes: input.sizeBytes,
+      sha256: input.sha256 ?? null,
+      bucket: input.bucket,
+      objectKey: input.objectKey,
+      status: "pending_upload",
+    }).returning();
+    if (!fileRow) {
+      throw new Error("Failed to create file");
+    }
+    const [uploadRow] = await tx.insert(schema.fileUploads).values({
+      fileId: fileRow.id,
+      status: "pending",
+      expiresAt: input.expiresAt,
+    }).returning({ id: schema.fileUploads.id, expiresAt: schema.fileUploads.expiresAt });
+    if (!uploadRow) {
+      throw new Error("Failed to create file upload");
+    }
+    return {
+      file: mapFile(fileRow),
+      uploadId: uploadRow.id,
+      expiresAt: uploadRow.expiresAt.toISOString(),
+    };
+  });
+}
+
+export async function getFile(db: Database, fileId: string): Promise<FileAsset | null> {
+  const [row] = await db.select().from(schema.files).where(eq(schema.files.id, fileId)).limit(1);
+  return row ? mapFile(row) : null;
+}
+
+export async function requireFile(db: Database, fileId: string): Promise<FileAsset> {
+  const file = await getFile(db, fileId);
+  if (!file) {
+    throw new Error(`File not found: ${fileId}`);
+  }
+  return file;
+}
+
+export async function getFileUpload(db: Database, uploadId: string): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
+  const [row] = await db.select({
+    id: schema.fileUploads.id,
+    status: schema.fileUploads.status,
+    expiresAt: schema.fileUploads.expiresAt,
+    file: schema.files,
+  }).from(schema.fileUploads)
+    .innerJoin(schema.files, eq(schema.fileUploads.fileId, schema.files.id))
+    .where(eq(schema.fileUploads.id, uploadId))
+    .limit(1);
+  return row ? {
+    id: row.id,
+    status: row.status as FileUploadStatus,
+    expiresAt: row.expiresAt,
+    file: mapFile(row.file),
+  } : null;
+}
+
+export async function completeFileUpload(db: Database, uploadId: string): Promise<FileAsset> {
+  return await db.transaction(async (tx) => {
+    const [uploadRow] = await tx.select().from(schema.fileUploads).where(eq(schema.fileUploads.id, uploadId)).for("update").limit(1);
+    if (!uploadRow) {
+      throw new Error(`File upload not found: ${uploadId}`);
+    }
+    const [fileRow] = await tx.select().from(schema.files).where(eq(schema.files.id, uploadRow.fileId)).for("update").limit(1);
+    if (!fileRow) {
+      throw new Error(`File not found for upload: ${uploadId}`);
+    }
+    const now = new Date();
+    const [updatedFile] = await tx.update(schema.files).set({
+      status: "ready",
+      updatedAt: now,
+    }).where(eq(schema.files.id, fileRow.id)).returning();
+    await tx.update(schema.fileUploads).set({
+      status: "completed",
+      completedAt: now,
+      updatedAt: now,
+    }).where(eq(schema.fileUploads.id, uploadId));
+    if (!updatedFile) {
+      throw new Error("Failed to complete file upload");
+    }
+    return mapFile(updatedFile);
+  });
+}
+
+export async function markFileUploadFailed(db: Database, uploadId: string, fileId: string): Promise<void> {
+  const now = new Date();
+  await db.transaction(async (tx) => {
+    await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(eq(schema.fileUploads.id, uploadId));
+    await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(eq(schema.files.id, fileId));
+  });
+}
+
 export async function createSession(db: Database, input: {
   initialMessage: string;
   resources: ResourceRef[];
+  tools?: ToolRef[];
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
@@ -41,6 +150,7 @@ export async function createSession(db: Database, input: {
   const [row] = await db.insert(schema.sessions).values({
     initialMessage: input.initialMessage,
     resources: input.resources,
+    tools: input.tools ?? [],
     metadata: input.metadata,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
@@ -184,6 +294,92 @@ export async function appendSessionEvents(db: Database, sessionId: string, input
   });
 }
 
+export async function appendSessionEventsAndUpdateSession(db: Database, sessionId: string, inputs: AppendEventInput[], update: {
+  resources?: ResourceRef[];
+  tools?: ToolRef[];
+  status?: SessionStatus;
+  activeTurnId?: string | null;
+}): Promise<SessionEvent[]> {
+  if (inputs.length === 0) {
+    return [];
+  }
+  return await db.transaction(async (tx) => {
+    const locked = await tx.execute(sql<{ last_sequence: number }>`select last_sequence from sessions where id = ${sessionId} for update`);
+    const row = locked[0];
+    if (!row) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    let sequence = Number(row.last_sequence);
+    const now = new Date();
+    const values = inputs.map((input) => ({
+      sessionId,
+      sequence: ++sequence,
+      type: input.type,
+      payload: input.payload ?? {},
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt: input.occurredAt ?? now,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(update.resources !== undefined ? { resources: update.resources } : {}),
+      ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.status !== undefined ? { status: update.status } : {}),
+      ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
+      updatedAt: now,
+    }).where(eq(schema.sessions.id, sessionId));
+    return inserted.map(mapEvent);
+  });
+}
+
+export async function appendSessionEventsWithLockedSessionUpdate(db: Database, sessionId: string, build: (session: Session) => {
+  events: AppendEventInput[];
+  update?: {
+    resources?: ResourceRef[];
+    tools?: ToolRef[];
+    status?: SessionStatus;
+    activeTurnId?: string | null;
+  };
+}): Promise<SessionEvent[]> {
+  return await db.transaction(async (tx) => {
+    const [sessionRow] = await tx.select().from(schema.sessions).where(eq(schema.sessions.id, sessionId)).for("update").limit(1);
+    if (!sessionRow) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const built = build(mapSession(sessionRow));
+    if (built.events.length === 0) {
+      return [];
+    }
+    let sequence = sessionRow.lastSequence;
+    const now = new Date();
+    const values = built.events.map((input) => ({
+      sessionId,
+      sequence: ++sequence,
+      type: input.type,
+      payload: input.payload ?? {},
+      clientEventId: input.clientEventId ?? null,
+      turnId: input.turnId ?? null,
+      producerId: input.producerId ?? null,
+      producerSeq: input.producerSeq ?? null,
+      occurredAt: input.occurredAt ?? now,
+    }));
+    const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+    const update = built.update ?? {};
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(update.resources !== undefined ? { resources: update.resources } : {}),
+      ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.status !== undefined ? { status: update.status } : {}),
+      ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
+      updatedAt: now,
+    }).where(eq(schema.sessions.id, sessionId));
+    return inserted.map(mapEvent);
+  });
+}
+
 export function sessionSubject(sessionId: string): string {
   return `sessions.${sessionId}.events`;
 }
@@ -194,6 +390,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     status: row.status as SessionStatus,
     initialMessage: row.initialMessage,
     resources: row.resources as ResourceRef[],
+    tools: row.tools as ToolRef[],
     metadata: row.metadata,
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
@@ -215,5 +412,21 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
     occurredAt: row.occurredAt.toISOString(),
     clientEventId: row.clientEventId,
     turnId: row.turnId,
+  };
+}
+
+function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
+  return {
+    id: row.id,
+    status: row.status as FileStatus,
+    filename: row.filename,
+    safeFilename: row.safeFilename,
+    contentType: row.contentType,
+    sizeBytes: row.sizeBytes,
+    sha256: row.sha256,
+    bucket: row.bucket,
+    objectKey: row.objectKey,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
   };
 }

@@ -33,8 +33,7 @@ try {
 
 function scriptedModelForScenario(scenario: string): ScriptedModel {
   if (scenario === "sandbox") {
-    return new ScriptedModel([
-      {
+    const shellStep = {
         output: [functionCall("exec_command", {
           cmd: [
           "set -e",
@@ -45,17 +44,18 @@ function scriptedModelForScenario(scenario: string): ScriptedModel {
           "git --version",
           "jq --version",
           "curl --version",
+          "if [ -d files ]; then find files -maxdepth 3 -type f -print -exec cat {} \\; ; fi",
           "mkdir -p repos/e2e/repo && echo sandbox-ok > repos/e2e/repo/agent-output.txt && cat repos/e2e/repo/agent-output.txt",
           ].join("\n"),
           yield_time_ms: 10_000,
           max_output_tokens: 20_000,
         }, "sandbox-shell")],
-      },
-      {
+      };
+    const doneStep = {
         chunks: ["sandbox ", "ok"],
         outputText: "sandbox ok",
-      },
-    ]);
+      };
+    return new ScriptedModel([shellStep, doneStep, shellStep, doneStep, shellStep, doneStep]);
   }
   if (scenario === "slow") {
     return new ScriptedModel([

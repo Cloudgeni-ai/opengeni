@@ -1,8 +1,10 @@
 import type { Settings } from "@infra-agents/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@infra-agents/config";
-import type { ReasoningEffort, ResourceRef, SessionEventType } from "@infra-agents/contracts";
+import type { ReasoningEffort, ResourceRef, SessionEventType, ToolRef } from "@infra-agents/contracts";
 import {
   Agent,
+  connectMcpServers,
+  MCPServerStreamableHttp,
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
   run,
@@ -10,6 +12,7 @@ import {
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   type AgentInputItem,
+  type MCPServer,
   type Model,
   type RunStreamEvent,
 } from "@openai/agents";
@@ -23,6 +26,8 @@ import {
   Manifest,
   SandboxAgent,
   gitRepo,
+  inContainerMountStrategy,
+  s3Mount,
   skills,
   type SandboxClient,
   type SandboxSessionLike,
@@ -40,6 +45,8 @@ export type NormalizedRuntimeEvent = {
   type: SessionEventType;
   payload: unknown;
 };
+
+type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
 
 export function ensureReadableStreamFrom(): void {
   const ctor = globalThis.ReadableStream as (typeof ReadableStream & {
@@ -73,8 +80,23 @@ export function ensureReadableStreamFrom(): void {
 }
 
 export type AgentSegmentInput =
-  | { kind: "message"; text: string; serializedRunState?: string | null }
+  | { kind: "message"; text: string; modelImages?: ModelImageInput[]; omittedModelImages?: OmittedModelImageInput[]; serializedRunState?: string | null }
   | { kind: "approval"; serializedRunState: string; approvalId: string; decision: "approve" | "reject"; message?: string };
+
+export type ModelImageInput = {
+  fileId: string;
+  filename: string;
+  sandboxPath: string;
+  image: string;
+  detail?: "auto" | "low" | "high";
+};
+
+export type OmittedModelImageInput = {
+  fileId: string;
+  filename: string;
+  sandboxPath: string;
+  reason: string;
+};
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
@@ -85,6 +107,7 @@ export type PreparedAgentInput = {
 export type InfraAgentRuntime = {
   configure: (settings: Settings) => void;
   buildAgent: (settings: Settings, resources: ResourceRef[], options?: BuildAgentOptions) => Agent<any, any>;
+  prepareTools: (settings: Settings, tools: ToolRef[]) => Promise<PreparedAgentTools>;
   prepareInput: (agent: Agent<any, any>, input: AgentSegmentInput, options?: PrepareInputOptions) => Promise<PreparedAgentInput>;
   runStream: (agent: Agent<any, any>, input: PreparedAgentInput, settings: Settings, options?: RunAgentStreamOptions) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
@@ -102,6 +125,7 @@ export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrid
       ...options,
       ...(overrides.model ? { model: overrides.model } : {}),
     }),
+    prepareTools: prepareAgentTools,
     prepareInput: prepareRunInput,
     runStream: async (agent, input, settings, options) => await runAgentStream(agent, input, settings, {
       ...options,
@@ -141,6 +165,7 @@ export type BuildAgentOptions = {
   model?: Model;
   reasoningEffort?: ReasoningEffort;
   sandboxEnvironment?: Record<string, string>;
+  mcpServers?: MCPServer[];
 };
 
 export function buildInfraAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
@@ -151,6 +176,7 @@ export function buildInfraAgent(settings: Settings, resources: ResourceRef[], op
       "You are a standalone infrastructure engineering agent.",
       "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
       "Repository resources are mounted under repos/<owner>/<repo>.",
+      "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
       "Terraform and infrastructure skills are under .agents/ including terraform style, terraform test, terraform stacks, Azure verified modules, search/import, refactor module, and checkov.",
       "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
       "When Azure credentials are available, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
@@ -160,6 +186,7 @@ export function buildInfraAgent(settings: Settings, resources: ResourceRef[], op
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
     },
+    ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
   } as const;
 
   if (settings.sandboxBackend === "none") {
@@ -174,6 +201,123 @@ export function buildInfraAgent(settings: Settings, resources: ResourceRef[], op
       skills({ lazyFrom: localDirLazySkillSource({ src: bundledSkillsDir() }) }),
     ],
   });
+}
+
+export type PreparedAgentTools = {
+  mcpServers: MCPServer[];
+  close: () => Promise<void>;
+};
+
+export async function prepareAgentTools(settings: Settings, tools: ToolRef[]): Promise<PreparedAgentTools> {
+  if (tools.length === 0) {
+    return { mcpServers: [], close: async () => {} };
+  }
+  const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const servers = tools.map((tool) => {
+    const config = registry.get(tool.id);
+    if (!config) {
+      throw new Error(`Unknown MCP server id: ${tool.id}`);
+    }
+    return new PrefixedMcpServer(new MCPServerStreamableHttp({
+      url: config.url,
+      name: config.name ?? config.id,
+      cacheToolsList: config.cacheToolsList,
+      ...(config.timeoutMs ? {
+        timeout: config.timeoutMs,
+        clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+      } : {}),
+    }), config.id, config.allowedTools);
+  });
+  const connected = await connectMcpServers(servers, {
+    connectInParallel: true,
+    strict: true,
+  });
+  return {
+    mcpServers: connected.active,
+    close: async () => {
+      await connected.close();
+    },
+  };
+}
+
+export function prefixedMcpToolName(registryId: string, toolName: string): string {
+  return `${registryId}__${toolName}`;
+}
+
+class PrefixedMcpServer implements MCPServer {
+  readonly cacheToolsList: boolean;
+  readonly name: string;
+  readonly prefix: string;
+  private readonly allowedTools: Set<string> | undefined;
+
+  constructor(private readonly inner: MCPServer, registryId: string, allowedTools?: string[]) {
+    this.name = registryId;
+    this.prefix = prefixedMcpToolName(registryId, "");
+    this.cacheToolsList = inner.cacheToolsList;
+    this.allowedTools = allowedTools ? new Set(allowedTools) : undefined;
+  }
+
+  connect(): Promise<void> {
+    return this.inner.connect();
+  }
+
+  close(): Promise<void> {
+    return this.inner.close();
+  }
+
+  async listTools(): Promise<RuntimeMcpTool[]> {
+    const tools = await this.inner.listTools();
+    return tools
+      .filter((tool) => this.isAllowed(tool.name))
+      .map((tool) => ({ ...tool, name: prefixedMcpToolName(this.name, tool.name) }));
+  }
+
+  async callTool(toolName: string, args: Record<string, unknown> | null, meta?: Record<string, unknown> | null): Promise<any> {
+    const unprefixed = this.unprefixToolName(toolName);
+    if (!this.isAllowed(unprefixed)) {
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
+    }
+    return await this.inner.callTool(unprefixed, args, meta);
+  }
+
+  invalidateToolsCache(): Promise<void> {
+    return this.inner.invalidateToolsCache();
+  }
+
+  async listResources(params?: Record<string, unknown>): Promise<any> {
+    const resourcesServer = this.inner as MCPServer & { listResources?: (params?: Record<string, unknown>) => Promise<any> };
+    if (!resourcesServer.listResources) {
+      throw new Error(`MCP server ${this.name} does not support resources`);
+    }
+    return await resourcesServer.listResources(params);
+  }
+
+  async listResourceTemplates(params?: Record<string, unknown>): Promise<any> {
+    const resourcesServer = this.inner as MCPServer & { listResourceTemplates?: (params?: Record<string, unknown>) => Promise<any> };
+    if (!resourcesServer.listResourceTemplates) {
+      throw new Error(`MCP server ${this.name} does not support resource templates`);
+    }
+    return await resourcesServer.listResourceTemplates(params);
+  }
+
+  async readResource(uri: string): Promise<any> {
+    const resourcesServer = this.inner as MCPServer & { readResource?: (uri: string) => Promise<any> };
+    if (!resourcesServer.readResource) {
+      throw new Error(`MCP server ${this.name} does not support resource reads`);
+    }
+    return await resourcesServer.readResource(uri);
+  }
+
+  private isAllowed(toolName: string): boolean {
+    return !this.allowedTools || this.allowedTools.has(toolName);
+  }
+
+  private unprefixToolName(toolName: string): string {
+    if (!toolName.startsWith(this.prefix)) {
+      throw new Error(`MCP tool ${toolName} is missing expected ${this.name} prefix`);
+    }
+    return toolName.slice(this.prefix.length);
+  }
 }
 
 export function createSandboxClient(settings: Settings, environment = collectSandboxEnvironment(settings)): unknown {
@@ -216,19 +360,20 @@ export type PrepareInputOptions = {
 
 export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmentInput, options: PrepareInputOptions = {}): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
+    const userMessage = buildUserMessageInput(input.text, input.modelImages ?? [], input.omittedModelImages ?? []);
     if (!input.serializedRunState) {
-      return { input: input.text };
+      return userMessage ? { input: [userMessage] } : { input: input.text };
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
     const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
     return {
       input: [
         ...state.history,
-        {
+        userMessage ?? ({
           type: "message",
           role: "user",
           content: input.text,
-        } as AgentInputItem,
+        } as AgentInputItem),
       ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
@@ -248,6 +393,43 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
   return { input: state };
 }
 
+export function buildUserMessageInput(text: string, images: ModelImageInput[] = [], omittedImages: OmittedModelImageInput[] = []): AgentInputItem | null {
+  if (images.length === 0 && omittedImages.length === 0) {
+    return null;
+  }
+  const omissionNote = omittedImages.length
+    ? [
+        "",
+        "Some image attachments are mounted in the sandbox but were too large for direct model vision context:",
+        ...omittedImages.map((image) => `- ${image.filename}: ${image.sandboxPath} (${image.reason})`),
+      ].join("\n")
+    : "";
+  return {
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_text", text: `${text}${imageContextNote(images)}${omissionNote}` },
+      ...images.map((image) => ({
+        type: "input_image" as const,
+        image: image.image,
+        detail: image.detail ?? "auto",
+      })),
+    ],
+  } as AgentInputItem;
+}
+
+function imageContextNote(images: ModelImageInput[]): string {
+  if (images.length === 0) {
+    return "";
+  }
+  return [
+    "",
+    "Attached image files are included in this message as direct vision inputs and are also mounted in the sandbox:",
+    ...images.map((image) => `- ${image.filename}: ${image.sandboxPath}`),
+    "Answer from the direct image context when possible; use the sandbox file only when you need filesystem verification or file operations.",
+  ].join("\n");
+}
+
 export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
@@ -258,7 +440,10 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   const prepared: PreparedAgentInput = typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
-  const client = rawClient ? withAzurePreflight(rawClient as SandboxClient, environment, overrides.onRuntimeEvent) : undefined;
+  const refreshedClient = rawClient
+    ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest)
+    : undefined;
+  const client = refreshedClient ? withAzurePreflight(refreshedClient, environment, overrides.onRuntimeEvent) : undefined;
   const sandboxSessionState = prepared.sandboxSessionState
     ?? (prepared.serializedRunStateForSandbox && client
       ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
@@ -275,6 +460,96 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     } as SandboxRunConfig;
   }
   return await run(agent, prepared.input, runOptions);
+}
+
+export function withManifestRefreshOnResume(client: SandboxClient, targetManifest: Manifest | undefined): SandboxClient {
+  if (!targetManifest || !client.resume) {
+    return client;
+  }
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
+    ...(client.create ? { create: async (...args: any[]) => await (client.create as any)(...args) } : {}),
+    resume: async (state: SandboxSessionState) => {
+      const session = await client.resume!(state);
+      await applyMissingManifestEntries(session, targetManifest);
+      return session;
+    },
+    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
+    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
+    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
+    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
+    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+  };
+}
+
+export async function applyMissingManifestEntries(session: SandboxSessionLike, targetManifest: Manifest): Promise<void> {
+  const currentManifestValue = (session as { state?: { manifest?: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> } } }).state?.manifest;
+  const currentManifest = currentManifestValue ? ensureManifest(currentManifestValue) : undefined;
+  const target = ensureManifest(targetManifest);
+  if (!currentManifest) {
+    if (Object.keys(target.entries).length === 0) {
+      return;
+    }
+    throw new Error("Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable");
+  }
+  if (!session.applyManifest && !session.materializeEntry) {
+    if (Object.keys(target.entries).length === 0) {
+      return;
+    }
+    throw new Error("Resumed sandbox session cannot apply new manifest entries because it does not support applyManifest() or materializeEntry()");
+  }
+  if (Object.keys(target.entries).length === 0) {
+    return;
+  }
+  if (currentManifest.root !== target.root) {
+    throw new Error("Cannot apply per-turn resources to a sandbox with a different manifest root");
+  }
+  const entries: Record<string, any> = {};
+  for (const [path, entry] of Object.entries(target.entries)) {
+    const existing = (currentManifest.entries as Record<string, unknown>)[path];
+    if (existing === undefined) {
+      entries[path] = entry;
+      continue;
+    }
+    if (stableJson(existing) !== stableJson(entry)) {
+      throw new Error(`Cannot replace existing sandbox manifest entry: ${path}`);
+    }
+  }
+  if (Object.keys(entries).length === 0) {
+    return;
+  }
+  const delta = new Manifest({
+    root: currentManifest.root,
+    entries,
+    environment: target.environment,
+  });
+  if (session.applyManifest) {
+    await session.applyManifest(delta);
+  } else {
+    for (const [path, entry] of Object.entries(entries)) {
+      await session.materializeEntry!({ path, entry });
+    }
+  }
+  (session as { state?: { manifest?: Manifest } }).state!.manifest = new Manifest({
+    root: currentManifest.root,
+    environment: currentManifest.environment,
+    entries: {
+      ...currentManifest.entries,
+      ...entries,
+    },
+  });
+}
+
+function ensureManifest(manifest: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> }): Manifest {
+  if (manifest instanceof Manifest && typeof manifest.mountTargetsForMaterialization === "function") {
+    return manifest;
+  }
+  return new Manifest({
+    ...(manifest.root ? { root: manifest.root } : {}),
+    entries: manifest.entries ?? {},
+    environment: manifest.environment ?? {},
+  });
 }
 
 export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent[] {
@@ -348,24 +623,35 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
   });
 }
 
-function buildManifest(settings: Settings, resources: ResourceRef[], environment = collectSandboxEnvironment(settings)): Manifest {
+export function buildManifest(settings: Settings, resources: ResourceRef[], environment = collectSandboxEnvironment(settings)): Manifest {
   const entries: Record<string, any> = {};
   for (const resource of resources) {
-    if (resource.kind !== "repository") {
-      continue;
-    }
-    const metadata = resource.metadata;
-    const host = stringValue(metadata.host);
-    const repo = stringValue(metadata.repo);
-    const ref = stringValue(metadata.ref);
-    const mountPath = stringValue(metadata.mount_path)?.replace(/^\/+|\/+$/g, "");
-    const subpath = stringValue(metadata.subpath) ?? undefined;
-    if (host && repo && ref && mountPath) {
+    if (resource.kind === "repository") {
+      const url = new URL(resource.uri);
+      const host = url.hostname.toLowerCase();
+      const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+      const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
       entries[mountPath] = gitRepo({
         host,
         repo,
-        ref,
-        ...(subpath ? { subpath } : {}),
+        ref: resource.ref,
+        ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
+      });
+      continue;
+    }
+    if (resource.kind === "file") {
+      const config = objectStorageMountConfig(settings);
+      const mountPath = normalizeManifestPath(resource.mountPath ?? `files/${resource.fileId}`);
+      entries[mountPath] = s3Mount({
+        bucket: config.bucket,
+        prefix: `files/${resource.fileId}/original`,
+        endpointUrl: config.endpointUrl,
+        region: config.region,
+        s3Provider: config.s3Provider,
+        accessKeyId: config.accessKeyId,
+        secretAccessKey: config.secretAccessKey,
+        readOnly: true,
+        mountStrategy: inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
       });
     }
   }
@@ -374,6 +660,36 @@ function buildManifest(settings: Settings, resources: ResourceRef[], environment
     entries,
     environment,
   });
+}
+
+function objectStorageMountConfig(settings: Settings): {
+  bucket: string;
+  endpointUrl: string;
+  region: string;
+  s3Provider: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+} {
+  const endpointUrl = settings.objectStorageSandboxEndpoint ?? settings.objectStorageEndpoint;
+  if (!endpointUrl || !settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey) {
+    throw new Error("File resources require configured S3-compatible object storage");
+  }
+  return {
+    bucket: settings.objectStorageBucket,
+    endpointUrl,
+    region: settings.objectStorageRegion,
+    s3Provider: settings.objectStorageS3Provider,
+    accessKeyId: settings.objectStorageAccessKeyId,
+    secretAccessKey: settings.objectStorageSecretAccessKey,
+  };
+}
+
+function normalizeManifestPath(path: string): string {
+  const normalized = path.replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized.includes("..")) {
+    throw new Error(`Invalid sandbox resource path: ${path}`);
+  }
+  return normalized;
 }
 
 async function restoredSandboxSessionState(state: RunState<any, any>, client: unknown): Promise<SandboxSessionState | undefined> {
@@ -448,10 +764,50 @@ export function azurePreflightCommand(): string {
     "TENANT_ID=\"${AZURE_TENANT_ID:-${ARM_TENANT_ID:-}}\"",
     "SUBSCRIPTION_ID=\"${AZURE_SUBSCRIPTION_ID:-${ARM_SUBSCRIPTION_ID:-}}\"",
     "if [ -n \"$CLIENT_ID\" ] && [ -n \"$CLIENT_SECRET\" ] && [ -n \"$TENANT_ID\" ]; then",
+    "  command -v az >/dev/null 2>&1 || { echo \"Azure CLI is not installed in the sandbox\" >&2; exit 127; }",
     "  az account show --only-show-errors >/dev/null 2>&1 || az login --service-principal --username \"$CLIENT_ID\" --password \"$CLIENT_SECRET\" --tenant \"$TENANT_ID\" --allow-no-subscriptions --only-show-errors --output none",
     "  [ -n \"$SUBSCRIPTION_ID\" ] && az account set --subscription \"$SUBSCRIPTION_ID\" --only-show-errors",
     "fi",
   ].join("\n");
+}
+
+export function sandboxCommandExitCode(result: unknown): number | null {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+  const candidate = result as {
+    exitCode?: unknown;
+    exit_code?: unknown;
+    code?: unknown;
+    status?: unknown;
+  };
+  for (const value of [candidate.exitCode, candidate.exit_code, candidate.code, candidate.status]) {
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+  return null;
+}
+
+function sandboxCommandOutput(result: unknown): string {
+  if (!result || typeof result !== "object") {
+    return "";
+  }
+  const candidate = result as {
+    output?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+  };
+  return [candidate.output, candidate.stderr, candidate.stdout]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+}
+
+function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
+  const exitCode = sandboxCommandExitCode(result);
+  if (exitCode !== null && exitCode !== 0) {
+    throw new Error(sandboxCommandOutput(result) || `${operation} failed with exit code ${exitCode}`);
+  }
 }
 
 function hasAzureServicePrincipal(environment: Record<string, string>): boolean {
@@ -475,16 +831,15 @@ async function runAzurePreflight(
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });
-      if (result.exitCode && result.exitCode !== 0) {
-        throw new Error(result.output || result.stderr || `Azure CLI preflight failed with exit code ${result.exitCode}`);
-      }
+      assertSandboxCommandSucceeded(result, "Azure CLI preflight");
     } else if (session.execCommand) {
-      await session.execCommand({
+      const result = await session.execCommand({
         cmd: azurePreflightCommand(),
         workdir: "/workspace",
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });
+      assertSandboxCommandSucceeded(result, "Azure CLI preflight");
     } else {
       throw new Error("Sandbox session does not support command execution");
     }
@@ -519,6 +874,20 @@ function stringValue(value: unknown): string | undefined {
 
 function isAsyncIterable<T>(source: Iterable<T> | AsyncIterable<T>): source is AsyncIterable<T> {
   return typeof (source as AsyncIterable<T>)[Symbol.asyncIterator] === "function";
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
+  }
+  return value;
 }
 
 function approvalIdentifier(item: any): string {

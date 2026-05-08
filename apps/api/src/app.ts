@@ -6,10 +6,16 @@ import {
 import {
   ClientConfig,
   ClientSessionEvent,
+  CompleteFileUploadResponse,
+  CreateFileUploadRequest,
+  CreateFileUploadResponse,
   CreateSessionRequest,
+  FileAsset,
+  FileDownloadUrlResponse,
   GitHubAppManifestCreate,
   type ResourceRef,
   type SessionEvent,
+  type ToolRef,
 } from "@infra-agents/contracts";
 import {
   appendAndPublishEvents,
@@ -17,11 +23,16 @@ import {
   type EventBus,
 } from "@infra-agents/events";
 import {
+  completeFileUpload,
+  appendSessionEventsWithLockedSessionUpdate,
+  createFileUpload,
   createSession,
+  getFileUpload,
+  requireFile,
   getSession,
   listSessionEvents,
+  markFileUploadFailed,
   requireSession,
-  setSessionStatus,
   setTemporalWorkflowId,
   type AppendEventInput,
   type Database,
@@ -42,6 +53,7 @@ import {
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import { createObjectStorage } from "@infra-agents/storage";
 
 export type SessionWorkflowClient = {
   startSessionWorkflow: (input: { sessionId: string; initialEventId: string; workflowId: string }) => Promise<void>;
@@ -61,6 +73,7 @@ export type AppDependencies = {
 export function createApp(deps: AppDependencies): Hono {
   const { settings, db, bus, workflowClient } = deps;
   const githubStateSecret = deps.githubStateSecret ?? settings.githubAppManifestStateSecret ?? crypto.randomUUID();
+  const objectStorage = createObjectStorage(settings);
   const app = new Hono();
 
   app.use("*", cors({
@@ -83,7 +96,108 @@ export function createApp(deps: AppDependencies): Hono {
     allowedModels: configuredAllowedModels(settings),
     defaultReasoningEffort: settings.openaiReasoningEffort,
     allowedReasoningEfforts: configuredAllowedReasoningEfforts(settings),
+    fileUploads: {
+      enabled: objectStorage !== null,
+      maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
+    },
   })));
+
+  app.post("/v1/files/uploads", async (c) => {
+    if (!objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    const payload = CreateFileUploadRequest.parse(await c.req.json());
+    if (payload.sizeBytes > objectStorage.maxSinglePutSizeBytes) {
+      throw new HTTPException(413, { message: `file exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes` });
+    }
+    const fileId = crypto.randomUUID();
+    const safeFilename = sanitizeFilename(payload.filename);
+    const objectKey = `files/${fileId}/original/${safeFilename}`;
+    const signed = await objectStorage.createPutUrl({
+      key: objectKey,
+      contentType: payload.contentType,
+      ...(payload.sha256 ? { sha256: payload.sha256 } : {}),
+    });
+    const upload = await createFileUpload(db, {
+      fileId,
+      filename: payload.filename,
+      safeFilename,
+      contentType: payload.contentType,
+      sizeBytes: payload.sizeBytes,
+      sha256: payload.sha256 ?? null,
+      bucket: objectStorage.bucket,
+      objectKey,
+      expiresAt: signed.expiresAt,
+    });
+    return c.json(CreateFileUploadResponse.parse({
+      fileId: upload.file.id,
+      uploadId: upload.uploadId,
+      putUrl: signed.url,
+      requiredHeaders: signed.requiredHeaders,
+      expiresAt: upload.expiresAt,
+      maxSizeBytes: objectStorage.maxSinglePutSizeBytes,
+    }), 201);
+  });
+
+  app.post("/v1/files/uploads/:uploadId/complete", async (c) => {
+    if (!objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    const upload = await getFileUpload(db, c.req.param("uploadId"));
+    if (!upload) {
+      throw new HTTPException(404, { message: "file upload not found" });
+    }
+    if (upload.status !== "pending") {
+      throw new HTTPException(409, { message: `file upload is ${upload.status}` });
+    }
+    if (upload.expiresAt.getTime() < Date.now()) {
+      await markFileUploadFailed(db, upload.id, upload.file.id);
+      throw new HTTPException(409, { message: "file upload has expired" });
+    }
+    const head = await objectStorage.headFile(upload.file).catch((error) => {
+      throw new HTTPException(409, { message: `uploaded object is not available: ${error instanceof Error ? error.message : String(error)}` });
+    });
+    if (Number(head.ContentLength ?? -1) !== upload.file.sizeBytes) {
+      await markFileUploadFailed(db, upload.id, upload.file.id);
+      throw new HTTPException(422, { message: "uploaded object size does not match file metadata" });
+    }
+    if (upload.file.contentType && head.ContentType && head.ContentType !== upload.file.contentType) {
+      await markFileUploadFailed(db, upload.id, upload.file.id);
+      throw new HTTPException(422, { message: "uploaded object content type does not match file metadata" });
+    }
+    if (upload.file.sha256 && head.Metadata?.sha256 !== upload.file.sha256) {
+      await markFileUploadFailed(db, upload.id, upload.file.id);
+      throw new HTTPException(422, { message: "uploaded object checksum metadata does not match file metadata" });
+    }
+    const file = await completeFileUpload(db, upload.id);
+    return c.json(CompleteFileUploadResponse.parse({ file }));
+  });
+
+  app.get("/v1/files/:fileId", async (c) => {
+    const file = await requireFile(db, c.req.param("fileId")).catch(() => null);
+    if (!file) {
+      throw new HTTPException(404, { message: "file not found" });
+    }
+    return c.json(FileAsset.parse(file));
+  });
+
+  app.post("/v1/files/:fileId/download-url", async (c) => {
+    if (!objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    const file = await requireFile(db, c.req.param("fileId")).catch(() => null);
+    if (!file) {
+      throw new HTTPException(404, { message: "file not found" });
+    }
+    if (file.status !== "ready") {
+      throw new HTTPException(409, { message: `file is ${file.status}` });
+    }
+    const signed = await objectStorage.createGetUrl({ key: file.objectKey });
+    return c.json(FileDownloadUrlResponse.parse({
+      url: signed.url,
+      expiresAt: signed.expiresAt.toISOString(),
+    }));
+  });
 
   app.get("/v1/github/app", (c) => {
     const missing = githubAppMissingSettings(settings);
@@ -163,12 +277,18 @@ export function createApp(deps: AppDependencies): Hono {
   app.post("/v1/sessions", async (c) => {
     const payload = CreateSessionRequest.parse(await c.req.json());
     const resources = normalizeResources(payload.resources);
+    const tools = validateToolRefs(payload.tools, settings);
     validateGitHubRepositorySelection(resources);
+    if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
+      throw new HTTPException(503, { message: "object storage is not configured" });
+    }
+    await validateFileResources(db, resources);
     const model = payload.model ?? settings.openaiModel;
     const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
     const session = await createSession(db, {
       initialMessage: payload.initialMessage,
       resources,
+      tools,
       metadata: {
         ...payload.metadata,
         model,
@@ -177,11 +297,16 @@ export function createApp(deps: AppDependencies): Hono {
       model,
       sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
     });
+    const initialPayload = {
+      text: payload.initialMessage,
+      ...(resources.length ? { resources } : {}),
+      ...(tools.length ? { tools } : {}),
+    };
     const events = await appendAndPublishEvents(db, bus, session.id, [
       { type: "session.created", payload: { status: "queued" } },
       {
         type: "user.message",
-        payload: { text: payload.initialMessage },
+        payload: initialPayload,
         ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       },
       { type: "session.status.changed", payload: { status: "queued" } },
@@ -221,11 +346,55 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.post("/v1/sessions/:sessionId/events", async (c) => {
     const sessionId = c.req.param("sessionId");
-    const session = await requireSession(db, sessionId);
     const event = ClientSessionEvent.parse(await c.req.json());
-    if (event.type === "user.message" && session.status !== "idle") {
-      throw new HTTPException(409, { message: `session is ${session.status}; cannot accept a new user message` });
+    if (event.type === "user.message") {
+      const requestedResources = normalizeResources(event.payload.resources ?? []);
+      const requestedTools = validateToolRefs(event.payload.tools ?? [], settings);
+      if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
+        throw new HTTPException(503, { message: "object storage is not configured" });
+      }
+      await validateFileResources(db, requestedResources);
+      const appended = await appendSessionEventsWithLockedSessionUpdate(db, sessionId, (lockedSession) => {
+        if (lockedSession.status !== "idle") {
+          throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
+        }
+        validateGitHubRepositorySelection([...lockedSession.resources, ...requestedResources]);
+        const nextResources = mergeResourceRefs(lockedSession.resources, requestedResources);
+        const nextTools = mergeToolRefs(lockedSession.tools, requestedTools);
+        return {
+          events: [
+            {
+              type: event.type,
+              payload: {
+                text: event.payload.text,
+                ...(requestedResources.length ? { resources: requestedResources } : {}),
+                ...(requestedTools.length ? { tools: requestedTools } : {}),
+              },
+              ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+            },
+            { type: "session.status.changed", payload: { status: "queued" } },
+          ],
+          update: {
+            resources: nextResources,
+            tools: nextTools,
+            status: "queued",
+            activeTurnId: null,
+          },
+        };
+      }).then(async (events) => {
+        await bus.publish(sessionId, events);
+        return events;
+      });
+      const accepted = appended[0];
+      if (!accepted) {
+        throw new HTTPException(500, { message: "failed to append client event" });
+      }
+      const workflowId = workflowIdForSession(sessionId);
+      await workflowClient.signalUserMessage({ sessionId, eventId: accepted.id, workflowId });
+      return c.json(accepted, 202);
     }
+
+    const session = await requireSession(db, sessionId);
     if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
       throw new HTTPException(409, { message: `session is ${session.status}; no approval is pending` });
     }
@@ -234,19 +403,13 @@ export function createApp(deps: AppDependencies): Hono {
       payload: event.payload,
       ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
     }];
-    if (event.type === "user.message") {
-      eventsToAppend.push({ type: "session.status.changed", payload: { status: "queued" } });
-    }
     const appended = await appendAndPublishEvents(db, bus, sessionId, eventsToAppend);
     const accepted = appended[0];
     if (!accepted) {
       throw new HTTPException(500, { message: "failed to append client event" });
     }
     const workflowId = workflowIdForSession(sessionId);
-    if (event.type === "user.message") {
-      await setSessionStatus(db, sessionId, "queued", null);
-      await workflowClient.signalUserMessage({ sessionId, eventId: accepted.id, workflowId });
-    } else if (event.type === "user.approvalDecision") {
+    if (event.type === "user.approvalDecision") {
       await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
     } else {
       await workflowClient.signalInterrupt({ sessionId, eventId: accepted.id, workflowId });
@@ -357,46 +520,126 @@ async function assertSessionExists(db: Database, sessionId: string): Promise<voi
   }
 }
 
+export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
+  const mcpServerIds = new Set(settings.mcpServers.map((server) => server.id));
+  const selected = new Set<string>();
+  const out: ToolRef[] = [];
+  for (const tool of tools) {
+    if (tool.kind !== "mcp") {
+      throw new HTTPException(422, { message: `unsupported tool kind: ${(tool as { kind?: string }).kind}` });
+    }
+    if (!mcpServerIds.has(tool.id)) {
+      throw new HTTPException(422, { message: `unknown MCP server id: ${tool.id}` });
+    }
+    if (selected.has(tool.id)) {
+      continue;
+    }
+    selected.add(tool.id);
+    out.push(tool);
+  }
+  return out;
+}
+
 export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
-  const mountPaths = new Set<string>();
-  return resources.map((resource) => {
-    if (resource.kind !== "repository") {
-      return resource;
+  const mountPaths = new Map<string, string>();
+  const identities = new Map<string, string>();
+  const seenResources = new Set<string>();
+  const out: ResourceRef[] = [];
+  for (const resource of resources) {
+    let normalized: ResourceRef;
+    if (resource.kind === "file") {
+      const mountPath = normalizeMountPath(resource.mountPath ?? `files/${resource.fileId}`);
+      normalized = {
+        kind: "file",
+        fileId: resource.fileId,
+        mountPath,
+      };
+    } else {
+      const url = parseResourceUrl(resource.uri);
+      if (url.protocol !== "https:" || !url.hostname) {
+        throw new HTTPException(422, { message: "repository resources must use HTTPS Git URLs" });
+      }
+      const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+      const parts = path.split("/").filter(Boolean);
+      if (parts.length < 2) {
+        throw new HTTPException(422, { message: "repository URL must include owner and repo" });
+      }
+      const repo = parts.join("/");
+      const mountPath = normalizeMountPath(resource.mountPath ?? `repos/${repo}`);
+      normalized = {
+        kind: "repository",
+        uri: `https://${url.hostname.toLowerCase()}/${repo}.git`,
+        ref: resource.ref.trim(),
+        mountPath,
+        ...(resource.subpath ? { subpath: normalizeMountPath(resource.subpath) } : {}),
+        ...(resource.githubInstallationId ? { githubInstallationId: resource.githubInstallationId } : {}),
+        ...(resource.githubRepositoryId ? { githubRepositoryId: resource.githubRepositoryId } : {}),
+      };
     }
-    const url = new URL(resource.uri);
-    if (url.protocol !== "https:" || !url.hostname) {
-      throw new HTTPException(422, { message: "repository resources must use HTTPS Git URLs" });
+    const key = stableJson(normalized);
+    const mounted = normalized.mountPath ? mountPaths.get(normalized.mountPath) : undefined;
+    if (mounted && mounted !== key) {
+      throw new HTTPException(422, { message: `duplicate resource mount path: ${normalized.mountPath}` });
     }
-    const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-    const parts = path.split("/").filter(Boolean);
-    if (parts.length < 2) {
-      throw new HTTPException(422, { message: "repository URL must include owner and repo" });
+    if (normalized.mountPath) {
+      mountPaths.set(normalized.mountPath, key);
     }
-    const repo = parts.join("/");
-    const ref = typeof resource.metadata.ref === "string" && resource.metadata.ref.trim() ? resource.metadata.ref.trim() : "";
-    if (!ref) {
-      throw new HTTPException(422, { message: "repository resources require metadata.ref" });
+    const identity = resourceIdentityKey(normalized);
+    const seenIdentity = identities.get(identity);
+    if (seenIdentity && seenIdentity !== key) {
+      throw new HTTPException(422, { message: `duplicate resource with different settings: ${identity}` });
     }
-    const mountPath = `repos/${repo}`;
-    if (mountPaths.has(mountPath)) {
-      throw new HTTPException(422, { message: `duplicate repository mount path: ${mountPath}` });
+    identities.set(identity, key);
+    if (!seenResources.has(key)) {
+      seenResources.add(key);
+      out.push(normalized);
     }
-    mountPaths.add(mountPath);
-    return {
-      kind: "repository",
-      uri: `https://${url.hostname.toLowerCase()}/${repo}.git`,
-      metadata: {
-        ...resource.metadata,
-        host: url.hostname.toLowerCase(),
-        repo,
-        ref,
-        subpath: typeof resource.metadata.subpath === "string" && resource.metadata.subpath.trim()
-          ? resource.metadata.subpath.trim().replace(/^\/+|\/+$/g, "")
-          : null,
-        mount_path: mountPath,
-      },
-    };
-  });
+  }
+  return out;
+}
+
+export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRef[] {
+  const seen = new Set<string>();
+  const out: ToolRef[] = [];
+  for (const tool of [...existing, ...additions]) {
+    const key = `${tool.kind}:${tool.id}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(tool);
+  }
+  return out;
+}
+
+export function mergeResourceRefs(existing: ResourceRef[], additions: ResourceRef[]): ResourceRef[] {
+  const out = [...existing];
+  const mountPaths = new Map(existing.flatMap((resource) => resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : []));
+  const identities = new Map(existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const));
+  const exact = new Set(existing.map(stableJson));
+
+  for (const resource of additions) {
+    const serialized = stableJson(resource);
+    if (exact.has(serialized)) {
+      continue;
+    }
+    const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
+    if (existingAtMount && existingAtMount !== serialized) {
+      throw new HTTPException(422, { message: `resource mount path is already attached: ${resource.mountPath}` });
+    }
+    const identity = resourceIdentityKey(resource);
+    const existingIdentity = identities.get(identity);
+    if (existingIdentity && existingIdentity !== serialized) {
+      throw new HTTPException(422, { message: `resource is already attached with different settings: ${identity}` });
+    }
+    out.push(resource);
+    exact.add(serialized);
+    identities.set(identity, serialized);
+    if (resource.mountPath) {
+      mountPaths.set(resource.mountPath, serialized);
+    }
+  }
+  return out;
 }
 
 export function validateGitHubRepositorySelection(resources: ResourceRef[]): void {
@@ -404,8 +647,8 @@ export function validateGitHubRepositorySelection(resources: ResourceRef[]): voi
     if (resource.kind !== "repository") {
       return [];
     }
-    const installationRaw = resource.metadata.github_installation_id;
-    const repositoryRaw = resource.metadata.github_repository_id;
+    const installationRaw = resource.githubInstallationId;
+    const repositoryRaw = resource.githubRepositoryId;
     if (installationRaw === null && repositoryRaw === null) {
       return [];
     }
@@ -432,6 +675,48 @@ export function validateGitHubRepositorySelection(resources: ResourceRef[]): voi
   }
 }
 
+export async function validateFileResources(db: Database, resources: ResourceRef[]): Promise<void> {
+  const fileIds = new Set<string>();
+  for (const resource of resources) {
+    if (resource.kind !== "file") {
+      continue;
+    }
+    if (fileIds.has(resource.fileId)) {
+      throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
+    }
+    fileIds.add(resource.fileId);
+    const file = await requireFile(db, resource.fileId).catch(() => null);
+    if (!file) {
+      throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
+    }
+    if (file.status !== "ready") {
+      throw new HTTPException(422, { message: `file resource ${resource.fileId} is ${file.status}` });
+    }
+  }
+}
+
+function sanitizeFilename(filename: string): string {
+  const trimmed = filename.trim().replace(/[/\\]/g, "_");
+  const safe = trimmed.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/\s+/g, " ").trim();
+  return safe || "file";
+}
+
+function normalizeMountPath(path: string): string {
+  const normalized = path.trim().replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized.includes("..")) {
+    throw new HTTPException(422, { message: `invalid resource mount path: ${path}` });
+  }
+  return normalized;
+}
+
+function parseResourceUrl(uri: string): URL {
+  try {
+    return new URL(uri);
+  } catch {
+    throw new HTTPException(422, { message: "repository resources must use valid URLs" });
+  }
+}
+
 function positiveInteger(value: unknown): number | null {
   if (typeof value === "number" && Number.isInteger(value) && value > 0) {
     return value;
@@ -440,6 +725,27 @@ function positiveInteger(value: unknown): number | null {
     return Number(value);
   }
   return null;
+}
+
+function resourceIdentityKey(resource: ResourceRef): string {
+  if (resource.kind === "file") {
+    return `file:${resource.fileId}`;
+  }
+  return `repository:${resource.uri}`;
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
+  }
+  return value;
 }
 
 function githubSuccessHtml(envLines: string[], installUrl: string): string {

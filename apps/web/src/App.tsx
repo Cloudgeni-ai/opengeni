@@ -7,9 +7,11 @@ import {
   ChevronDownIcon,
   CircleDashedIcon,
   CopyIcon,
+  DownloadIcon,
   FileJsonIcon,
   GitBranchIcon,
   GitPullRequestIcon,
+  ImageIcon,
   Loader2Icon,
   LockIcon,
   PanelRightIcon,
@@ -49,6 +51,8 @@ import {
   createSession,
   fetchClientConfig,
   fetchEvents,
+  fetchFileAsset,
+  fetchFileDownloadUrl,
   fetchGitHubRepositories,
   fetchGitHubStatus,
   fetchSession,
@@ -60,12 +64,15 @@ import {
 } from "./api";
 import type {
   ClientConfig,
+  FileAsset,
   GitHubRepository,
   ReasoningEffort,
   ResourceRef,
   Session,
   SessionEvent,
   SessionStatus,
+  ToolRef,
+  TurnSubmission,
 } from "./types";
 import { cn } from "@/lib/utils";
 import { Streamdown, type StreamdownComponents } from "./vendor/streamdown-runtime.js";
@@ -123,6 +130,8 @@ type ConversationUserTurn = {
   kind: "user";
   id: string;
   text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
   occurredAt: string;
 };
 
@@ -226,12 +235,14 @@ export function App() {
     }
   }
 
-  async function submitInitial(prompt: string) {
+  async function submitInitial(submission: TurnSubmission) {
     setBusy(true);
     try {
+      const selectedResources = buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs);
       const created = await createSession({
-        initialMessage: prompt,
-        resources: buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
+        initialMessage: submission.text,
+        resources: [...selectedResources, ...(submission.resources ?? [])],
+        tools: submission.tools,
         model,
         reasoningEffort,
       });
@@ -256,13 +267,16 @@ export function App() {
     window.history.pushState({}, "", "/");
   }
 
-  async function submitFollowUp(prompt: string) {
-    if (!session || !prompt.trim()) {
+  async function submitFollowUp(submission: TurnSubmission) {
+    if (!session || !submission.text.trim()) {
       return;
     }
     setBusy(true);
     try {
-      await sendUserMessage(session.id, prompt.trim());
+      await sendUserMessage(session.id, {
+        ...submission,
+        text: submission.text.trim(),
+      });
       setSession(await fetchSession(session.id));
     } catch (error) {
       toast.error("Failed to send follow-up", { description: error instanceof Error ? error.message : String(error) });
@@ -383,6 +397,7 @@ export function App() {
             <Composer
               autoFocus
               pending={busy}
+              fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
               placeholder="Describe a task for the agent..."
               submitLabel={busy ? "Starting" : "Send"}
               examples={examples}
@@ -472,10 +487,12 @@ export function App() {
               <div className="mx-auto w-full max-w-3xl">
                 <Composer
                   pending={busy}
-                  disabled={!canSendFollowUp || sessionRunning}
+                  disabled={!canSendFollowUp}
+                  submitDisabled={sessionRunning}
+                  fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
                   disabledHint={
                     sessionRunning
-                      ? "Agent is running. Stop to interrupt."
+                      ? "Agent is running. Stop before sending."
                       : session.status !== "idle"
                         ? `Session is ${session.status}.`
                         : undefined
@@ -899,13 +916,81 @@ function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
 }
 
 function UserMessage({ turn }: { turn: ConversationUserTurn }) {
+  const fileResources = turn.resources.filter((resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file");
+  const repositoryResources = turn.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
   return (
     <article className="message-in flex justify-end gap-2.5" data-testid="timeline-user">
       <div className="max-w-[82%] rounded-xl rounded-br-sm border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/75 px-3 py-2 text-[14px] leading-6">
+        {fileResources.length > 0 || repositoryResources.length > 0 || turn.tools.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {fileResources.map((resource) => <MessageFileAttachment key={`${resource.fileId}:${resource.mountPath ?? ""}`} resource={resource} />)}
+            {repositoryResources.map((resource) => (
+              <span
+                key={`${resource.uri}:${resource.ref}:${resource.mountPath ?? ""}`}
+                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+              >
+                <GitBranchIcon className="size-3.5 shrink-0" />
+                <span className="truncate">{repositoryDisplayName(resource)}</span>
+              </span>
+            ))}
+            {turn.tools.map((tool) => (
+              <span
+                key={`${tool.kind}:${tool.id}`}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+              >
+                <WrenchIcon className="size-3.5" />
+                <span>{tool.id}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
         <MarkdownText text={turn.text} compact />
       </div>
       <AvatarBubble variant="user" />
     </article>
+  );
+}
+
+function MessageFileAttachment({ resource }: { resource: Extract<ResourceRef, { kind: "file" }> }) {
+  const [file, setFile] = useState<FileAsset | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    void fetchFileAsset(resource.fileId).then((asset) => {
+      if (mounted) {
+        setFile(asset);
+      }
+    }).catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [resource.fileId]);
+
+  async function openFile() {
+    setBusy(true);
+    try {
+      const signed = await fetchFileDownloadUrl(resource.fileId);
+      window.open(signed.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error("Failed to open file", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const isImage = file?.contentType.startsWith("image/");
+  return (
+    <button
+      type="button"
+      onClick={openFile}
+      disabled={busy}
+      className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] disabled:opacity-60"
+    >
+      {isImage ? <ImageIcon className="size-3.5 shrink-0" /> : <FileJsonIcon className="size-3.5 shrink-0" />}
+      <span className="truncate">{file?.filename ?? resource.fileId}</span>
+      <DownloadIcon className="size-3 shrink-0" />
+    </button>
   );
 }
 
@@ -1220,11 +1305,11 @@ function SessionInspector(props: {
                   <div className="min-w-0 space-y-2">
                     {repositories.map((resource, index) => (
                       <div key={`${resource.uri}:${index}`} className="min-w-0 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
-                        <div className="min-w-0 truncate text-xs font-medium">{String(resource.metadata.repo ?? resource.uri)}</div>
+                        <div className="min-w-0 truncate text-xs font-medium">{repositoryDisplayName(resource)}</div>
                         <div className="mt-1 min-w-0 truncate font-mono text-[11px] text-[color:var(--color-fg-subtle)]">{resource.uri}</div>
                         <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">
-                          <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">ref {String(resource.metadata.ref ?? "main")}</span>
-                          {resource.metadata.mount_path ? <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">{String(resource.metadata.mount_path)}</span> : null}
+                          <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">ref {resource.ref}</span>
+                          {resource.mountPath ? <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">{resource.mountPath}</span> : null}
                         </div>
                       </div>
                     ))}
@@ -1466,17 +1551,46 @@ function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], sel
     return {
       kind: "repository",
       uri: `https://${parsed.host}/${parsed.repo}.git`,
-      metadata: {
-        host: parsed.host,
-        repo: parsed.repo,
-        ref: repo.ref,
-        subpath: null,
-        mount_path: mountPath,
-        github_repository_id: repo.repositoryId,
-        github_installation_id: repo.installationId,
-      },
+      ref: repo.ref,
+      mountPath,
+      ...(repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
+      ...(repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
   });
+}
+
+function isResourceRefArray(value: unknown): value is ResourceRef[] {
+  return Array.isArray(value) && value.every((item) => {
+    if (!item || typeof item !== "object") {
+      return false;
+    }
+    const resource = item as Partial<ResourceRef>;
+    if (resource.kind === "file") {
+      return typeof resource.fileId === "string";
+    }
+    if (resource.kind === "repository") {
+      return typeof resource.uri === "string" && typeof resource.ref === "string";
+    }
+    return false;
+  });
+}
+
+function isToolRefArray(value: unknown): value is ToolRef[] {
+  return Array.isArray(value) && value.every((item) => {
+    if (!item || typeof item !== "object") {
+      return false;
+    }
+    const tool = item as Partial<ToolRef>;
+    return tool.kind === "mcp" && typeof tool.id === "string";
+  });
+}
+
+function repositoryDisplayName(resource: Extract<ResourceRef, { kind: "repository" }>): string {
+  try {
+    return new URL(resource.uri).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  } catch {
+    return resource.uri;
+  }
 }
 
 function normalizeRepositoryUrl(value: string): { host: string; repo: string } {
@@ -1563,6 +1677,8 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
         kind: "user",
         id: event.id,
         text: String(payload.text ?? ""),
+        resources: isResourceRefArray(payload.resources) ? payload.resources : [],
+        tools: isToolRefArray(payload.tools) ? payload.tools : [],
         occurredAt: event.occurredAt,
       });
     } else if (event.type === "agent.message.delta") {
@@ -1711,6 +1827,8 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
       kind: "user",
       id: `user-${session.id}`,
       text: session.initialMessage,
+      resources: session.resources,
+      tools: session.tools,
       occurredAt: session.createdAt,
     });
   }

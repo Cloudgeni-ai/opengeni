@@ -14,6 +14,8 @@ RUN apt-get update \
         git \
         jq \
         openssh-client \
+        fuse3 \
+        rclone \
         unzip \
         wget \
     && rm -rf /var/lib/apt/lists/*

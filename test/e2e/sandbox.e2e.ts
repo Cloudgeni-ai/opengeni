@@ -12,7 +12,7 @@ describe("real Docker sandbox e2e", () => {
 
   beforeAll(async () => {
     await buildSandboxImage("infra-agents-sandbox:local", repoRoot);
-    services = await startTestServices({ temporal: true });
+    services = await startTestServices({ temporal: true, objectStorage: true });
     await services.migrate();
     apiPort = await freePort();
     const env = stackEnv(services, apiPort);
@@ -56,6 +56,52 @@ describe("real Docker sandbox e2e", () => {
     const toolOutput = events.find((event) => event.type === "agent.toolCall.output");
     expect(JSON.stringify(toolOutput?.payload ?? {})).toContain("sandbox-ok");
     expect(events.some((event) => event.type === "agent.message.completed")).toBe(true);
+  }, 240_000);
+
+  test("mounts uploaded file resources through native S3 sandbox manifest entries", async () => {
+    const upload = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filename: "sandbox-file.txt",
+        contentType: "text/plain",
+        sizeBytes: "file-mounted-ok".length,
+      }),
+    });
+    expect(upload.status).toBe(201);
+    const uploadBody = await upload.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    const put = await fetch(uploadBody.putUrl, {
+      method: "PUT",
+      body: "file-mounted-ok",
+      headers: uploadBody.requiredHeaders,
+    });
+    expect(put.ok).toBe(true);
+    const complete = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads/${uploadBody.uploadId}/complete`, {
+      method: "POST",
+    });
+    expect(complete.ok).toBe(true);
+
+    const create = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "verify mounted file",
+        sandboxBackend: "docker",
+        resources: [{ kind: "file", fileId: uploadBody.fileId }],
+      }),
+    });
+    expect(create.status).toBe(202);
+    const session = await create.json() as { id: string };
+
+    await waitFor(async () => {
+      const events = await sessionEvents(session.id);
+      return events.some((event) => event.type === "session.status.changed" && (event.payload as { status?: string }).status === "idle");
+    }, { timeoutMs: 180_000 });
+
+    const events = await sessionEvents(session.id);
+    expect(events
+      .filter((event) => event.type === "agent.toolCall.output")
+      .some((event) => JSON.stringify(event.payload ?? {}).includes("file-mounted-ok"))).toBe(true);
   }, 240_000);
 
   test("sandbox image has required CLIs and no custom Azure login helper", async () => {
@@ -103,6 +149,14 @@ function stackEnv(services: TestServices, apiPort: number): Record<string, strin
     INFRA_AGENT_SANDBOX_BACKEND: "docker",
     INFRA_AGENT_DOCKER_IMAGE: "infra-agents-sandbox:local",
     INFRA_AGENT_SANDBOX_ENV_PROFILES: "none",
+    INFRA_AGENT_OBJECT_STORAGE_ENDPOINT: services.objectStorageEndpoint!,
+    INFRA_AGENT_OBJECT_STORAGE_SANDBOX_ENDPOINT: services.objectStorageSandboxEndpoint!,
+    INFRA_AGENT_OBJECT_STORAGE_BUCKET: "infra-agents-files",
+    INFRA_AGENT_OBJECT_STORAGE_REGION: "us-east-1",
+    INFRA_AGENT_OBJECT_STORAGE_S3_PROVIDER: "Minio",
+    INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID: "minioadmin",
+    INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+    INFRA_AGENT_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
     INFRA_AGENT_TEST_SCENARIO: "sandbox",
   };
 }

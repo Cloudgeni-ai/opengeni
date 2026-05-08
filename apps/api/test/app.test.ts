@@ -3,32 +3,30 @@ import { allowedCorsOrigin, normalizeResources, replaySessionEvents, validateGit
 import type { SessionEvent } from "@infra-agents/contracts";
 
 describe("API helpers", () => {
-  test("normalizes repository resources into sandbox mount metadata", () => {
+  test("normalizes repository resources into sandbox mount paths", () => {
     const [resource] = normalizeResources([{
       kind: "repository",
       uri: "https://github.com/OpenAI/example.git",
-      metadata: { ref: "main", subpath: "/infra/" },
+      ref: "main",
+      subpath: "/infra/",
     }]);
 
     expect(resource).toEqual({
       kind: "repository",
       uri: "https://github.com/OpenAI/example.git",
-      metadata: {
-        ref: "main",
-        subpath: "infra",
-        host: "github.com",
-        repo: "OpenAI/example",
-        mount_path: "repos/OpenAI/example",
-      },
+      ref: "main",
+      subpath: "infra",
+      mountPath: "repos/OpenAI/example",
     });
   });
 
-  test("rejects repository resources without refs", () => {
-    expect(() => normalizeResources([{
-      kind: "repository",
-      uri: "https://github.com/openai/example.git",
-      metadata: {},
-    }])).toThrow("repository resources require metadata.ref");
+  test("normalizes file resources into sandbox mount paths", () => {
+    const fileId = "00000000-0000-4000-8000-000000000010";
+    expect(normalizeResources([{ kind: "file", fileId }])).toEqual([{
+      kind: "file",
+      fileId,
+      mountPath: `files/${fileId}`,
+    }]);
   });
 
   test("uses stable workflow ids for sessions", () => {
@@ -40,12 +38,16 @@ describe("API helpers", () => {
       {
         kind: "repository",
         uri: "https://github.com/a/one.git",
-        metadata: { github_installation_id: 1, github_repository_id: 11 },
+        ref: "main",
+        githubInstallationId: 1,
+        githubRepositoryId: 11,
       },
       {
         kind: "repository",
         uri: "https://github.com/b/two.git",
-        metadata: { github_installation_id: 2, github_repository_id: 22 },
+        ref: "main",
+        githubInstallationId: 2,
+        githubRepositoryId: 22,
       },
     ])).toThrow("one installation");
   });
@@ -55,7 +57,8 @@ describe("API helpers", () => {
       {
         kind: "repository",
         uri: "https://github.com/a/one.git",
-        metadata: { github_installation_id: 1 },
+        ref: "main",
+        githubInstallationId: 1,
       },
     ])).toThrow("positive github_installation_id");
   });

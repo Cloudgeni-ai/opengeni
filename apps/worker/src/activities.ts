@@ -4,7 +4,7 @@ import {
   getSettings,
   type Settings,
 } from "@infra-agents/config";
-import type { ResourceRef, ReasoningEffort } from "@infra-agents/contracts";
+import type { FileAsset, ResourceRef, ReasoningEffort } from "@infra-agents/contracts";
 import type { SessionEventType } from "@infra-agents/contracts";
 import {
   createDb,
@@ -12,6 +12,7 @@ import {
   finishTurn,
   getLatestRunState,
   getSessionEvent,
+  requireFile,
   requireSession,
   saveRunState,
   setSessionStatus,
@@ -27,7 +28,10 @@ import {
   createProductionAgentRuntime,
   normalizeSdkEvent,
   type InfraAgentRuntime,
+  type ModelImageInput,
+  type OmittedModelImageInput,
 } from "@infra-agents/runtime";
+import { bytesToDataUrl, createObjectStorage, type ObjectStorage } from "@infra-agents/storage";
 import { CancelledFailure, Context } from "@temporalio/activity";
 
 type Services = {
@@ -35,6 +39,7 @@ type Services = {
   db: Database;
   bus: EventBus;
   runtime: InfraAgentRuntime;
+  objectStorage: ObjectStorage | null;
 };
 
 export type ActivityDependencies = Partial<Services>;
@@ -61,13 +66,14 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         db: dependencies.db ?? dbClient!.db,
         bus: dependencies.bus ?? await createNatsEventBus(settings.natsUrl),
         runtime: dependencies.runtime ?? createProductionAgentRuntime(),
+        objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
       };
     })();
     return servicesPromise;
   }
 
   async function runAgentSegment(input: RunAgentSegmentInput): Promise<RunAgentSegmentResult> {
-    const { settings, db, bus, runtime } = await services();
+    const { settings, db, bus, runtime, objectStorage } = await services();
     runtime.configure(settings);
     const session = await requireSession(db, input.sessionId);
     const trigger = await getSessionEvent(db, input.triggerEventId);
@@ -103,6 +109,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     activityContext?.heartbeat({ phase: "turn_started", sessionId: input.sessionId, turnId });
 
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
+    let preparedTools: Awaited<ReturnType<InfraAgentRuntime["prepareTools"]>> | null = null;
     await publish([
       { type: "session.status.changed", payload: { status: "running" } },
       { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
@@ -116,11 +123,13 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
       };
       const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, session.resources);
       const reasoningEffort = reasoningEffortForSession(session.metadata, runSettings.openaiReasoningEffort);
+      preparedTools = await runtime.prepareTools(runSettings, session.tools);
       const agent = runtime.buildAgent(runSettings, session.resources, {
         reasoningEffort,
         sandboxEnvironment,
+        mcpServers: preparedTools.mcpServers,
       });
-      const runInput = await segmentInput(db, runtime, agent, trigger);
+      const runInput = await segmentInput(db, runtime, agent, trigger, runSettings, objectStorage);
       const stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
         onRuntimeEvent: async (event) => {
@@ -201,6 +210,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
       await setSessionStatus(db, input.sessionId, "failed", null);
       return { status: "failed" };
     } finally {
+      await preparedTools?.close().catch(() => undefined);
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }
@@ -267,19 +277,34 @@ export const runAgentSegment = defaultActivities.runAgentSegment;
 export const failSession = defaultActivities.failSession;
 export const cancelSession = defaultActivities.cancelSession;
 
-async function segmentInput(db: Database, runtime: InfraAgentRuntime, agent: any, trigger: Awaited<ReturnType<typeof getSessionEvent>>) {
+async function segmentInput(
+  db: Database,
+  runtime: InfraAgentRuntime,
+  agent: any,
+  trigger: Awaited<ReturnType<typeof getSessionEvent>>,
+  settings: Settings,
+  objectStorage: ObjectStorage | null,
+) {
   if (!trigger) {
     throw new Error("Missing trigger event");
   }
   if (trigger.type === "user.message") {
-    const payload = trigger.payload as { text?: unknown };
+    const payload = trigger.payload as { text?: unknown; resources?: unknown };
     if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
       throw new Error("user.message payload is missing text");
     }
+    const { modelImages, omittedModelImages } = await modelImageInputsForTurn(
+      db,
+      objectStorage,
+      settings.modelImageMaxBytes,
+      Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
+    );
     const latestState = await getLatestRunState(db, trigger.sessionId);
     return await runtime.prepareInput(agent, {
       kind: "message",
       text: payload.text,
+      modelImages,
+      omittedModelImages,
       serializedRunState: latestState?.serializedRunState ?? null,
     });
   }
@@ -302,6 +327,50 @@ async function segmentInput(db: Database, runtime: InfraAgentRuntime, agent: any
     });
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
+}
+
+export async function modelImageInputsForTurn(
+  db: Database,
+  objectStorage: ObjectStorage | null,
+  maxBytes: number,
+  resources: ResourceRef[],
+): Promise<{ modelImages: ModelImageInput[]; omittedModelImages: OmittedModelImageInput[] }> {
+  const modelImages: ModelImageInput[] = [];
+  const omittedModelImages: OmittedModelImageInput[] = [];
+  for (const resource of resources) {
+    if (resource.kind !== "file") {
+      continue;
+    }
+    const file = await requireFile(db, resource.fileId);
+    if (!file.contentType.toLowerCase().startsWith("image/")) {
+      continue;
+    }
+    const sandboxPath = sandboxFilePath(resource, file);
+    if (file.sizeBytes > maxBytes) {
+      omittedModelImages.push({
+        fileId: file.id,
+        filename: file.filename,
+        sandboxPath,
+        reason: `exceeds ${maxBytes} byte model image limit`,
+      });
+      continue;
+    }
+    if (!objectStorage) {
+      throw new Error("Image model context requires configured object storage");
+    }
+    modelImages.push({
+      fileId: file.id,
+      filename: file.filename,
+      sandboxPath,
+      image: bytesToDataUrl(await objectStorage.getFileBytes(file), file.contentType),
+      detail: "auto",
+    });
+  }
+  return { modelImages, omittedModelImages };
+}
+
+function sandboxFilePath(resource: Extract<ResourceRef, { kind: "file" }>, file: FileAsset): string {
+  return `/workspace/${resource.mountPath ?? `files/${file.id}`}/${file.safeFilename}`;
 }
 
 async function sandboxEnvironmentForRun(settings: Settings, resources: ResourceRef[]): Promise<Record<string, string>> {
@@ -340,8 +409,8 @@ function githubRepositorySelection(resources: ResourceRef[]): { installationId: 
     if (resource.kind !== "repository") {
       return [];
     }
-    const installationId = positiveInteger(resource.metadata.github_installation_id);
-    const repositoryId = positiveInteger(resource.metadata.github_repository_id);
+    const installationId = positiveInteger(resource.githubInstallationId);
+    const repositoryId = positiveInteger(resource.githubRepositoryId);
     return installationId && repositoryId ? [{ installationId, repositoryId }] : [];
   });
   if (selected.length === 0) {

@@ -53,6 +53,7 @@ export async function startApi() {
   const server = Bun.serve({
     hostname: settings.apiHost,
     port: settings.apiPort,
+    idleTimeout: 255,
     fetch: app.fetch,
   });
   console.log(`Infra Agents API listening on http://${settings.apiHost}:${settings.apiPort}`);

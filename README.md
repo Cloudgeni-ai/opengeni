@@ -150,7 +150,7 @@ Azure authentication uses normal Azure CLI preflight inside the sandbox when ARM
 ```bash
 bun install
 cp .env.example .env
-docker compose up -d postgres nats temporal
+docker compose up -d postgres nats temporal minio minio-init
 bun run db:migrate
 docker build -f docker/sandbox.Dockerfile -t infra-agents-sandbox:local .
 bun run dev:api
@@ -164,6 +164,7 @@ Open:
 - API health: `http://127.0.0.1:8000/healthz`
 - NATS monitor: `http://127.0.0.1:8222`
 - Temporal gRPC: `127.0.0.1:7233`
+- MinIO console: `http://127.0.0.1:9001`
 
 If you run Temporal with the local dev server instead of the compose service, the Temporal UI is commonly available at `http://127.0.0.1:8233`.
 

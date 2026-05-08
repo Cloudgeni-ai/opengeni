@@ -14,14 +14,18 @@ export type TestServices = {
   natsPort: number;
   natsMonitorPort: number;
   temporalPort: number;
+  minioPort?: number;
+  minioConsolePort?: number;
   databaseUrl: string;
   natsUrl: string;
   temporalHost: string;
+  objectStorageEndpoint?: string;
+  objectStorageSandboxEndpoint?: string;
   migrate: () => Promise<void>;
   down: () => Promise<void>;
 };
 
-export async function startTestServices(options: { temporal?: boolean } = {}): Promise<TestServices> {
+export async function startTestServices(options: { temporal?: boolean; objectStorage?: boolean } = {}): Promise<TestServices> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
@@ -37,7 +41,7 @@ export async function startTestServices(options: { temporal?: boolean } = {}): P
   throw lastError;
 }
 
-async function startTestServicesAttempt(options: { temporal?: boolean } = {}): Promise<TestServices> {
+async function startTestServicesAttempt(options: { temporal?: boolean; objectStorage?: boolean } = {}): Promise<TestServices> {
   const cwd = await makeTempDir("infra-agents-compose-");
   const projectName = `infra_agents_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
   const ports = {
@@ -45,9 +49,14 @@ async function startTestServicesAttempt(options: { temporal?: boolean } = {}): P
     nats: await freePort(),
     natsMonitor: await freePort(),
     temporal: await freePort(),
+    minio: await freePort(),
+    minioConsole: await freePort(),
   };
   const composeFile = join(cwd, "compose.yml");
-  await writeFile(composeFile, composeYaml(ports, options.temporal ?? true));
+  await writeFile(composeFile, composeYaml(ports, {
+    temporal: options.temporal ?? true,
+    objectStorage: options.objectStorage ?? false,
+  }));
   const up = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "up", "-d"], { timeoutMs: 180_000 });
   if (up.exitCode !== 0) {
     await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "down", "-v", "--remove-orphans"], { timeoutMs: 60_000 }).catch(() => undefined);
@@ -63,9 +72,14 @@ async function startTestServicesAttempt(options: { temporal?: boolean } = {}): P
     natsPort: ports.nats,
     natsMonitorPort: ports.natsMonitor,
     temporalPort: ports.temporal,
+    ...(options.objectStorage ? { minioPort: ports.minio, minioConsolePort: ports.minioConsole } : {}),
     databaseUrl: `postgres://infra_agents:infra_agents@127.0.0.1:${ports.postgres}/infra_agents`,
     natsUrl: `nats://127.0.0.1:${ports.nats}`,
     temporalHost: `127.0.0.1:${ports.temporal}`,
+    ...(options.objectStorage ? {
+      objectStorageEndpoint: `http://127.0.0.1:${ports.minio}`,
+      objectStorageSandboxEndpoint: `http://host.docker.internal:${ports.minio}`,
+    } : {}),
     migrate: async () => {
       await migrate(services.databaseUrl);
     },
@@ -80,6 +94,13 @@ async function startTestServicesAttempt(options: { temporal?: boolean } = {}): P
     await waitForNats(services.natsUrl);
     if (options.temporal ?? true) {
       await waitForTemporal(services.temporalHost);
+    }
+    if (options.objectStorage ?? false) {
+      await waitForMinio(services.objectStorageEndpoint!);
+      const bucket = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"], { timeoutMs: 60_000 });
+      if (bucket.exitCode !== 0) {
+        throw new Error(`minio bucket bootstrap failed\n${bucket.stdout}\n${bucket.stderr}`);
+      }
     }
     return services;
   } catch (error) {
@@ -159,7 +180,14 @@ export async function freePort(): Promise<number> {
   return port;
 }
 
-function composeYaml(ports: { postgres: number; nats: number; natsMonitor: number; temporal: number }, temporal: boolean): string {
+async function waitForMinio(endpoint: string): Promise<void> {
+  await waitFor(async () => {
+    const response = await fetch(`${endpoint}/minio/health/ready`).catch(() => null);
+    return response?.ok === true;
+  }, { timeoutMs: 90_000, intervalMs: 500 });
+}
+
+function composeYaml(ports: { postgres: number; nats: number; natsMonitor: number; temporal: number; minio: number; minioConsole: number }, options: { temporal: boolean; objectStorage: boolean }): string {
   return `services:
   postgres:
     image: postgres:17-alpine
@@ -182,7 +210,7 @@ function composeYaml(ports: { postgres: number; nats: number; natsMonitor: numbe
       - "127.0.0.1:${ports.nats}:4222"
       - "127.0.0.1:${ports.natsMonitor}:8222"
 
-${temporal ? `  temporal:
+${options.temporal ? `  temporal:
     image: temporalio/auto-setup:1.28
     environment:
       DB: postgres12
@@ -197,6 +225,31 @@ ${temporal ? `  temporal:
         condition: service_healthy
     ports:
       - "127.0.0.1:${ports.temporal}:7233"
+` : ""}
+${options.objectStorage ? `  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:${ports.minio}:9000"
+      - "127.0.0.1:${ports.minioConsole}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 40
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "mc alias set local http://minio:9000 minioadmin minioadmin &&
+       mc mb --ignore-existing local/infra-agents-files"
 ` : ""}
 `;
 }

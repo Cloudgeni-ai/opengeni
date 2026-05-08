@@ -11,12 +11,15 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1044.0",
+    "@aws-sdk/s3-request-presigner": "^3.1044.0",
     "@hono/zod-validator": "^0.7.6",
     "@infra-agents/config": "workspace:*",
     "@infra-agents/contracts": "workspace:*",
     "@infra-agents/db": "workspace:*",
     "@infra-agents/events": "workspace:*",
     "@infra-agents/github": "workspace:*",
+    "@infra-agents/storage": "workspace:*",
     "@temporalio/client": "^1.17.0",
     "hono": "^4.12.18",
     "zod": "^4.2.1"

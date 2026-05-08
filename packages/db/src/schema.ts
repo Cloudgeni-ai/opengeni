@@ -1,11 +1,12 @@
 import { sql } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { bigint, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const sessions = pgTable("sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
   status: text("status").notNull().default("queued"),
   initialMessage: text("initial_message").notNull(),
   resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+  tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   model: text("model").notNull(),
   sandboxBackend: text("sandbox_backend").notNull(),
@@ -15,6 +16,36 @@ export const sessions = pgTable("sessions", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const files = pgTable("files", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  status: text("status").notNull().default("pending_upload"),
+  filename: text("filename").notNull(),
+  safeFilename: text("safe_filename").notNull(),
+  contentType: text("content_type").notNull(),
+  sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+  sha256: text("sha256"),
+  bucket: text("bucket").notNull(),
+  objectKey: text("object_key").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  objectKey: uniqueIndex("files_object_key_idx").on(table.objectKey),
+  status: index("files_status_idx").on(table.status),
+}));
+
+export const fileUploads = pgTable("file_uploads", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  fileId: uuid("file_id").notNull().references(() => files.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("pending"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  fileId: index("file_uploads_file_id_idx").on(table.fileId),
+  status: index("file_uploads_status_idx").on(table.status),
+}));
 
 export const sessionTurns = pgTable("session_turns", {
   id: uuid("id").primaryKey().defaultRandom(),

@@ -17,7 +17,7 @@ The stack means everything needed to run the Hono API, React web app, Temporal w
 2. Start infrastructure:
 
    ```bash
-   docker compose up -d postgres nats temporal
+   docker compose up -d postgres nats temporal minio minio-init
    bun run db:migrate
    ```
 

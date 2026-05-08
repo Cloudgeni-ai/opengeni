@@ -2,6 +2,7 @@ import { ReasoningEffort, SandboxBackend } from "@infra-agents/contracts";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const registryId = /^[A-Za-z0-9_-]+$/;
 
 export const sandboxEnvProfiles: Record<string, string[]> = {
   azure: [
@@ -44,6 +45,7 @@ const SettingsSchema = z.object({
   openaiReasoningEffort: ReasoningEffort.default("high"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
+  modelImageMaxBytes: z.coerce.number().int().positive().default(20_000_000),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -63,6 +65,14 @@ const SettingsSchema = z.object({
   sandboxEnvProfiles: z.string().default("azure,github"),
   sandboxEnvExtraVars: z.string().default(""),
   sandboxEnvVars: z.string().optional(),
+  objectStorageEndpoint: z.string().url().optional(),
+  objectStorageSandboxEndpoint: z.string().url().optional(),
+  objectStorageBucket: z.string().min(1).default("infra-agents-files"),
+  objectStorageRegion: z.string().min(1).default("us-east-1"),
+  objectStorageS3Provider: z.string().min(1).default("Minio"),
+  objectStorageAccessKeyId: z.string().optional(),
+  objectStorageSecretAccessKey: z.string().optional(),
+  objectStorageForcePathStyle: z.coerce.boolean().default(true),
   gitAuthorName: z.string().optional(),
   gitAuthorEmail: z.string().optional(),
   gitCommitterName: z.string().optional(),
@@ -75,9 +85,18 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
+  mcpServers: z.array(z.object({
+    id: z.string().min(1).regex(registryId),
+    name: z.string().min(1).optional(),
+    url: z.string().url(),
+    allowedTools: z.array(z.string().min(1)).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    cacheToolsList: z.boolean().default(false),
+  })).default([]),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
+export type McpServerConfig = Settings["mcpServers"][number];
 
 function optional(name: string): string | undefined {
   const value = process.env[name];
@@ -104,6 +123,7 @@ export function getSettings(): Settings {
     openaiReasoningEffort: optional("INFRA_AGENT_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("INFRA_AGENT_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("INFRA_AGENT_OPENAI_RESPONSES_TRANSPORT"),
+    modelImageMaxBytes: optional("INFRA_AGENT_MODEL_IMAGE_MAX_BYTES"),
     azureOpenaiBaseUrl: optional("INFRA_AGENT_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("INFRA_AGENT_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("INFRA_AGENT_AZURE_OPENAI_DEPLOYMENT"),
@@ -123,6 +143,14 @@ export function getSettings(): Settings {
     sandboxEnvProfiles: optional("INFRA_AGENT_SANDBOX_ENV_PROFILES"),
     sandboxEnvExtraVars: optional("INFRA_AGENT_SANDBOX_ENV_EXTRA_VARS"),
     sandboxEnvVars: optional("INFRA_AGENT_SANDBOX_ENV_VARS"),
+    objectStorageEndpoint: optional("INFRA_AGENT_OBJECT_STORAGE_ENDPOINT"),
+    objectStorageSandboxEndpoint: optional("INFRA_AGENT_OBJECT_STORAGE_SANDBOX_ENDPOINT"),
+    objectStorageBucket: optional("INFRA_AGENT_OBJECT_STORAGE_BUCKET"),
+    objectStorageRegion: optional("INFRA_AGENT_OBJECT_STORAGE_REGION"),
+    objectStorageS3Provider: optional("INFRA_AGENT_OBJECT_STORAGE_S3_PROVIDER"),
+    objectStorageAccessKeyId: optional("INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID"),
+    objectStorageSecretAccessKey: optional("INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY"),
+    objectStorageForcePathStyle: optional("INFRA_AGENT_OBJECT_STORAGE_FORCE_PATH_STYLE"),
     gitAuthorName: optional("INFRA_AGENT_GIT_AUTHOR_NAME") ?? optional("GIT_AUTHOR_NAME"),
     gitAuthorEmail: optional("INFRA_AGENT_GIT_AUTHOR_EMAIL") ?? optional("GIT_AUTHOR_EMAIL"),
     gitCommitterName: optional("INFRA_AGENT_GIT_COMMITTER_NAME") ?? optional("GIT_COMMITTER_NAME"),
@@ -135,6 +163,7 @@ export function getSettings(): Settings {
     githubAppSlug: optional("INFRA_AGENT_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("INFRA_AGENT_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("INFRA_AGENT_GITHUB_APP_PRIVATE_KEY"),
+    mcpServers: parseMcpServers(optional("INFRA_AGENT_MCP_SERVERS")),
   };
   const settings = SettingsSchema.parse(raw);
   validateSettings(settings);
@@ -203,6 +232,22 @@ export function parseExposedPorts(raw: string): number[] {
   });
 }
 
+export function parseMcpServers(raw: string | undefined): unknown[] | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error("value must be a JSON array");
+    }
+    return parsed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`INFRA_AGENT_MCP_SERVERS must be a JSON array: ${message}`);
+  }
+}
+
 function validateSettings(settings: Settings): void {
   if (settings.openaiProvider === "azure") {
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiEndpoint) {
@@ -221,8 +266,21 @@ function validateSettings(settings: Settings): void {
   if (Boolean(settings.modalTokenId) !== Boolean(settings.modalTokenSecret)) {
     throw new Error("INFRA_AGENT_MODAL_TOKEN_ID and INFRA_AGENT_MODAL_TOKEN_SECRET must both be set or both omitted");
   }
+  if (Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)) {
+    throw new Error("INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID and INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY must both be set or both omitted");
+  }
+  if ((settings.objectStorageEndpoint || settings.objectStorageSandboxEndpoint) && (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)) {
+    throw new Error("Object storage endpoints require INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID and INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY");
+  }
   parseExposedPorts(settings.dockerExposedPorts);
   sandboxEnvironmentVariableNames(settings);
+  const serverIds = new Set<string>();
+  for (const server of settings.mcpServers) {
+    if (serverIds.has(server.id)) {
+      throw new Error(`INFRA_AGENT_MCP_SERVERS contains duplicate id ${server.id}`);
+    }
+    serverIds.add(server.id);
+  }
 }
 
 function splitCsv(raw: string): string[] {

@@ -5,6 +5,7 @@ import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   getSettings,
+  parseMcpServers,
   sandboxEnvironmentVariableNames,
 } from "../src";
 
@@ -58,6 +59,16 @@ describe("sandbox environment profiles", () => {
     expect(configuredAllowedReasoningEfforts(settings)).toEqual(["xhigh", "low", "medium", "high"]);
   });
 
+  test("parses model image context size cap", () => {
+    const original = { ...process.env };
+    try {
+      process.env.INFRA_AGENT_MODEL_IMAGE_MAX_BYTES = "1234";
+      expect(getSettings().modelImageMaxBytes).toBe(1234);
+    } finally {
+      process.env = original;
+    }
+  });
+
   test("collects git identity settings for sandbox pass-through", () => {
     expect(collectGitIdentityEnvironment({
       ...getSettings(),
@@ -71,5 +82,37 @@ describe("sandbox environment profiles", () => {
       GIT_COMMITTER_NAME: "Infra Agent",
       GIT_COMMITTER_EMAIL: "infra@example.com",
     });
+  });
+
+  test("parses MCP server registry JSON", () => {
+    const parsed = parseMcpServers('[{"id":"docs","name":"Document Search","url":"http://127.0.0.1:8787/mcp","allowedTools":["search_documents"]}]');
+    const settings = {
+      ...getSettings(),
+      mcpServers: parsed as ReturnType<typeof getSettings>["mcpServers"],
+    };
+    expect(settings.mcpServers[0]?.id).toBe("docs");
+    expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
+  });
+
+  test("rejects non-array MCP server registry JSON", () => {
+    expect(() => parseMcpServers('{"id":"docs"}')).toThrow("must be a JSON array");
+  });
+
+  test("parses object storage settings and rejects incomplete credentials", () => {
+    const original = { ...process.env };
+    try {
+      process.env.INFRA_AGENT_OBJECT_STORAGE_ENDPOINT = "http://127.0.0.1:9000";
+      process.env.INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID = "minioadmin";
+      process.env.INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY = "minioadmin";
+      const settings = getSettings();
+      expect(settings.objectStorageEndpoint).toBe("http://127.0.0.1:9000");
+      expect(settings.objectStorageBucket).toBe("infra-agents-files");
+      expect(settings.objectStorageForcePathStyle).toBe(true);
+
+      delete process.env.INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY;
+      expect(() => getSettings()).toThrow("both be set or both omitted");
+    } finally {
+      process.env = original;
+    }
   });
 });

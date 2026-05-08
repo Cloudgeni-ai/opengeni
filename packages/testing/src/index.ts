@@ -5,3 +5,4 @@ export * from "./sse";
 export * from "./assertions";
 export * from "./settings";
 export * from "./fakes";
+export * from "./mcp";

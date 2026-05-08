@@ -33,6 +33,23 @@ describe("projectConversation", () => {
     expect(JSON.stringify(activity)).not.toContain("sensitive raw reasoning");
     expect(JSON.stringify(activity)).toContain("Internal reasoning is hidden.");
   });
+
+  test("keeps per-turn attachments on user messages", () => {
+    const fileId = "00000000-0000-4000-8000-000000000010";
+    const turns = projectConversation(session(), [
+      event(1, "user.message", {
+        text: "Use this file",
+        resources: [{ kind: "file", fileId, mountPath: `files/${fileId}` }],
+        tools: [{ kind: "mcp", id: "docs" }],
+      }),
+    ]);
+
+    expect(turns[0]).toMatchObject({
+      kind: "user",
+      resources: [{ kind: "file", fileId, mountPath: `files/${fileId}` }],
+      tools: [{ kind: "mcp", id: "docs" }],
+    });
+  });
 });
 
 function session(): Session {
@@ -41,6 +58,7 @@ function session(): Session {
     status: "running",
     initialMessage: "Inspect the repo",
     resources: [],
+    tools: [],
     metadata: {},
     model: "scripted-model",
     sandboxBackend: "none",

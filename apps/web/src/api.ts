@@ -1,4 +1,16 @@
-import type { ClientConfig, GitHubRepository, ReasoningEffort, ResourceRef, Session, SessionEvent } from "./types";
+import type {
+  ClientConfig,
+  CreateFileUploadResponse,
+  FileAsset,
+  FileDownloadUrlResponse,
+  GitHubRepository,
+  ReasoningEffort,
+  ResourceRef,
+  Session,
+  SessionEvent,
+  ToolRef,
+  TurnSubmission,
+} from "./types";
 
 export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
 
@@ -20,6 +32,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export function createSession(input: {
   initialMessage: string;
   resources: ResourceRef[];
+  tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
 }): Promise<Session> {
@@ -28,6 +41,7 @@ export function createSession(input: {
     body: JSON.stringify({
       initialMessage: input.initialMessage,
       resources: input.resources,
+      tools: input.tools ?? [],
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       clientEventId: crypto.randomUUID(),
@@ -47,15 +61,52 @@ export function fetchEvents(sessionId: string, after = 0): Promise<SessionEvent[
   return request<SessionEvent[]>(`/v1/sessions/${sessionId}/events?after=${after}`);
 }
 
-export function sendUserMessage(sessionId: string, text: string): Promise<SessionEvent> {
+export function sendUserMessage(sessionId: string, submission: TurnSubmission): Promise<SessionEvent> {
   return request<SessionEvent>(`/v1/sessions/${sessionId}/events`, {
     method: "POST",
     body: JSON.stringify({
       type: "user.message",
       clientEventId: crypto.randomUUID(),
-      payload: { text },
+      payload: {
+        text: submission.text,
+        resources: submission.resources ?? [],
+        tools: submission.tools ?? [],
+      },
     }),
   });
+}
+
+export async function uploadFileAsset(file: File): Promise<FileAsset> {
+  const upload = await request<CreateFileUploadResponse>("/v1/files/uploads", {
+    method: "POST",
+    body: JSON.stringify({
+      filename: file.name || "file",
+      contentType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+    }),
+  });
+  const put = await fetch(upload.putUrl, {
+    method: "PUT",
+    body: file,
+    headers: upload.requiredHeaders,
+  });
+  if (!put.ok) {
+    throw new Error(`Object storage upload failed: ${put.status} ${await put.text()}`);
+  }
+  const completed = await request<{ file: FileAsset }>(`/v1/files/uploads/${upload.uploadId}/complete`, {
+    method: "POST",
+  });
+  return completed.file;
+}
+
+export async function fetchFileDownloadUrl(fileId: string): Promise<FileDownloadUrlResponse> {
+  return await request<FileDownloadUrlResponse>(`/v1/files/${fileId}/download-url`, {
+    method: "POST",
+  });
+}
+
+export async function fetchFileAsset(fileId: string): Promise<FileAsset> {
+  return await request<FileAsset>(`/v1/files/${fileId}`);
 }
 
 export function sendInterrupt(sessionId: string, reason?: string): Promise<SessionEvent> {

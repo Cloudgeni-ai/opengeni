@@ -1,9 +1,58 @@
 export type SessionStatus = "queued" | "running" | "idle" | "requires_action" | "failed" | "cancelled";
 
-export type ResourceRef = {
-  kind: "repository" | "object" | "url";
-  uri: string;
-  metadata: Record<string, unknown>;
+export type ResourceRef =
+  | {
+      kind: "repository";
+      uri: string;
+      ref: string;
+      mountPath?: string;
+      subpath?: string;
+      githubInstallationId?: number;
+      githubRepositoryId?: number;
+    }
+  | {
+      kind: "file";
+      fileId: string;
+      mountPath?: string;
+    };
+
+export type ToolRef = {
+  kind: "mcp";
+  id: string;
+};
+
+export type FileAsset = {
+  id: string;
+  status: "pending_upload" | "ready" | "failed" | "expired" | "deleted";
+  filename: string;
+  safeFilename: string;
+  contentType: string;
+  sizeBytes: number;
+  sha256: string | null;
+  bucket: string;
+  objectKey: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateFileUploadResponse = {
+  fileId: string;
+  uploadId: string;
+  putUrl: string;
+  requiredHeaders: Record<string, string>;
+  expiresAt: string;
+  maxSizeBytes: number;
+};
+
+export type FileDownloadUrlResponse = {
+  url: string;
+  expiresAt: string;
+};
+
+export type TurnSubmission = {
+  text: string;
+  resources?: ResourceRef[];
+  tools?: ToolRef[];
 };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -13,6 +62,10 @@ export type ClientConfig = {
   allowedModels: string[];
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
+  fileUploads: {
+    enabled: boolean;
+    maxSizeBytes: number;
+  };
 };
 
 export type Session = {
@@ -20,6 +73,7 @@ export type Session = {
   status: SessionStatus;
   initialMessage: string;
   resources: ResourceRef[];
+  tools: ToolRef[];
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: "docker" | "modal" | "local" | "none";

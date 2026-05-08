@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS "sessions" (
   "status" text NOT NULL DEFAULT 'queued',
   "initial_message" text NOT NULL,
   "resources" jsonb NOT NULL DEFAULT '[]'::jsonb,
+  "tools" jsonb NOT NULL DEFAULT '[]'::jsonb,
   "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "model" text NOT NULL,
   "sandbox_backend" text NOT NULL,
@@ -14,6 +15,33 @@ CREATE TABLE IF NOT EXISTS "sessions" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE "sessions" ADD COLUMN IF NOT EXISTS "tools" jsonb NOT NULL DEFAULT '[]'::jsonb;
+CREATE TABLE IF NOT EXISTS "files" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "status" text NOT NULL DEFAULT 'pending_upload',
+  "filename" text NOT NULL,
+  "safe_filename" text NOT NULL,
+  "content_type" text NOT NULL,
+  "size_bytes" bigint NOT NULL,
+  "sha256" text,
+  "bucket" text NOT NULL,
+  "object_key" text NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "files_object_key_idx" ON "files" ("object_key");
+CREATE INDEX IF NOT EXISTS "files_status_idx" ON "files" ("status");
+CREATE TABLE IF NOT EXISTS "file_uploads" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "file_id" uuid NOT NULL REFERENCES "files"("id") ON DELETE CASCADE,
+  "status" text NOT NULL DEFAULT 'pending',
+  "expires_at" timestamptz NOT NULL,
+  "completed_at" timestamptz,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS "file_uploads_file_id_idx" ON "file_uploads" ("file_id");
+CREATE INDEX IF NOT EXISTS "file_uploads_status_idx" ON "file_uploads" ("status");
 CREATE TABLE IF NOT EXISTS "session_turns" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "session_id" uuid NOT NULL REFERENCES "sessions"("id") ON DELETE CASCADE,
