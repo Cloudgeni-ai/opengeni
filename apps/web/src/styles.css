@@ -194,6 +194,11 @@ body {
   animation: message-in 180ms ease-out both;
 }
 
+.chat-scroll-mask {
+  scrollbar-gutter: stable;
+  scroll-padding-block: 2.5rem 14rem;
+}
+
 .markdown-stream {
   max-width: 100%;
   overflow-wrap: anywhere;

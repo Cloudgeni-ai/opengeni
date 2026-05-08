@@ -87,6 +87,62 @@ export const FileDownloadUrlResponse = z.object({
 });
 export type FileDownloadUrlResponse = z.infer<typeof FileDownloadUrlResponse>;
 
+export const DocumentStatus = z.enum(["queued", "indexing", "ready", "failed"]);
+export type DocumentStatus = z.infer<typeof DocumentStatus>;
+
+export const DocumentBase = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type DocumentBase = z.infer<typeof DocumentBase>;
+
+export const Document = z.object({
+  id: z.string().uuid(),
+  baseId: z.string().uuid(),
+  fileId: z.string().uuid(),
+  status: DocumentStatus,
+  title: z.string(),
+  parser: z.string(),
+  chunkCount: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Document = z.infer<typeof Document>;
+
+export const DocumentSearchResult = z.object({
+  chunkId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  baseId: z.string().uuid(),
+  fileId: z.string().uuid(),
+  title: z.string(),
+  text: z.string(),
+  score: z.number(),
+  chunkIndex: z.number().int().nonnegative(),
+  metadata: z.record(z.string(), z.unknown()),
+});
+export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
+
+export const CreateDocumentBaseRequest = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+});
+export type CreateDocumentBaseRequest = z.infer<typeof CreateDocumentBaseRequest>;
+
+export const AddDocumentRequest = z.object({
+  fileId: z.string().uuid(),
+});
+export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
+
+export const DocumentSearchRequest = z.object({
+  query: z.string().min(1),
+  limit: z.number().int().positive().max(20).default(5),
+});
+export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
+
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
@@ -167,6 +223,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       text: z.string().min(1),
       resources: z.array(ResourceRef).default([]),
       tools: z.array(ToolRef).default([]),
+      model: z.string().min(1).optional(),
+      reasoningEffort: ReasoningEffort.optional(),
     }),
   }),
   z.object({

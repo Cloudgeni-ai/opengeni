@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azurePreflightCommand, buildInfraAgent, buildManifest, buildUserMessageInput, ensureReadableStreamFrom, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, sandboxCommandExitCode } from "../src/index";
+import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
+import { applyMissingManifestEntries, azurePreflightCommand, buildInfraAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzurePreflight, sandboxCommandExitCode, sandboxRunAs } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@infra-agents/testing";
 import type { MCPServer } from "@openai/agents";
@@ -33,6 +33,38 @@ describe("runtime event normalization", () => {
     expect(events).toEqual([]);
   });
 
+  test("maps Responses reasoning summary deltas into text-only reasoning events", () => {
+    const events = normalizeSdkEvent(new RunRawModelStreamEvent({
+      type: "model",
+      providerData: {
+        rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+      },
+        event: {
+          type: "response.reasoning_summary_text.delta",
+          delta: "Checking credentials",
+        },
+    } as any));
+
+    expect(events).toEqual([
+      { type: "agent.reasoning.delta", payload: { text: "Checking credentials" } },
+    ]);
+  });
+
+  test("does not persist raw SDK reasoning items", () => {
+    const events = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        type: "reasoning_item",
+        rawItem: {
+          type: "reasoning",
+          content: [{ type: "input_text", text: "raw reasoning summary object" }],
+        },
+      },
+    } as any);
+
+    expect(events).toEqual([]);
+  });
+
   test("maps tool call stream items into tool events", () => {
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
@@ -53,10 +85,26 @@ describe("runtime event normalization", () => {
 
   test("uses normal Azure CLI service principal preflight", () => {
     const command = azurePreflightCommand();
+    expect(command).toContain("export HOME=");
+    expect(command).toContain("export AZURE_CONFIG_DIR=");
+    expect(command).toContain("mkdir -p \"$AZURE_CONFIG_DIR\"");
     expect(command).toContain("command -v az");
     expect(command).toContain("az login --service-principal");
     expect(command).toContain("az account set --subscription");
     expect(command).not.toContain("infra-agent-azure-login");
+  });
+
+  test("runs Azure preflight as the sandbox agent user", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    await runAzurePreflight({
+      execCommand: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "" };
+      },
+    } as any, undefined, "sandbox");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.runAs).toBe("sandbox");
+    expect(calls[0]?.workdir).toBe("/workspace");
   });
 
   test("recognizes common sandbox command exit code shapes", () => {
@@ -85,46 +133,22 @@ describe("runtime event normalization", () => {
     expect(prepared.input).toBe("hello");
   });
 
-  test("builds structured user input for image attachments", async () => {
-    const prepared = await prepareRunInput(buildInfraAgent(testSettings({ sandboxBackend: "none" }), []), {
-      kind: "message",
-      text: "what is this?",
-      modelImages: [{
-        fileId: "00000000-0000-4000-8000-000000000010",
-        filename: "chart.png",
-        sandboxPath: "/workspace/files/00000000-0000-4000-8000-000000000010/chart.png",
-        image: "data:image/png;base64,abcd",
-      }],
-      serializedRunState: null,
-    });
-    const input = prepared.input as any[];
-    expect(input[0]).toMatchObject({
-      type: "message",
-      role: "user",
-    });
-    expect(input[0].content[0]).toMatchObject({ type: "input_text" });
-    expect(input[0].content[0].text).toContain("what is this?");
-    expect(input[0].content[0].text).toContain("direct vision inputs");
-    expect(input[0].content[0].text).toContain("/workspace/files/00000000-0000-4000-8000-000000000010/chart.png");
-    expect(input[0].content[1]).toEqual({ type: "input_image", image: "data:image/png;base64,abcd", detail: "auto" });
-  });
-
-  test("adds sandbox-only notes for omitted oversized images", () => {
-    const item = buildUserMessageInput("inspect this", [], [{
-      fileId: "00000000-0000-4000-8000-000000000010",
-      filename: "huge.png",
-      sandboxPath: "/workspace/files/00000000-0000-4000-8000-000000000010/huge.png",
-      reason: "exceeds 20 byte model image limit",
-    }]) as any;
-    expect(item.content[0].text).toContain("inspect this");
-    expect(item.content[0].text).toContain("huge.png");
-    expect(item.content[0].text).toContain("/workspace/files/00000000-0000-4000-8000-000000000010/huge.png");
-    expect(item.content).toHaveLength(1);
-  });
-
   test("builds agents without MCP servers by default", () => {
     const agent = buildInfraAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(agent.mcpServers).toEqual([]);
+  });
+
+  test("sets sandbox runAs for sandbox backends only", () => {
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBe("sandbox");
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBe("sandbox");
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
+    expect((buildInfraAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs).toBe("sandbox");
+    expect((buildInfraAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs).toBeUndefined();
+  });
+
+  test("includes read-only attachment guidance in agent instructions", () => {
+    const agent = buildInfraAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect(agent.instructions).toContain("Attached files are mounted read-only; copy them before modifying.");
   });
 
   test("builds native S3 mount entries for file resources", () => {
@@ -215,6 +239,30 @@ describe("runtime event normalization", () => {
     } as any, JSON.parse(JSON.stringify(target)));
     expect(applied).toHaveLength(1);
     expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+  });
+
+  test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
+    const manifestRecord = JSON.parse(JSON.stringify(new Manifest({ entries: {} })));
+    let received: Record<string, unknown> | null = null;
+    const restored = await deserializeSandboxSessionStateEnvelope({
+      backendId: "docker",
+      deserializeSessionState: async (state: Record<string, unknown>) => {
+        received = state;
+        return {
+          manifest: new Manifest(state.manifest as any),
+          workspaceRootPath: "/tmp/workspace",
+          workspaceReady: true,
+        } as any;
+      },
+    } as any, {
+      providerState: {
+        workspaceRootPath: "/tmp/workspace",
+      },
+      manifest: manifestRecord,
+      workspaceReady: true,
+    });
+    expect(received?.manifest).toEqual(manifestRecord);
+    expect(typeof restored?.manifest.mountTargetsForMaterialization).toBe("function");
   });
 
   test("fails when resumed sandbox sessions cannot apply missing manifest entries", async () => {

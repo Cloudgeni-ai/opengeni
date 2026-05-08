@@ -297,6 +297,8 @@ export async function appendSessionEvents(db: Database, sessionId: string, input
 export async function appendSessionEventsAndUpdateSession(db: Database, sessionId: string, inputs: AppendEventInput[], update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
+  model?: string;
+  metadata?: Record<string, unknown>;
   status?: SessionStatus;
   activeTurnId?: string | null;
 }): Promise<SessionEvent[]> {
@@ -327,6 +329,8 @@ export async function appendSessionEventsAndUpdateSession(db: Database, sessionI
       lastSequence: sequence,
       ...(update.resources !== undefined ? { resources: update.resources } : {}),
       ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.model !== undefined ? { model: update.model } : {}),
+      ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
       ...(update.status !== undefined ? { status: update.status } : {}),
       ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
       updatedAt: now,
@@ -340,6 +344,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, s
   update?: {
     resources?: ResourceRef[];
     tools?: ToolRef[];
+    model?: string;
+    metadata?: Record<string, unknown>;
     status?: SessionStatus;
     activeTurnId?: string | null;
   };
@@ -372,6 +378,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, s
       lastSequence: sequence,
       ...(update.resources !== undefined ? { resources: update.resources } : {}),
       ...(update.tools !== undefined ? { tools: update.tools } : {}),
+      ...(update.model !== undefined ? { model: update.model } : {}),
+      ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
       ...(update.status !== undefined ? { status: update.status } : {}),
       ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
       updatedAt: now,

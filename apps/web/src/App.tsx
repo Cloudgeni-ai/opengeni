@@ -9,6 +9,8 @@ import {
   CopyIcon,
   DownloadIcon,
   FileJsonIcon,
+  FilesIcon,
+  FileSearchIcon,
   GitBranchIcon,
   GitPullRequestIcon,
   ImageIcon,
@@ -49,7 +51,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   createSession,
+  addDocumentToBase,
+  createDocumentBase,
   fetchClientConfig,
+  fetchDocumentBases,
+  fetchDocuments,
   fetchEvents,
   fetchFileAsset,
   fetchFileDownloadUrl,
@@ -59,13 +65,18 @@ import {
   sendApproval,
   sendInterrupt,
   sendUserMessage,
+  searchDocumentBase,
   startGitHubManifest,
   streamUrl,
+  uploadFileAsset,
 } from "./api";
 import type {
   ClientConfig,
+  DocumentBase,
+  DocumentSearchResult,
   FileAsset,
   GitHubRepository,
+  IndexedDocument,
   ReasoningEffort,
   ResourceRef,
   Session,
@@ -158,6 +169,7 @@ type ConversationTurn = ConversationUserTurn | ConversationAssistantTurn | Conve
 
 export function App() {
   const [sessionId, setSessionId] = useState(() => sessionIdFromPath());
+  const [homeView, setHomeView] = useState<"agent" | "documents">("agent");
   const [session, setSession] = useState<Session | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
@@ -174,6 +186,7 @@ export function App() {
   const [githubStatus, setGithubStatus] = useState<{ configured: boolean; missing: string[]; installUrl: string | null } | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
+  const [documentSearchEnabled, setDocumentSearchEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -205,9 +218,7 @@ export function App() {
 
   useSessionStream(sessionId, lastSequence, (incoming) => {
     setEvents((current) => mergeEvents(current, incoming));
-    if (incoming.some((event) => event.type === "session.status.changed")) {
-      void fetchSession(incoming[0]!.sessionId).then(setSession).catch(() => undefined);
-    }
+    setSession((current) => current ? applySessionStatusEvents(current, incoming) : current);
   }, setConnectionState);
 
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
@@ -239,10 +250,11 @@ export function App() {
     setBusy(true);
     try {
       const selectedResources = buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs);
+      const selectedTools = buildTools(submission.tools, documentSearchEnabled);
       const created = await createSession({
         initialMessage: submission.text,
         resources: [...selectedResources, ...(submission.resources ?? [])],
-        tools: submission.tools,
+        tools: selectedTools,
         model,
         reasoningEffort,
       });
@@ -276,6 +288,9 @@ export function App() {
       await sendUserMessage(session.id, {
         ...submission,
         text: submission.text.trim(),
+        tools: buildTools(submission.tools, documentSearchEnabled),
+        model,
+        reasoningEffort,
       });
       setSession(await fetchSession(session.id));
     } catch (error) {
@@ -337,7 +352,7 @@ export function App() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col overflow-x-hidden bg-[color:var(--color-bg)] text-[color:var(--color-fg)]">
+    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-[color:var(--color-bg)] text-[color:var(--color-fg)]">
       <Toaster richColors theme="dark" />
       <header className="sticky top-0 z-40 flex h-14 items-center gap-3 border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/75 px-4 backdrop-blur sm:px-6">
         <button
@@ -393,133 +408,93 @@ export function App() {
             </p>
           </section>
 
-          <section className="mt-8">
-            <Composer
-              autoFocus
-              pending={busy}
-              fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
-              placeholder="Describe a task for the agent..."
-              submitLabel={busy ? "Starting" : "Send"}
-              examples={examples}
-              controlsStart={
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <ModelPicker
-                    config={clientConfig}
-                    model={model}
-                    effort={reasoningEffort}
-                    disabled={busy}
-                    onModelChange={setModel}
-                    onEffortChange={setReasoningEffort}
-                  />
-                  <RepositoryContextPicker
-                    configured={githubStatus?.configured === true}
-                    installUrl={githubStatus?.installUrl ?? null}
-                    repositories={githubRepos}
-                    groups={repositoryGroups}
-                    selectedRepoIds={selectedRepoIds}
-                    selectedRepoRefs={selectedRepoRefs}
-                    selectedInstallationId={selectedInstallationId}
-                    manualRepos={manualRepos}
-                    manualOpen={manualReposOpen}
-                    githubAppOpen={githubAppOpen}
-                    org={githubOrg}
-                    pending={busy}
-                    repoBusy={repoBusy}
-                    githubAppBusy={githubAppBusy}
-                    onRefresh={refreshGitHub}
-                    onToggleRepo={toggleGitHubRepository}
-                    onRefChange={(repoId, ref) => setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))}
-                    onManualOpenChange={setManualReposOpen}
-                    onManualAdd={addManualRepository}
-                    onManualUpdate={(id, patch) => setManualRepos((current) => current.map((repo) => repo.id === id ? { ...repo, ...patch } : repo))}
-                    onManualRemove={(id) => setManualRepos((current) => current.filter((repo) => repo.id !== id))}
-                    onGitHubAppOpenChange={setGithubAppOpen}
-                    onOrgChange={setGithubOrg}
-                    onStartGitHubApp={startGitHubAppManifestFlow}
-                  />
-                </div>
-              }
-              onSubmit={submitInitial}
-            />
-          </section>
-
-          <RecentSessions onSelect={selectSession} />
+          <Tabs value={homeView} onValueChange={(value) => setHomeView(value === "documents" ? "documents" : "agent")} className="mt-8">
+            <TabsList className="mx-auto grid w-full max-w-sm grid-cols-2">
+              <TabsTrigger value="agent">Agent</TabsTrigger>
+              <TabsTrigger value="documents">Documents</TabsTrigger>
+            </TabsList>
+            <TabsContent value="agent" className="mt-6">
+              <Composer
+                autoFocus
+                pending={busy}
+                fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
+                placeholder="Describe a task for the agent..."
+                submitLabel={busy ? "Starting" : "Send"}
+                examples={examples}
+                controlsStart={
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <ModelPicker
+                      config={clientConfig}
+                      model={model}
+                      effort={reasoningEffort}
+                      disabled={busy}
+                      onModelChange={setModel}
+                      onEffortChange={setReasoningEffort}
+                    />
+                    <RepositoryContextPicker
+                      configured={githubStatus?.configured === true}
+                      installUrl={githubStatus?.installUrl ?? null}
+                      repositories={githubRepos}
+                      groups={repositoryGroups}
+                      selectedRepoIds={selectedRepoIds}
+                      selectedRepoRefs={selectedRepoRefs}
+                      selectedInstallationId={selectedInstallationId}
+                      manualRepos={manualRepos}
+                      manualOpen={manualReposOpen}
+                      githubAppOpen={githubAppOpen}
+                      org={githubOrg}
+                      pending={busy}
+                      repoBusy={repoBusy}
+                      githubAppBusy={githubAppBusy}
+                      onRefresh={refreshGitHub}
+                      onToggleRepo={toggleGitHubRepository}
+                      onRefChange={(repoId, ref) => setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))}
+                      onManualOpenChange={setManualReposOpen}
+                      onManualAdd={addManualRepository}
+                      onManualUpdate={(id, patch) => setManualRepos((current) => current.map((repo) => repo.id === id ? { ...repo, ...patch } : repo))}
+                      onManualRemove={(id) => setManualRepos((current) => current.filter((repo) => repo.id !== id))}
+                      onGitHubAppOpenChange={setGithubAppOpen}
+                      onOrgChange={setGithubOrg}
+                      onStartGitHubApp={startGitHubAppManifestFlow}
+                    />
+                    <DocumentSearchToolToggle
+                      enabled={documentSearchEnabled}
+                      disabled={busy}
+                      onToggle={() => setDocumentSearchEnabled((enabled) => !enabled)}
+                    />
+                  </div>
+                }
+                onSubmit={submitInitial}
+              />
+              <RecentSessions onSelect={selectSession} />
+            </TabsContent>
+            <TabsContent value="documents" className="mt-6">
+              <DocumentsWorkspace fileUploadsEnabled={clientConfig?.fileUploads.enabled === true} />
+            </TabsContent>
+          </Tabs>
         </div>
       ) : (
         <div className={cn("grid min-h-0 w-full min-w-0 flex-1 grid-cols-1 overflow-hidden", inspectorOpen && "lg:grid-cols-[minmax(0,1fr)_minmax(0,390px)]")}>
-          <section className="flex min-h-0 min-w-0 flex-col">
-            <ScrollArea className="min-h-0 flex-1">
-              <div className="mx-auto w-full max-w-3xl px-4 pt-8 pb-32 sm:px-6">
-                {conversation.length === 0 ? (
-                  <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
-                    Waiting for session activity
-                  </div>
-                ) : (
-                  <ConversationStream turns={conversation} />
-                )}
-
-                {approvals.length > 0 ? (
-                  <div className="mt-6 grid gap-3">
-                    {approvals.map((approval) => (
-                      <div key={approval.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-                        <div className="text-sm font-medium">{approval.name}</div>
-                        <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-[color:var(--color-bg)] p-3 text-xs text-[color:var(--color-fg-muted)]">
-                          {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
-                        </pre>
-                        <div className="mt-3 flex justify-end gap-2">
-                          <Button size="sm" onClick={() => void sendApproval(session.id, approval.id, "approve")}>
-                            <CheckIcon className="size-3.5" />
-                            Approve
-                          </Button>
-                          <Button size="sm" variant="destructive" onClick={() => void sendApproval(session.id, approval.id, "reject")}>
-                            <XIcon className="size-3.5" />
-                            Reject
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            </ScrollArea>
-
-            <div className="sticky bottom-0 border-t border-[color:var(--color-border)] bg-[color:var(--color-bg)]/90 px-4 py-3 backdrop-blur sm:px-6">
-              <div className="mx-auto w-full max-w-3xl">
-                <Composer
-                  pending={busy}
-                  disabled={!canSendFollowUp}
-                  submitDisabled={sessionRunning}
-                  fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
-                  disabledHint={
-                    sessionRunning
-                      ? "Agent is running. Stop before sending."
-                      : session.status !== "idle"
-                        ? `Session is ${session.status}.`
-                        : undefined
-                  }
-                  placeholder={sessionRunning ? "Agent is running..." : "Send a follow-up..."}
-                  submitLabel={busy ? "Sending" : "Send"}
-                  submitAction={
-                    sessionRunning ? (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        onClick={interruptSession}
-                        disabled={busy}
-                        aria-label="Interrupt"
-                        className="h-8 gap-1.5 px-3"
-                      >
-                        {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SquareIcon className="size-3.5" />}
-                        <span className="text-xs font-medium">Stop</span>
-                      </Button>
-                    ) : undefined
-                  }
-                  onSubmit={submitFollowUp}
-                />
-              </div>
-            </div>
-          </section>
+          <SessionChatPane
+            conversation={conversation}
+            approvals={approvals}
+            busy={busy}
+            canSendFollowUp={canSendFollowUp}
+            session={session}
+            sessionRunning={sessionRunning}
+            fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
+            documentSearchEnabled={documentSearchEnabled}
+            clientConfig={clientConfig}
+            model={model}
+            reasoningEffort={reasoningEffort}
+            onDocumentSearchToggle={() => setDocumentSearchEnabled((enabled) => !enabled)}
+            onModelChange={setModel}
+            onReasoningEffortChange={setReasoningEffort}
+            onSubmit={submitFollowUp}
+            onInterrupt={interruptSession}
+            onApprove={(approvalId) => void sendApproval(session.id, approvalId, "approve")}
+            onReject={(approvalId) => void sendApproval(session.id, approvalId, "reject")}
+          />
 
           {inspectorOpen ? (
             <aside className="min-h-0 w-full min-w-0 overflow-hidden border-t border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 lg:border-t-0 lg:border-l">
@@ -530,6 +505,33 @@ export function App() {
       )}
     </main>
   );
+}
+
+export function applySessionStatusEvents(session: Session, events: SessionEvent[]): Session {
+  return events.reduce((current, event) => {
+    if (event.type !== "session.status.changed" || event.sessionId !== current.id) {
+      return current;
+    }
+    const status = (event.payload as { status?: unknown }).status;
+    if (!isSessionStatus(status)) {
+      return current;
+    }
+    return {
+      ...current,
+      status,
+      activeTurnId: status === "idle" || status === "failed" || status === "cancelled" ? null : current.activeTurnId,
+      updatedAt: event.occurredAt,
+    };
+  }, session);
+}
+
+function isSessionStatus(value: unknown): value is SessionStatus {
+  return value === "queued" ||
+    value === "running" ||
+    value === "idle" ||
+    value === "requires_action" ||
+    value === "failed" ||
+    value === "cancelled";
 }
 
 function RepositoryContextPicker(props: {
@@ -840,6 +842,281 @@ function RepositoryContextPicker(props: {
   );
 }
 
+function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolean }) {
+  const [bases, setBases] = useState<DocumentBase[]>([]);
+  const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<IndexedDocument[]>([]);
+  const [results, setResults] = useState<DocumentSearchResult[]>([]);
+  const [name, setName] = useState("");
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
+
+  useEffect(() => {
+    void refreshBases();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedBaseId) {
+      setDocuments([]);
+      setResults([]);
+      return;
+    }
+    void fetchDocuments(selectedBaseId).then(setDocuments).catch((error) => {
+      toast.error("Failed to load documents", { description: String(error) });
+    });
+  }, [selectedBaseId]);
+
+  useEffect(() => {
+    if (!selectedBaseId || !documents.some((document) => document.status === "queued" || document.status === "indexing")) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void fetchDocuments(selectedBaseId).then(setDocuments).catch(() => undefined);
+    }, 1200);
+    return () => window.clearInterval(timer);
+  }, [selectedBaseId, documents]);
+
+  async function refreshBases() {
+    try {
+      const next = await fetchDocumentBases();
+      setBases(next);
+      setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
+    } catch (error) {
+      toast.error("Failed to load document bases", { description: String(error) });
+    }
+  }
+
+  async function handleCreateBase() {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    try {
+      const base = await createDocumentBase({ name: trimmed });
+      setBases((current) => [...current, base]);
+      setSelectedBaseId(base.id);
+      setName("");
+    } catch (error) {
+      toast.error("Failed to create document base", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleFiles(files: FileList | null) {
+    if (!selectedBaseId || !files || files.length === 0) return;
+    setBusy(true);
+    try {
+      for (const file of Array.from(files)) {
+        const asset = await uploadFileAsset(file);
+        const indexed = await addDocumentToBase(selectedBaseId, asset.id);
+        setDocuments((current) => [indexed, ...current.filter((item) => item.id !== indexed.id)]);
+      }
+      toast.success("Document indexed");
+    } catch (error) {
+      toast.error("Failed to index document", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  async function handleSearch() {
+    if (!selectedBaseId || !query.trim()) return;
+    setBusy(true);
+    try {
+      setResults(await searchDocumentBase(selectedBaseId, query.trim()));
+    } catch (error) {
+      toast.error("Document search failed", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="rounded-xl border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-left shadow-sm sm:p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <FileSearchIcon className="size-4 text-[color:var(--color-brand)]" />
+            Document bases
+          </div>
+          <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+            Upload files into an indexed base, then attach Docs to an agent turn for MCP search.
+          </p>
+        </div>
+        <div className="flex min-w-0 gap-2">
+          <Input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="New base"
+            className="h-8 min-w-0 text-xs"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void handleCreateBase();
+            }}
+          />
+          <Button type="button" size="sm" onClick={handleCreateBase} disabled={busy || !name.trim()} className="h-8 shrink-0">
+            <PlusIcon className="size-3.5" />
+            Create
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="space-y-1">
+          {bases.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+              Create a document base to start.
+            </div>
+          ) : bases.map((base) => (
+            <button
+              key={base.id}
+              type="button"
+              onClick={() => setSelectedBaseId(base.id)}
+              className={cn(
+                "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
+                selectedBaseId === base.id
+                  ? "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
+                  : "border-[color:var(--color-border)] bg-[color:var(--color-bg)]/25 text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)]",
+              )}
+            >
+              <span className="truncate">{base.name}</span>
+              {selectedBaseId === base.id ? <CheckIcon className="size-3.5 shrink-0" /> : null}
+            </button>
+          ))}
+        </div>
+
+        <div className="min-w-0 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/20 p-3">
+          {selectedBase ? (
+            <>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{selectedBase.name}</div>
+                  <div className="text-xs text-[color:var(--color-fg-subtle)]">{documents.length} indexed files</div>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(event) => void handleFiles(event.target.files)}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={busy || !fileUploadsEnabled}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="h-8"
+                  >
+                    {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <FilesIcon className="size-3.5" />}
+                    Upload
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <Input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Search indexed documents"
+                  className="h-9 text-sm"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void handleSearch();
+                  }}
+                />
+                <Button type="button" size="sm" onClick={handleSearch} disabled={busy || !query.trim()} className="h-9">
+                  <FileSearchIcon className="size-3.5" />
+                  Search
+                </Button>
+              </div>
+
+              <div className="mt-4 grid gap-3">
+                {results.length > 0 ? (
+                  <div className="space-y-2">
+                    {results.map((result) => (
+                      <div key={result.chunkId} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="truncate font-medium text-[color:var(--color-fg)]">{result.title}</span>
+                          <span className="shrink-0 text-[color:var(--color-fg-subtle)]">{Math.round(result.score * 100)}%</span>
+                        </div>
+                        <p className="mt-2 line-clamp-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">{result.text}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="space-y-2">
+                  {documents.map((document) => (
+                    <div key={document.id} className="flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-medium">{document.title}</div>
+                        <div className="mt-0.5 text-[11px] text-[color:var(--color-fg-subtle)]">
+                          {document.status} · {document.chunkCount} chunks · {document.parser}
+                        </div>
+                      </div>
+                      <StatusDot status={document.status} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="grid min-h-48 place-items-center text-center text-xs text-[color:var(--color-fg-muted)]">
+              Select or create a base.
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StatusDot({ status }: { status: IndexedDocument["status"] }) {
+  return (
+    <span
+      className={cn(
+        "size-2.5 shrink-0 rounded-full",
+        status === "ready" && "bg-emerald-400",
+        status === "failed" && "bg-red-400",
+        (status === "queued" || status === "indexing") && "bg-amber-300",
+      )}
+      aria-label={status}
+      title={status}
+    />
+  );
+}
+
+function DocumentSearchToolToggle(props: {
+  enabled: boolean;
+  disabled?: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      variant={props.enabled ? "secondary" : "ghost"}
+      size="sm"
+      disabled={props.disabled}
+      onClick={props.onToggle}
+      aria-pressed={props.enabled}
+      aria-label="Attach document search tool"
+      title="Attach document search"
+      className={cn(
+        "h-8 max-w-[12rem] gap-1.5 rounded-full border px-2.5 text-xs",
+        props.enabled
+          ? "border-[color:var(--color-brand)]/35 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
+          : "border-transparent text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
+      )}
+    >
+      <FilesIcon className="size-3.5" />
+      <span className="truncate">Docs</span>
+      {props.enabled ? <CheckIcon className="size-3 shrink-0" /> : null}
+    </Button>
+  );
+}
+
 function ModelPicker(props: {
   config: ClientConfig | null;
   model: string;
@@ -897,12 +1174,164 @@ function StatusBadge({ status }: { status: SessionStatus }) {
   );
 }
 
-function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [turns]);
+function SessionChatPane(props: {
+  conversation: ConversationTurn[];
+  approvals: Array<{ id: string; name: string; arguments?: unknown; raw?: unknown }>;
+  busy: boolean;
+  canSendFollowUp: boolean;
+  session: Session;
+  sessionRunning: boolean;
+  fileUploadsEnabled: boolean;
+  documentSearchEnabled: boolean;
+  clientConfig: ClientConfig | null;
+  model: string;
+  reasoningEffort: IntelligenceEffort;
+  onDocumentSearchToggle: () => void;
+  onModelChange: (model: string) => void;
+  onReasoningEffortChange: (effort: IntelligenceEffort) => void;
+  onSubmit: (submission: TurnSubmission) => void;
+  onInterrupt: () => void;
+  onApprove: (approvalId: string) => void;
+  onReject: (approvalId: string) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const nearBottomRef = useRef(true);
+  const previousTurnCountRef = useRef(props.conversation.length);
+  const lastEventKey = [
+    props.conversation.at(-1)?.id ?? "empty",
+    props.conversation.at(-1)?.kind ?? "none",
+    props.conversation.length,
+    props.approvals.length,
+  ].join(":");
 
+  function updateNearBottom() {
+    const element = scrollRef.current;
+    if (!element) {
+      nearBottomRef.current = true;
+      return;
+    }
+    nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+  }
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || !nearBottomRef.current) {
+      previousTurnCountRef.current = props.conversation.length;
+      return;
+    }
+    const turnCountChanged = props.conversation.length !== previousTurnCountRef.current;
+    previousTurnCountRef.current = props.conversation.length;
+    const frame = requestAnimationFrame(() => {
+      element.scrollTo({
+        top: element.scrollHeight,
+        behavior: turnCountChanged ? "smooth" : "auto",
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [lastEventKey, props.conversation]);
+
+  return (
+    <section className="relative min-h-0 min-w-0 overflow-hidden">
+      <div
+        ref={scrollRef}
+        onScroll={updateNearBottom}
+        className="chat-scroll-mask h-full min-h-0 overflow-y-auto overflow-x-hidden"
+        data-testid="session-chat-scroll"
+      >
+        <div className="mx-auto w-full max-w-3xl px-4 pt-8 pb-56 sm:px-6">
+          {props.conversation.length === 0 ? (
+            <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
+              Waiting for session activity
+            </div>
+          ) : (
+            <ConversationStream turns={props.conversation} />
+          )}
+
+          {props.approvals.length > 0 ? (
+            <div className="mt-6 grid gap-3">
+              {props.approvals.map((approval) => (
+                <div key={approval.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                  <div className="text-sm font-medium">{approval.name}</div>
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-[color:var(--color-bg)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                    {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
+                  </pre>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button size="sm" onClick={() => props.onApprove(approval.id)}>
+                      <CheckIcon className="size-3.5" />
+                      Approve
+                    </Button>
+                    <Button size="sm" variant="destructive" onClick={() => props.onReject(approval.id)}>
+                      <XIcon className="size-3.5" />
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-[color:var(--color-bg)] to-transparent" />
+      <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-[color:var(--color-bg)] via-[color:var(--color-bg)]/80 to-transparent" />
+      <div className="absolute inset-x-0 bottom-0 px-4 pb-4 sm:px-6">
+        <div className="mx-auto w-full max-w-3xl">
+          <Composer
+            pending={props.busy}
+            disabled={!props.canSendFollowUp}
+            submitDisabled={props.sessionRunning}
+            fileUploadsEnabled={props.fileUploadsEnabled}
+            disabledHint={
+              props.sessionRunning
+                ? "Agent is running. Stop before sending."
+                : props.session.status !== "idle"
+                  ? `Session is ${props.session.status}.`
+                  : undefined
+            }
+            placeholder={props.sessionRunning ? "Agent is running..." : "Send a follow-up..."}
+            submitLabel={props.busy ? "Sending" : "Send"}
+            submitAction={
+              props.sessionRunning ? (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={props.onInterrupt}
+                  disabled={props.busy}
+                  aria-label="Interrupt"
+                  className="h-8 gap-1.5 px-3"
+                >
+                  {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SquareIcon className="size-3.5" />}
+                  <span className="text-xs font-medium">Stop</span>
+                </Button>
+              ) : undefined
+            }
+            controlsStart={
+              <div className="flex min-w-0 items-center gap-1.5">
+                <ModelPicker
+                  config={props.clientConfig}
+                  model={props.model}
+                  effort={props.reasoningEffort}
+                  disabled={props.busy}
+                  onModelChange={props.onModelChange}
+                  onEffortChange={props.onReasoningEffortChange}
+                />
+                <DocumentSearchToolToggle
+                  enabled={props.documentSearchEnabled}
+                  disabled={props.busy || !props.canSendFollowUp}
+                  onToggle={props.onDocumentSearchToggle}
+                />
+              </div>
+            }
+            onSubmit={props.onSubmit}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
   return (
     <div className="space-y-3.5" data-testid="session-timeline">
       {turns.map((turn) => turn.kind === "user"
@@ -910,7 +1339,6 @@ function ConversationStream({ turns }: { turns: ConversationTurn[] }) {
         : turn.kind === "assistant"
           ? <AssistantMessage key={turn.id} turn={turn} />
           : <ActivityMessage key={turn.id} turn={turn} />)}
-      <div ref={bottomRef} aria-hidden="true" />
     </div>
   );
 }
@@ -1036,16 +1464,7 @@ function TracePanel(props: {
   trace: ConversationTraceItem[];
   status: ConversationActivityTurn["status"];
 }) {
-  const shouldOpen = props.status === "running" || props.status === "requires_action";
-  const [open, setOpen] = useState(shouldOpen);
-
-  useEffect(() => {
-    if (props.status === "complete") {
-      setOpen(false);
-    } else if (shouldOpen) {
-      setOpen(true);
-    }
-  }, [props.status, shouldOpen]);
+  const [open, setOpen] = useState(false);
 
   const failed = props.trace.some((item) => item.status === "failed");
   const running = props.trace.some((item) => item.status === "running");
@@ -1100,12 +1519,12 @@ function TraceItemView({ item }: { item: ConversationTraceItem }) {
           </span>
         </div>
         {item.detail ? (
-          <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[color:var(--color-surface)]/70 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
+          <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-[color:var(--color-surface)]/70 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
             {item.detail}
           </pre>
         ) : null}
         {item.output ? (
-          <pre className="mt-1.5 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/45 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
+          <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/45 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
             {item.output}
           </pre>
         ) : null}
@@ -1421,9 +1840,10 @@ function sanitizeEventForDisplay(event: SessionEvent): SessionEvent {
   if (event.type !== "agent.reasoning.delta") {
     return event;
   }
+  const text = reasoningSummaryText(event.payload);
   return {
     ...event,
-    payload: { kind: "model_activity" },
+    payload: { text: text || "Reasoning summary received." },
   };
 }
 
@@ -1557,6 +1977,14 @@ function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], sel
       ...(repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
   });
+}
+
+export function buildTools(existing: ToolRef[] | undefined, documentSearchEnabled: boolean): ToolRef[] {
+  const out = [...(existing ?? [])];
+  if (documentSearchEnabled && !out.some((tool) => tool.kind === "mcp" && tool.id === "docs")) {
+    out.push({ kind: "mcp", id: "docs" });
+  }
+  return out;
 }
 
 function isResourceRefArray(value: unknown): value is ResourceRef[] {
@@ -1698,19 +2126,21 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
       assistant.status = "complete";
       currentMessage = null;
     } else if (event.type === "agent.reasoning.delta") {
+      const text = reasoningSummaryText(payload) || "Reasoning summary received.";
       const activity = startActivity(event);
       activity.status = "running";
       const existing = findTrace(activity, `reasoning:${activity.id}`, "reasoning");
       if (existing) {
         existing.status = "running";
+        existing.detail = existing.detail ? `${existing.detail}${text}` : text;
       } else {
         activity.trace.push({
           id: event.id,
           key: `reasoning:${activity.id}`,
           kind: "reasoning",
           status: "running",
-          title: "Model reasoning",
-          detail: "Internal reasoning is hidden.",
+          title: "Reasoning summary",
+          detail: text,
           occurredAt: event.occurredAt,
         });
       }
@@ -1814,12 +2244,17 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
         message.status = "complete";
         currentMessage = null;
       }
-      const activity = lastActivity();
-      if (activity) {
+      for (const activity of out) {
+        if (activity.kind !== "activity" || activity.status !== "running") {
+          continue;
+        }
+        if (event.turnId && activity.turnId && activity.turnId !== event.turnId) {
+          continue;
+        }
         activity.status = "complete";
         completeRunningActivity(activity);
-        currentActivity = null;
       }
+      currentActivity = null;
     }
   }
   if (out.length === 0 && session.initialMessage) {
@@ -1847,6 +2282,26 @@ function findTrace(activity: ConversationActivityTurn, key: string, kind: Conver
   const trace = [...activity.trace].reverse();
   return trace.find((item) => item.key === key)
     ?? trace.find((item) => item.kind === kind && item.status === "running");
+}
+
+function reasoningSummaryText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+  const directText = (payload as { text?: unknown }).text;
+  if (typeof directText === "string") {
+    return directText;
+  }
+  const item = (payload as { item?: unknown }).item;
+  const rawItem = item && typeof item === "object" ? (item as { rawItem?: unknown }).rawItem : undefined;
+  const content = rawItem && typeof rawItem === "object" ? (rawItem as { content?: unknown }).content : undefined;
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  return content
+    .map((part) => part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")
+    .filter(Boolean)
+    .join("");
 }
 
 function traceKey(event: SessionEvent): string {

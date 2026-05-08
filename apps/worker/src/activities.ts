@@ -20,6 +20,7 @@ import {
   type Database,
 } from "@infra-agents/db";
 import { appendAndPublishEvents, createNatsEventBus, type EventBus } from "@infra-agents/events";
+import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@infra-agents/documents";
 import {
   createGitHubAppInstallationToken,
   githubAppBotIdentity,
@@ -28,10 +29,8 @@ import {
   createProductionAgentRuntime,
   normalizeSdkEvent,
   type InfraAgentRuntime,
-  type ModelImageInput,
-  type OmittedModelImageInput,
 } from "@infra-agents/runtime";
-import { bytesToDataUrl, createObjectStorage, type ObjectStorage } from "@infra-agents/storage";
+import { createObjectStorage, type ObjectStorage } from "@infra-agents/storage";
 import { CancelledFailure, Context } from "@temporalio/activity";
 
 type Services = {
@@ -40,6 +39,7 @@ type Services = {
   bus: EventBus;
   runtime: InfraAgentRuntime;
   objectStorage: ObjectStorage | null;
+  documentServices: DocumentServices;
 };
 
 export type ActivityDependencies = Partial<Services>;
@@ -48,6 +48,10 @@ type RunAgentSegmentInput = {
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
+};
+
+type IndexDocumentInput = {
+  documentId: string;
 };
 
 export type RunAgentSegmentResult = {
@@ -67,6 +71,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         bus: dependencies.bus ?? await createNatsEventBus(settings.natsUrl),
         runtime: dependencies.runtime ?? createProductionAgentRuntime(),
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
+        documentServices: dependencies.documentServices ?? createDocumentServices(settings),
       };
     })();
     return servicesPromise;
@@ -110,6 +115,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
 
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<InfraAgentRuntime["prepareTools"]>> | null = null;
+    await setSessionStatus(db, input.sessionId, "running", turnId);
     await publish([
       { type: "session.status.changed", payload: { status: "running" } },
       { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
@@ -129,7 +135,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         sandboxEnvironment,
         mcpServers: preparedTools.mcpServers,
       });
-      const runInput = await segmentInput(db, runtime, agent, trigger, runSettings, objectStorage);
+      const runInput = await segmentInput(db, runtime, agent, trigger);
       const stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
         onRuntimeEvent: async (event) => {
@@ -170,12 +176,12 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
           serializedRunState: stream.state.toString(),
           pendingApprovals: approvals,
         });
+        await finishTurn(db, turnId, "requires_action");
+        await setSessionStatus(db, input.sessionId, "requires_action", turnId);
         await publish([
           { type: "session.requiresAction", payload: { approvals } },
           { type: "session.status.changed", payload: { status: "requires_action" } },
         ], true);
-        await finishTurn(db, turnId, "requires_action");
-        await setSessionStatus(db, input.sessionId, "requires_action", turnId);
         return { status: "requires_action" };
       }
 
@@ -186,13 +192,13 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         serializedRunState: stream.state.toString(),
         pendingApprovals: [],
       });
+      await finishTurn(db, turnId, "idle");
+      await setSessionStatus(db, input.sessionId, "idle", null);
       await publish([
         { type: "agent.message.completed", payload: { text: finalOutput } },
         { type: "turn.completed", payload: { output: finalOutput } },
         { type: "session.status.changed", payload: { status: "idle" } },
       ], true);
-      await finishTurn(db, turnId, "idle");
-      await setSessionStatus(db, input.sessionId, "idle", null);
       return { status: "idle" };
     } catch (error) {
       if (error instanceof CancelledFailure) {
@@ -202,12 +208,12 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
+      await finishTurn(db, turnId, "failed");
+      await setSessionStatus(db, input.sessionId, "failed", null);
       await publish([
         { type: "turn.failed", payload: { error: message } },
         { type: "session.status.changed", payload: { status: "failed" } },
       ], true);
-      await finishTurn(db, turnId, "failed");
-      await setSessionStatus(db, input.sessionId, "failed", null);
       return { status: "failed" };
     } finally {
       await preparedTools?.close().catch(() => undefined);
@@ -215,6 +221,14 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         clearInterval(heartbeatTimer);
       }
     }
+  }
+
+  async function indexDocument(input: IndexDocumentInput) {
+    const { db, objectStorage, documentServices } = await services();
+    if (!objectStorage) {
+      throw new Error("object storage is not configured");
+    }
+    return await indexDocumentNow(db, objectStorage, input.documentId, documentServices);
   }
 
   async function failSession(input: RunAgentSegmentInput & { error?: string }): Promise<void> {
@@ -266,6 +280,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
 
   return {
     runAgentSegment,
+    indexDocument,
     failSession,
     cancelSession,
   };
@@ -274,6 +289,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
 const defaultActivities = createActivities();
 
 export const runAgentSegment = defaultActivities.runAgentSegment;
+export const indexDocument = defaultActivities.indexDocument;
 export const failSession = defaultActivities.failSession;
 export const cancelSession = defaultActivities.cancelSession;
 
@@ -282,8 +298,6 @@ async function segmentInput(
   runtime: InfraAgentRuntime,
   agent: any,
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
-  settings: Settings,
-  objectStorage: ObjectStorage | null,
 ) {
   if (!trigger) {
     throw new Error("Missing trigger event");
@@ -293,18 +307,15 @@ async function segmentInput(
     if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
       throw new Error("user.message payload is missing text");
     }
-    const { modelImages, omittedModelImages } = await modelImageInputsForTurn(
+    const text = await userMessageTextWithAttachments(
       db,
-      objectStorage,
-      settings.modelImageMaxBytes,
+      payload.text,
       Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
     );
     const latestState = await getLatestRunState(db, trigger.sessionId);
     return await runtime.prepareInput(agent, {
       kind: "message",
-      text: payload.text,
-      modelImages,
-      omittedModelImages,
+      text,
       serializedRunState: latestState?.serializedRunState ?? null,
     });
   }
@@ -329,44 +340,28 @@ async function segmentInput(
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }
 
-export async function modelImageInputsForTurn(
+export async function userMessageTextWithAttachments(
   db: Database,
-  objectStorage: ObjectStorage | null,
-  maxBytes: number,
+  text: string,
   resources: ResourceRef[],
-): Promise<{ modelImages: ModelImageInput[]; omittedModelImages: OmittedModelImageInput[] }> {
-  const modelImages: ModelImageInput[] = [];
-  const omittedModelImages: OmittedModelImageInput[] = [];
+): Promise<string> {
+  const attachedFiles: string[] = [];
   for (const resource of resources) {
     if (resource.kind !== "file") {
       continue;
     }
     const file = await requireFile(db, resource.fileId);
-    if (!file.contentType.toLowerCase().startsWith("image/")) {
-      continue;
-    }
-    const sandboxPath = sandboxFilePath(resource, file);
-    if (file.sizeBytes > maxBytes) {
-      omittedModelImages.push({
-        fileId: file.id,
-        filename: file.filename,
-        sandboxPath,
-        reason: `exceeds ${maxBytes} byte model image limit`,
-      });
-      continue;
-    }
-    if (!objectStorage) {
-      throw new Error("Image model context requires configured object storage");
-    }
-    modelImages.push({
-      fileId: file.id,
-      filename: file.filename,
-      sandboxPath,
-      image: bytesToDataUrl(await objectStorage.getFileBytes(file), file.contentType),
-      detail: "auto",
-    });
+    attachedFiles.push(`- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`);
   }
-  return { modelImages, omittedModelImages };
+  if (attachedFiles.length === 0) {
+    return text;
+  }
+  return [
+    text,
+    "",
+    "Attached files are available in the sandbox:",
+    ...attachedFiles,
+  ].join("\n");
 }
 
 function sandboxFilePath(resource: Extract<ResourceRef, { kind: "file" }>, file: FileAsset): string {
@@ -378,6 +373,10 @@ async function sandboxEnvironmentForRun(settings: Settings, resources: ResourceR
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
   };
+  if (settings.sandboxBackend === "docker" || settings.sandboxBackend === "modal") {
+    environment.HOME ??= "/workspace";
+    environment.AZURE_CONFIG_DIR ??= "/workspace/.azure";
+  }
   const selection = githubRepositorySelection(resources);
   if (!selection) {
     return environment;

@@ -7,8 +7,13 @@ import {
   ClientConfig,
   ClientSessionEvent,
   CompleteFileUploadResponse,
+  AddDocumentRequest,
+  CreateDocumentBaseRequest,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
+  Document,
+  DocumentBase,
+  DocumentSearchRequest,
   CreateSessionRequest,
   FileAsset,
   FileDownloadUrlResponse,
@@ -50,10 +55,26 @@ import {
   personalAppManifestUrl,
   verifySignedState,
 } from "@infra-agents/github";
+import {
+  addDocumentToBase,
+  createDocumentServices,
+  createDocumentBase,
+  type DocumentServices,
+  getDocument,
+  getDocumentChunk,
+  getDocumentBase,
+  indexDocumentNow,
+  listDocumentBases,
+  listDocuments,
+  searchDocuments,
+} from "@infra-agents/documents";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { createObjectStorage } from "@infra-agents/storage";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import * as z from "zod/v4";
 
 export type SessionWorkflowClient = {
   startSessionWorkflow: (input: { sessionId: string; initialEventId: string; workflowId: string }) => Promise<void>;
@@ -62,11 +83,17 @@ export type SessionWorkflowClient = {
   signalInterrupt: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
 };
 
+export type DocumentIndexClient = {
+  indexDocument: (input: { documentId: string }) => Promise<Document | void>;
+};
+
 export type AppDependencies = {
   settings: Settings;
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
+  documentIndexer?: DocumentIndexClient;
+  documentServices?: DocumentServices;
   githubStateSecret?: string;
 };
 
@@ -74,6 +101,17 @@ export function createApp(deps: AppDependencies): Hono {
   const { settings, db, bus, workflowClient } = deps;
   const githubStateSecret = deps.githubStateSecret ?? settings.githubAppManifestStateSecret ?? crypto.randomUUID();
   const objectStorage = createObjectStorage(settings);
+  let documentServices: DocumentServices | null = deps.documentServices ?? null;
+  const getDocumentServices = () => {
+    documentServices ??= createDocumentServices(settings);
+    return documentServices;
+  };
+  const documentIndexer = deps.documentIndexer ?? {
+    indexDocument: async ({ documentId }) => {
+      if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
+      return await indexDocumentNow(db, objectStorage, documentId, getDocumentServices());
+    },
+  };
   const app = new Hono();
 
   app.use("*", cors({
@@ -197,6 +235,64 @@ export function createApp(deps: AppDependencies): Hono {
       url: signed.url,
       expiresAt: signed.expiresAt.toISOString(),
     }));
+  });
+
+  app.post("/v1/document-bases", async (c) => {
+    const payload = CreateDocumentBaseRequest.parse(await c.req.json());
+    return c.json(DocumentBase.parse(await createDocumentBase(db, payload)), 201);
+  });
+
+  app.get("/v1/document-bases", async (c) => {
+    return c.json((await listDocumentBases(db)).map((base) => DocumentBase.parse(base)));
+  });
+
+  app.get("/v1/document-bases/:baseId", async (c) => {
+    const base = await getDocumentBase(db, c.req.param("baseId"));
+    if (!base) throw new HTTPException(404, { message: "document base not found" });
+    return c.json(DocumentBase.parse(base));
+  });
+
+  app.post("/v1/document-bases/:baseId/documents", async (c) => {
+    if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
+    const payload = AddDocumentRequest.parse(await c.req.json());
+    try {
+      const document = await addDocumentToBase(db, { baseId: c.req.param("baseId"), fileId: payload.fileId });
+      const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
+      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ documentId: document.id }) ?? document);
+      return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
+    } catch (error) {
+      throw documentHttpException(error);
+    }
+  });
+
+  app.get("/v1/document-bases/:baseId/documents", async (c) => {
+    return c.json((await listDocuments(db, c.req.param("baseId"))).map((document) => Document.parse(document)));
+  });
+
+  app.post("/v1/documents/:documentId/reindex", async (c) => {
+    if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
+    try {
+      const document = await getDocument(db, c.req.param("documentId"));
+      if (!document) throw new HTTPException(404, { message: "document not found" });
+      return c.json(Document.parse(await documentIndexer.indexDocument({ documentId: document.id }) ?? document));
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      throw documentHttpException(error);
+    }
+  });
+
+  app.post("/v1/document-bases/:baseId/search", async (c) => {
+    const payload = DocumentSearchRequest.parse(await c.req.json());
+    const base = await getDocumentBase(db, c.req.param("baseId"));
+    if (!base) throw new HTTPException(404, { message: "document base not found" });
+    return c.json({ results: await searchDocuments(db, { baseIds: [base.id], query: payload.query, limit: payload.limit }, getDocumentServices()) });
+  });
+
+  app.all("/v1/mcp/docs", async (c) => {
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const server = buildDocumentsMcpServer(db, getDocumentServices());
+    await server.connect(transport);
+    return await transport.handleRequest(c.req.raw);
   });
 
   app.get("/v1/github/app", (c) => {
@@ -350,6 +446,8 @@ export function createApp(deps: AppDependencies): Hono {
     if (event.type === "user.message") {
       const requestedResources = normalizeResources(event.payload.resources ?? []);
       const requestedTools = validateToolRefs(event.payload.tools ?? [], settings);
+      const requestedModel = event.payload.model ?? null;
+      const requestedReasoningEffort = event.payload.reasoningEffort ?? null;
       if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
@@ -361,6 +459,10 @@ export function createApp(deps: AppDependencies): Hono {
         validateGitHubRepositorySelection([...lockedSession.resources, ...requestedResources]);
         const nextResources = mergeResourceRefs(lockedSession.resources, requestedResources);
         const nextTools = mergeToolRefs(lockedSession.tools, requestedTools);
+        const nextModel = requestedModel ?? lockedSession.model;
+        const nextMetadata = requestedReasoningEffort
+          ? { ...lockedSession.metadata, reasoningEffort: requestedReasoningEffort }
+          : lockedSession.metadata;
         return {
           events: [
             {
@@ -369,6 +471,8 @@ export function createApp(deps: AppDependencies): Hono {
                 text: event.payload.text,
                 ...(requestedResources.length ? { resources: requestedResources } : {}),
                 ...(requestedTools.length ? { tools: requestedTools } : {}),
+                ...(requestedModel ? { model: requestedModel } : {}),
+                ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
               },
               ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
             },
@@ -377,6 +481,8 @@ export function createApp(deps: AppDependencies): Hono {
           update: {
             resources: nextResources,
             tools: nextTools,
+            model: nextModel,
+            metadata: nextMetadata,
             status: "queued",
             activeTurnId: null,
           },
@@ -753,6 +859,50 @@ function githubSuccessHtml(envLines: string[], installUrl: string): string {
   const escaped = escapeHtml(envText);
   const install = installUrl ? `<a href="${escapeHtml(installUrl)}">Install on repositories</a>` : "";
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Created</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(720px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}pre{white-space:pre-wrap;word-break:break-word;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:16px}a{color:#fafafa}</style></head><body><main><h1>GitHub App created</h1><p>Add these values to .env, then restart API and worker.</p><pre>${escaped}</pre>${install}</main></body></html>`;
+}
+
+function buildDocumentsMcpServer(db: Database, documentServices: DocumentServices): McpServer {
+  const server = new McpServer({ name: "infra-agents-documents", version: "1.0.0" });
+  server.registerTool("list_document_bases", {
+    description: "List available document bases.",
+    inputSchema: {},
+  }, async () => ({
+    content: [{ type: "text", text: JSON.stringify(await listDocumentBases(db)) }],
+  }));
+  server.registerTool("search_documents", {
+    description: "Search indexed documents.",
+    inputSchema: {
+      query: z.string(),
+      baseIds: z.array(z.string()).optional(),
+      limit: z.number().optional(),
+    },
+  }, async ({ query, baseIds, limit }) => ({
+    content: [{ type: "text", text: JSON.stringify(await searchDocuments(db, {
+      query,
+      ...(baseIds ? { baseIds } : {}),
+      ...(limit ? { limit } : {}),
+    }, documentServices)) }],
+  }));
+  server.registerTool("fetch_document_chunk", {
+    description: "Fetch one indexed document chunk.",
+    inputSchema: {
+      chunkId: z.string(),
+    },
+  }, async ({ chunkId }) => {
+    const found = await getDocumentChunk(db, chunkId);
+    return {
+      content: [{ type: "text", text: found ? JSON.stringify(found) : `chunk not found: ${chunkId}` }],
+      isError: !found,
+    };
+  });
+  return server;
+}
+
+function documentHttpException(error: unknown): HTTPException {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("not found")) return new HTTPException(404, { message });
+  if (message.includes("pending") || message.includes("failed") || message.includes("deleted")) return new HTTPException(422, { message });
+  return new HTTPException(500, { message });
 }
 
 function escapeHtml(value: string): string {

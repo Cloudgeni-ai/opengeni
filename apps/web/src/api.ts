@@ -1,9 +1,12 @@
 import type {
   ClientConfig,
   CreateFileUploadResponse,
+  DocumentBase,
+  DocumentSearchResult,
   FileAsset,
   FileDownloadUrlResponse,
   GitHubRepository,
+  IndexedDocument,
   ReasoningEffort,
   ResourceRef,
   Session,
@@ -57,8 +60,18 @@ export function fetchSession(sessionId: string): Promise<Session> {
   return request<Session>(`/v1/sessions/${sessionId}`);
 }
 
-export function fetchEvents(sessionId: string, after = 0): Promise<SessionEvent[]> {
-  return request<SessionEvent[]>(`/v1/sessions/${sessionId}/events?after=${after}`);
+export async function fetchEvents(sessionId: string, after = 0): Promise<SessionEvent[]> {
+  const limit = 500;
+  const events: SessionEvent[] = [];
+  let cursor = after;
+  while (true) {
+    const page = await request<SessionEvent[]>(`/v1/sessions/${sessionId}/events?after=${cursor}&limit=${limit}`);
+    events.push(...page);
+    if (page.length < limit) {
+      return events;
+    }
+    cursor = page[page.length - 1]!.sequence;
+  }
 }
 
 export function sendUserMessage(sessionId: string, submission: TurnSubmission): Promise<SessionEvent> {
@@ -71,6 +84,8 @@ export function sendUserMessage(sessionId: string, submission: TurnSubmission): 
         text: submission.text,
         resources: submission.resources ?? [],
         tools: submission.tools ?? [],
+        model: submission.model,
+        reasoningEffort: submission.reasoningEffort,
       },
     }),
   });
@@ -107,6 +122,36 @@ export async function fetchFileDownloadUrl(fileId: string): Promise<FileDownload
 
 export async function fetchFileAsset(fileId: string): Promise<FileAsset> {
   return await request<FileAsset>(`/v1/files/${fileId}`);
+}
+
+export function createDocumentBase(input: { name: string; description?: string }): Promise<DocumentBase> {
+  return request<DocumentBase>("/v1/document-bases", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function fetchDocumentBases(): Promise<DocumentBase[]> {
+  return request<DocumentBase[]>("/v1/document-bases");
+}
+
+export function fetchDocuments(baseId: string): Promise<IndexedDocument[]> {
+  return request<IndexedDocument[]>(`/v1/document-bases/${baseId}/documents`);
+}
+
+export function addDocumentToBase(baseId: string, fileId: string): Promise<IndexedDocument> {
+  return request<IndexedDocument>(`/v1/document-bases/${baseId}/documents`, {
+    method: "POST",
+    body: JSON.stringify({ fileId }),
+  });
+}
+
+export async function searchDocumentBase(baseId: string, query: string): Promise<DocumentSearchResult[]> {
+  const response = await request<{ results: DocumentSearchResult[] }>(`/v1/document-bases/${baseId}/search`, {
+    method: "POST",
+    body: JSON.stringify({ query, limit: 8 }),
+  });
+  return response.results;
 }
 
 export function sendInterrupt(sessionId: string, reason?: string): Promise<SessionEvent> {

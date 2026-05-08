@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS "sessions" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -42,6 +43,51 @@ CREATE TABLE IF NOT EXISTS "file_uploads" (
 );
 CREATE INDEX IF NOT EXISTS "file_uploads_file_id_idx" ON "file_uploads" ("file_id");
 CREATE INDEX IF NOT EXISTS "file_uploads_status_idx" ON "file_uploads" ("status");
+CREATE TABLE IF NOT EXISTS "document_bases" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "name" text NOT NULL,
+  "description" text,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS "documents" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "base_id" uuid NOT NULL REFERENCES "document_bases"("id") ON DELETE CASCADE,
+  "file_id" uuid NOT NULL REFERENCES "files"("id") ON DELETE RESTRICT,
+  "status" text NOT NULL DEFAULT 'queued',
+  "title" text NOT NULL,
+  "parser" text NOT NULL DEFAULT 'liteparse',
+  "chunk_count" integer NOT NULL DEFAULT 0,
+  "error" text,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "documents_base_file_idx" ON "documents" ("base_id", "file_id");
+CREATE INDEX IF NOT EXISTS "documents_base_status_idx" ON "documents" ("base_id", "status");
+CREATE TABLE IF NOT EXISTS "document_chunks" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "document_id" uuid NOT NULL REFERENCES "documents"("id") ON DELETE CASCADE,
+  "base_id" uuid NOT NULL REFERENCES "document_bases"("id") ON DELETE CASCADE,
+  "file_id" uuid NOT NULL REFERENCES "files"("id") ON DELETE RESTRICT,
+  "chunk_index" integer NOT NULL,
+  "text" text NOT NULL,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "embedding" vector(3072) NOT NULL,
+  "embedding_model" text NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT now()
+);
+DROP INDEX IF EXISTS "document_chunks_embedding_hnsw_idx";
+DO $$
+BEGIN
+  BEGIN
+    ALTER TABLE "document_chunks" ALTER COLUMN "embedding" TYPE vector(3072);
+  EXCEPTION WHEN others THEN
+    DELETE FROM "document_chunks";
+    ALTER TABLE "document_chunks" ALTER COLUMN "embedding" TYPE vector(3072);
+  END;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS "document_chunks_document_index_idx" ON "document_chunks" ("document_id", "chunk_index");
+CREATE INDEX IF NOT EXISTS "document_chunks_base_idx" ON "document_chunks" ("base_id");
 CREATE TABLE IF NOT EXISTS "session_turns" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "session_id" uuid NOT NULL REFERENCES "sessions"("id") ON DELETE CASCADE,

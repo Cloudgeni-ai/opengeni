@@ -36,6 +36,7 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
+import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,23 +81,8 @@ export function ensureReadableStreamFrom(): void {
 }
 
 export type AgentSegmentInput =
-  | { kind: "message"; text: string; modelImages?: ModelImageInput[]; omittedModelImages?: OmittedModelImageInput[]; serializedRunState?: string | null }
+  | { kind: "message"; text: string; serializedRunState?: string | null }
   | { kind: "approval"; serializedRunState: string; approvalId: string; decision: "approve" | "reject"; message?: string };
-
-export type ModelImageInput = {
-  fileId: string;
-  filename: string;
-  sandboxPath: string;
-  image: string;
-  detail?: "auto" | "low" | "high";
-};
-
-export type OmittedModelImageInput = {
-  fileId: string;
-  filename: string;
-  sandboxPath: string;
-  reason: string;
-};
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
@@ -177,6 +163,7 @@ export function buildInfraAgent(settings: Settings, resources: ResourceRef[], op
       "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
       "Repository resources are mounted under repos/<owner>/<repo>.",
       "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+      "Attached files are mounted read-only; copy them before modifying.",
       "Terraform and infrastructure skills are under .agents/ including terraform style, terraform test, terraform stacks, Azure verified modules, search/import, refactor module, and checkov.",
       "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
       "When Azure credentials are available, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
@@ -193,14 +180,26 @@ export function buildInfraAgent(settings: Settings, resources: ResourceRef[], op
     return new Agent(baseConfig);
   }
 
+  const runAs = sandboxRunAs(settings);
   return new SandboxAgent({
     ...baseConfig,
     defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment),
+    ...(runAs ? { runAs } : {}),
     capabilities: [
       ...Capabilities.default(),
       skills({ lazyFrom: localDirLazySkillSource({ src: bundledSkillsDir() }) }),
     ],
   });
+}
+
+export function sandboxRunAs(settings: Settings): string | undefined {
+  if (settings.sandboxBackend === "docker" || settings.sandboxBackend === "modal") {
+    return "sandbox";
+  }
+  if (settings.sandboxBackend === "local") {
+    return userInfo().username;
+  }
+  return undefined;
 }
 
 export type PreparedAgentTools = {
@@ -360,20 +359,19 @@ export type PrepareInputOptions = {
 
 export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmentInput, options: PrepareInputOptions = {}): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
-    const userMessage = buildUserMessageInput(input.text, input.modelImages ?? [], input.omittedModelImages ?? []);
     if (!input.serializedRunState) {
-      return userMessage ? { input: [userMessage] } : { input: input.text };
+      return { input: input.text };
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
     const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
     return {
       input: [
         ...state.history,
-        userMessage ?? ({
+        {
           type: "message",
           role: "user",
           content: input.text,
-        } as AgentInputItem),
+        } as AgentInputItem,
       ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
@@ -393,43 +391,6 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
   return { input: state };
 }
 
-export function buildUserMessageInput(text: string, images: ModelImageInput[] = [], omittedImages: OmittedModelImageInput[] = []): AgentInputItem | null {
-  if (images.length === 0 && omittedImages.length === 0) {
-    return null;
-  }
-  const omissionNote = omittedImages.length
-    ? [
-        "",
-        "Some image attachments are mounted in the sandbox but were too large for direct model vision context:",
-        ...omittedImages.map((image) => `- ${image.filename}: ${image.sandboxPath} (${image.reason})`),
-      ].join("\n")
-    : "";
-  return {
-    type: "message",
-    role: "user",
-    content: [
-      { type: "input_text", text: `${text}${imageContextNote(images)}${omissionNote}` },
-      ...images.map((image) => ({
-        type: "input_image" as const,
-        image: image.image,
-        detail: image.detail ?? "auto",
-      })),
-    ],
-  } as AgentInputItem;
-}
-
-function imageContextNote(images: ModelImageInput[]): string {
-  if (images.length === 0) {
-    return "";
-  }
-  return [
-    "",
-    "Attached image files are included in this message as direct vision inputs and are also mounted in the sandbox:",
-    ...images.map((image) => `- ${image.filename}: ${image.sandboxPath}`),
-    "Answer from the direct image context when possible; use the sandbox file only when you need filesystem verification or file operations.",
-  ].join("\n");
-}
-
 export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
@@ -443,7 +404,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   const refreshedClient = rawClient
     ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest)
     : undefined;
-  const client = refreshedClient ? withAzurePreflight(refreshedClient, environment, overrides.onRuntimeEvent) : undefined;
+  const client = refreshedClient ? withAzurePreflight(refreshedClient, environment, overrides.onRuntimeEvent, sandboxRunAs(settings)) : undefined;
   const sandboxSessionState = prepared.sandboxSessionState
     ?? (prepared.serializedRunStateForSandbox && client
       ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
@@ -603,8 +564,6 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     if (text) {
       out.push({ type: "agent.message.completed", payload: { text } });
     }
-  } else if (item.type === "reasoning_item") {
-    out.push({ type: "agent.reasoning.delta", payload: { item } });
   }
   return out;
 }
@@ -712,25 +671,41 @@ async function restoredSandboxSessionState(state: RunState<any, any>, client: un
   if ((client as SandboxClient).backendId !== entry.backendId) {
     throw new Error("RunState sandbox backend does not match the configured sandbox client");
   }
-  const envelope = entry.sessionState;
+  return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
+}
+
+export async function deserializeSandboxSessionStateEnvelope(client: SandboxClient, envelope: unknown): Promise<SandboxSessionState | undefined> {
   if (!envelope || typeof envelope !== "object") {
     return undefined;
   }
-  return {
-    ...(envelope.providerState ?? {}),
-    manifest: envelope.manifest,
-    ...(envelope.snapshot !== undefined ? { snapshot: envelope.snapshot } : {}),
-    ...(envelope.snapshotFingerprint !== undefined ? { snapshotFingerprint: envelope.snapshotFingerprint } : {}),
-    ...(envelope.snapshotFingerprintVersion !== undefined ? { snapshotFingerprintVersion: envelope.snapshotFingerprintVersion } : {}),
-    workspaceReady: envelope.workspaceReady,
-    ...(envelope.exposedPorts ? { exposedPorts: structuredClone(envelope.exposedPorts) } : {}),
-  } as SandboxSessionState;
+  if (!client.deserializeSessionState) {
+    throw new Error("Sandbox client must implement deserializeSessionState() to resume RunState sandbox state");
+  }
+  const state = envelope as {
+    providerState?: Record<string, unknown>;
+    manifest?: unknown;
+    snapshot?: unknown;
+    snapshotFingerprint?: unknown;
+    snapshotFingerprintVersion?: unknown;
+    workspaceReady?: unknown;
+    exposedPorts?: unknown;
+  };
+  return await client.deserializeSessionState({
+    ...(state.providerState ?? {}),
+    manifest: state.manifest,
+    ...(state.snapshot !== undefined ? { snapshot: state.snapshot } : {}),
+    ...(state.snapshotFingerprint !== undefined ? { snapshotFingerprint: state.snapshotFingerprint } : {}),
+    ...(state.snapshotFingerprintVersion !== undefined ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion } : {}),
+    workspaceReady: state.workspaceReady,
+    ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
+  });
 }
 
 function withAzurePreflight(
   client: SandboxClient,
   environment: Record<string, string>,
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void,
+  runAs?: string,
 ): SandboxClient {
   if (!hasAzureServicePrincipal(environment)) {
     return client;
@@ -739,7 +714,7 @@ function withAzurePreflight(
   const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !seen.has(session)) {
       seen.add(session);
-      await runAzurePreflight(session, onRuntimeEvent);
+      await runAzurePreflight(session, onRuntimeEvent, runAs);
     }
     return session;
   };
@@ -759,6 +734,9 @@ function withAzurePreflight(
 
 export function azurePreflightCommand(): string {
   return [
+    "export HOME=\"${HOME:-/workspace}\"",
+    "export AZURE_CONFIG_DIR=\"${AZURE_CONFIG_DIR:-$HOME/.azure}\"",
+    "mkdir -p \"$AZURE_CONFIG_DIR\"",
     "CLIENT_ID=\"${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}\"",
     "CLIENT_SECRET=\"${AZURE_CLIENT_SECRET:-${ARM_CLIENT_SECRET:-}}\"",
     "TENANT_ID=\"${AZURE_TENANT_ID:-${ARM_TENANT_ID:-}}\"",
@@ -817,9 +795,10 @@ function hasAzureServicePrincipal(environment: Record<string, string>): boolean 
   return Boolean(clientId && clientSecret && tenantId);
 }
 
-async function runAzurePreflight(
+export async function runAzurePreflight(
   session: SandboxSessionLike,
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void,
+  runAs?: string,
 ): Promise<void> {
   const payload = { name: "azure-cli-login", command: "az login --service-principal" };
   await onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
@@ -828,6 +807,7 @@ async function runAzurePreflight(
       const result = await session.exec({
         cmd: azurePreflightCommand(),
         workdir: "/workspace",
+        ...(runAs ? { runAs } : {}),
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });
@@ -836,6 +816,7 @@ async function runAzurePreflight(
       const result = await session.execCommand({
         cmd: azurePreflightCommand(),
         workdir: "/workspace",
+        ...(runAs ? { runAs } : {}),
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });

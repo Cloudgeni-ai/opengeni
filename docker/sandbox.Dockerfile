@@ -48,8 +48,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
-ENV HOME=/tmp \
-    AZURE_CONFIG_DIR=/tmp/.azure
+ENV HOME=/workspace \
+    AZURE_CONFIG_DIR=/workspace/.azure
 
 COPY docker/infra-agent-git-askpass /usr/local/bin/infra-agent-git-askpass
 RUN chmod 0755 /usr/local/bin/infra-agent-git-askpass

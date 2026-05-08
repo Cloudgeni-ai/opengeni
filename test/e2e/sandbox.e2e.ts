@@ -104,6 +104,56 @@ describe("real Docker sandbox e2e", () => {
       .some((event) => JSON.stringify(event.payload ?? {}).includes("file-mounted-ok"))).toBe(true);
   }, 240_000);
 
+  test("views uploaded image resources directly from mounted S3 paths", async () => {
+    const imageBytes = Uint8Array.from(Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "base64",
+    ));
+    const upload = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filename: "sandbox-image.png",
+        contentType: "image/png",
+        sizeBytes: imageBytes.byteLength,
+      }),
+    });
+    expect(upload.status).toBe(201);
+    const uploadBody = await upload.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    const put = await fetch(uploadBody.putUrl, {
+      method: "PUT",
+      body: imageBytes,
+      headers: uploadBody.requiredHeaders,
+    });
+    expect(put.ok).toBe(true);
+    expect((await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads/${uploadBody.uploadId}/complete`, { method: "POST" })).ok).toBe(true);
+
+    const create = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        initialMessage: "verify mounted image",
+        sandboxBackend: "docker",
+        resources: [{ kind: "file", fileId: uploadBody.fileId, mountPath: "files/e2e-image" }],
+      }),
+    });
+    expect(create.status).toBe(202);
+    const session = await create.json() as { id: string };
+
+    await waitFor(async () => {
+      const events = await sessionEvents(session.id);
+      return events.some((event) => event.type === "session.status.changed" && (event.payload as { status?: string }).status === "idle");
+    }, { timeoutMs: 180_000 });
+
+    const events = await sessionEvents(session.id);
+    const viewOutput = events.find((event) =>
+      event.type === "agent.toolCall.output" &&
+      JSON.stringify(event.payload ?? {}).includes("sandbox-view-image")
+    );
+    expect(JSON.stringify(viewOutput?.payload ?? {})).not.toContain("unable to read image");
+    expect(JSON.stringify(viewOutput?.payload ?? {})).toContain("image");
+  }, 240_000);
+
   test("sandbox image has required CLIs and no custom Azure login helper", async () => {
     const result = await runCommand([
       "docker",

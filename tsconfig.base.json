@@ -20,10 +20,13 @@
       "@infra-agents/contracts": ["packages/contracts/src/index.ts"],
       "@infra-agents/config": ["packages/config/src/index.ts"],
       "@infra-agents/db": ["packages/db/src/index.ts"],
+      "@infra-agents/db/schema": ["packages/db/src/schema.ts"],
       "@infra-agents/db/migrate": ["packages/db/src/migrate.ts"],
       "@infra-agents/events": ["packages/events/src/index.ts"],
       "@infra-agents/github": ["packages/github/src/index.ts"],
+      "@infra-agents/documents": ["packages/documents/src/index.ts"],
       "@infra-agents/runtime": ["packages/runtime/src/index.ts"],
+      "@infra-agents/storage": ["packages/storage/src/index.ts"],
       "@infra-agents/testing": ["packages/testing/src/index.ts"],
       "@infra-agents/api": ["apps/api/src/index.ts"],
       "@infra-agents/worker": ["apps/worker/src/index.ts"]

@@ -12,7 +12,6 @@ import {
 } from "@infra-agents/db";
 import { createNatsEventBus, type EventBus } from "@infra-agents/events";
 import { createProductionAgentRuntime } from "@infra-agents/runtime";
-import type { ObjectStorage } from "@infra-agents/storage";
 import { createActivities } from "../../apps/worker/src/activities";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@infra-agents/testing";
 
@@ -110,7 +109,7 @@ describe("worker activities integration", () => {
     expect(secondRequest).toContain("second question");
   });
 
-  test("passes per-turn image file resources into model context", async () => {
+  test("adds per-turn file resource paths to model text", async () => {
     const fileId = crypto.randomUUID();
     const upload = await createFileUpload(dbClient.db, {
       fileId,
@@ -139,7 +138,6 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
-      objectStorage: fakeObjectStorage(new Uint8Array([1, 2, 3, 4])),
       runtime: createProductionAgentRuntime({ model }),
     });
 
@@ -150,12 +148,14 @@ describe("worker activities integration", () => {
     });
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
-    expect(request).toContain("input_image");
-    expect(request).toContain("data:image/png;base64,AQIDBA==");
+    expect(request).not.toContain("input_image");
+    expect(request).not.toContain("data:image/png");
     expect(request).toContain("look at this");
+    expect(request).toContain("Attached files are available in the sandbox");
+    expect(request).toContain(`diagram.png (image/png, 4 bytes): /workspace/files/${fileId}/diagram.png`);
   });
 
-  test("keeps oversized image files sandbox-only for model context", async () => {
+  test("does not require object storage reads for attached file path context", async () => {
     const fileId = crypto.randomUUID();
     const upload = await createFileUpload(dbClient.db, {
       fileId,
@@ -181,10 +181,9 @@ describe("worker activities integration", () => {
       { type: "user.message", payload: { text: "look at this", resources: [resource] } },
     ]);
     const activities = createActivities({
-      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, modelImageMaxBytes: 1 }),
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
-      objectStorage: fakeObjectStorage(new Uint8Array([1, 2, 3, 4])),
       runtime: createProductionAgentRuntime({ model }),
     });
 
@@ -196,7 +195,7 @@ describe("worker activities integration", () => {
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
     expect(request).not.toContain("input_image");
-    expect(request).toContain("too large for direct model vision context");
+    expect(request).not.toContain("direct model vision context");
     expect(request).toContain(`/workspace/files/${fileId}/large.png`);
   });
 
@@ -355,22 +354,3 @@ describe("worker activities integration", () => {
     }
   });
 });
-
-function fakeObjectStorage(bytes: Uint8Array): ObjectStorage {
-  return {
-    bucket: "infra-agents-files",
-    maxSinglePutSizeBytes: 5_000_000_000,
-    async createPutUrl() {
-      throw new Error("not used");
-    },
-    async createGetUrl() {
-      throw new Error("not used");
-    },
-    async headFile() {
-      throw new Error("not used");
-    },
-    async getFileBytes() {
-      return bytes;
-    },
-  };
-}

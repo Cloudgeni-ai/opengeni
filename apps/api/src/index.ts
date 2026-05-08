@@ -2,10 +2,11 @@ import { getSettings } from "@infra-agents/config";
 import { createDb } from "@infra-agents/db";
 import { createNatsEventBus } from "@infra-agents/events";
 import { Connection, Client as TemporalClient } from "@temporalio/client";
-import { createApp, type SessionWorkflowClient } from "./app";
+import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 
 export async function createTemporalWorkflowClient(settings: ReturnType<typeof getSettings>): Promise<{
   client: SessionWorkflowClient;
+  documentIndexer: DocumentIndexClient;
   close: () => Promise<void>;
 }> {
   const connection = await Connection.connect({ address: settings.temporalHost });
@@ -31,8 +32,19 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
       await temporal.workflow.getHandle(workflowId).signal("interrupt", eventId);
     },
   };
+  const documentIndexer: DocumentIndexClient = {
+    indexDocument: async ({ documentId }) => {
+      const workflowId = `document-index-${documentId}-${crypto.randomUUID()}`;
+      await temporal.workflow.start("documentIndexWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId,
+        args: [{ documentId }],
+      });
+    },
+  };
   return {
     client,
+    documentIndexer,
     close: async () => {
       await connection.close();
     },
@@ -49,6 +61,7 @@ export async function startApi() {
     db: dbClient.db,
     bus,
     workflowClient: workflowClient.client,
+    documentIndexer: workflowClient.documentIndexer,
   });
   const server = Bun.serve({
     hostname: settings.apiHost,

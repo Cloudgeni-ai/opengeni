@@ -59,16 +59,6 @@ describe("sandbox environment profiles", () => {
     expect(configuredAllowedReasoningEfforts(settings)).toEqual(["xhigh", "low", "medium", "high"]);
   });
 
-  test("parses model image context size cap", () => {
-    const original = { ...process.env };
-    try {
-      process.env.INFRA_AGENT_MODEL_IMAGE_MAX_BYTES = "1234";
-      expect(getSettings().modelImageMaxBytes).toBe(1234);
-    } finally {
-      process.env = original;
-    }
-  });
-
   test("collects git identity settings for sandbox pass-through", () => {
     expect(collectGitIdentityEnvironment({
       ...getSettings(),
@@ -94,6 +84,15 @@ describe("sandbox environment profiles", () => {
     expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
   });
 
+  test("registers built-in document MCP server by default", () => {
+    const settings = getSettings();
+    expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
+      name: "Document Search",
+      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp/docs`,
+      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+    });
+  });
+
   test("rejects non-array MCP server registry JSON", () => {
     expect(() => parseMcpServers('{"id":"docs"}')).toThrow("must be a JSON array");
   });
@@ -111,6 +110,37 @@ describe("sandbox environment profiles", () => {
 
       delete process.env.INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY;
       expect(() => getSettings()).toThrow("both be set or both omitted");
+    } finally {
+      process.env = original;
+    }
+  });
+
+  test("parses document indexing settings", () => {
+    const original = { ...process.env };
+    try {
+      process.env.INFRA_AGENT_DOCUMENT_CHUNK_SIZE = "2000";
+      process.env.INFRA_AGENT_DOCUMENT_CHUNK_OVERLAP = "200";
+      process.env.INFRA_AGENT_DOCUMENT_EMBEDDING_PROVIDER = "deterministic";
+      process.env.INFRA_AGENT_DOCUMENT_EMBEDDING_MODEL = "local-test";
+      process.env.INFRA_AGENT_DOCUMENT_EMBEDDING_DIMENSIONS = "3072";
+      const settings = getSettings();
+      expect(settings.documentParser).toBe("liteparse");
+      expect(settings.documentChunkSize).toBe(2000);
+      expect(settings.documentChunkOverlap).toBe(200);
+      expect(settings.documentEmbeddingProvider).toBe("deterministic");
+      expect(settings.documentEmbeddingModel).toBe("local-test");
+      expect(settings.documentEmbeddingDimensions).toBe(3072);
+    } finally {
+      process.env = original;
+    }
+  });
+
+  test("rejects invalid document chunk overlap", () => {
+    const original = { ...process.env };
+    try {
+      process.env.INFRA_AGENT_DOCUMENT_CHUNK_SIZE = "100";
+      process.env.INFRA_AGENT_DOCUMENT_CHUNK_OVERLAP = "100";
+      expect(() => getSettings()).toThrow("must be smaller");
     } finally {
       process.env = original;
     }

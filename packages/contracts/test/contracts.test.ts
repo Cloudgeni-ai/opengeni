@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { ClientConfig, ClientSessionEvent, CreateSessionRequest, ResourceRef, SessionBusMessage } from "../src";
+import {
+  AddDocumentRequest,
+  ClientConfig,
+  ClientSessionEvent,
+  CreateDocumentBaseRequest,
+  CreateSessionRequest,
+  DocumentSearchRequest,
+  ResourceRef,
+  SessionBusMessage,
+} from "../src";
 
 describe("contracts", () => {
   test("accepts create session defaults", () => {
@@ -76,7 +85,7 @@ describe("contracts", () => {
     })).toThrow();
   });
 
-  test("accepts per-turn resources and tools on user messages", () => {
+  test("accepts per-turn resources, tools, and model settings on user messages", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     const payload = ClientSessionEvent.parse({
       type: "user.message",
@@ -84,12 +93,16 @@ describe("contracts", () => {
         text: "use this too",
         resources: [{ kind: "file", fileId }],
         tools: [{ kind: "mcp", id: "docs" }],
+        model: "gpt-5.5",
+        reasoningEffort: "xhigh",
       },
     });
     expect(payload.type).toBe("user.message");
     if (payload.type !== "user.message") throw new Error("expected user.message");
     expect(payload.payload.resources).toEqual([{ kind: "file", fileId }]);
     expect(payload.payload.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    expect(payload.payload.model).toBe("gpt-5.5");
+    expect(payload.payload.reasoningEffort).toBe("xhigh");
   });
 
   test("keeps text-only user messages compatible", () => {
@@ -116,5 +129,24 @@ describe("contracts", () => {
       }],
     });
     expect(message.events[0]?.type).toBe("agent.message.delta");
+  });
+
+  test("accepts document service request contracts", () => {
+    const fileId = "00000000-0000-4000-8000-000000000010";
+    expect(CreateDocumentBaseRequest.parse({ name: "Runbooks", description: "Ops docs" })).toEqual({
+      name: "Runbooks",
+      description: "Ops docs",
+    });
+    expect(AddDocumentRequest.parse({ fileId })).toEqual({ fileId });
+    expect(DocumentSearchRequest.parse({ query: "network policy", limit: 20 })).toEqual({
+      query: "network policy",
+      limit: 20,
+    });
+  });
+
+  test("rejects invalid document service requests", () => {
+    expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
+    expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
+    expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
   });
 });

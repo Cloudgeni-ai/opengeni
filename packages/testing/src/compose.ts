@@ -190,7 +190,7 @@ async function waitForMinio(endpoint: string): Promise<void> {
 function composeYaml(ports: { postgres: number; nats: number; natsMonitor: number; temporal: number; minio: number; minioConsole: number }, options: { temporal: boolean; objectStorage: boolean }): string {
   return `services:
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_DB: infra_agents
       POSTGRES_USER: infra_agents

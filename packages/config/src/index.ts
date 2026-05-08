@@ -45,7 +45,6 @@ const SettingsSchema = z.object({
   openaiReasoningEffort: ReasoningEffort.default("high"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
-  modelImageMaxBytes: z.coerce.number().int().positive().default(20_000_000),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -73,6 +72,14 @@ const SettingsSchema = z.object({
   objectStorageAccessKeyId: z.string().optional(),
   objectStorageSecretAccessKey: z.string().optional(),
   objectStorageForcePathStyle: z.coerce.boolean().default(true),
+  documentParser: z.string().min(1).default("liteparse"),
+  documentChunkSize: z.coerce.number().int().positive().default(1200),
+  documentChunkOverlap: z.coerce.number().int().nonnegative().default(160),
+  documentEmbeddingProvider: z.enum(["openai", "deterministic"]).default("openai"),
+  documentEmbeddingModel: z.string().min(1).default("text-embedding-3-large"),
+  documentEmbeddingDimensions: z.coerce.number().int().positive().default(3072),
+  documentEmbeddingApiKey: z.string().optional(),
+  documentEmbeddingBaseUrl: z.string().url().optional(),
   gitAuthorName: z.string().optional(),
   gitAuthorEmail: z.string().optional(),
   gitCommitterName: z.string().optional(),
@@ -123,7 +130,6 @@ export function getSettings(): Settings {
     openaiReasoningEffort: optional("INFRA_AGENT_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("INFRA_AGENT_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("INFRA_AGENT_OPENAI_RESPONSES_TRANSPORT"),
-    modelImageMaxBytes: optional("INFRA_AGENT_MODEL_IMAGE_MAX_BYTES"),
     azureOpenaiBaseUrl: optional("INFRA_AGENT_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("INFRA_AGENT_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("INFRA_AGENT_AZURE_OPENAI_DEPLOYMENT"),
@@ -151,6 +157,14 @@ export function getSettings(): Settings {
     objectStorageAccessKeyId: optional("INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID"),
     objectStorageSecretAccessKey: optional("INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY"),
     objectStorageForcePathStyle: optional("INFRA_AGENT_OBJECT_STORAGE_FORCE_PATH_STYLE"),
+    documentParser: optional("INFRA_AGENT_DOCUMENT_PARSER"),
+    documentChunkSize: optional("INFRA_AGENT_DOCUMENT_CHUNK_SIZE"),
+    documentChunkOverlap: optional("INFRA_AGENT_DOCUMENT_CHUNK_OVERLAP"),
+    documentEmbeddingProvider: optional("INFRA_AGENT_DOCUMENT_EMBEDDING_PROVIDER"),
+    documentEmbeddingModel: optional("INFRA_AGENT_DOCUMENT_EMBEDDING_MODEL"),
+    documentEmbeddingDimensions: optional("INFRA_AGENT_DOCUMENT_EMBEDDING_DIMENSIONS"),
+    documentEmbeddingApiKey: optional("INFRA_AGENT_DOCUMENT_EMBEDDING_API_KEY"),
+    documentEmbeddingBaseUrl: optional("INFRA_AGENT_DOCUMENT_EMBEDDING_BASE_URL"),
     gitAuthorName: optional("INFRA_AGENT_GIT_AUTHOR_NAME") ?? optional("GIT_AUTHOR_NAME"),
     gitAuthorEmail: optional("INFRA_AGENT_GIT_AUTHOR_EMAIL") ?? optional("GIT_AUTHOR_EMAIL"),
     gitCommitterName: optional("INFRA_AGENT_GIT_COMMITTER_NAME") ?? optional("GIT_COMMITTER_NAME"),
@@ -166,6 +180,15 @@ export function getSettings(): Settings {
     mcpServers: parseMcpServers(optional("INFRA_AGENT_MCP_SERVERS")),
   };
   const settings = SettingsSchema.parse(raw);
+  if (!settings.mcpServers.some((server) => server.id === "docs")) {
+    settings.mcpServers.push({
+      id: "docs",
+      name: "Document Search",
+      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp/docs`,
+      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+      cacheToolsList: false,
+    });
+  }
   validateSettings(settings);
   return settings;
 }
@@ -271,6 +294,9 @@ function validateSettings(settings: Settings): void {
   }
   if ((settings.objectStorageEndpoint || settings.objectStorageSandboxEndpoint) && (!settings.objectStorageAccessKeyId || !settings.objectStorageSecretAccessKey)) {
     throw new Error("Object storage endpoints require INFRA_AGENT_OBJECT_STORAGE_ACCESS_KEY_ID and INFRA_AGENT_OBJECT_STORAGE_SECRET_ACCESS_KEY");
+  }
+  if (settings.documentChunkOverlap >= settings.documentChunkSize) {
+    throw new Error("INFRA_AGENT_DOCUMENT_CHUNK_OVERLAP must be smaller than INFRA_AGENT_DOCUMENT_CHUNK_SIZE");
   }
   parseExposedPorts(settings.dockerExposedPorts);
   sandboxEnvironmentVariableNames(settings);

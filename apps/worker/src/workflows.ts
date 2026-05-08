@@ -16,6 +16,14 @@ export type SessionWorkflowInput = {
   initialEventId: string;
 };
 
+export type DocumentIndexWorkflowInput = {
+  documentId: string;
+};
+
+export async function documentIndexWorkflow(input: DocumentIndexWorkflowInput) {
+  return await activity.indexDocument(input);
+}
+
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
   const messageQueue: string[] = [input.initialEventId];
   const approvalQueue: string[] = [];

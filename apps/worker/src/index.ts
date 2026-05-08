@@ -14,15 +14,16 @@ export async function createInfraAgentWorker(options: WorkerOptions = {}): Promi
 }> {
   const settings = options.settings ?? getSettings();
   const connection = await NativeConnection.connect({ address: settings.temporalHost });
+  const activities = options.activities ?? createActivities({
+    ...options.activityDependencies,
+    settings,
+  });
   const worker = await Worker.create({
     connection,
     namespace: settings.temporalNamespace,
     taskQueue: settings.temporalTaskQueue,
     workflowsPath: new URL("./workflows.ts", import.meta.url).pathname,
-    activities: options.activities ?? createActivities({
-      ...options.activityDependencies,
-      settings,
-    }),
+    activities,
   });
   return { worker, connection };
 }

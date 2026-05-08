@@ -49,10 +49,45 @@ export type FileDownloadUrlResponse = {
   expiresAt: string;
 };
 
+export type DocumentBase = {
+  id: string;
+  name: string;
+  description: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type IndexedDocument = {
+  id: string;
+  baseId: string;
+  fileId: string;
+  status: "queued" | "indexing" | "ready" | "failed";
+  title: string;
+  parser: string;
+  chunkCount: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DocumentSearchResult = {
+  chunkId: string;
+  documentId: string;
+  baseId: string;
+  fileId: string;
+  title: string;
+  text: string;
+  score: number;
+  chunkIndex: number;
+  metadata: Record<string, unknown>;
+};
+
 export type TurnSubmission = {
   text: string;
   resources?: ResourceRef[];
   tools?: ToolRef[];
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
 };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";

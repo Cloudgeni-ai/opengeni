@@ -55,7 +55,21 @@ function scriptedModelForScenario(scenario: string): ScriptedModel {
         chunks: ["sandbox ", "ok"],
         outputText: "sandbox ok",
       };
-    return new ScriptedModel([shellStep, doneStep, shellStep, doneStep, shellStep, doneStep]);
+    const viewImageStep = {
+      output: [functionCall("view_image", {
+        path: "/workspace/files/e2e-image/sandbox-image.png",
+      }, "sandbox-view-image")],
+    };
+    return new ScriptedModel([
+      shellStep,
+      doneStep,
+      shellStep,
+      doneStep,
+      viewImageStep,
+      doneStep,
+      shellStep,
+      doneStep,
+    ]);
   }
   if (scenario === "slow") {
     return new ScriptedModel([

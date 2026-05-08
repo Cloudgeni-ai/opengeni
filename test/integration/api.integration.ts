@@ -4,6 +4,7 @@ import { appendAndPublishEvents } from "@infra-agents/events";
 import type { SessionEvent } from "@infra-agents/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { MemoryEventBus, parseSseBlock, startTestServices, testSettings, type TestServices } from "@infra-agents/testing";
+import { prepareAgentTools } from "@infra-agents/runtime";
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -145,6 +146,50 @@ describe("API component integration", () => {
     });
     expect(duplicate.status).toBe(202);
     expect((await requireSession(dbClient.db, session.id)).tools).toEqual([{ kind: "mcp", id: "docs" }]);
+  });
+
+  test("updates model settings on follow-up user messages", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const created = await app.request("/v1/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "hello",
+        model: "scripted-model",
+        reasoningEffort: "low",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = await created.json() as { id: string };
+    await setSessionStatus(dbClient.db, session.id, "idle", null);
+
+    const accepted = await app.request(`/v1/sessions/${session.id}/events`, {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: {
+          text: "use a stronger model",
+          model: "gpt-5.5",
+          reasoningEffort: "xhigh",
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(accepted.status).toBe(202);
+    const event = await accepted.json() as SessionEvent;
+    expect(event.payload).toEqual({
+      text: "use a stronger model",
+      model: "gpt-5.5",
+      reasoningEffort: "xhigh",
+    });
+    const updated = await requireSession(dbClient.db, session.id);
+    expect(updated.model).toBe("gpt-5.5");
+    expect(updated.metadata.reasoningEffort).toBe("xhigh");
   });
 
   test("serializes concurrent follow-up user messages before merging session tools", async () => {
@@ -514,6 +559,114 @@ describe("API component integration", () => {
     const body = await response.json() as { configured: boolean; missing: string[] };
     expect(body.configured).toBe(false);
     expect(body.missing.length).toBeGreaterThan(0);
+    });
+
+  test("indexes uploaded files into document bases and searches them", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const uploadResponse = await app.request("/v1/files/uploads", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: "network-runbook.txt",
+        contentType: "text/plain",
+        sizeBytes: 67,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const upload = await uploadResponse.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    const body = "Private endpoint failures are fixed by updating the network policy.";
+    await fetch(upload.putUrl, { method: "PUT", body, headers: upload.requiredHeaders });
+    expect((await app.request(`/v1/files/uploads/${upload.uploadId}/complete`, { method: "POST" })).status).toBe(200);
+
+    const baseResponse = await app.request("/v1/document-bases", {
+      method: "POST",
+      body: JSON.stringify({ name: "Runbooks", description: "Operational docs" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(baseResponse.status).toBe(201);
+    const base = await baseResponse.json() as { id: string; name: string };
+    expect(base.name).toBe("Runbooks");
+
+    const addResponse = await app.request(`/v1/document-bases/${base.id}/documents`, {
+      method: "POST",
+      body: JSON.stringify({ fileId: upload.fileId }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(addResponse.status).toBe(201);
+    const document = await addResponse.json() as { id: string; status: string; chunkCount: number };
+    expect(document.status).toBe("ready");
+    expect(document.chunkCount).toBe(1);
+
+    const listResponse = await app.request(`/v1/document-bases/${base.id}/documents`);
+    expect(listResponse.status).toBe(200);
+    expect(await listResponse.json()).toHaveLength(1);
+
+    const searchResponse = await app.request(`/v1/document-bases/${base.id}/search`, {
+      method: "POST",
+      body: JSON.stringify({ query: "network policy", limit: 3 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(searchResponse.status).toBe(200);
+    const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
+    expect(search.results[0]?.text).toContain("network policy");
+    expect(search.results[0]?.title).toBe("network-runbook.txt");
+  });
+
+  test("serves indexed documents through the built-in MCP endpoint", async () => {
+    const port = 19_000 + Math.floor(Math.random() * 1_000);
+    const settings = {
+      ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      mcpServers: [{
+        id: "docs",
+        name: "Document Search",
+        url: `http://127.0.0.1:${port}/v1/mcp/docs`,
+        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+        timeoutMs: undefined,
+        cacheToolsList: false,
+      }],
+    };
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port, hostname: "127.0.0.1", fetch: app.fetch });
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      const uploadResponse = await app.request("/v1/files/uploads", {
+        method: "POST",
+        body: JSON.stringify({ filename: "mcp-runbook.txt", contentType: "text/plain", sizeBytes: 60 }),
+        headers: { "content-type": "application/json" },
+      });
+      const upload = await uploadResponse.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+      await fetch(upload.putUrl, { method: "PUT", body: "MCP document search returns private endpoint runbook chunks.", headers: upload.requiredHeaders });
+      expect((await app.request(`/v1/files/uploads/${upload.uploadId}/complete`, { method: "POST" })).status).toBe(200);
+      const baseResponse = await app.request("/v1/document-bases", {
+        method: "POST",
+        body: JSON.stringify({ name: "MCP Runbooks" }),
+        headers: { "content-type": "application/json" },
+      });
+      const base = await baseResponse.json() as { id: string };
+      expect((await app.request(`/v1/document-bases/${base.id}/documents`, {
+        method: "POST",
+        body: JSON.stringify({ fileId: upload.fileId }),
+        headers: { "content-type": "application/json" },
+      })).status).toBe(201);
+
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
+      const result = await prepared.mcpServers[0]!.callTool("docs__search_documents", { query: "private endpoint", baseIds: [base.id], limit: 3 });
+      expect(JSON.stringify(result)).toContain("private endpoint runbook");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
   });
 });
 

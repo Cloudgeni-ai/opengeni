@@ -108,6 +108,46 @@ describe("Temporal workflow integration", () => {
       await run;
     }
   });
+
+  test("dispatches document index workflow activity", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const calls: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      indexDocument: async (input: unknown) => {
+        calls.push(input);
+        return {
+          id: "document-1",
+          baseId: "base-1",
+          fileId: "file-1",
+          status: "ready",
+          title: "runbook.txt",
+          parser: "liteparse",
+          chunkCount: 1,
+          error: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+      },
+      runAgentSegment: async () => ({ status: "idle" }),
+      failSession: async () => undefined,
+      cancelSession: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("documentIndexWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ documentId: "document-1" }],
+      });
+      const result = await handle.result();
+      expect(calls).toEqual([{ documentId: "document-1" }]);
+      expect(result).toMatchObject({ id: "document-1", status: "ready" });
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
 });
 
 async function testWorker(nativeConnection: NativeConnection, taskQueue: string, activities: Record<string, (...args: any[]) => Promise<unknown>>): Promise<Worker> {

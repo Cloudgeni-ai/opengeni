@@ -145,6 +145,8 @@ flowchart LR
 
 Azure authentication uses normal Azure CLI preflight inside the sandbox when ARM/AZURE service-principal variables are available. GitHub App repository selections are validated to one installation and converted into scoped installation tokens for the selected repositories.
 
+Current Docker limitation: file resources use native S3-compatible in-container mounts. Docker sandboxes can mount those files when they are present in the initial manifest, but cannot add a new in-container FUSE mount to an already-running container unless the container was started with the required Docker privileges. In V1, attach file resources before the first run when using the Docker backend. Mid-session native file mounts should be revisited when the OpenAI Agents SDK exposes a clean way to pre-enable or update those Docker mount privileges.
+
 ## Local Stack
 
 ```bash
@@ -214,6 +216,7 @@ Normal integration and E2E tests use Bun's test runner. Deterministic SDK-level 
 - First-class `agents` and `environments` API resources.
 - Client SDK for event streaming, timeline projection, markdown rendering, approvals, and interrupts.
 - More OpenAI Agents SDK-compatible sandbox backends.
+- Native mid-session file mounts for Docker sandboxes once the SDK supports privilege-safe late in-container mounts.
 - Deeper Temporal/OpenAI Agents SDK integration when the TypeScript SDK supports durable agent, tool, and sandbox boundaries cleanly.
 
 ## References
