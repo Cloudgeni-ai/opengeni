@@ -1,5 +1,10 @@
 import type { Settings } from "@infra-agents/config";
-import type { ResourceRef, SessionTurn, ToolRef } from "@infra-agents/contracts";
+import {
+  reasoningEffortForMetadata,
+  type ResourceRef,
+  type SessionTurn,
+  type ToolRef,
+} from "@infra-agents/contracts";
 import {
   createSession,
   enqueueSessionTurn,
@@ -95,8 +100,5 @@ export async function requireQueuedTurnForApi(db: Database, sessionId: string, t
 }
 
 export function reasoningEffortForSession(metadata: Record<string, unknown>, fallback: Settings["openaiReasoningEffort"]): Settings["openaiReasoningEffort"] {
-  const value = metadata.reasoningEffort;
-  return value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
-    ? value
-    : fallback;
+  return reasoningEffortForMetadata(metadata, fallback);
 }

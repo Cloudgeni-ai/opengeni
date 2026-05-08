@@ -18,24 +18,24 @@ import { CancelledFailure } from "@temporalio/activity";
 import {
   mergeResourceRefs,
   mergeToolRefs,
-} from "./activity-common";
-import { sandboxEnvironmentForRun } from "./activity-environment";
-import { segmentInput } from "./activity-run-input";
+} from "./common";
+import { sandboxEnvironmentForRun } from "./environment";
+import { segmentInput } from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
   nextStreamEvent,
   startActivityHeartbeat,
-} from "./activity-streaming";
+} from "./streaming";
 import type {
   ActivityServices,
   RunAgentSegmentInput,
   RunAgentSegmentResult,
-} from "./activity-types";
+} from "./types";
 
 export function createRunAgentSegmentActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentSegment(input: RunAgentSegmentInput): Promise<RunAgentSegmentResult> {
-    const { settings, db, bus, runtime, objectStorage } = await services();
+    const { settings, db, bus, runtime } = await services();
     runtime.configure(settings);
     const session = await requireSession(db, input.sessionId);
     const trigger = await getSessionEvent(db, input.triggerEventId);
@@ -101,7 +101,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         sandboxEnvironment,
         mcpServers: preparedTools.mcpServers,
       });
-      const runInput = await segmentInput(db, runtime, agent, trigger, runSettings, objectStorage);
+      const runInput = await segmentInput(db, runtime, agent, trigger);
       const stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
         onRuntimeEvent: async (event) => {

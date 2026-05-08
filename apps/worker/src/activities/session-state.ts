@@ -11,7 +11,7 @@ import type {
   ClaimNextQueuedTurnInput,
   MarkSessionIdleInput,
   RunAgentSegmentInput,
-} from "./activity-types";
+} from "./types";
 
 export function createSessionStateActivities(services: () => Promise<ActivityServices>) {
   async function failSession(input: RunAgentSegmentInput & { error?: string }): Promise<void> {

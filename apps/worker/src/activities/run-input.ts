@@ -1,4 +1,3 @@
-import type { Settings } from "@infra-agents/config";
 import type { FileAsset, ResourceRef } from "@infra-agents/contracts";
 import {
   getLatestRunState,
@@ -7,15 +6,12 @@ import {
   type Database,
 } from "@infra-agents/db";
 import type { InfraAgentRuntime } from "@infra-agents/runtime";
-import type { ObjectStorage } from "@infra-agents/storage";
 
 export async function segmentInput(
   db: Database,
   runtime: InfraAgentRuntime,
   agent: any,
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
-  settings: Settings,
-  objectStorage: ObjectStorage | null,
 ) {
   if (!trigger) {
     throw new Error("Missing trigger event");
@@ -25,8 +21,6 @@ export async function segmentInput(
     if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
       throw new Error("user.message payload is missing text");
     }
-    void settings;
-    void objectStorage;
     const text = await userMessageTextWithAttachments(
       db,
       payload.text,

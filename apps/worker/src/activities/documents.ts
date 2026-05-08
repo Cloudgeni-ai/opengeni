@@ -2,7 +2,7 @@ import { indexDocumentNow } from "@infra-agents/documents";
 import type {
   ActivityServices,
   IndexDocumentInput,
-} from "./activity-types";
+} from "./types";
 
 export function createDocumentActivities(services: () => Promise<ActivityServices>) {
   return {

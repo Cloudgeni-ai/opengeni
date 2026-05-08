@@ -1,5 +1,13 @@
 import type { Settings } from "@infra-agents/config";
-import type { ResourceRef, ToolRef } from "@infra-agents/contracts";
+import {
+  mergeResourceRefs as mergeContractResourceRefs,
+  mergeToolRefs,
+  resourceIdentityKey,
+  ResourceRefConflictError,
+  stableJson,
+  type ResourceRef,
+  type ToolRef,
+} from "@infra-agents/contracts";
 import { requireFile, type Database } from "@infra-agents/db";
 import { HTTPException } from "hono/http-exception";
 
@@ -81,48 +89,15 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   return out;
 }
 
-export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRef[] {
-  const seen = new Set<string>();
-  const out: ToolRef[] = [];
-  for (const tool of [...existing, ...additions]) {
-    const key = `${tool.kind}:${tool.id}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    out.push(tool);
-  }
-  return out;
-}
-
 export function mergeResourceRefs(existing: ResourceRef[], additions: ResourceRef[]): ResourceRef[] {
-  const out = [...existing];
-  const mountPaths = new Map(existing.flatMap((resource) => resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : []));
-  const identities = new Map(existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const));
-  const exact = new Set(existing.map(stableJson));
-
-  for (const resource of additions) {
-    const serialized = stableJson(resource);
-    if (exact.has(serialized)) {
-      continue;
+  try {
+    return mergeContractResourceRefs(existing, additions, { rejectConflicts: true });
+  } catch (error) {
+    if (error instanceof ResourceRefConflictError) {
+      throw new HTTPException(422, { message: error.message });
     }
-    const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
-    if (existingAtMount && existingAtMount !== serialized) {
-      throw new HTTPException(422, { message: `resource mount path is already attached: ${resource.mountPath}` });
-    }
-    const identity = resourceIdentityKey(resource);
-    const existingIdentity = identities.get(identity);
-    if (existingIdentity && existingIdentity !== serialized) {
-      throw new HTTPException(422, { message: `resource is already attached with different settings: ${identity}` });
-    }
-    out.push(resource);
-    exact.add(serialized);
-    identities.set(identity, serialized);
-    if (resource.mountPath) {
-      mountPaths.set(resource.mountPath, serialized);
-    }
+    throw error;
   }
-  return out;
 }
 
 export function validateGitHubRepositorySelection(resources: ResourceRef[]): void {
@@ -178,10 +153,6 @@ export async function validateFileResources(db: Database, resources: ResourceRef
   }
 }
 
-export function stableJson(value: unknown): string {
-  return JSON.stringify(sortJson(value));
-}
-
 function normalizeMountPath(path: string): string {
   const normalized = path.trim().replace(/^\/+|\/+$/g, "");
   if (!normalized || normalized.includes("..")) {
@@ -208,19 +179,4 @@ function positiveInteger(value: unknown): number | null {
   return null;
 }
 
-function resourceIdentityKey(resource: ResourceRef): string {
-  if (resource.kind === "file") {
-    return `file:${resource.fileId}`;
-  }
-  return `repository:${resource.uri}`;
-}
-
-function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortJson);
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
-  }
-  return value;
-}
+export { mergeToolRefs, stableJson };

@@ -4,11 +4,11 @@ import { createDocumentServices } from "@infra-agents/documents";
 import { createNatsEventBus } from "@infra-agents/events";
 import { createProductionAgentRuntime } from "@infra-agents/runtime";
 import { createObjectStorage } from "@infra-agents/storage";
-import { createRunAgentSegmentActivity } from "./activity-agent-segment";
-import { createDocumentActivities } from "./activity-documents";
-import { createScheduledTaskActivities } from "./activity-scheduled-tasks";
-import { createSessionStateActivities } from "./activity-session-state";
-import type { ActivityDependencies, ActivityServices } from "./activity-types";
+import { createRunAgentSegmentActivity } from "./activities/agent-segment";
+import { createDocumentActivities } from "./activities/documents";
+import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
+import { createSessionStateActivities } from "./activities/session-state";
+import type { ActivityDependencies, ActivityServices } from "./activities/types";
 
 export type {
   ActivityDependencies,
@@ -17,7 +17,7 @@ export type {
   IndexDocumentInput,
   RunAgentSegmentInput,
   RunAgentSegmentResult,
-} from "./activity-types";
+} from "./activities/types";
 
 export function createActivities(dependencies: ActivityDependencies = {}) {
   let servicesPromise: Promise<ActivityServices> | null = null;

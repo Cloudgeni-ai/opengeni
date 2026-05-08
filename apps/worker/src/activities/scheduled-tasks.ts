@@ -15,12 +15,12 @@ import {
   mergeToolRefs,
   scheduledUserMessagePayload,
   workflowIdForSession,
-} from "./activity-common";
+} from "./common";
 import type {
   ActivityServices,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
-} from "./activity-types";
+} from "./types";
 
 export function createScheduledTaskActivities(services: () => Promise<ActivityServices>) {
   return {

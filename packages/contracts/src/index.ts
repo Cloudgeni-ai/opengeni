@@ -149,6 +149,91 @@ export const ToolRef = z.object({
 });
 export type ToolRef = z.infer<typeof ToolRef>;
 
+export class ResourceRefConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceRefConflictError";
+  }
+}
+
+export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRef[] {
+  const seen = new Set<string>();
+  const out: ToolRef[] = [];
+  for (const tool of [...existing, ...additions]) {
+    const key = `${tool.kind}:${tool.id}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(tool);
+  }
+  return out;
+}
+
+export function mergeResourceRefs(
+  existing: ResourceRef[],
+  additions: ResourceRef[],
+  options: { rejectConflicts?: boolean } = {},
+): ResourceRef[] {
+  const out = [...existing];
+  const mountPaths = new Map(existing.flatMap((resource) => resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : []));
+  const identities = new Map(existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const));
+  const exact = new Set(existing.map(stableJson));
+
+  for (const resource of additions) {
+    const serialized = stableJson(resource);
+    if (exact.has(serialized)) {
+      continue;
+    }
+    if (options.rejectConflicts) {
+      const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
+      if (existingAtMount && existingAtMount !== serialized) {
+        throw new ResourceRefConflictError(`resource mount path is already attached: ${resource.mountPath}`);
+      }
+      const identity = resourceIdentityKey(resource);
+      const existingIdentity = identities.get(identity);
+      if (existingIdentity && existingIdentity !== serialized) {
+        throw new ResourceRefConflictError(`resource is already attached with different settings: ${identity}`);
+      }
+    }
+    out.push(resource);
+    exact.add(serialized);
+    identities.set(resourceIdentityKey(resource), serialized);
+    if (resource.mountPath) {
+      mountPaths.set(resource.mountPath, serialized);
+    }
+  }
+  return out;
+}
+
+export function reasoningEffortForMetadata(metadata: Record<string, unknown>, fallback: ReasoningEffort): ReasoningEffort {
+  const value = metadata.reasoningEffort;
+  return value === "none" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh"
+    ? value
+    : fallback;
+}
+
+export function stableJson(value: unknown): string {
+  return JSON.stringify(sortJson(value));
+}
+
+export function resourceIdentityKey(resource: ResourceRef): string {
+  if (resource.kind === "file") {
+    return `file:${resource.fileId}`;
+  }
+  return `repository:${resource.uri}`;
+}
+
+function sortJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJson);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, nested]) => [key, sortJson(nested)]));
+  }
+  return value;
+}
+
 export const SessionTurnStatus = z.enum(["queued", "running", "requires_action", "completed", "failed", "cancelled"]);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
