@@ -102,9 +102,22 @@ export const sessionTurns = pgTable("session_turns", {
   triggerEventId: uuid("trigger_event_id").notNull(),
   temporalWorkflowId: text("temporal_workflow_id").notNull(),
   status: text("status").notNull(),
+  source: text("source").notNull().default("user"),
+  position: integer("position").notNull(),
+  prompt: text("prompt").notNull(),
+  resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+  tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+  model: text("model").notNull(),
+  reasoningEffort: text("reasoning_effort").notNull(),
+  sandboxBackend: text("sandbox_backend").notNull(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => ({
+  queue: index("session_turns_queue_idx").on(table.sessionId, table.status, table.position),
+}));
 
 export const sessionEvents = pgTable("session_events", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -134,3 +147,38 @@ export const agentRunStates = pgTable("agent_run_states", {
   pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const scheduledTasks = pgTable("scheduled_tasks", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  status: text("status").notNull().default("active"),
+  schedule: jsonb("schedule").$type<unknown>().notNull(),
+  temporalScheduleId: text("temporal_schedule_id").notNull(),
+  runMode: text("run_mode").notNull().default("new_session_per_run"),
+  overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
+  agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
+  reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, { onDelete: "set null" }),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  temporalScheduleId: uniqueIndex("scheduled_tasks_temporal_schedule_id_idx").on(table.temporalScheduleId),
+  status: index("scheduled_tasks_status_idx").on(table.status),
+}));
+
+export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  taskId: uuid("task_id").notNull().references(() => scheduledTasks.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("queued"),
+  triggerType: text("trigger_type").notNull(),
+  scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+  firedAt: timestamp("fired_at", { withTimezone: true }).notNull().defaultNow(),
+  sessionId: uuid("session_id").references(() => sessions.id, { onDelete: "set null" }),
+  triggerEventId: uuid("trigger_event_id"),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  taskCreated: index("scheduled_task_runs_task_created_idx").on(table.taskId, table.createdAt),
+  session: index("scheduled_task_runs_session_idx").on(table.sessionId),
+}));

@@ -35,7 +35,7 @@
         "@infra-agents/events": "workspace:*",
         "@infra-agents/github": "workspace:*",
         "@infra-agents/storage": "workspace:*",
-        "@modelcontextprotocol/sdk": "^1.21.0",
+        "@modelcontextprotocol/sdk": "^1.29.0",
         "@temporalio/client": "^1.17.0",
         "hono": "^4.12.18",
         "zod": "^4.2.1",

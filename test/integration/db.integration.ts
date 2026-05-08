@@ -2,13 +2,19 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   appendSessionEvents,
   createDb,
+  createScheduledTask,
+  createScheduledTaskRun,
   createSession,
   createTurn,
   finishTurn,
   getLatestRunState,
+  listScheduledTaskRuns,
+  listScheduledTasks,
   listSessionEvents,
   saveRunState,
   setSessionStatus,
+  updateScheduledTask,
+  updateScheduledTaskRun,
 } from "@infra-agents/db";
 import { expectContiguousSequences, startTestServices, type TestServices } from "@infra-agents/testing";
 
@@ -118,5 +124,36 @@ describe("DB integration", () => {
     expect(latest?.serializedRunState).toBe("state-2");
     await finishTurn(dbClient.db, turnId, "idle");
     await setSessionStatus(dbClient.db, session.id, "idle", null);
+  });
+
+  test("persists scheduled tasks and run history", async () => {
+    const task = await createScheduledTask(dbClient.db, {
+      name: "daily",
+      status: "active",
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "run",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const updated = await updateScheduledTask(dbClient.db, task.id, { status: "paused" });
+    expect(updated.status).toBe("paused");
+    expect((await listScheduledTasks(dbClient.db)).some((item) => item.id === task.id)).toBe(true);
+
+    const run = await createScheduledTaskRun(dbClient.db, {
+      taskId: task.id,
+      triggerType: "manual",
+      scheduledAt: null,
+    });
+    await updateScheduledTaskRun(dbClient.db, run.id, { status: "failed", error: "no worker" });
+    const runs = await listScheduledTaskRuns(dbClient.db, task.id);
+    expect(runs[0]?.status).toBe("failed");
+    expect(runs[0]?.error).toBe("no worker");
   });
 });

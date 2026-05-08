@@ -149,6 +149,151 @@ export const ToolRef = z.object({
 });
 export type ToolRef = z.infer<typeof ToolRef>;
 
+export const SessionTurnStatus = z.enum(["queued", "running", "requires_action", "completed", "failed", "cancelled"]);
+export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
+
+export const SessionTurnSource = z.enum(["user", "scheduled_task", "api"]);
+export type SessionTurnSource = z.infer<typeof SessionTurnSource>;
+
+export const SessionTurn = z.object({
+  id: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  triggerEventId: z.string().uuid(),
+  temporalWorkflowId: z.string(),
+  status: SessionTurnStatus,
+  source: SessionTurnSource,
+  position: z.number().int().positive(),
+  prompt: z.string().min(1),
+  resources: z.array(ResourceRef),
+  tools: z.array(ToolRef),
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort,
+  sandboxBackend: SandboxBackend,
+  metadata: z.record(z.string(), z.unknown()),
+  startedAt: z.string().nullable(),
+  finishedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SessionTurn = z.infer<typeof SessionTurn>;
+
+export const UpdateSessionTurnRequest = z.object({
+  prompt: z.string().min(1).optional(),
+  resources: z.array(ResourceRef).optional(),
+  tools: z.array(ToolRef).optional(),
+  model: z.string().min(1).optional(),
+  reasoningEffort: ReasoningEffort.optional(),
+  sandboxBackend: SandboxBackend.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+export type UpdateSessionTurnRequest = z.infer<typeof UpdateSessionTurnRequest>;
+
+export const ReorderSessionTurnsRequest = z.object({
+  turnIds: z.array(z.string().uuid()).min(1),
+});
+export type ReorderSessionTurnsRequest = z.infer<typeof ReorderSessionTurnsRequest>;
+
+export const ScheduledTaskStatus = z.enum(["active", "paused"]);
+export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
+
+export const ScheduledTaskRunStatus = z.enum(["queued", "dispatched", "failed"]);
+export type ScheduledTaskRunStatus = z.infer<typeof ScheduledTaskRunStatus>;
+
+export const ScheduledTaskRunMode = z.enum(["new_session_per_run", "reusable_session"]);
+export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
+
+export const ScheduledTaskOverlapPolicy = z.enum(["allow_concurrent", "skip", "buffer_one"]);
+export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
+
+export const ScheduledTaskTriggerType = z.enum(["scheduled", "manual"]);
+export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
+
+export const ScheduledTaskScheduleSpec = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("once"),
+    runAt: z.string().datetime({ offset: true }),
+    timeZone: z.string().min(1).default("UTC"),
+  }),
+  z.object({
+    type: z.literal("interval"),
+    everySeconds: z.number().int().positive(),
+    startAt: z.string().datetime({ offset: true }).optional(),
+    endAt: z.string().datetime({ offset: true }).optional(),
+  }),
+  z.object({
+    type: z.literal("calendar"),
+    timeZone: z.string().min(1).default("UTC"),
+    hour: z.number().int().min(0).max(23),
+    minute: z.number().int().min(0).max(59),
+    daysOfWeek: z.array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"])).min(1).optional(),
+  }),
+]);
+export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
+
+export const ScheduledTaskAgentConfig = z.object({
+  prompt: z.string().min(1),
+  resources: z.array(ResourceRef).default([]),
+  tools: z.array(ToolRef).default([]),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  model: z.string().min(1).optional(),
+  reasoningEffort: ReasoningEffort.optional(),
+  sandboxBackend: SandboxBackend.optional(),
+});
+export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
+
+export const ScheduledTask = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  status: ScheduledTaskStatus,
+  schedule: ScheduledTaskScheduleSpec,
+  temporalScheduleId: z.string(),
+  runMode: ScheduledTaskRunMode,
+  overlapPolicy: ScheduledTaskOverlapPolicy,
+  agentConfig: ScheduledTaskAgentConfig,
+  reusableSessionId: z.string().uuid().nullable(),
+  metadata: z.record(z.string(), z.unknown()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ScheduledTask = z.infer<typeof ScheduledTask>;
+
+export const ScheduledTaskRun = z.object({
+  id: z.string().uuid(),
+  taskId: z.string().uuid(),
+  status: ScheduledTaskRunStatus,
+  triggerType: ScheduledTaskTriggerType,
+  scheduledAt: z.string().nullable(),
+  firedAt: z.string(),
+  sessionId: z.string().uuid().nullable(),
+  triggerEventId: z.string().uuid().nullable(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
+
+export const CreateScheduledTaskRequest = z.object({
+  name: z.string().min(1),
+  schedule: ScheduledTaskScheduleSpec,
+  runMode: ScheduledTaskRunMode.default("new_session_per_run"),
+  overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+  agentConfig: ScheduledTaskAgentConfig,
+  status: ScheduledTaskStatus.default("active"),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+export const UpdateScheduledTaskRequest = z.object({
+  name: z.string().min(1).optional(),
+  schedule: ScheduledTaskScheduleSpec.optional(),
+  runMode: ScheduledTaskRunMode.optional(),
+  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  agentConfig: ScheduledTaskAgentConfig.optional(),
+  status: ScheduledTaskStatus.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   status: SessionStatus,
@@ -173,6 +318,8 @@ export const SessionEventType = z.enum([
   "user.message",
   "user.interrupt",
   "user.approvalDecision",
+  "turn.queued",
+  "turn.updated",
   "turn.started",
   "turn.completed",
   "turn.failed",
@@ -277,6 +424,10 @@ export const ClientConfig = z.object({
   allowedModels: z.array(z.string()).min(1),
   defaultReasoningEffort: ReasoningEffort,
   allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
+  mcpServers: z.array(z.object({
+    id: z.string(),
+    name: z.string(),
+  })).default([]),
   fileUploads: z.object({
     enabled: z.boolean(),
     maxSizeBytes: z.number().int().positive(),

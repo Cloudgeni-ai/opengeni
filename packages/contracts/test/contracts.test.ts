@@ -4,6 +4,7 @@ import {
   ClientConfig,
   ClientSessionEvent,
   CreateDocumentBaseRequest,
+  CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
   ResourceRef,
@@ -72,10 +73,28 @@ describe("contracts", () => {
       allowedModels: ["gpt-5.5"],
       defaultReasoningEffort: "high",
       allowedReasoningEfforts: ["low", "medium", "high"],
+      mcpServers: [{ id: "infra_agents", name: "Infra Agents" }],
       fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
     });
     expect(payload.defaultReasoningEffort).toBe("high");
     expect(payload.fileUploads.enabled).toBe(true);
+    expect(payload.mcpServers[0]?.id).toBe("infra_agents");
+  });
+
+  test("accepts structured scheduled task definitions", () => {
+    const payload = CreateScheduledTaskRequest.parse({
+      name: "Daily check",
+      schedule: { type: "calendar", timeZone: "Europe/Oslo", hour: 9, minute: 30 },
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "Check repository health",
+        resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+        tools: [{ kind: "mcp", id: "infra_agents" }],
+      },
+    });
+    expect(payload.schedule.type).toBe("calendar");
+    expect(payload.agentConfig.tools[0]?.id).toBe("infra_agents");
   });
 
   test("rejects empty user message command", () => {

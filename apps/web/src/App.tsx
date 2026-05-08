@@ -2,6 +2,7 @@ import {
   AlertTriangleIcon,
   ArrowLeftIcon,
   BotIcon,
+  CalendarClockIcon,
   CheckIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -17,7 +18,9 @@ import {
   Loader2Icon,
   LockIcon,
   PanelRightIcon,
+  PauseIcon,
   PlusIcon,
+  PlayIcon,
   RefreshCwIcon,
   SparkleIcon,
   SquareIcon,
@@ -50,9 +53,11 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  createSession,
   addDocumentToBase,
+  createSession,
   createDocumentBase,
+  createScheduledTask,
+  deleteScheduledTask,
   fetchClientConfig,
   fetchDocumentBases,
   fetchDocuments,
@@ -61,13 +66,19 @@ import {
   fetchFileDownloadUrl,
   fetchGitHubRepositories,
   fetchGitHubStatus,
+  fetchScheduledTaskRuns,
+  fetchScheduledTasks,
   fetchSession,
+  pauseScheduledTask,
+  resumeScheduledTask,
   sendApproval,
   sendInterrupt,
   sendUserMessage,
   searchDocumentBase,
   startGitHubManifest,
   streamUrl,
+  triggerScheduledTask,
+  updateScheduledTask,
   uploadFileAsset,
 } from "./api";
 import type {
@@ -79,6 +90,9 @@ import type {
   IndexedDocument,
   ReasoningEffort,
   ResourceRef,
+  ScheduledTask,
+  ScheduledTaskRun,
+  ScheduledTaskScheduleSpec,
   Session,
   SessionEvent,
   SessionStatus,
@@ -467,6 +481,13 @@ export function App() {
                 onSubmit={submitInitial}
               />
               <RecentSessions onSelect={selectSession} />
+              <ScheduledTasksPanel
+                clientConfig={clientConfig}
+                resources={buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs)}
+                model={model}
+                reasoningEffort={reasoningEffort}
+                onSelectSession={selectSession}
+              />
             </TabsContent>
             <TabsContent value="documents" className="mt-6">
               <DocumentsWorkspace fileUploadsEnabled={clientConfig?.fileUploads.enabled === true} />
@@ -1907,6 +1928,226 @@ function RecentSessions({ onSelect }: { onSelect: (id: string) => void }) {
   );
 }
 
+function ScheduledTasksPanel(props: {
+  clientConfig: ClientConfig | null;
+  resources: ResourceRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  onSelectSession: (id: string) => void;
+}) {
+  const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [runs, setRuns] = useState<Record<string, ScheduledTaskRun[]>>({});
+  const [open, setOpen] = useState(false);
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [scheduleType, setScheduleType] = useState<"once" | "interval" | "calendar">("once");
+  const [runAt, setRunAt] = useState(() => localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)));
+  const [intervalMinutes, setIntervalMinutes] = useState(60);
+  const [calendarTime, setCalendarTime] = useState("09:00");
+  const [runMode, setRunMode] = useState<ScheduledTask["runMode"]>("new_session_per_run");
+  const [overlapPolicy, setOverlapPolicy] = useState<ScheduledTask["overlapPolicy"]>("allow_concurrent");
+  const [includeInfraTool, setIncludeInfraTool] = useState(true);
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function refresh() {
+    const next = await fetchScheduledTasks();
+    setTasks(next);
+    const entries = await Promise.all(next.slice(0, 8).map(async (task) => [task.id, await fetchScheduledTaskRuns(task.id)] as const));
+    setRuns(Object.fromEntries(entries));
+  }
+
+  async function createTask() {
+    if (!prompt.trim()) {
+      toast.error("Scheduled task prompt is required");
+      return;
+    }
+    setBusyTaskId("new");
+    try {
+      const schedule = scheduledTaskSchedule(scheduleType, runAt, intervalMinutes, calendarTime);
+      const tools: ToolRef[] = includeInfraTool && props.clientConfig?.mcpServers.some((server) => server.id === "infra_agents")
+        ? [{ kind: "mcp", id: "infra_agents" }]
+        : [];
+      await createScheduledTask({
+        name: name.trim() || prompt.trim().slice(0, 64),
+        schedule,
+        runMode,
+        overlapPolicy,
+        agentConfig: {
+          prompt: prompt.trim(),
+          resources: props.resources,
+          tools,
+          metadata: {},
+          model: props.model,
+          reasoningEffort: props.reasoningEffort,
+        },
+      });
+      setName("");
+      setPrompt("");
+      setOpen(false);
+      await refresh();
+      toast.success("Scheduled task created");
+    } catch (error) {
+      toast.error("Failed to create scheduled task", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
+
+  async function taskAction(task: ScheduledTask, action: "pause" | "resume" | "trigger" | "delete" | "rename" | "prompt") {
+    setBusyTaskId(task.id);
+    try {
+      if (action === "pause") {
+        await pauseScheduledTask(task.id);
+      } else if (action === "resume") {
+        await resumeScheduledTask(task.id);
+      } else if (action === "trigger") {
+        await triggerScheduledTask(task.id);
+      } else if (action === "delete") {
+        await deleteScheduledTask(task.id);
+      } else if (action === "rename") {
+        const next = window.prompt("Scheduled task name", task.name);
+        if (next === null) return;
+        await updateScheduledTask(task.id, { name: next });
+      } else {
+        const next = window.prompt("Scheduled task prompt", task.agentConfig.prompt);
+        if (next === null) return;
+        await updateScheduledTask(task.id, { agentConfig: { ...task.agentConfig, prompt: next } });
+      }
+      await refresh();
+    } catch (error) {
+      toast.error("Scheduled task action failed", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusyTaskId(null);
+    }
+  }
+
+  return (
+    <section className="mt-8 border-t border-[color:var(--color-border)] pt-6">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">Scheduled tasks</h2>
+          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Create and manage recurring or one-shot agent runs.</p>
+        </div>
+        <div className="flex gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()}>
+            <RefreshCwIcon className="size-3.5" />
+            Refresh
+          </Button>
+          <Button type="button" size="sm" onClick={() => setOpen((value) => !value)}>
+            <CalendarClockIcon className="size-3.5" />
+            New
+          </Button>
+        </div>
+      </div>
+
+      {open ? (
+        <div className="mt-4 grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label>Name</Label>
+              <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="Daily infrastructure review" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Schedule</Label>
+              <select className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm" value={scheduleType} onChange={(event) => setScheduleType(event.target.value as typeof scheduleType)}>
+                <option value="once">Once</option>
+                <option value="interval">Interval</option>
+                <option value="calendar">Daily</option>
+              </select>
+            </div>
+          </div>
+          <textarea
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            className="min-h-20 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-sm"
+            placeholder="What should the agent do on schedule?"
+          />
+          <div className="grid gap-2 sm:grid-cols-3">
+            {scheduleType === "once" ? (
+              <Input type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} />
+            ) : scheduleType === "interval" ? (
+              <Input type="number" min={1} value={intervalMinutes} onChange={(event) => setIntervalMinutes(Number(event.target.value))} />
+            ) : (
+              <Input type="time" value={calendarTime} onChange={(event) => setCalendarTime(event.target.value)} />
+            )}
+            <select className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm" value={runMode} onChange={(event) => setRunMode(event.target.value as ScheduledTask["runMode"])}>
+              <option value="new_session_per_run">New session per run</option>
+              <option value="reusable_session">Reusable session</option>
+            </select>
+            <select className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm" value={overlapPolicy} onChange={(event) => setOverlapPolicy(event.target.value as ScheduledTask["overlapPolicy"])}>
+              <option value="allow_concurrent">Allow concurrent</option>
+              <option value="skip">Skip overlapping</option>
+              <option value="buffer_one">Buffer one</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+            <input type="checkbox" checked={includeInfraTool} onChange={(event) => setIncludeInfraTool(event.target.checked)} />
+            Attach Infra Agents MCP tool
+          </label>
+          <div className="flex justify-end">
+            <Button type="button" onClick={() => void createTask()} disabled={busyTaskId === "new"}>
+              {busyTaskId === "new" ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+              Create scheduled task
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-3 grid gap-2">
+        {tasks.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-sm text-[color:var(--color-fg-subtle)]">No scheduled tasks.</div>
+        ) : tasks.map((task) => (
+          <div key={task.id} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{task.name}</div>
+                <div className="mt-1 text-xs text-[color:var(--color-fg-subtle)]">{scheduleLabel(task.schedule)} · {task.runMode.replaceAll("_", " ")} · {task.status}</div>
+              </div>
+              <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                <Button variant="ghost" size="icon-sm" onClick={() => void taskAction(task, task.status === "active" ? "pause" : "resume")} aria-label={task.status === "active" ? "Pause" : "Resume"}>
+                  {task.status === "active" ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
+                </Button>
+                <Button variant="ghost" size="icon-sm" onClick={() => void taskAction(task, "trigger")} aria-label="Trigger now">
+                  <BotIcon className="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon-sm" onClick={() => void taskAction(task, "rename")} aria-label="Rename">
+                  <FileJsonIcon className="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon-sm" onClick={() => void taskAction(task, "prompt")} aria-label="Edit prompt">
+                  <WrenchIcon className="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon-sm" onClick={() => void taskAction(task, "delete")} aria-label="Delete">
+                  <Trash2Icon className="size-3.5" />
+                </Button>
+              </div>
+            </div>
+            {(runs[task.id] ?? []).length > 0 ? (
+              <div className="mt-2 grid gap-1">
+                {(runs[task.id] ?? []).slice(0, 3).map((run) => (
+                  <button
+                    key={run.id}
+                    type="button"
+                    disabled={!run.sessionId}
+                    onClick={() => run.sessionId ? props.onSelectSession(run.sessionId) : undefined}
+                    className="flex items-center justify-between gap-2 rounded border border-[color:var(--color-border)] px-2 py-1.5 text-left text-xs text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)] disabled:opacity-60"
+                  >
+                    <span>{run.triggerType} · {run.status}</span>
+                    <span>{formatTimestamp(run.firedAt)}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function useSessionStream(
   sessionId: string | null,
   after: number,
@@ -2457,6 +2698,41 @@ function eventLabel(type: string): string {
 function formatTimestamp(value: string): string {
   const timestamp = new Date(value);
   return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
+}
+
+function localDateTimeValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function scheduledTaskSchedule(type: "once" | "interval" | "calendar", runAt: string, intervalMinutes: number, calendarTime: string): ScheduledTaskScheduleSpec {
+  if (type === "interval") {
+    return { type: "interval", everySeconds: Math.max(60, Math.round(intervalMinutes * 60)) };
+  }
+  if (type === "calendar") {
+    const [hourRaw, minuteRaw] = calendarTime.split(":");
+    return {
+      type: "calendar",
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      hour: Number(hourRaw ?? 9),
+      minute: Number(minuteRaw ?? 0),
+    };
+  }
+  return {
+    type: "once",
+    runAt: new Date(runAt).toISOString(),
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  };
+}
+
+function scheduleLabel(schedule: ScheduledTaskScheduleSpec): string {
+  if (schedule.type === "interval") {
+    return `Every ${Math.round(schedule.everySeconds / 60)} min`;
+  }
+  if (schedule.type === "calendar") {
+    return `Daily ${String(schedule.hour).padStart(2, "0")}:${String(schedule.minute).padStart(2, "0")} ${schedule.timeZone}`;
+  }
+  return `Once ${formatTimestamp(schedule.runAt)}`;
 }
 
 function isUiReasoningEffort(value: ReasoningEffort): value is IntelligenceEffort {

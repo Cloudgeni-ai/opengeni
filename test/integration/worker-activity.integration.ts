@@ -5,10 +5,13 @@ import {
   completeFileUpload,
   createDb,
   createFileUpload,
+  createScheduledTask,
   createSession,
   getSession,
   getLatestRunState,
   listSessionEvents,
+  listScheduledTaskRuns,
+  requireScheduledTask,
 } from "@infra-agents/db";
 import { createNatsEventBus, type EventBus } from "@infra-agents/events";
 import { createProductionAgentRuntime } from "@infra-agents/runtime";
@@ -352,5 +355,88 @@ describe("worker activities integration", () => {
     } finally {
       mcp.close();
     }
+  });
+
+  test("dispatches scheduled tasks into new sessions and run history", async () => {
+    const task = await createScheduledTask(dbClient.db, {
+      name: "scheduled-new-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "inspect nightly",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: { source: "test" },
+      },
+      metadata: {},
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        mcpServers: [{ id: "docs", url: "http://127.0.0.1:1/mcp", name: "Docs" }],
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    const result = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "scheduled" });
+
+    expect(result.action).toBe("start");
+    expect(result.workflowId).toBe(`session-${result.sessionId}`);
+    const session = await getSession(dbClient.db, result.sessionId);
+    expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
+    expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    const events = await listSessionEvents(dbClient.db, result.sessionId, 0, 10);
+    expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({ text: "inspect nightly", scheduledTaskId: task.id });
+    const [run] = await listScheduledTaskRuns(dbClient.db, task.id);
+    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
+  });
+
+  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
+    const task = await createScheduledTask(dbClient.db, {
+      name: "scheduled-reusable",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "follow up",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        mcpServers: [{ id: "docs", url: "http://127.0.0.1:1/mcp", name: "Docs" }],
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    const first = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "scheduled" });
+    const stored = await requireScheduledTask(dbClient.db, task.id);
+    const second = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "manual" });
+
+    expect(first.action).toBe("start");
+    expect(second.action).toBe("signal");
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(stored.reusableSessionId).toBe(first.sessionId);
+    const events = await listSessionEvents(dbClient.db, first.sessionId, 0, 10);
+    expect(events.filter((event) => event.type === "user.message")).toHaveLength(2);
+    const runs = await listScheduledTaskRuns(dbClient.db, task.id);
+    expect(runs).toHaveLength(2);
+    expect(runs.every((run) => run.status === "dispatched")).toBe(true);
   });
 });

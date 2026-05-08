@@ -9,6 +9,10 @@ import type {
   IndexedDocument,
   ReasoningEffort,
   ResourceRef,
+  ScheduledTask,
+  ScheduledTaskAgentConfig,
+  ScheduledTaskRun,
+  ScheduledTaskScheduleSpec,
   Session,
   SessionEvent,
   ToolRef,
@@ -196,4 +200,55 @@ export async function startGitHubManifest(organization?: string): Promise<{ acti
     method: "POST",
     body: JSON.stringify({ organization: organization || undefined, public: false, includeCiPermissions: true }),
   });
+}
+
+export function fetchScheduledTasks(): Promise<ScheduledTask[]> {
+  return request<ScheduledTask[]>("/v1/scheduled-tasks");
+}
+
+export function fetchScheduledTaskRuns(taskId: string): Promise<ScheduledTaskRun[]> {
+  return request<ScheduledTaskRun[]>(`/v1/scheduled-tasks/${taskId}/runs`);
+}
+
+export function createScheduledTask(input: {
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  runMode: ScheduledTask["runMode"];
+  overlapPolicy: ScheduledTask["overlapPolicy"];
+  agentConfig: ScheduledTaskAgentConfig;
+}): Promise<ScheduledTask> {
+  return request<ScheduledTask>("/v1/scheduled-tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateScheduledTask(taskId: string, input: Partial<{
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  runMode: ScheduledTask["runMode"];
+  overlapPolicy: ScheduledTask["overlapPolicy"];
+  agentConfig: ScheduledTaskAgentConfig;
+  status: ScheduledTask["status"];
+}>): Promise<ScheduledTask> {
+  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function pauseScheduledTask(taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/pause`, { method: "POST" });
+}
+
+export function resumeScheduledTask(taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/resume`, { method: "POST" });
+}
+
+export function triggerScheduledTask(taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/trigger`, { method: "POST" });
+}
+
+export function deleteScheduledTask(taskId: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(`/v1/scheduled-tasks/${taskId}`, { method: "DELETE" });
 }

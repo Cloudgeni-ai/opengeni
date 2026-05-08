@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createDb, listSessionEvents, requireSession, setSessionStatus } from "@infra-agents/db";
+import { createDb, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, requireSession, setSessionStatus } from "@infra-agents/db";
 import { appendAndPublishEvents } from "@infra-agents/events";
 import type { SessionEvent } from "@infra-agents/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -46,9 +46,9 @@ describe("API component integration", () => {
     expect(session.temporalWorkflowId).toBe(`session-${session.id}`);
     expect(session.model).toBe("scripted-model");
     expect(session.metadata.reasoningEffort).toBe("xhigh");
-    expect(workflow.started).toHaveLength(1);
+    expect(workflow.wakeups).toHaveLength(1);
     const events = await listSessionEvents(dbClient.db, session.id);
-    expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed"]);
+    expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
   });
 
   test("rejects unknown MCP tool refs during session create", async () => {
@@ -148,7 +148,7 @@ describe("API component integration", () => {
     expect((await requireSession(dbClient.db, session.id)).tools).toEqual([{ kind: "mcp", id: "docs" }]);
   });
 
-  test("updates model settings on follow-up user messages", async () => {
+  test("queues model settings on follow-up user messages", async () => {
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -187,12 +187,13 @@ describe("API component integration", () => {
       model: "gpt-5.5",
       reasoningEffort: "xhigh",
     });
-    const updated = await requireSession(dbClient.db, session.id);
-    expect(updated.model).toBe("gpt-5.5");
-    expect(updated.metadata.reasoningEffort).toBe("xhigh");
+    const turns = await listSessionTurns(dbClient.db, session.id);
+    const turn = turns.find((item) => item.triggerEventId === event.id);
+    expect(turn?.model).toBe("gpt-5.5");
+    expect(turn?.reasoningEffort).toBe("xhigh");
   });
 
-  test("serializes concurrent follow-up user messages before merging session tools", async () => {
+  test("queues concurrent follow-up user messages while merging session tools", async () => {
     const mcpServers = Array.from({ length: 12 }, (_, index) => ({
       id: `docs-${index}`,
       name: `Docs ${index}`,
@@ -226,9 +227,8 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     })));
 
-    expect(responses.filter((response) => response.status === 202)).toHaveLength(1);
-    expect(responses.filter((response) => response.status === 409)).toHaveLength(mcpServers.length - 1);
-    expect((await requireSession(dbClient.db, session.id)).tools).toHaveLength(1);
+    expect(responses.filter((response) => response.status === 202)).toHaveLength(mcpServers.length);
+    expect((await requireSession(dbClient.db, session.id)).tools).toHaveLength(mcpServers.length);
   });
 
   test("rejects unknown MCP tool refs on follow-up user messages", async () => {
@@ -269,6 +269,129 @@ describe("API component integration", () => {
     expect(payload.defaultModel).toBe("scripted-model");
     expect(payload.allowedReasoningEfforts).toContain("high");
     expect(payload.fileUploads).toEqual({ enabled: false, maxSizeBytes: 5_000_000_000 });
+  });
+
+  test("creates and manages scheduled tasks", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const created = await app.request("/v1/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "hourly",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "inspect", resources: [], tools: [] },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(201);
+    const task = await created.json() as { id: string; temporalScheduleId: string };
+    expect(task.temporalScheduleId).toBe(`scheduled-task-${task.id}`);
+    expect(workflow.synced).toHaveLength(1);
+
+    const paused = await app.request(`/v1/scheduled-tasks/${task.id}/pause`, { method: "POST" });
+    expect(paused.status).toBe(200);
+    expect(workflow.synced).toHaveLength(2);
+
+    const triggered = await app.request(`/v1/scheduled-tasks/${task.id}/trigger`, { method: "POST" });
+    expect(triggered.status).toBe(202);
+    expect(workflow.triggers).toEqual([{ taskId: task.id }]);
+
+    const listed = await app.request("/v1/scheduled-tasks");
+    expect(listed.status).toBe(200);
+    expect((await listed.json() as Array<{ id: string }>).some((item) => item.id === task.id)).toBe(true);
+  });
+
+  test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    workflow.syncError = new Error("temporal unavailable");
+    const failedCreateName = `sync-fail-${crypto.randomUUID()}`;
+    const failedCreate = await app.request("/v1/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: failedCreateName,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(failedCreate.status).toBe(500);
+    expect((await listScheduledTasks(dbClient.db)).some((task) => task.name === failedCreateName)).toBe(false);
+
+    workflow.syncError = null;
+    const created = await app.request("/v1/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: `rollback-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const task = await created.json() as { id: string };
+
+    workflow.syncError = new Error("temporal unavailable");
+    const failedPause = await app.request(`/v1/scheduled-tasks/${task.id}/pause`, { method: "POST" });
+    expect(failedPause.status).toBe(500);
+    expect((await getScheduledTask(dbClient.db, task.id))?.status).toBe("active");
+  });
+
+  test("returns 404 for missing scheduled task actions", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const response = await app.request(`/v1/scheduled-tasks/${crypto.randomUUID()}/pause`, { method: "POST" });
+    expect(response.status).toBe(404);
+  });
+
+  test("validates scheduled task semantic edge cases", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const blankName = await app.request("/v1/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "   ",
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(blankName.status).toBe(422);
+
+    const invalidWindow = await app.request("/v1/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "bad-window",
+        schedule: {
+          type: "interval",
+          everySeconds: 3600,
+          startAt: "2026-05-08T12:00:00.000Z",
+          endAt: "2026-05-08T11:00:00.000Z",
+        },
+        agentConfig: { prompt: "inspect" },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(invalidWindow.status).toBe(422);
   });
 
   test("reports file upload support when object storage is configured", async () => {
@@ -459,7 +582,7 @@ describe("API component integration", () => {
       body: JSON.stringify({ type: "user.message", payload: { text: "too soon" } }),
       headers: { "content-type": "application/json" },
     });
-    expect(rejected.status).toBe(409);
+    expect(rejected.status).toBe(202);
 
     await setSessionStatus(dbClient.db, session.id, "idle", null);
     const accepted = await app.request(`/v1/sessions/${session.id}/events`, {
@@ -468,7 +591,7 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(accepted.status).toBe(202);
-    expect(workflow.userMessages).toHaveLength(1);
+    expect(workflow.wakeups.length).toBeGreaterThanOrEqual(2);
 
     const approvalRejected = await app.request(`/v1/sessions/${session.id}/events`, {
       method: "POST",
@@ -521,14 +644,14 @@ describe("API component integration", () => {
     const listed = await app.request(`/v1/sessions/${session.id}/events?limit=10`);
     expect(listed.status).toBe(200);
     const initialEvents = await listed.json() as SessionEvent[];
-    expect(initialEvents.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed"]);
+    expect(initialEvents.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
 
     const replayAbort = new AbortController();
     const replay = await app.request(new Request(`http://test/v1/sessions/${session.id}/events/stream?after=0`, {
       signal: replayAbort.signal,
     }));
     expect(replay.status).toBe(200);
-    expect((await readSseEvents(replay, 3, replayAbort)).map((event) => event.type)).toEqual(initialEvents.map((event) => event.type));
+    expect((await readSseEvents(replay, 4, replayAbort)).map((event) => event.type)).toEqual(initialEvents.map((event) => event.type));
 
     const liveAbortA = new AbortController();
     const liveAbortB = new AbortController();
@@ -706,8 +829,13 @@ async function readSseEvents(response: Response, count: number, abort: AbortCont
 class FakeWorkflowClient implements SessionWorkflowClient {
   started: unknown[] = [];
   userMessages: unknown[] = [];
+  wakeups: unknown[] = [];
   approvals: unknown[] = [];
   interrupts: unknown[] = [];
+  synced: unknown[] = [];
+  deletedSchedules: unknown[] = [];
+  triggers: unknown[] = [];
+  syncError: Error | null = null;
 
   async startSessionWorkflow(input: unknown): Promise<void> {
     this.started.push(input);
@@ -717,12 +845,31 @@ class FakeWorkflowClient implements SessionWorkflowClient {
     this.userMessages.push(input);
   }
 
+  async wakeSessionWorkflow(input: unknown): Promise<void> {
+    this.wakeups.push(input);
+  }
+
   async signalApprovalDecision(input: unknown): Promise<void> {
     this.approvals.push(input);
   }
 
   async signalInterrupt(input: unknown): Promise<void> {
     this.interrupts.push(input);
+  }
+
+  async syncScheduledTask(input: unknown): Promise<void> {
+    this.synced.push(input);
+    if (this.syncError) {
+      throw this.syncError;
+    }
+  }
+
+  async deleteScheduledTaskSchedule(input: unknown): Promise<void> {
+    this.deletedSchedules.push(input);
+  }
+
+  async triggerScheduledTask(input: unknown): Promise<void> {
+    this.triggers.push(input);
   }
 }
 
