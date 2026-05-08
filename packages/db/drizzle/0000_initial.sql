@@ -94,9 +94,31 @@ CREATE TABLE IF NOT EXISTS "session_turns" (
   "trigger_event_id" uuid NOT NULL,
   "temporal_workflow_id" text NOT NULL,
   "status" text NOT NULL,
+  "source" text NOT NULL DEFAULT 'user',
+  "position" integer NOT NULL DEFAULT 1,
+  "prompt" text NOT NULL DEFAULT '',
+  "resources" jsonb NOT NULL DEFAULT '[]'::jsonb,
+  "tools" jsonb NOT NULL DEFAULT '[]'::jsonb,
+  "model" text NOT NULL DEFAULT '',
+  "reasoning_effort" text NOT NULL DEFAULT 'medium',
+  "sandbox_backend" text NOT NULL DEFAULT 'none',
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "started_at" timestamptz,
+  "finished_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "source" text NOT NULL DEFAULT 'user';
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "position" integer NOT NULL DEFAULT 1;
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "prompt" text NOT NULL DEFAULT '';
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "resources" jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "tools" jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "model" text NOT NULL DEFAULT '';
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "reasoning_effort" text NOT NULL DEFAULT 'medium';
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "sandbox_backend" text NOT NULL DEFAULT 'none';
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "started_at" timestamptz;
+ALTER TABLE "session_turns" ADD COLUMN IF NOT EXISTS "finished_at" timestamptz;
 CREATE TABLE IF NOT EXISTS "session_events" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "session_id" uuid NOT NULL REFERENCES "sessions"("id") ON DELETE CASCADE,
@@ -119,7 +141,39 @@ CREATE TABLE IF NOT EXISTS "agent_run_states" (
   "pending_approvals" jsonb NOT NULL DEFAULT '[]'::jsonb,
   "created_at" timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS "scheduled_tasks" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "name" text NOT NULL,
+  "status" text NOT NULL DEFAULT 'active',
+  "schedule" jsonb NOT NULL,
+  "temporal_schedule_id" text NOT NULL,
+  "run_mode" text NOT NULL DEFAULT 'new_session_per_run',
+  "overlap_policy" text NOT NULL DEFAULT 'allow_concurrent',
+  "agent_config" jsonb NOT NULL,
+  "reusable_session_id" uuid REFERENCES "sessions"("id") ON DELETE SET NULL,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS "scheduled_task_runs" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+  "task_id" uuid NOT NULL REFERENCES "scheduled_tasks"("id") ON DELETE CASCADE,
+  "status" text NOT NULL DEFAULT 'queued',
+  "trigger_type" text NOT NULL,
+  "scheduled_at" timestamptz,
+  "fired_at" timestamptz NOT NULL DEFAULT now(),
+  "session_id" uuid REFERENCES "sessions"("id") ON DELETE SET NULL,
+  "trigger_event_id" uuid,
+  "error" text,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  "updated_at" timestamptz NOT NULL DEFAULT now()
+);
 CREATE UNIQUE INDEX IF NOT EXISTS "session_events_session_sequence_idx" ON "session_events" ("session_id", "sequence");
 CREATE UNIQUE INDEX IF NOT EXISTS "session_events_client_event_idx" ON "session_events" ("session_id", "client_event_id") WHERE "client_event_id" IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS "session_events_producer_idx" ON "session_events" ("session_id", "producer_id", "producer_seq") WHERE "producer_id" IS NOT NULL AND "producer_seq" IS NOT NULL;
 CREATE INDEX IF NOT EXISTS "session_events_session_created_idx" ON "session_events" ("session_id", "created_at");
+CREATE INDEX IF NOT EXISTS "session_turns_queue_idx" ON "session_turns" ("session_id", "status", "position");
+CREATE UNIQUE INDEX IF NOT EXISTS "scheduled_tasks_temporal_schedule_id_idx" ON "scheduled_tasks" ("temporal_schedule_id");
+CREATE INDEX IF NOT EXISTS "scheduled_tasks_status_idx" ON "scheduled_tasks" ("status");
+CREATE INDEX IF NOT EXISTS "scheduled_task_runs_task_created_idx" ON "scheduled_task_runs" ("task_id", "created_at");
+CREATE INDEX IF NOT EXISTS "scheduled_task_runs_session_idx" ON "scheduled_task_runs" ("session_id");

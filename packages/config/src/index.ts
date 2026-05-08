@@ -36,6 +36,7 @@ const SettingsSchema = z.object({
   temporalTaskQueue: z.string().default("infra-agent-runs-ts"),
   apiHost: z.string().default("0.0.0.0"),
   apiPort: z.coerce.number().int().positive().default(8000),
+  infraAgentsMcpUrl: z.string().url().optional(),
   corsAllowOriginRegex: z.string().default(String.raw`^https?://(localhost|127\.0\.0\.1)(:\d+)?$`),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
@@ -121,6 +122,7 @@ export function getSettings(): Settings {
     temporalTaskQueue: optional("INFRA_AGENT_TEMPORAL_TASK_QUEUE"),
     apiHost: optional("INFRA_AGENT_API_HOST"),
     apiPort: optional("INFRA_AGENT_API_PORT"),
+    infraAgentsMcpUrl: optional("INFRA_AGENT_MCP_URL"),
     corsAllowOriginRegex: optional("INFRA_AGENT_CORS_ALLOW_ORIGIN_REGEX"),
     openaiProvider: optional("INFRA_AGENT_OPENAI_PROVIDER"),
     openaiApiKey: optional("INFRA_AGENT_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
@@ -179,16 +181,11 @@ export function getSettings(): Settings {
     githubAppPrivateKey: optional("INFRA_AGENT_GITHUB_APP_PRIVATE_KEY"),
     mcpServers: parseMcpServers(optional("INFRA_AGENT_MCP_SERVERS")),
   };
-  const settings = SettingsSchema.parse(raw);
-  if (!settings.mcpServers.some((server) => server.id === "docs")) {
-    settings.mcpServers.push({
-      id: "docs",
-      name: "Document Search",
-      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp/docs`,
-      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
-      cacheToolsList: false,
-    });
-  }
+  const parsed = SettingsSchema.parse(raw);
+  const settings = {
+    ...parsed,
+    mcpServers: ensureBuiltInMcpServers(parsed),
+  };
   validateSettings(settings);
   return settings;
 }
@@ -269,6 +266,27 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`INFRA_AGENT_MCP_SERVERS must be a JSON array: ${message}`);
   }
+}
+
+function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
+  const existing = settings.mcpServers.filter((server) => server.id !== "infra_agents");
+  const hasDocs = existing.some((server) => server.id === "docs");
+  return [
+    {
+      id: "infra_agents",
+      name: "Infra Agents",
+      url: settings.infraAgentsMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/mcp`,
+      cacheToolsList: true,
+    },
+    ...(hasDocs ? [] : [{
+      id: "docs",
+      name: "Document Search",
+      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp/docs`,
+      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+      cacheToolsList: false,
+    }]),
+    ...existing,
+  ];
 }
 
 function validateSettings(settings: Settings): void {

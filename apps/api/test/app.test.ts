@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { ScheduleOverlapPolicy } from "@temporalio/client";
 import { allowedCorsOrigin, normalizeResources, replaySessionEvents, validateGitHubRepositorySelection, workflowIdForSession } from "../src/app";
+import { temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import type { SessionEvent } from "@infra-agents/contracts";
 
 describe("API helpers", () => {
@@ -31,6 +33,28 @@ describe("API helpers", () => {
 
   test("uses stable workflow ids for sessions", () => {
     expect(workflowIdForSession("abc")).toBe("session-abc");
+  });
+
+  test("maps scheduled task schedules into Temporal specs", () => {
+    expect(temporalScheduleSpec({ type: "interval", everySeconds: 90, startAt: "2026-05-08T10:00:00.000Z", endAt: "2026-05-08T11:00:00.000Z" })).toEqual({
+      intervals: [{ every: "90s" }],
+      startAt: new Date("2026-05-08T10:00:00.000Z"),
+      endAt: new Date("2026-05-08T11:00:00.000Z"),
+    });
+    expect(temporalScheduleSpec({ type: "calendar", timeZone: "Europe/Oslo", hour: 9, minute: 30, daysOfWeek: ["MONDAY"] })).toEqual({
+      calendars: [{ hour: 9, minute: 30, second: 0, dayOfWeek: ["MONDAY"] }],
+      timezone: "Europe/Oslo",
+    });
+    expect(temporalScheduleSpec({ type: "once", runAt: "2026-05-08T12:34:56.000+02:00", timeZone: "Europe/Oslo" })).toEqual({
+      calendars: [{ year: 2026, month: "MAY", dayOfMonth: 8, hour: 10, minute: 34, second: 56 }],
+      timezone: "UTC",
+    });
+  });
+
+  test("maps scheduled task overlap policies into Temporal policies", () => {
+    expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
+    expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
+    expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
   });
 
   test("rejects selected GitHub App repos from multiple installations", () => {
