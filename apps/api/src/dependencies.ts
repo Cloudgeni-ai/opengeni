@@ -6,7 +6,6 @@ import type { EventBus } from "@infra-agents/events";
 import type { createObjectStorage } from "@infra-agents/storage";
 
 export type SessionWorkflowClient = {
-  startSessionWorkflow: (input: { sessionId: string; initialEventId: string; workflowId: string }) => Promise<void>;
   signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   wakeSessionWorkflow: (input: { sessionId: string; workflowId: string }) => Promise<void>;
   signalApprovalDecision: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;

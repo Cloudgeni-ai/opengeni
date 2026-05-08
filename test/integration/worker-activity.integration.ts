@@ -3,19 +3,24 @@ import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
   completeFileUpload,
+  createTurn,
   createDb,
   createFileUpload,
   createScheduledTask,
   createSession,
+  finishTurn,
   getSession,
   getLatestRunState,
   listSessionEvents,
   listScheduledTaskRuns,
   requireScheduledTask,
+  saveRunState,
+  setSessionStatus,
 } from "@infra-agents/db";
 import { createNatsEventBus, type EventBus } from "@infra-agents/events";
-import { createProductionAgentRuntime } from "@infra-agents/runtime";
+import { createProductionAgentRuntime, type InfraAgentRuntime } from "@infra-agents/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
+import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@infra-agents/testing";
 
 describe("worker activities integration", () => {
@@ -230,6 +235,98 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
     expect((await getSession(dbClient.db, session.id))?.status).toBe("failed");
+  });
+
+  test("marks approval reruns running before resuming the agent", async () => {
+    const workflowId = "workflow-approval-rerun";
+    const session = await createSession(dbClient.db, {
+      initialMessage: "needs approval",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [initialTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+      { type: "user.message", payload: { text: "needs approval" } },
+    ]);
+    const turnId = await createTurn(dbClient.db, {
+      sessionId: session.id,
+      temporalWorkflowId: workflowId,
+      triggerEventId: initialTrigger!.id,
+      source: "user",
+      prompt: "needs approval",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "high",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    await finishTurn(dbClient.db, turnId, "requires_action");
+    await saveRunState(dbClient.db, {
+      sessionId: session.id,
+      turnId,
+      serializedRunState: "saved-state",
+      pendingApprovals: [{ id: "approval-1" }],
+    });
+    await setSessionStatus(dbClient.db, session.id, "requires_action", turnId);
+    const [approvalTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+      { type: "user.approvalDecision", payload: { approvalId: "approval-1", decision: "approve" } },
+    ]);
+    let observedDuringRun: { status?: string; activeTurnId?: string | null } | null = null;
+    const runtime: InfraAgentRuntime = {
+      configure: () => {},
+      buildAgent: () => ({} as never),
+      prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
+      prepareInput: async (_agent, input) => {
+        expect(input.kind).toBe("approval");
+        return { input: "approved" };
+      },
+      runStream: async () => {
+        const stored = await getSession(dbClient.db, session.id);
+        observedDuringRun = {
+          status: stored?.status,
+          activeTurnId: stored?.activeTurnId,
+        };
+        return {
+          toStream: () => (async function* () {})(),
+          completed: Promise.resolve(),
+          interruptions: [],
+          state: { toString: () => "resumed-state" },
+          finalOutput: "approved",
+        } as never;
+      },
+      serializeApprovals: () => [],
+    };
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(activities.runAgentSegment({
+      sessionId: session.id,
+      triggerEventId: approvalTrigger!.id,
+      workflowId,
+      turnId,
+    })).resolves.toEqual({ status: "idle" });
+
+    expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turnId });
+    expect((await getSession(dbClient.db, session.id))?.status).toBe("idle");
+  });
+
+  test("sets Docker and Modal sandbox home defaults", async () => {
+    const docker = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "docker" }), []);
+    const modal = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "modal" }), []);
+    const disabled = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "none" }), []);
+
+    expect(docker.HOME).toBe("/workspace");
+    expect(docker.AZURE_CONFIG_DIR).toBe("/workspace/.azure");
+    expect(modal.HOME).toBe("/workspace");
+    expect(modal.AZURE_CONFIG_DIR).toBe("/workspace/.azure");
+    expect(disabled.HOME).toBeUndefined();
+    expect(disabled.AZURE_CONFIG_DIR).toBeUndefined();
   });
 
   test("attaches configured MCP tools and executes a prefixed tool call during a run", async () => {

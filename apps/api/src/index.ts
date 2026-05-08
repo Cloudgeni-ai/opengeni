@@ -32,13 +32,6 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     namespace: settings.temporalNamespace,
   });
   const client: SessionWorkflowClient = {
-    startSessionWorkflow: async ({ sessionId, initialEventId, workflowId }) => {
-      await temporal.workflow.start("sessionWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId,
-        args: [{ sessionId, initialEventId }],
-      });
-    },
     signalUserMessage: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("userMessage", eventId);
     },

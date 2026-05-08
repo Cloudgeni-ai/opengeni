@@ -80,6 +80,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
 
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<InfraAgentRuntime["prepareTools"]>> | null = null;
+    await setSessionStatus(db, input.sessionId, "running", turnId);
     await publish([
       { type: "session.status.changed", payload: { status: "running" } },
       { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },

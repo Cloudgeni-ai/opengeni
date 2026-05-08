@@ -14,6 +14,10 @@ export async function sandboxEnvironmentForRun(settings: Settings, resources: Re
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
   };
+  if (settings.sandboxBackend === "docker" || settings.sandboxBackend === "modal") {
+    environment.HOME ??= "/workspace";
+    environment.AZURE_CONFIG_DIR ??= "/workspace/.azure";
+  }
   const selection = githubRepositorySelection(resources);
   if (!selection) {
     return environment;

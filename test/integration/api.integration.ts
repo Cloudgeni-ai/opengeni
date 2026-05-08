@@ -827,7 +827,6 @@ async function readSseEvents(response: Response, count: number, abort: AbortCont
 }
 
 class FakeWorkflowClient implements SessionWorkflowClient {
-  started: unknown[] = [];
   userMessages: unknown[] = [];
   wakeups: unknown[] = [];
   approvals: unknown[] = [];
@@ -836,10 +835,6 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   deletedSchedules: unknown[] = [];
   triggers: unknown[] = [];
   syncError: Error | null = null;
-
-  async startSessionWorkflow(input: unknown): Promise<void> {
-    this.started.push(input);
-  }
 
   async signalUserMessage(input: unknown): Promise<void> {
     this.userMessages.push(input);
