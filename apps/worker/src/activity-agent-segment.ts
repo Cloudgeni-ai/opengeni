@@ -170,7 +170,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       if (error instanceof CancelledFailure) {
         await batcher?.flush().catch(() => undefined);
         await finishTurn(db, turnId, "cancelled").catch(() => undefined);
-        await setSessionStatus(db, input.sessionId, "cancelled", null).catch(() => undefined);
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);

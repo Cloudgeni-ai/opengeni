@@ -41,23 +41,26 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     await setSessionStatus(db, input.sessionId, "failed", null);
   }
 
-  async function cancelSession(input: RunAgentSegmentInput): Promise<void> {
+  async function interruptActiveTurn(input: RunAgentSegmentInput): Promise<void> {
     const { db, bus } = await services();
     const session = await requireSession(db, input.sessionId);
+    if (!session.activeTurnId) {
+      return;
+    }
     const trigger = await getSessionEvent(db, input.triggerEventId);
     await appendAndPublishEvents(db, bus, input.sessionId, [
       {
+        turnId: session.activeTurnId,
         type: "turn.cancelled",
         payload: { triggerEventId: input.triggerEventId, reason: trigger?.payload ?? null },
       },
       {
+        turnId: session.activeTurnId,
         type: "session.status.changed",
         payload: { status: "queued" },
       },
     ]);
-    if (session.activeTurnId) {
-      await finishTurn(db, session.activeTurnId, "cancelled");
-    }
+    await finishTurn(db, session.activeTurnId, "cancelled");
     await setSessionStatus(db, input.sessionId, "queued", null);
   }
 
@@ -76,7 +79,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
 
   return {
     failSession,
-    cancelSession,
+    interruptActiveTurn,
     claimNextQueuedTurn,
     markSessionIdle,
   };

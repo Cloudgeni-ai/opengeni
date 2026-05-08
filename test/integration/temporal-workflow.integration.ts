@@ -32,7 +32,7 @@ describe("Temporal workflow integration", () => {
         return { status: "idle" };
       },
       failSession: async () => undefined,
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {
@@ -64,7 +64,7 @@ describe("Temporal workflow integration", () => {
         return { status: calls.length === 1 ? "requires_action" : "idle" };
       },
       failSession: async () => undefined,
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {
@@ -100,7 +100,7 @@ describe("Temporal workflow integration", () => {
       failSession: async (input: unknown) => {
         failures.push(input);
       },
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {
@@ -113,6 +113,132 @@ describe("Temporal workflow integration", () => {
       await handle.result();
       expect(attempts).toBe(1);
       expect(failures).toHaveLength(1);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
+
+  test("idle interrupt marks the session idle without cancelling a turn", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const idleMarks: unknown[] = [];
+    const interrupts: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => null,
+      markSessionIdle: async (input: unknown) => {
+        idleMarks.push(input);
+      },
+      runAgentSegment: async () => ({ status: "idle" }),
+      failSession: async () => undefined,
+      interruptActiveTurn: async (input: unknown) => {
+        interrupts.push(input);
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const sessionId = crypto.randomUUID();
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ sessionId }],
+      });
+      await handle.signal("interrupt", "interrupt-event");
+      await handle.result();
+      expect(idleMarks).toEqual([{ sessionId }]);
+      expect(interrupts).toHaveLength(0);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  });
+
+  test("interrupt during an active run cancels the active turn and continues queued work", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const sessionId = crypto.randomUUID();
+    const workflowId = `wf-${crypto.randomUUID()}`;
+    const first = queuedTurn("event-1");
+    const second = queuedTurn("event-2");
+    const queuedTurns = [first];
+    const runs: unknown[] = [];
+    const interrupts: unknown[] = [];
+    let allowFirstRunToFinish = false;
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentSegment: async (input: unknown) => {
+        runs.push(input);
+        if (runs.length === 1) {
+          while (!allowFirstRunToFinish) {
+            await Bun.sleep(10);
+          }
+        }
+        return { status: "idle" };
+      },
+      failSession: async () => undefined,
+      interruptActiveTurn: async (input: unknown) => {
+        interrupts.push(input);
+        allowFirstRunToFinish = true;
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [{ sessionId, initialEventId: first.triggerEventId }],
+      });
+      await waitFor(() => runs.length === 1);
+      queuedTurns.push(second);
+      await handle.signal("userMessage", second.triggerEventId);
+      await handle.signal("interrupt", "interrupt-event");
+      await waitFor(() => runs.length === 2);
+      expect(interrupts).toEqual([{ sessionId, triggerEventId: "interrupt-event", workflowId }]);
+      expect(runs[1]).toMatchObject({ sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
+    } finally {
+      allowFirstRunToFinish = true;
+      worker.shutdown();
+      await run;
+    }
+  });
+
+  test("interrupt while awaiting approval cancels the blocked turn and continues queued work", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const sessionId = crypto.randomUUID();
+    const workflowId = `wf-${crypto.randomUUID()}`;
+    const first = queuedTurn("event-1");
+    const second = queuedTurn("event-2");
+    const queuedTurns = [first];
+    const runs: unknown[] = [];
+    const interrupts: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentSegment: async (input: unknown) => {
+        runs.push(input);
+        return { status: runs.length === 1 ? "requires_action" : "idle" };
+      },
+      failSession: async () => undefined,
+      interruptActiveTurn: async (input: unknown) => {
+        interrupts.push(input);
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [{ sessionId, initialEventId: first.triggerEventId }],
+      });
+      await waitFor(() => runs.length === 1);
+      queuedTurns.push(second);
+      await handle.signal("userMessage", second.triggerEventId);
+      await handle.signal("interrupt", "interrupt-event");
+      await waitFor(() => runs.length === 2);
+      expect(interrupts).toEqual([{ sessionId, triggerEventId: "interrupt-event", workflowId }]);
+      expect(runs[1]).toMatchObject({ sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
     } finally {
       worker.shutdown();
       await run;
@@ -140,7 +266,7 @@ describe("Temporal workflow integration", () => {
       },
       runAgentSegment: async () => ({ status: "idle" }),
       failSession: async () => undefined,
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {
@@ -185,7 +311,7 @@ describe("Temporal workflow integration", () => {
         return { status: "idle" };
       },
       failSession: async () => undefined,
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {
@@ -233,7 +359,7 @@ describe("Temporal workflow integration", () => {
         return { status: "idle" };
       },
       failSession: async () => undefined,
-      cancelSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
     });
     const run = worker.run();
     try {

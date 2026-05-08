@@ -37,11 +37,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenWakeups = wakeups;
       const woke = await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, "5s");
       if (interruptedEventId) {
-        await activity.cancelSession({
-          sessionId: input.sessionId,
-          triggerEventId: interruptedEventId,
-          workflowId,
-        });
+        interruptedEventId = null;
+        await activity.markSessionIdle({ sessionId: input.sessionId });
         return;
       }
       if (woke) {
@@ -64,7 +61,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
   async function runTurn(sessionId: string, turnId: string, triggerEventId: string): Promise<boolean> {
     if (interruptedEventId) {
-      await activity.cancelSession({
+      await activity.interruptActiveTurn({
         sessionId,
         triggerEventId: interruptedEventId,
         workflowId: workflowInfo().workflowId,
@@ -91,7 +88,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
     if (outcome.kind === "interrupt") {
       scope.cancel();
-      await activity.cancelSession({
+      await activity.interruptActiveTurn({
         sessionId,
         triggerEventId: interruptedEventId!,
         workflowId: workflowInfo().workflowId,
@@ -117,7 +114,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     if (outcome.result.status === "requires_action") {
       await condition(() => interruptedEventId !== null || approvalQueue.length > 0);
       if (interruptedEventId) {
-        await activity.cancelSession({
+        await activity.interruptActiveTurn({
           sessionId,
           triggerEventId: interruptedEventId,
           workflowId,
