@@ -10,7 +10,8 @@ import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
   requireScheduledTaskForApi,
-  restoreScheduledTask,
+  syncCreatedScheduledTask,
+  syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
 import { boundedLimit } from "../http/common";
@@ -21,12 +22,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/scheduled-tasks", async (c) => {
     const payload = CreateScheduledTaskRequest.parse(await c.req.json());
     const task = await createValidatedScheduledTask({ settings, db, objectStorage, payload });
-    try {
-      await workflowClient.syncScheduledTask({ task });
-    } catch (error) {
-      await deleteScheduledTask(db, task.id).catch(() => undefined);
-      throw error;
-    }
+    await syncCreatedScheduledTask({ db, workflowClient, task });
     return c.json(task, 201);
   });
 
@@ -44,36 +40,21 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const payload = UpdateScheduledTaskRequest.parse(await c.req.json());
     const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, existing, payload });
     const task = await updateScheduledTask(db, taskId, update);
-    try {
-      await workflowClient.syncScheduledTask({ task });
-    } catch (error) {
-      await restoreScheduledTask(db, existing).catch(() => undefined);
-      throw error;
-    }
+    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 
   app.post("/v1/scheduled-tasks/:taskId/pause", async (c) => {
     const existing = await requireScheduledTaskForApi(db, c.req.param("taskId"));
     const task = await updateScheduledTask(db, existing.id, { status: "paused" });
-    try {
-      await workflowClient.syncScheduledTask({ task });
-    } catch (error) {
-      await restoreScheduledTask(db, existing).catch(() => undefined);
-      throw error;
-    }
+    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 
   app.post("/v1/scheduled-tasks/:taskId/resume", async (c) => {
     const existing = await requireScheduledTaskForApi(db, c.req.param("taskId"));
     const task = await updateScheduledTask(db, existing.id, { status: "active" });
-    try {
-      await workflowClient.syncScheduledTask({ task });
-    } catch (error) {
-      await restoreScheduledTask(db, existing).catch(() => undefined);
-      throw error;
-    }
+    await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 

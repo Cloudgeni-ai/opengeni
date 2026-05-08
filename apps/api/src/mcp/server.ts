@@ -14,6 +14,8 @@ import * as z4 from "zod/v4";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
+  syncCreatedScheduledTask,
+  syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
 
@@ -48,7 +50,7 @@ export function buildInfraAgentsMcpServer(deps: ApiRouteDeps): McpServer {
   }, async (args) => {
     const payload = CreateScheduledTaskRequest.parse(args);
     const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, payload });
-    await deps.workflowClient.syncScheduledTask({ task });
+    await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
     return json(task);
   });
 
@@ -69,7 +71,7 @@ export function buildInfraAgentsMcpServer(deps: ApiRouteDeps): McpServer {
     const payload = UpdateScheduledTaskRequest.parse(raw);
     const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, existing, payload });
     const task = await updateScheduledTask(deps.db, id, update);
-    await deps.workflowClient.syncScheduledTask({ task });
+    await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
     return json(task);
   });
 
@@ -77,8 +79,9 @@ export function buildInfraAgentsMcpServer(deps: ApiRouteDeps): McpServer {
     description: "Pause a scheduled task.",
     inputSchema: { id: z4.string().uuid() },
   }, async ({ id }) => {
+    const existing = await requireScheduledTask(deps.db, id);
     const task = await updateScheduledTask(deps.db, id, { status: "paused" });
-    await deps.workflowClient.syncScheduledTask({ task });
+    await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
     return json(task);
   });
 
@@ -86,8 +89,9 @@ export function buildInfraAgentsMcpServer(deps: ApiRouteDeps): McpServer {
     description: "Resume a scheduled task.",
     inputSchema: { id: z4.string().uuid() },
   }, async ({ id }) => {
+    const existing = await requireScheduledTask(deps.db, id);
     const task = await updateScheduledTask(deps.db, id, { status: "active" });
-    await deps.workflowClient.syncScheduledTask({ task });
+    await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
     return json(task);
   });
 

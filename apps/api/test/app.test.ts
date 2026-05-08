@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { ScheduleOverlapPolicy } from "@temporalio/client";
+import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { allowedCorsOrigin, normalizeResources, replaySessionEvents, validateGitHubRepositorySelection, workflowIdForSession } from "../src/app";
-import { temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
+import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import type { SessionEvent } from "@infra-agents/contracts";
 
 describe("API helpers", () => {
@@ -55,6 +55,11 @@ describe("API helpers", () => {
     expect(temporalOverlapPolicy("allow_concurrent")).toBe(ScheduleOverlapPolicy.ALLOW_ALL);
     expect(temporalOverlapPolicy("skip")).toBe(ScheduleOverlapPolicy.SKIP);
     expect(temporalOverlapPolicy("buffer_one")).toBe(ScheduleOverlapPolicy.BUFFER_ONE);
+  });
+
+  test("only creates a schedule after update when Temporal reports not found", () => {
+    expect(shouldCreateScheduleAfterUpdateError(new ScheduleNotFoundError("missing", "schedule-1"))).toBe(true);
+    expect(shouldCreateScheduleAfterUpdateError(new Error("network unavailable"))).toBe(false);
   });
 
   test("rejects selected GitHub App repos from multiple installations", () => {

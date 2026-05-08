@@ -3,6 +3,7 @@ import { createDb, getScheduledTask, listSessionEvents, listScheduledTasks, list
 import { appendAndPublishEvents } from "@infra-agents/events";
 import type { SessionEvent } from "@infra-agents/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
+import { buildInfraAgentsMcpServer } from "../../apps/api/src/mcp/server";
 import { MemoryEventBus, parseSseBlock, startTestServices, testSettings, type TestServices } from "@infra-agents/testing";
 import { prepareAgentTools } from "@infra-agents/runtime";
 
@@ -346,6 +347,44 @@ describe("API component integration", () => {
     const failedPause = await app.request(`/v1/scheduled-tasks/${task.id}/pause`, { method: "POST" });
     expect(failedPause.status).toBe(500);
     expect((await getScheduledTask(dbClient.db, task.id))?.status).toBe("active");
+  });
+
+  test("keeps MCP scheduled task persistence consistent when schedule sync fails", async () => {
+    workflow = new FakeWorkflowClient();
+    const settings = testSettings({ databaseUrl: services.databaseUrl });
+    const mcp = buildInfraAgentsMcpServer({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by scheduled task MCP tests");
+      },
+    });
+
+    workflow.syncError = new Error("temporal unavailable");
+    const failedCreateName = `mcp-sync-fail-${crypto.randomUUID()}`;
+    await expect(callMcpTool(mcp, "scheduled_tasks_create", {
+      name: failedCreateName,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt: "inspect" },
+    })).rejects.toThrow("temporal unavailable");
+    expect((await listScheduledTasks(dbClient.db)).some((task) => task.name === failedCreateName)).toBe(false);
+
+    workflow.syncError = null;
+    const task = await callMcpTool<{ id: string }>(mcp, "scheduled_tasks_create", {
+      name: `mcp-rollback-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt: "inspect" },
+    });
+
+    workflow.syncError = new Error("temporal unavailable");
+    await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: task.id })).rejects.toThrow("temporal unavailable");
+    expect((await getScheduledTask(dbClient.db, task.id))?.status).toBe("active");
+    await expect(callMcpTool(mcp, "scheduled_tasks_resume", { id: crypto.randomUUID() })).rejects.toThrow("Scheduled task not found");
   });
 
   test("returns 404 for missing scheduled task actions", async () => {
@@ -824,6 +863,19 @@ async function readSseEvents(response: Response, count: number, abort: AbortCont
     abort.abort();
     await reader.cancel().catch(() => undefined);
   }
+}
+
+async function callMcpTool<T = unknown>(server: unknown, name: string, args: Record<string, unknown>): Promise<T> {
+  const tool = (server as { _registeredTools?: Record<string, { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }> })._registeredTools?.[name];
+  if (!tool) {
+    throw new Error(`MCP tool not registered: ${name}`);
+  }
+  const result = await tool.handler(args, {});
+  const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  if (!text) {
+    throw new Error(`MCP tool returned no text: ${name}`);
+  }
+  return JSON.parse(text) as T;
 }
 
 class FakeWorkflowClient implements SessionWorkflowClient {

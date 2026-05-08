@@ -7,11 +7,13 @@ import type {
 } from "@infra-agents/contracts";
 import {
   createScheduledTask,
+  deleteScheduledTask,
   getScheduledTask,
   updateScheduledTask,
   type Database,
 } from "@infra-agents/db";
 import { HTTPException } from "hono/http-exception";
+import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import {
   normalizeResources,
@@ -99,6 +101,33 @@ export async function restoreScheduledTask(db: Database, task: ScheduledTask): P
     reusableSessionId: task.reusableSessionId,
     metadata: task.metadata,
   });
+}
+
+export async function syncCreatedScheduledTask(input: {
+  db: Database;
+  workflowClient: SessionWorkflowClient;
+  task: ScheduledTask;
+}): Promise<void> {
+  try {
+    await input.workflowClient.syncScheduledTask({ task: input.task });
+  } catch (error) {
+    await deleteScheduledTask(input.db, input.task.id).catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function syncUpdatedScheduledTask(input: {
+  db: Database;
+  workflowClient: SessionWorkflowClient;
+  previous: ScheduledTask;
+  task: ScheduledTask;
+}): Promise<void> {
+  try {
+    await input.workflowClient.syncScheduledTask({ task: input.task });
+  } catch (error) {
+    await restoreScheduledTask(input.db, input.previous).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function scheduledTaskTemporalScheduleId(taskId: string): string {

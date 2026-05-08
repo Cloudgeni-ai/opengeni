@@ -2,7 +2,7 @@ import { getSettings } from "@infra-agents/config";
 import type { ScheduledTask, ScheduledTaskOverlapPolicy, ScheduledTaskScheduleSpec } from "@infra-agents/contracts";
 import { createDb } from "@infra-agents/db";
 import { createNatsEventBus } from "@infra-agents/events";
-import { Connection, Client as TemporalClient, ScheduleOverlapPolicy } from "@temporalio/client";
+import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 
@@ -53,9 +53,14 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     syncScheduledTask: async ({ task }) => {
       const schedule = temporal.schedule.getHandle(task.temporalScheduleId);
       const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
-      await schedule.update(() => temporalScheduleUpdateOptions(options)).catch(async () => {
+      try {
+        await schedule.update(() => temporalScheduleUpdateOptions(options));
+      } catch (error) {
+        if (!shouldCreateScheduleAfterUpdateError(error)) {
+          throw error;
+        }
         await temporal.schedule.create(options);
-      });
+      }
     },
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
       await temporal.schedule.getHandle(temporalScheduleId).delete().catch(() => undefined);
@@ -134,6 +139,10 @@ export function temporalOverlapPolicy(policy: ScheduledTaskOverlapPolicy): Sched
     return ScheduleOverlapPolicy.BUFFER_ONE;
   }
   return ScheduleOverlapPolicy.ALLOW_ALL;
+}
+
+export function shouldCreateScheduleAfterUpdateError(error: unknown): boolean {
+  return error instanceof ScheduleNotFoundError;
 }
 
 export function temporalScheduleSpec(schedule: ScheduledTaskScheduleSpec): ScheduleSpec {
