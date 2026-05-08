@@ -302,6 +302,7 @@ describe("runtime event normalization", () => {
 
   test("prefixes MCP tool names deterministically", () => {
     expect(prefixedMcpToolName("docs", "search_documents")).toBe("docs__search_documents");
+    expect(prefixedMcpToolName("files", "files_get_download_url")).toBe("files__files_get_download_url");
   });
 
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {

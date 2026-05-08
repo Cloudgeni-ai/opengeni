@@ -6,6 +6,7 @@ import {
   deleteScheduledTask,
   listScheduledTaskRuns,
   listScheduledTasks,
+  requireFile,
   requireScheduledTask,
   updateScheduledTask,
 } from "@infra-agents/db";
@@ -23,6 +24,37 @@ export function buildInfraAgentsMcpServer(deps: ApiRouteDeps): McpServer {
     version: "1.0.0",
   });
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+
+  server.registerTool("files_get_download_url", {
+    description: "Create a short-lived download URL for a ready file asset.",
+    inputSchema: { fileId: z4.string().uuid() },
+  }, async ({ fileId }) => {
+    if (!deps.objectStorage) {
+      throw new Error("object storage is not configured");
+    }
+    const file = await requireFile(deps.db, fileId);
+    if (file.status !== "ready") {
+      throw new Error(`file is ${file.status}`);
+    }
+    const signed = await deps.objectStorage.createGetUrl({ key: file.objectKey });
+    return json({
+      file: {
+        id: file.id,
+        filename: file.filename,
+        safeFilename: file.safeFilename,
+        contentType: file.contentType,
+        sizeBytes: file.sizeBytes,
+        sha256: file.sha256,
+        status: file.status,
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+      },
+      downloadUrl: {
+        url: signed.url,
+        expiresAt: signed.expiresAt.toISOString(),
+      },
+    });
+  });
 
   server.registerTool("scheduled_tasks_list", {
     description: "List scheduled tasks.",

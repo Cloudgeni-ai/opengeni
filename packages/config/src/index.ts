@@ -270,14 +270,23 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
 
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "infra_agents");
+  const firstPartyMcpUrl = settings.infraAgentsMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/mcp`;
+  const hasFiles = existing.some((server) => server.id === "files");
   const hasDocs = existing.some((server) => server.id === "docs");
   return [
     {
       id: "infra_agents",
       name: "Infra Agents",
-      url: settings.infraAgentsMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/mcp`,
+      url: firstPartyMcpUrl,
       cacheToolsList: true,
     },
+    ...(hasFiles ? [] : [{
+      id: "files",
+      name: "Files",
+      url: firstPartyMcpUrl,
+      allowedTools: ["files_get_download_url"],
+      cacheToolsList: true,
+    }]),
     ...(hasDocs ? [] : [{
       id: "docs",
       name: "Document Search",

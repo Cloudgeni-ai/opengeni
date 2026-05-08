@@ -750,6 +750,13 @@ describe("API component integration", () => {
         allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
         timeoutMs: undefined,
         cacheToolsList: false,
+      }, {
+        id: "files",
+        name: "Files",
+        url: `http://127.0.0.1:${port}/v1/mcp`,
+        allowedTools: ["files_get_download_url"],
+        timeoutMs: undefined,
+        cacheToolsList: false,
       }],
     };
     const app = createApp({
@@ -781,17 +788,81 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       })).status).toBe(201);
 
-      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
-      const tools = await prepared.mcpServers[0]!.listTools();
-      expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
-      const result = await prepared.mcpServers[0]!.callTool("docs__search_documents", { query: "private endpoint", baseIds: [base.id], limit: 3 });
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
+      const docsServer = prepared.mcpServers[0]!;
+      const filesServer = prepared.mcpServers[1]!;
+      const docTools = await docsServer.listTools();
+      expect(docTools.map((tool) => tool.name)).toContain("docs__search_documents");
+      const fileTools = await filesServer.listTools();
+      expect(fileTools.map((tool) => tool.name)).toEqual(["files__files_get_download_url"]);
+
+      const result = await docsServer.callTool("docs__search_documents", { query: "private endpoint", baseIds: [base.id], limit: 3 });
       expect(JSON.stringify(result)).toContain("private endpoint runbook");
+
+      const downloadResult = await filesServer.callTool("files__files_get_download_url", { fileId: upload.fileId });
+      const downloadPayload = JSON.parse(mcpText(downloadResult)) as { file: { id: string; filename: string }; downloadUrl: { url: string } };
+      expect(downloadPayload.file).toMatchObject({ id: upload.fileId, filename: "mcp-runbook.txt" });
+      const downloaded = await fetch(downloadPayload.downloadUrl.url);
+      expect(downloaded.status).toBe(200);
+      expect(await downloaded.text()).toContain("private endpoint runbook");
+
+      const pendingUploadResponse = await app.request("/v1/files/uploads", {
+        method: "POST",
+        body: JSON.stringify({ filename: "pending-mcp.txt", contentType: "text/plain", sizeBytes: 7 }),
+        headers: { "content-type": "application/json" },
+      });
+      const pendingUpload = await pendingUploadResponse.json() as { fileId: string };
+      expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: pendingUpload.fileId }))).toContain("file is pending_upload");
+      expect(mcpText(await filesServer.callTool("files__files_get_download_url", { fileId: crypto.randomUUID() }))).toContain("File not found");
+    } finally {
+      await prepared?.close().catch(() => undefined);
+      server.stop(true);
+    }
+  });
+
+  test("file download MCP tool reports unconfigured object storage", async () => {
+    const port = 20_000 + Math.floor(Math.random() * 1_000);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      mcpServers: [{
+        id: "files",
+        name: "Files",
+        url: `http://127.0.0.1:${port}/v1/mcp`,
+        allowedTools: ["files_get_download_url"],
+        timeoutMs: undefined,
+        cacheToolsList: false,
+      }],
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port, hostname: "127.0.0.1", fetch: app.fetch });
+    let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "files" }]);
+      expect(mcpText(await prepared.mcpServers[0]!.callTool("files__files_get_download_url", { fileId: crypto.randomUUID() }))).toContain("object storage is not configured");
     } finally {
       await prepared?.close().catch(() => undefined);
       server.stop(true);
     }
   });
 });
+
+function mcpText(result: unknown): string {
+  const content = Array.isArray(result)
+    ? result
+    : result && typeof result === "object" && Array.isArray((result as { content?: unknown }).content)
+      ? (result as { content: unknown[] }).content
+      : [];
+  const first = content[0];
+  if (first && typeof first === "object" && typeof (first as { text?: unknown }).text === "string") {
+    return (first as { text: string }).text;
+  }
+  throw new Error(`MCP result did not contain text content: ${JSON.stringify(result)}`);
+}
 
 async function readSseEvents(response: Response, count: number, abort: AbortController): Promise<SessionEvent[]> {
   expect(response.body).toBeTruthy();

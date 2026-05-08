@@ -85,9 +85,10 @@ describe("projectConversation", () => {
 });
 
 describe("buildTools", () => {
-  test("adds document search once when enabled", () => {
-    expect(buildTools(undefined, true)).toEqual([{ kind: "mcp", id: "docs" }]);
-    expect(buildTools([{ kind: "mcp", id: "docs" }], true)).toEqual([{ kind: "mcp", id: "docs" }]);
+  test("adds document search and file download tools once when enabled", () => {
+    expect(buildTools(undefined, true)).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
+    expect(buildTools([{ kind: "mcp", id: "docs" }], true)).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
+    expect(buildTools([{ kind: "mcp", id: "files" }], true)).toEqual([{ kind: "mcp", id: "files" }, { kind: "mcp", id: "docs" }]);
   });
 
   test("preserves existing tools when document search is disabled", () => {

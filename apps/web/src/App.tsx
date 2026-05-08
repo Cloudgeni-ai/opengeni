@@ -2222,8 +2222,12 @@ function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], sel
 
 export function buildTools(existing: ToolRef[] | undefined, documentSearchEnabled: boolean): ToolRef[] {
   const out = [...(existing ?? [])];
-  if (documentSearchEnabled && !out.some((tool) => tool.kind === "mcp" && tool.id === "docs")) {
-    out.push({ kind: "mcp", id: "docs" });
+  if (documentSearchEnabled) {
+    for (const id of ["docs", "files"]) {
+      if (!out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
+        out.push({ kind: "mcp", id });
+      }
+    }
   }
   return out;
 }

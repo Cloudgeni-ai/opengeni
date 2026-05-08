@@ -84,13 +84,39 @@ describe("sandbox environment profiles", () => {
     expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
   });
 
-  test("registers built-in document MCP server by default", () => {
+  test("registers built-in MCP profiles by default", () => {
     const settings = getSettings();
+    expect(settings.mcpServers.find((server) => server.id === "infra_agents")).toMatchObject({
+      name: "Infra Agents",
+      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp`,
+    });
+    expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
+      name: "Files",
+      url: `http://127.0.0.1:${settings.apiPort}/v1/mcp`,
+      allowedTools: ["files_get_download_url"],
+    });
     expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
       name: "Document Search",
       url: `http://127.0.0.1:${settings.apiPort}/v1/mcp/docs`,
       allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
     });
+  });
+
+  test("does not duplicate a custom files MCP profile", () => {
+    const original = { ...process.env };
+    try {
+      process.env.INFRA_AGENT_MCP_SERVERS = '[{"id":"files","name":"Custom Files","url":"http://127.0.0.1:8787/mcp","allowedTools":["custom_download"]}]';
+      const settings = getSettings();
+      const ids = settings.mcpServers.map((server) => server.id);
+      expect(ids.filter((id) => id === "files")).toHaveLength(1);
+      expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
+        name: "Custom Files",
+        url: "http://127.0.0.1:8787/mcp",
+        allowedTools: ["custom_download"],
+      });
+    } finally {
+      process.env = original;
+    }
   });
 
   test("rejects non-array MCP server registry JSON", () => {
