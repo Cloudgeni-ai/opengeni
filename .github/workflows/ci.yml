@@ -63,7 +63,7 @@ jobs:
 
       - name: Validate Helm chart
         run: |
-          ! grep -R -nE '(:|tag: )latest($|")' docker-compose.yml deploy/helm/opengeni
+          ! grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni
           helm lint deploy/helm/opengeni
           helm template opengeni deploy/helm/opengeni \
             --namespace opengeni \
