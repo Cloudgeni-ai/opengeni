@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opengeni.fullname" . }}-config
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  {{- if .Values.nats.enabled }}
+  OPENGENI_NATS_URL: {{ printf "nats://%s-nats:%d" (include "opengeni.fullname" .) (.Values.nats.clientPort | int) | quote }}
+  {{- else if .Values.nats.url }}
+  OPENGENI_NATS_URL: {{ .Values.nats.url | quote }}
+  {{- end }}
+  {{- if .Values.temporal.enabled }}
+  OPENGENI_TEMPORAL_HOST: {{ printf "%s-temporal:%d" (include "opengeni.fullname" .) (.Values.temporal.service.port | int) | quote }}
+  {{- end }}
+  {{- if .Values.observability.otel.enabled }}
+  OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) .Values.observability.otel.endpoint | quote }}
+  {{- end }}
+  OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: {{ .Values.observability.structuredLogs | quote }}
+  OPENGENI_OBSERVABILITY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}

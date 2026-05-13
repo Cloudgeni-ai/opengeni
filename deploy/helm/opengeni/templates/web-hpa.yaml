@@ -1,0 +1,23 @@
+{{- if and .Values.web.enabled .Values.web.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "opengeni.fullname" . }}-web
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "opengeni.fullname" . }}-web
+  minReplicas: {{ .Values.web.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.web.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.web.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

@@ -1,0 +1,47 @@
+{{- if .Values.nats.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  replicas: {{ .Values.nats.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nats
+    spec:
+      containers:
+        - name: nats
+          image: {{ printf "%s:%s" .Values.nats.image.repository .Values.nats.image.tag | quote }}
+          imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          args:
+            - "-m"
+            - {{ .Values.nats.monitorPort | quote }}
+          ports:
+            - name: client
+              containerPort: {{ .Values.nats.clientPort }}
+            - name: monitor
+              containerPort: {{ .Values.nats.monitorPort }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+{{- end }}

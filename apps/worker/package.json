@@ -16,6 +16,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
     "@opengeni/events": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
     "@temporalio/activity": "^1.17.0",

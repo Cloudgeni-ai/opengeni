@@ -42,6 +42,7 @@ Manual equivalent:
    - `OPENGENI_DATABASE_URL`
    - `OPENGENI_NATS_URL`
    - `OPENGENI_TEMPORAL_HOST`
+   - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
    - OpenAI or Azure OpenAI credentials
    - `OPENGENI_SANDBOX_BACKEND=docker` or `modal`
    - sandbox preparation profiles / env allowlist when needed
@@ -61,6 +62,10 @@ Default URLs:
 - Web: `http://127.0.0.1:3000`
 - NATS monitor: `http://127.0.0.1:8222`
 - Temporal gRPC: `127.0.0.1:7233`
+
+`bun run dev` may auto-select alternate Docker Compose host ports when defaults are already in use; it wires those selected ports into the API and worker environment for that run.
+
+MinIO is the local S3-compatible object storage default for Docker Compose and optional self-contained Kubernetes smoke tests. Production Azure deployments should use `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` with Azure Blob credentials instead of deploying MinIO manually.
 
 ## Architecture Notes
 
@@ -87,6 +92,8 @@ Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity
 
 Do not expect model provider credentials to automatically appear in the sandbox unless explicitly allowed.
 
+The API and sandbox file-resource object-storage boundary supports `s3-compatible` and `azure-blob`. Azure Blob-backed deployments use native Azure Blob manifest mounts for attached files.
+
 ## Verification
 
 Unit tests and typechecks do not require Temporal, NATS, Postgres, a sandbox backend, or live model credentials:
@@ -97,3 +104,9 @@ bun test
 ```
 
 End-to-end agent runs require the full stack plus valid model and sandbox credentials.
+
+## Deployment Work Notes
+
+When working on production deployment, Azure deployment, Helm, Terraform, conformance checks, or cloud-provider-agnostic infrastructure, read and keep `docs/infra-deployment-goal.md` current. Treat it as the source of truth for the active infrastructure end goal.
+
+Track every Azure resource created for deployment verification in `docs/azure-resource-ledger.md` before or immediately after creation. Do not commit Azure secrets, kubeconfigs, Terraform state, local tfvars, generated credentials, or private endpoints that are not intentionally documented examples.

@@ -1,0 +1,26 @@
+name_prefix         = "opengeni-dev"
+location            = "westeurope"
+resource_group_name = "rg-opengeni-dev"
+deployment_phase    = "complete"
+
+tags = {
+  environment = "dev"
+}
+
+postgres = {
+  mode          = "external"
+  existing_host = "existing-postgres.postgres.database.azure.com"
+}
+
+temporal = {
+  mode          = "external"
+  existing_host = "temporal.example.com:7233"
+  namespace     = "default"
+  task_queue    = "opengeni-runs-ts"
+}
+
+object_storage = {
+  mode   = "managed"
+  api    = "azure-blob"
+  bucket = "opengeni-files"
+}

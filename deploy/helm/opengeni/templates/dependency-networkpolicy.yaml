@@ -1,0 +1,101 @@
+{{- if and .Values.networkPolicy.enabled .Values.postgres.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-postgres
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: migration
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: temporal
+      ports:
+        - protocol: TCP
+          port: {{ .Values.postgres.service.port }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.temporal.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-temporal
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: temporal
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: {{ .Values.temporal.service.port }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.minio.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-minio
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: minio-bucket
+      ports:
+        - protocol: TCP
+          port: {{ .Values.minio.service.apiPort }}
+{{- end }}

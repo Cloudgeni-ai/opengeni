@@ -4,8 +4,8 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
 ARG TARGETARCH
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+RUN set -eux; \
+    packages=" \
         bash \
         ca-certificates \
         coreutils \
@@ -18,7 +18,17 @@ RUN apt-get update \
         rclone \
         unzip \
         wget \
-    && rm -rf /var/lib/apt/lists/*
+    "; \
+    for attempt in 1 2 3; do \
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+        apt-get update \
+        && apt-get install -y --download-only --no-install-recommends $packages \
+        && break; \
+        if [ "$attempt" = "3" ]; then exit 1; fi; \
+        sleep $((attempt * 5)); \
+    done; \
+    apt-get install -y --no-install-recommends $packages; \
+    rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
@@ -43,7 +53,14 @@ RUN set -eux; \
     chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list; \
-    apt-get update; \
+    for attempt in 1 2 3; do \
+        rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+        apt-get update \
+        && apt-get install -y --download-only --no-install-recommends gh \
+        && break; \
+        if [ "$attempt" = "3" ]; then exit 1; fi; \
+        sleep $((attempt * 5)); \
+    done; \
     apt-get install -y --no-install-recommends gh; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version

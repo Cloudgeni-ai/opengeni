@@ -1,0 +1,42 @@
+{{- if and .Values.migrations.enabled .Values.api.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "opengeni.fullname" . }}-migrate
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    {{- toYaml .Values.migrations.annotations | nindent 4 }}
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.migrations.image) | quote }}
+          imagePullPolicy: {{ .Values.migrations.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.migrations.command | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
+          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
+          env:
+            {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- end }}

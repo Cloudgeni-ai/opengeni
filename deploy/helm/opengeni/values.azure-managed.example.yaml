@@ -1,0 +1,99 @@
+global:
+  imageRegistry: "ACR_LOGIN_SERVER"
+
+api:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+worker:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WORKER_IMAGE_DIGEST"
+
+web:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WEB_IMAGE_DIGEST"
+
+migrations:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+networkPolicy:
+  enabled: true
+
+postgres:
+  enabled: false
+  # Keep false when Terraform provisions Azure Database for PostgreSQL and
+  # provide OPENGENI_DATABASE_URL through secret.existingSecret.
+
+temporal:
+  enabled: true
+  postgres:
+    host: AZURE_POSTGRES_HOST
+    port: 5432
+    username: opengeni
+    existingSecret: opengeni-postgres
+    passwordKey: POSTGRES_PASSWORD
+
+nats:
+  enabled: true
+
+minio:
+  enabled: false
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: azure-managed
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  OPENGENI_OBJECT_STORAGE_BACKEND: azure-blob
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  # Keep none for API/object-storage smoke tests. Modal is supported with Azure
+  # Blob by materializing attached file resources into the sandbox before the
+  # agent starts.
+  OPENGENI_SANDBOX_BACKEND: none
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  hosts:
+    - host: opengeni.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /healthz
+          pathType: Exact
+          service: api
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  otel:
+    enabled: true
+    # Leave endpoint empty when using the chart-managed collector; the chart
+    # points workloads at the release-local collector service automatically.
+    endpoint: ""
+  collector:
+    enabled: true

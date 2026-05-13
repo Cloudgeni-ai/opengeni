@@ -77,7 +77,7 @@ Temporal coordinates the work, but token streams and tool output do not go throu
 - Temporal worker
 - Postgres with Drizzle and pgvector
 - NATS Core realtime bus
-- MinIO for local S3-compatible file storage
+- MinIO for local S3-compatible file storage and Azure Blob for production object storage
 - OpenAI Agents SDK
 - Docker and Modal sandbox backends
 
@@ -128,6 +128,7 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_DATABASE_URL`
 - `OPENGENI_NATS_URL`
 - `OPENGENI_TEMPORAL_HOST`
+- `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` if dependencies need longer startup windows
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
 - `OPENGENI_SANDBOX_BACKEND`
@@ -135,16 +136,47 @@ Copy `.env.example` to `.env` and configure at least:
 
 If you are migrating from the pre-OpenGeni codebase, move the old `.env` aside and create a fresh one from `.env.example`; old `INFRA_AGENT_*` names are no longer read.
 
-For local MinIO, keep both object-storage endpoints:
+For local MinIO, keep S3-compatible storage and both object-storage endpoints:
 
 ```bash
+OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible
 OPENGENI_OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:9000
 OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=http://host.docker.internal:9000
 ```
 
 The first endpoint is for the host, browser, and API. The sandbox endpoint is for Docker agent containers, where `127.0.0.1` points at the sandbox container instead of host MinIO. Presigned URLs generated for one host are not safely interchangeable with the other because the host is part of the S3 signature.
 
+`bun run dev` auto-selects alternate Docker Compose host ports when common defaults such as `5432` are already in use, and it rewrites the in-memory runtime URLs for that run. Set `OPENGENI_*_HOST_PORT` values in `.env` when you need fixed local ports.
+
+For Azure production deployments, prefer Azure Blob:
+
+```bash
+OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob
+OPENGENI_OBJECT_STORAGE_BUCKET=opengeni-files
+OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING=...
+```
+
+`OPENGENI_OBJECT_STORAGE_BUCKET` maps to the Azure Blob container. The API uses SAS URLs for browser upload/download and server-side reads for document indexing. Docker/local sandboxes mount Azure Blob through rclone; Modal sandboxes receive attached Azure Blob files through sandbox file materialization before the agent starts.
+
 For Modal runs, configure the Modal sandbox variables in `.env.example`.
+
+## Deployment
+
+The deployment foundation is tracked in `docs/infra-deployment-goal.md` and the operator guide is in `docs/deployment.md`.
+
+Current deployment artifacts include:
+
+- A repo-owned deployment contract in `packages/deployment`.
+- A Helm chart for API, web, worker, migrations, and optional in-cluster NATS at `deploy/helm/opengeni`.
+- An Azure reference Terraform substrate at `deploy/terraform/azure`.
+- A preflight/profile command:
+
+```bash
+bun run deployment:profiles
+bun run deployment:preflight -- --profile azure-existing-services
+```
+
+Azure resources created during deployment verification must be tracked in `docs/azure-resource-ledger.md`.
 
 ## Web App
 

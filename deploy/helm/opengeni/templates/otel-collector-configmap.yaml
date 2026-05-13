@@ -1,0 +1,46 @@
+{{- if .Values.observability.collector.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opengeni.fullname" . }}-otel-collector
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+data:
+  collector.yaml: |
+    {{- if .Values.observability.collector.config }}
+    {{- tpl .Values.observability.collector.config . | nindent 4 }}
+    {{- else }}
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: opengeni-api
+              metrics_path: {{ .Values.observability.metrics.path }}
+              static_configs:
+                - targets:
+                    - {{ include "opengeni.fullname" . }}-api:{{ .Values.api.service.port }}
+    processors:
+      batch: {}
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 400
+    exporters:
+      debug:
+        verbosity: basic
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+        metrics:
+          receivers: [prometheus]
+          processors: [memory_limiter, batch]
+          exporters: [debug]
+    {{- end }}
+{{- end }}

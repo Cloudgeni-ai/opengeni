@@ -1,0 +1,43 @@
+{{- if .Values.observability.collector.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-otel-collector
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: otel-collector
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: otel-collector
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      containers:
+        - name: otel-collector
+          image: {{ printf "%s:%s" .Values.observability.collector.image.repository .Values.observability.collector.image.tag | quote }}
+          imagePullPolicy: {{ .Values.observability.collector.image.pullPolicy }}
+          args:
+            - --config=/conf/collector.yaml
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+            - name: metrics
+              containerPort: 8888
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+          resources:
+            {{- toYaml .Values.observability.collector.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "opengeni.fullname" . }}-otel-collector
+{{- end }}

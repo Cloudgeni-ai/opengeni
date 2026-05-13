@@ -8,7 +8,7 @@ services:
       POSTGRES_USER: opengeni
       POSTGRES_PASSWORD: opengeni
     ports:
-      - "5432:5432"
+      - "${OPENGENI_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +21,8 @@ services:
     image: nats:2-alpine
     command: ["-m", "8222"]
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "${OPENGENI_NATS_HOST_PORT:-4222}:4222"
+      - "${OPENGENI_NATS_MONITOR_HOST_PORT:-8222}:8222"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
       interval: 5s
@@ -51,7 +51,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "7233:7233"
+      - "${OPENGENI_TEMPORAL_HOST_PORT:-7233}:7233"
 
   minio:
     image: minio/minio:latest
@@ -60,8 +60,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${OPENGENI_MINIO_HOST_PORT:-9000}:9000"
+      - "${OPENGENI_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     healthcheck:
@@ -75,10 +75,24 @@ services:
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,minio"
+      no_proxy: "localhost,127.0.0.1,minio"
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "mc alias set local http://minio:9000 minioadmin minioadmin &&
-       mc mb --ignore-existing local/opengeni-files"
+      "for i in $$(seq 1 30); do
+         mc alias set local http://minio:9000 minioadmin minioadmin &&
+         mc mb --ignore-existing local/opengeni-files &&
+         exit 0;
+         sleep 2;
+       done;
+       exit 1"
 
 volumes:
   postgres-data:

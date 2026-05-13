@@ -1,0 +1,23 @@
+{{- if .Values.observability.collector.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-otel-collector
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+spec:
+  type: ClusterIP
+  ports:
+    - port: 4318
+      targetPort: otlp-http
+      protocol: TCP
+      name: otlp-http
+    - port: 8888
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: otel-collector
+{{- end }}

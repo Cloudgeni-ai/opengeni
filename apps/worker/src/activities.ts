@@ -2,6 +2,7 @@ import { getSettings } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
+import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentSegmentActivity } from "./activities/agent-segment";
@@ -33,6 +34,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         runtime: dependencies.runtime ?? createProductionAgentRuntime(),
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
+        observability: dependencies.observability ?? createObservability(settings, { component: "worker" }),
       };
     })();
     return servicesPromise;

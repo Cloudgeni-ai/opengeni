@@ -1,0 +1,59 @@
+{{- if .Values.web.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-web
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  {{- with .Values.web.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+      {{- with .Values.web.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.web.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.web.image) | quote }}
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.web.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.web.containerPort }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      {{- with .Values.web.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.web.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

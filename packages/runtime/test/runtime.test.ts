@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxRunAs, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -196,11 +196,12 @@ describe("runtime event normalization", () => {
     expect(agent.mcpServers).toEqual([]);
   });
 
-  test("sets sandbox runAs for sandbox backends only", () => {
+  test("sets sandbox runAs only for backends that support manifest users", () => {
     expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBe("sandbox");
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBe("sandbox");
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBeUndefined();
     expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
     expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs).toBe("sandbox");
+    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any).runAs).toBeUndefined();
     expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs).toBeUndefined();
   });
 
@@ -224,6 +225,142 @@ describe("runtime event normalization", () => {
     expect(entry.endpointUrl).toBe("http://host.docker.internal:9000");
     expect(entry.s3Provider).toBe("Minio");
     expect(entry.mountStrategy).toEqual({ type: "in_container", pattern: { type: "rclone", mode: "fuse" } });
+  });
+
+  test("uses Modal cloud bucket strategy for Modal S3-compatible file resources", () => {
+    const fileId = "00000000-0000-4000-8000-000000000011";
+    const manifest = buildManifest(testSettings({
+      sandboxBackend: "modal",
+      objectStorageEndpoint: "https://s3.example.com",
+      objectStorageAccessKeyId: "access-key",
+      objectStorageSecretAccessKey: "secret-key",
+    }), [{ kind: "file", fileId }]);
+    const entry = manifest.entries[`files/${fileId}`] as any;
+    expect(entry.type).toBe("s3_mount");
+    expect(entry.mountStrategy).toMatchObject({ type: "modal_cloud_bucket" });
+  });
+
+  test("builds native Azure Blob mount entries for file resources", () => {
+    const fileId = "00000000-0000-4000-8000-000000000020";
+    const manifest = buildManifest(testSettings({
+      objectStorageBackend: "azure-blob",
+      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+    }), [{ kind: "file", fileId }]);
+    const entry = manifest.entries[`files/${fileId}`] as any;
+    expect(entry.type).toBe("azure_blob_mount");
+    expect(entry.container).toBe("opengeni-files");
+    expect(entry.prefix).toBe(`files/${fileId}/original`);
+    expect(entry.accountName).toBe("acct");
+    expect(entry.accountKey).toBe("secret");
+    expect(entry.endpointUrl).toBeUndefined();
+    expect(entry.mountStrategy).toEqual({ type: "in_container", pattern: { type: "rclone", mode: "fuse" } });
+  });
+
+  test("keeps custom Azure Blob mount endpoints for non-standard storage hosts", () => {
+    const fileId = "00000000-0000-4000-8000-000000000022";
+    const manifest = buildManifest(testSettings({
+      objectStorageBackend: "azure-blob",
+      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://custom.blob.example.test/",
+    }), [{ kind: "file", fileId }]);
+    const entry = manifest.entries[`files/${fileId}`] as any;
+    expect(entry.type).toBe("azure_blob_mount");
+    expect(entry.endpointUrl).toBe("https://custom.blob.example.test");
+  });
+
+  test("requires signed download materialization for Modal Azure Blob file resources", () => {
+    const fileId = "00000000-0000-4000-8000-000000000021";
+    expect(() => buildManifest(testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "azure-blob",
+      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+    }), [{ kind: "file", fileId }])).toThrow("Modal sandbox Azure Blob file resources require pre-signed download materialization");
+  });
+
+  test("uses inline manifest files for Modal Azure Blob file materialization when content is provided", () => {
+    const fileId = "00000000-0000-4000-8000-000000000023";
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      objectStorageBackend: "azure-blob",
+      objectStorageAzureConnectionString: "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret;BlobEndpoint=https://acct.blob.core.windows.net/",
+    });
+    const downloads = [{
+      fileId,
+      mountPath: `files/${fileId}`,
+      filename: "source.txt",
+      content: new TextEncoder().encode("hello"),
+      sizeBytes: 12,
+    }];
+    const manifest = buildManifest(settings, [{ kind: "file", fileId }], undefined, downloads);
+    const entry = manifest.entries[`files/${fileId}`] as any;
+    const agent = buildOpenGeniAgent(settings, [{ kind: "file", fileId }], { fileResourceDownloads: downloads });
+
+    expect(entry.type).toBe("dir");
+    expect(entry.children["source.txt"].type).toBe("file");
+    expect(new TextDecoder().decode(entry.children["source.txt"].content)).toBe("hello");
+    expect(sandboxFileDownloadsForAgent(agent)).toEqual([]);
+    expect((agent as any).defaultManifest.entries[`files/${fileId}`].type).toBe("dir");
+  });
+
+  test("downloads signed file resources before sandbox use without emitting URLs in events", async () => {
+    const commands: string[] = [];
+    const events: string[] = [];
+    await materializeSandboxFileDownloads({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      exec: async ({ cmd }: { cmd: string }) => {
+        commands.push(cmd);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+      },
+    } as any, [{
+      fileId: "file-1",
+      mountPath: "files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt?sig=secret",
+      sizeBytes: 5,
+    }], {
+      onRuntimeEvent: (event) => {
+        events.push(JSON.stringify(event));
+      },
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("curl --fail");
+    expect(commands[0]).toContain("https://storage.example/input.txt?sig=secret");
+    expect(events.join("\n")).not.toContain("sig=secret");
+    expect(events.join("\n")).toContain("file-resource-download");
+  });
+
+  test("wraps sandbox clients with signed file downloads on create and resume", async () => {
+    const sessions: any[] = [];
+    const baseClient = {
+      backendId: "modal",
+      create: async () => {
+        const session = {
+          state: { manifest: new Manifest({ root: "/workspace" }) },
+          execCommand: async () => "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
+        };
+        sessions.push(session);
+        return session;
+      },
+      resume: async (state: any) => {
+        const session = {
+          state,
+          execCommand: async () => "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOutput:\n",
+        };
+        sessions.push(session);
+        return session;
+      },
+    };
+    const client = withSandboxFileDownloads(baseClient as any, [{
+      fileId: "file-1",
+      mountPath: "files/file-1",
+      filename: "input.txt",
+      url: "https://storage.example/input.txt?sig=secret",
+    }]);
+
+    await client.create!();
+    await client.resume!({ manifest: new Manifest({ root: "/workspace" }) } as any);
+
+    expect(sessions).toHaveLength(2);
   });
 
   test("keeps repository resources as git repo manifest entries", () => {

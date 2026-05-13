@@ -1,0 +1,339 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+networkPolicy:
+  enabled: false
+  ingressController:
+    namespaceSelector: {}
+    podSelector: {}
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: production
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  OPENGENI_OBJECT_STORAGE_REGION: us-east-1
+  OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Minio
+  OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  OPENGENI_SANDBOX_BACKEND: modal
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+  stringData: {}
+
+api:
+  enabled: true
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  image:
+    repository: opengeni-api
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  service:
+    type: ClusterIP
+    port: 8000
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+worker:
+  enabled: true
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  image:
+    repository: opengeni-worker
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+
+web:
+  enabled: true
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  image:
+    repository: opengeni-web
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  service:
+    type: ClusterIP
+    port: 3000
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+migrations:
+  enabled: true
+  image:
+    repository: opengeni-api
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  command: ["bun", "run", "db:migrate"]
+  annotations:
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "-5"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+postgres:
+  enabled: false
+  image:
+    repository: pgvector/pgvector
+    tag: pg17
+    pullPolicy: IfNotPresent
+  auth:
+    database: opengeni
+    username: opengeni
+    password: opengeni
+    existingSecret: ""
+    passwordKey: POSTGRES_PASSWORD
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podSecurityContext:
+    fsGroup: 999
+  securityContext: {}
+
+temporal:
+  enabled: false
+  image:
+    repository: temporalio/auto-setup
+    tag: "1.28"
+    pullPolicy: IfNotPresent
+  service:
+    port: 7233
+  postgres:
+    host: ""
+    port: 5432
+    username: opengeni
+    existingSecret: ""
+    passwordKey: POSTGRES_PASSWORD
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podSecurityContext:
+    runAsNonRoot: false
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+minio:
+  enabled: false
+  image:
+    repository: minio/minio
+    tag: latest
+    pullPolicy: IfNotPresent
+  mcImage:
+    repository: minio/mc
+    tag: latest
+    pullPolicy: IfNotPresent
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+    existingSecret: ""
+    accessKeyKey: MINIO_ROOT_USER
+    secretKeyKey: MINIO_ROOT_PASSWORD
+  bucket: opengeni-files
+  publicEndpoint: ""
+  sandboxEndpoint: ""
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opengeni.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /healthz
+          pathType: Exact
+          service: api
+  tls: []
+
+nats:
+  enabled: false
+  url: ""
+  image:
+    repository: nats
+    tag: "2-alpine"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  clientPort: 4222
+  monitorPort: 8222
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+    path: /metrics
+  otel:
+    enabled: false
+    endpoint: ""
+  collector:
+    enabled: false
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: "0.139.0"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    config: ""

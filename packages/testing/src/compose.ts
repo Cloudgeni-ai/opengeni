@@ -97,10 +97,7 @@ async function startTestServicesAttempt(options: { temporal?: boolean; objectSto
     }
     if (options.objectStorage ?? false) {
       await waitForMinio(services.objectStorageEndpoint!);
-      const bucket = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"], { timeoutMs: 60_000 });
-      if (bucket.exitCode !== 0) {
-        throw new Error(`minio bucket bootstrap failed\n${bucket.stdout}\n${bucket.stderr}`);
-      }
+      await bootstrapMinioBucket(projectName, composeFile);
     }
     return services;
   } catch (error) {
@@ -187,6 +184,18 @@ async function waitForMinio(endpoint: string): Promise<void> {
   }, { timeoutMs: 90_000, intervalMs: 500 });
 }
 
+async function bootstrapMinioBucket(projectName: string, composeFile: string): Promise<void> {
+  let lastResult: Awaited<ReturnType<typeof runCommand>> | null = null;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    lastResult = await runCommand(["docker", "compose", "-p", projectName, "-f", composeFile, "run", "--rm", "minio-init"], { timeoutMs: 60_000 });
+    if (lastResult.exitCode === 0) {
+      return;
+    }
+    await Bun.sleep(attempt * 1_000);
+  }
+  throw new Error(`minio bucket bootstrap failed\n${lastResult?.stdout ?? ""}\n${lastResult?.stderr ?? ""}`);
+}
+
 function composeYaml(ports: { postgres: number; nats: number; natsMonitor: number; temporal: number; minio: number; minioConsole: number }, options: { temporal: boolean; objectStorage: boolean }): string {
   return `services:
   postgres:
@@ -213,6 +222,14 @@ function composeYaml(ports: { postgres: number; nats: number; natsMonitor: numbe
 ${options.temporal ? `  temporal:
     image: temporalio/auto-setup:1.28
     environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,postgres,temporal,frontend,history,matching,worker"
+      no_proxy: "localhost,127.0.0.1,postgres,temporal,frontend,history,matching,worker"
       DB: postgres12
       DB_PORT: 5432
       POSTGRES_USER: opengeni
@@ -246,10 +263,24 @@ ${options.objectStorage ? `  minio:
     depends_on:
       minio:
         condition: service_healthy
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,minio"
+      no_proxy: "localhost,127.0.0.1,minio"
     entrypoint: ["/bin/sh", "-c"]
     command: >
-      "mc alias set local http://minio:9000 minioadmin minioadmin &&
-       mc mb --ignore-existing local/opengeni-files"
+      "for i in $$(seq 1 30); do
+         mc alias set local http://minio:9000 minioadmin minioadmin &&
+         mc mb --ignore-existing local/opengeni-files &&
+         exit 0;
+         sleep 2;
+       done;
+       exit 1"
 ` : ""}
 `;
 }

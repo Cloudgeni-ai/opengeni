@@ -1,0 +1,64 @@
+{{- if .Values.minio.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "opengeni.fullname" . }}-minio-bucket
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-bucket
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "5"
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-bucket
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: mc
+          image: {{ printf "%s:%s" .Values.minio.mcImage.repository .Values.minio.mcImage.tag | quote }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          env:
+            - name: HTTP_PROXY
+              value: ""
+            - name: HTTPS_PROXY
+              value: ""
+            - name: ALL_PROXY
+              value: ""
+            - name: http_proxy
+              value: ""
+            - name: https_proxy
+              value: ""
+            - name: all_proxy
+              value: ""
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,{{ include "opengeni.fullname" . }}-minio"
+            - name: no_proxy
+              value: "localhost,127.0.0.1,{{ include "opengeni.fullname" . }}-minio"
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.minioSecretName" . }}
+                  key: {{ .Values.minio.auth.accessKeyKey }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.minioSecretName" . }}
+                  key: {{ .Values.minio.auth.secretKeyKey }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              for i in $(seq 1 30); do
+                mc alias set local {{ include "opengeni.minioEndpoint" . | quote }} "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
+                mc mb --ignore-existing local/{{ .Values.minio.bucket | quote }} &&
+                exit 0
+                sleep 2
+              done
+              exit 1
+{{- end }}

@@ -20,6 +20,7 @@
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
     "@opengeni/documents": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "@opengeni/storage": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@temporalio/client": "^1.17.0",

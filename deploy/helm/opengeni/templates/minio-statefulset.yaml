@@ -1,0 +1,81 @@
+{{- if .Values.minio.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "opengeni.fullname" . }}-minio
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "opengeni.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      containers:
+        - name: minio
+          image: {{ printf "%s:%s" .Values.minio.image.repository .Values.minio.image.tag | quote }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          args:
+            - server
+            - /data
+            - --console-address
+            - {{ printf ":%d" (.Values.minio.service.consolePort | int) | quote }}
+          ports:
+            - name: api
+              containerPort: {{ .Values.minio.service.apiPort }}
+            - name: console
+              containerPort: {{ .Values.minio.service.consolePort }}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.minioSecretName" . }}
+                  key: {{ .Values.minio.auth.accessKeyKey }}
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.minioSecretName" . }}
+                  key: {{ .Values.minio.auth.secretKeyKey }}
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+  {{- if .Values.minio.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.minio.persistence.storageClassName }}
+        storageClassName: {{ .Values.minio.persistence.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size | quote }}
+  {{- else }}
+      volumes:
+        - name: data
+          emptyDir: {}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,31 @@
+{{- if and .Values.networkPolicy.enabled .Values.nats.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: worker
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.clientPort }}
+        - protocol: TCP
+          port: {{ .Values.nats.monitorPort }}
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if and .Values.networkPolicy.enabled .Values.api.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-api
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: web
+        {{- if and .Values.observability.collector.enabled .Values.observability.metrics.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: otel-collector
+        {{- end }}
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.api.containerPort }}
+{{- end }}

@@ -1,0 +1,23 @@
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.nats.clientPort }}
+      targetPort: client
+      protocol: TCP
+      name: client
+    - port: {{ .Values.nats.monitorPort }}
+      targetPort: monitor
+      protocol: TCP
+      name: monitor
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+{{- end }}

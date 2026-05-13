@@ -3,6 +3,7 @@ import type { ScheduledTaskTriggerType } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
+import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
 
@@ -13,6 +14,7 @@ export type ActivityServices = {
   runtime: OpenGeniRuntime;
   objectStorage: ObjectStorage | null;
   documentServices: DocumentServices;
+  observability: Observability;
 };
 
 export type ActivityDependencies = Partial<ActivityServices>;

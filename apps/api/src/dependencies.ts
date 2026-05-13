@@ -3,6 +3,7 @@ import type { Document, ScheduledTask } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
+import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 
 export type SessionWorkflowClient = {
@@ -26,6 +27,7 @@ export type AppDependencies = {
   workflowClient: SessionWorkflowClient;
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
+  observability?: Observability;
   githubStateSecret?: string;
 };
 

@@ -1,0 +1,21 @@
+{{- if .Values.minio.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-minio
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: {{ .Values.minio.service.apiPort }}
+      targetPort: api
+    - name: console
+      port: {{ .Values.minio.service.consolePort }}
+      targetPort: console
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+{{- end }}

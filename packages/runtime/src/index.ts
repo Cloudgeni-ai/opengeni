@@ -25,6 +25,9 @@ import {
   Capabilities,
   Manifest,
   SandboxAgent,
+  azureBlobMount,
+  dir,
+  file,
   gitRepo,
   inContainerMountStrategy,
   s3Mount,
@@ -34,10 +37,10 @@ import {
   type SandboxSessionState,
   type SandboxRunConfig,
 } from "@openai/agents/sandbox";
-import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { ModalCloudBucketMountStrategy, ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix as posixPath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 ensureReadableStreamFrom();
@@ -88,6 +91,16 @@ export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   sandboxSessionState?: SandboxSessionState;
   serializedRunStateForSandbox?: string;
+};
+
+export type SandboxFileDownload = {
+  fileId: string;
+  mountPath: string;
+  filename: string;
+  url?: string;
+  content?: Uint8Array;
+  expiresAt?: Date | string;
+  sizeBytes?: number;
 };
 
 export type OpenGeniRuntime = {
@@ -151,8 +164,11 @@ export type BuildAgentOptions = {
   model?: Model;
   reasoningEffort?: ReasoningEffort;
   sandboxEnvironment?: Record<string, string>;
+  fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
 };
+
+const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
   const baseConfig = {
@@ -181,19 +197,21 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   }
 
   const runAs = sandboxRunAs(settings);
-  return new SandboxAgent({
+  const agent = new SandboxAgent({
     ...baseConfig,
-    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment),
+    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
     ...(runAs ? { runAs } : {}),
     capabilities: [
       ...Capabilities.default(),
       skills({ lazyFrom: localDirLazySkillSource({ src: bundledSkillsDir() }) }),
     ],
   });
+  agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
+  return agent;
 }
 
 export function sandboxRunAs(settings: Settings): string | undefined {
-  if (settings.sandboxBackend === "docker" || settings.sandboxBackend === "modal") {
+  if (settings.sandboxBackend === "docker") {
     return "sandbox";
   }
   if (settings.sandboxBackend === "local") {
@@ -405,8 +423,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest)
     : undefined;
   const runAs = sandboxRunAs(settings);
-  const client = refreshedClient
-    ? withSandboxLifecycleHooks(refreshedClient, sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)), {
+  const fileDownloads = sandboxFileDownloadsForAgent(agent);
+  const resourceClient = refreshedClient && fileDownloads.length > 0
+    ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
+      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+      ...(runAs ? { runAs } : {}),
+    })
+    : refreshedClient;
+  const client = resourceClient
+    ? withSandboxLifecycleHooks(resourceClient, sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)), {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
@@ -509,6 +534,95 @@ export async function applyMissingManifestEntries(session: SandboxSessionLike, t
   });
 }
 
+export function withSandboxFileDownloads(
+  client: SandboxClient,
+  downloads: SandboxFileDownload[],
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+): SandboxClient {
+  const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
+  if (normalizedDownloads.length === 0) {
+    return client;
+  }
+  const completed = new WeakSet<object>();
+  const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
+    if (typeof session === "object" && session !== null && !completed.has(session)) {
+      await materializeSandboxFileDownloads(session, normalizedDownloads, context);
+      completed.add(session);
+    }
+    return session;
+  };
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
+    ...(client.create ? { create: async (...args: any[]) => await wrapSession(await (client.create as any)(...args)) } : {}),
+    ...(client.resume ? { resume: async (state: SandboxSessionState) => await wrapSession(await client.resume!(state)) } : {}),
+    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
+    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
+    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
+    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
+    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
+  };
+}
+
+export async function materializeSandboxFileDownloads(
+  session: SandboxSessionLike,
+  downloads: SandboxFileDownload[],
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+): Promise<void> {
+  const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
+  if (normalizedDownloads.length === 0) {
+    return;
+  }
+  if (!session.exec && !session.execCommand) {
+    throw new Error("Sandbox file download materialization requires command execution support");
+  }
+  for (const download of normalizedDownloads) {
+    const targetPath = sandboxDownloadTargetPath(download);
+    const payload = {
+      fileId: download.fileId,
+      path: targetPath,
+      sizeBytes: download.sizeBytes ?? null,
+      expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
+    };
+    await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload: { name: "file-resource-download", ...payload } });
+    try {
+      const result = session.exec
+        ? await session.exec({
+          cmd: sandboxFileDownloadCommand(download, targetPath),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 20_000,
+        })
+        : await session.execCommand!({
+          cmd: sandboxFileDownloadCommand(download, targetPath),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: 1_000,
+          maxOutputTokens: 20_000,
+        });
+      assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
+      await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { name: "file-resource-download", ...payload } });
+    } catch (error) {
+      await context.onRuntimeEvent?.({
+        type: "sandbox.operation.failed",
+        payload: {
+          name: "file-resource-download",
+          ...payload,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      throw error;
+    }
+  }
+}
+
+export function sandboxFileDownloadsForAgent(agent: unknown): SandboxFileDownload[] {
+  return typeof agent === "object" && agent !== null
+    ? [...(agentFileDownloads.get(agent) ?? [])]
+    : [];
+}
+
 function ensureManifest(manifest: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> }): Manifest {
   if (manifest instanceof Manifest && typeof manifest.mountTargetsForMaterialization === "function") {
     return manifest;
@@ -589,8 +703,14 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
   });
 }
 
-export function buildManifest(settings: Settings, resources: ResourceRef[], environment = collectSandboxEnvironment(settings)): Manifest {
+export function buildManifest(
+  settings: Settings,
+  resources: ResourceRef[],
+  environment = collectSandboxEnvironment(settings),
+  fileResourceDownloads: SandboxFileDownload[] = [],
+): Manifest {
   const entries: Record<string, any> = {};
+  const downloadsByFileId = new Map(normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [download.fileId, download]));
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
@@ -606,19 +726,11 @@ export function buildManifest(settings: Settings, resources: ResourceRef[], envi
       continue;
     }
     if (resource.kind === "file") {
-      const config = objectStorageMountConfig(settings);
       const mountPath = normalizeManifestPath(resource.mountPath ?? `files/${resource.fileId}`);
-      entries[mountPath] = s3Mount({
-        bucket: config.bucket,
-        prefix: `files/${resource.fileId}/original`,
-        endpointUrl: config.endpointUrl,
-        region: config.region,
-        s3Provider: config.s3Provider,
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-        readOnly: true,
-        mountStrategy: inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
-      });
+      const download = downloadsByFileId.get(resource.fileId);
+      entries[mountPath] = download
+        ? sandboxDownloadDirectory(download, mountPath)
+        : objectStorageFileMount(settings, `files/${resource.fileId}/original`);
     }
   }
   return new Manifest({
@@ -628,7 +740,54 @@ export function buildManifest(settings: Settings, resources: ResourceRef[], envi
   });
 }
 
-function objectStorageMountConfig(settings: Settings): {
+function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
+  if (download.mountPath !== mountPath) {
+    throw new Error(`File download materialization path mismatch for ${download.fileId}: expected ${mountPath}, got ${download.mountPath}`);
+  }
+  assertSafeSandboxFilename(download.filename, download.fileId);
+  if (download.content) {
+    return dir({
+      children: {
+        [download.filename]: file({ content: download.content }),
+      },
+    });
+  }
+  return dir();
+}
+
+function objectStorageFileMount(settings: Settings, prefix: string): any {
+  if (settings.objectStorageBackend === "azure-blob") {
+    if (settings.sandboxBackend === "modal") {
+      throw new Error("Modal sandbox Azure Blob file resources require pre-signed download materialization because the current OpenAI Agents SDK Modal client does not support Azure Blob mount entries.");
+    }
+    const config = azureBlobMountConfig(settings);
+    return azureBlobMount({
+      container: config.container,
+      prefix,
+      accountName: config.accountName,
+      accountKey: config.accountKey,
+      endpointUrl: config.endpointUrl,
+      readOnly: true,
+      mountStrategy: inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
+    });
+  }
+  const config = s3CompatibleMountConfig(settings);
+  return s3Mount({
+    bucket: config.bucket,
+    prefix,
+    endpointUrl: config.endpointUrl,
+    region: config.region,
+    s3Provider: config.s3Provider,
+    accessKeyId: config.accessKeyId,
+    secretAccessKey: config.secretAccessKey,
+    readOnly: true,
+    mountStrategy: settings.sandboxBackend === "modal"
+      ? new ModalCloudBucketMountStrategy()
+      : inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
+  });
+}
+
+function s3CompatibleMountConfig(settings: Settings): {
   bucket: string;
   endpointUrl: string;
   region: string;
@@ -650,12 +809,102 @@ function objectStorageMountConfig(settings: Settings): {
   };
 }
 
+function azureBlobMountConfig(settings: Settings): {
+  container: string;
+  accountName: string;
+  accountKey: string;
+  endpointUrl?: string;
+} {
+  const parsed = settings.objectStorageAzureConnectionString
+    ? parseAzureConnectionString(settings.objectStorageAzureConnectionString)
+    : {};
+  const accountName = settings.objectStorageAzureAccountName ?? parsed.AccountName;
+  const accountKey = settings.objectStorageAzureAccountKey ?? parsed.AccountKey;
+  if (!accountName || !accountKey) {
+    throw new Error("File resources require Azure Blob account name and account key");
+  }
+  const endpointUrl = azureBlobManifestEndpoint(settings.objectStorageAzureEndpoint ?? parsed.BlobEndpoint, accountName);
+  return {
+    container: settings.objectStorageBucket,
+    accountName,
+    accountKey,
+    ...(endpointUrl ? { endpointUrl } : {}),
+  };
+}
+
+function azureBlobManifestEndpoint(endpoint: string | undefined, accountName: string): string | undefined {
+  if (!endpoint) {
+    return undefined;
+  }
+  const normalized = endpoint.replace(/\/+$/, "");
+  const standardAccountEndpoint = `https://${accountName}.blob.core.windows.net`;
+  return normalized === standardAccountEndpoint ? undefined : normalized;
+}
+
+function parseAzureConnectionString(value: string): Record<string, string> {
+  return Object.fromEntries(value.split(";")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const index = part.indexOf("=");
+      return index === -1 ? [part, ""] : [part.slice(0, index), part.slice(index + 1)];
+    }));
+}
+
 function normalizeManifestPath(path: string): string {
   const normalized = path.replace(/^\/+|\/+$/g, "");
   if (!normalized || normalized.includes("..")) {
     throw new Error(`Invalid sandbox resource path: ${path}`);
   }
   return normalized;
+}
+
+function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): SandboxFileDownload[] {
+  return downloads.map((download) => {
+    const mountPath = normalizeManifestPath(download.mountPath);
+    assertSafeSandboxFilename(download.filename, download.fileId);
+    if (!download.content && !download.url?.trim()) {
+      throw new Error(`File download materialization requires content or a URL for ${download.fileId}`);
+    }
+    return {
+      ...download,
+      mountPath,
+    };
+  });
+}
+
+function assertSafeSandboxFilename(filename: string, fileId: string): void {
+  if (!filename || filename.includes("/") || filename.includes("\\") || filename === "." || filename === ".." || filename.includes("..")) {
+    throw new Error(`Invalid sandbox file name for ${fileId}: ${filename}`);
+  }
+}
+
+function sandboxDownloadTargetPath(download: SandboxFileDownload): string {
+  return posixPath.join("/workspace", download.mountPath, download.filename);
+}
+
+function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: string): string {
+  if (!download.url) {
+    throw new Error(`File download materialization URL is empty for ${download.fileId}`);
+  }
+  const targetDir = posixPath.dirname(targetPath);
+  const tmpPath = `${targetPath}.opengeni-download-$$`;
+  return [
+    "set -euo pipefail",
+    `mkdir -p -- ${shellQuote(targetDir)}`,
+    `if [ ! -f ${shellQuote(targetPath)} ]; then`,
+    `  tmp=${shellQuote(tmpPath)}`,
+    "  cleanup() { rm -f -- \"$tmp\"; }",
+    "  trap cleanup EXIT",
+    `  curl --fail --location --silent --show-error --retry 3 --retry-delay 1 --output "$tmp" ${shellQuote(download.url)}`,
+    `  mv -- "$tmp" ${shellQuote(targetPath)}`,
+    "  trap - EXIT",
+    "fi",
+  ].join("\n");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 async function restoredSandboxSessionState(state: RunState<any, any>, client: unknown): Promise<SandboxSessionState | undefined> {
@@ -792,6 +1041,10 @@ export function azureCliLoginCommand(): string {
 }
 
 export function sandboxCommandExitCode(result: unknown): number | null {
+  if (typeof result === "string") {
+    const match = result.match(/Process exited with code (-?\d+)/);
+    return match ? Number(match[1]) : null;
+  }
   if (!result || typeof result !== "object") {
     return null;
   }

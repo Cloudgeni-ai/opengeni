@@ -4,6 +4,7 @@ import {
 } from "@opengeni/config";
 import { ClientConfig } from "@opengeni/contracts";
 import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@opengeni/documents";
+import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Hono } from "hono";
@@ -58,6 +59,7 @@ export function createApp(deps: AppDependencies): Hono {
     getDocumentServices,
   };
   const app = new Hono();
+  const observability = deps.observability ?? createObservability(deps.settings, { component: "api" });
 
   app.use("*", cors({
     origin: (origin) => {
@@ -68,10 +70,54 @@ export function createApp(deps: AppDependencies): Hono {
     },
   }));
 
+  app.use("*", async (c, next) => {
+    const url = new URL(c.req.url);
+    const route = routeLabel(url.pathname);
+    const start = performance.now();
+    const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
+      "http.request.method": c.req.method,
+      "url.path": url.pathname,
+      "opengeni.route": route,
+    });
+    try {
+      await next();
+      const status = c.res.status || 200;
+      const durationSeconds = (performance.now() - start) / 1000;
+      observability.recordHttpRequest({ method: c.req.method, route, status, durationSeconds });
+      span.end({
+        attributes: {
+          "http.response.status_code": status,
+          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+        },
+      });
+      observability.info("HTTP request completed", {
+        method: c.req.method,
+        route,
+        status,
+        durationMs: Math.round(durationSeconds * 1000),
+      });
+    } catch (error) {
+      const durationSeconds = (performance.now() - start) / 1000;
+      observability.recordHttpRequest({ method: c.req.method, route, status: 500, durationSeconds });
+      span.end({
+        attributes: {
+          "http.response.status_code": 500,
+          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+        },
+        error,
+      });
+      throw error;
+    }
+  });
+
   app.get("/healthz", (c) => c.json({
     service: deps.settings.serviceName,
     environment: deps.settings.environment,
     ok: true,
+  }));
+
+  app.get("/metrics", (c) => c.text(observability.prometheusMetrics(), 200, {
+    "content-type": "text/plain; version=0.0.4; charset=utf-8",
   }));
 
   app.get("/v1/config/client", (c) => c.json(ClientConfig.parse({
@@ -107,4 +153,23 @@ export function createApp(deps: AppDependencies): Hono {
 
 export function allowedCorsOrigin(pattern: string, origin: string): boolean {
   return new RegExp(`^(?:${pattern})$`).test(origin);
+}
+
+function routeLabel(pathname: string): string {
+  if (pathname.startsWith("/v1/sessions/") && pathname.endsWith("/events/stream")) {
+    return "/v1/sessions/:id/events/stream";
+  }
+  if (pathname.startsWith("/v1/sessions/") && pathname.includes("/events")) {
+    return "/v1/sessions/:id/events";
+  }
+  if (pathname.startsWith("/v1/sessions/")) {
+    return "/v1/sessions/:id";
+  }
+  if (pathname.startsWith("/v1/files/uploads/")) {
+    return "/v1/files/uploads/:id";
+  }
+  if (pathname.startsWith("/v1/files/") && pathname.endsWith("/download-url")) {
+    return "/v1/files/:id/download-url";
+  }
+  return pathname;
 }
