@@ -19,7 +19,11 @@ import type {
   TurnSubmission,
 } from "./types";
 
-export const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000").replace(/\/+$/, "");
+export function resolveApiBaseUrl(value: string | undefined): string {
+  return (value ?? "").replace(/\/+$/, "");
+}
+
+export const apiBaseUrl = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const accessKeyStorageKey = "opengeni.accessKey";
 
 export function getStoredAccessKey(): string | null {
@@ -219,7 +223,8 @@ export function sendApproval(sessionId: string, approvalId: string, decision: "a
 }
 
 function streamUrl(sessionId: string, after: number): string {
-  const url = new URL(`${apiBaseUrl}/v1/sessions/${sessionId}/events/stream`);
+  const path = `${apiBaseUrl}/v1/sessions/${sessionId}/events/stream`;
+  const url = new URL(path, window.location.origin);
   url.searchParams.set("after", String(after));
   return url.toString();
 }
