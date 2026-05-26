@@ -110,7 +110,9 @@ Use the full local stack only when the task requires real Temporal/NATS/Postgres
 bun run dev
 ```
 
-For infrastructure and deployment work, read `references/deployment-infrastructure.md`, `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`. Keep public docs focused on reusable operator behavior, not private verification history or cloud-account-specific records.
+For infrastructure and deployment work, read `references/deployment-infrastructure.md`, `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`. Run or inspect `bun run deployment:stack -- --profile <profile>` before making exact deployment claims. Keep public docs focused on reusable operator behavior, not private verification history or cloud-account-specific records.
+
+Do not claim a deployment is operational from static validation, rendered artifacts, deterministic smoke responses, or a sandbox-disabled profile alone. Real deployment confidence requires the selected profile's live dependencies, model provider, sandbox backend, object storage, auth boundary, and conformance checks to match the behavior being claimed.
 
 For production Kubernetes, use official upstream charts/operators or managed services for platform dependencies. OpenGeni's chart should own OpenGeni workloads and integration resources; built-in Postgres, Temporal, NATS, or MinIO templates are disposable conformance fixtures only and must not be described as the production path.
 

@@ -13,6 +13,17 @@ Use this reference to orient source discovery for OpenGeni deployment work. It i
 
 If paths move, rediscover by searching for deployment profile names, `DeploymentContract`, `stackPlanFor`, `deployment:preflight`, `deployment:stack`, Helm values files, and Terraform roots.
 
+For any concrete deployment claim, inspect the selected profile and render the
+current stack plan:
+
+```bash
+bun run deployment:stack -- --profile <profile>
+```
+
+Use the stack plan as the operator-facing map for created resource classes,
+managed wrapper charts, external dependencies, required secret keys, deploy
+commands, verification commands, and destroy commands.
+
 ## Durable Model
 
 OpenGeni should deploy as a provider-neutral application layer plus provider-specific substrate wiring:
@@ -22,6 +33,24 @@ OpenGeni should deploy as a provider-neutral application layer plus provider-spe
 - NATS and Temporal are outside the OpenGeni app chart in production. They can be existing endpoints, managed services where available, or official upstream Helm charts installed by stack-wrapper commands.
 - Built-in Postgres, Temporal, NATS, and MinIO chart templates are disposable fixtures for local development, CI, previews, and smoke/conformance use; do not present them as production substitutes.
 - Runtime artifacts generated from Terraform outputs split non-secret Helm values from private runtime env files. Generated artifacts belong in ignored local paths and must not be committed.
+
+## Real Versus Smoke Deployment
+
+A real deployment means the API, web app, worker, Postgres, NATS, Temporal,
+object storage, model provider, selected sandbox backend, ingress/auth boundary,
+and observability path are configured for the intended environment and verified
+together.
+
+A smoke deployment means one or more pieces are intentionally stubbed,
+deterministic, disabled, or only statically validated. Helm rendering,
+Terraform validation, image builds, deterministic test workers, fixed "hello"
+responses, and `OPENGENI_SANDBOX_BACKEND=none` are smoke signals, not proof of
+real agent execution.
+
+`OPENGENI_SANDBOX_BACKEND=none` is acceptable for API, platform, auth,
+observability, and object-storage smoke checks. It is not acceptable when the
+claim is that real agent execution, tools, file resources inside the sandbox, or
+production sandbox isolation works.
 
 ## Profiles And Modes
 
@@ -35,11 +64,31 @@ The built-in profile families are:
 
 For exact profile names, supported modes, env vars, generated commands, and validation checks, inspect `packages/deployment` or run the deployment scripts.
 
+When planning a deployment, make these choices explicitly from current source:
+
+- Runtime target: local, generic Kubernetes, Azure, AWS, GCP, preview, or self-contained smoke.
+- Service ownership: managed substrate, existing customer services, or disposable in-cluster fixtures.
+- Persistence: managed/external Postgres with required extensions and durable Temporal persistence.
+- Coordination: existing/managed/official-chart Temporal and NATS endpoints outside the app chart.
+- Files: provider-native object storage where possible, with browser-upload CORS for the deployed origin.
+- Execution: real model provider credentials and a real sandbox backend unless the goal is smoke only.
+- Edge: ingress, TLS, auth boundary, metrics exposure, tracing/logging, and secret delivery.
+
 ## Verification Meaning
 
 Passing typecheck, unit tests, Helm rendering, and Terraform validation only proves static correctness. A deployment is operational only after conformance verifies health, auth boundary, session creation/run, event replay, SSE reconnect, scheduled-task dispatch, object storage upload/download, and the selected sandbox/model path for the intended configuration.
 
 Deterministic test workers and fixed responses are infrastructure smoke tools, not proof that real model-provider credentials, real sandbox backends, or production tool execution are configured.
+
+Skipped conformance checks are explicit verification gaps. Do not report a
+subsystem as working when its check was skipped, replaced by a deterministic
+stub, or run against a different profile than the one being claimed.
+
+Stop and resolve the gap before claiming operational readiness when model
+credentials are missing, the sandbox backend is `none` but real execution is
+expected, object-storage CORS is unknown, ingress/auth behavior is ambiguous, a
+core conformance check is skipped, cloud credentials allow creation but not
+cleanup, or docs contradict current source.
 
 ## Security Boundaries
 
