@@ -1,6 +1,6 @@
 # Deployment
 
-OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks.
+OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
 ## Profiles
 
@@ -73,6 +73,9 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- --base-url https://opengeni.example.com
 ```
 
+If the target reports `auth.required=true` and no conformance access key is
+provided, conformance fails instead of treating auth as a skipped check.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash
@@ -87,7 +90,7 @@ for the deployed web origin. Prefer exact HTTPS origins in production; use `*`
 only for disposable private evaluation stacks where signed URLs and the
 OpenGeni access key are the real access boundaries.
 
-The conformance command verifies API health, Prometheus metrics exposure, a real session run, event replay, SSE replay, manual scheduled-task dispatch, and file upload/download unless the corresponding `--skip-observability`, `--skip-agent`, `--skip-scheduled-tasks`, or `--skip-storage` flag is set.
+The conformance command verifies API health, Prometheus metrics exposure, a real session run, event replay, SSE replay, manual scheduled-task dispatch, and file upload/download unless the corresponding `--skip-observability`, `--skip-agent`, `--skip-scheduled-tasks`, or `--skip-storage` flag is set. Skipped checks are explicit verification gaps, not proof that the skipped subsystem works.
 
 For Azure Blob-backed deployments, no object host rewrite should be needed because upload/download URLs are public Azure Blob SAS URLs:
 
@@ -108,8 +111,8 @@ Current profiles:
 - `aws-existing-services`: EKS workloads connected to existing Postgres, Temporal, and object storage.
 - `gcp-managed`: GKE plus GCP-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
 - `gcp-existing-services`: GKE workloads connected to existing Postgres, Temporal, and object storage.
-- `preview-pr`: same-repo pull-request preview environment.
-- `preview-branch`: manually requested branch preview environment.
+- `preview-pr`: operator-managed pull-request preview environment shape.
+- `preview-branch`: operator-managed branch preview environment shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
 ## Local Docker Compose
@@ -176,26 +179,17 @@ For local Kubernetes parity testing, build local images and install the same cha
 docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .
 docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .
 docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web -t opengeni-web:local-k8s .
+kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name "${KIND_CLUSTER_NAME:-opengeni-local}"
 
+export OPENGENI_ACCESS_KEY="${OPENGENI_ACCESS_KEY:?set OPENGENI_ACCESS_KEY for local shared-key auth}"
 kubectl create namespace opengeni-local --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n opengeni-local create secret generic opengeni-runtime-local-k8s --from-env-file=.env
+kubectl -n opengeni-local create secret generic opengeni-runtime-local-k8s \
+  --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install opengeni-local deploy/helm/opengeni \
   --namespace opengeni-local \
-  --set secret.existingSecret=opengeni-runtime-local-k8s \
-  --set api.image.repository=opengeni-api \
-  --set api.image.tag=local-k8s \
-  --set worker.image.repository=opengeni-worker \
-  --set worker.image.tag=local-k8s \
-  --set web.image.repository=opengeni-web \
-  --set web.image.tag=local-k8s \
-  --set migrations.image.repository=opengeni-api \
-  --set migrations.image.tag=local-k8s \
-  --set postgres.enabled=true \
-  --set temporal.enabled=true \
-  --set nats.enabled=true \
-  --set minio.enabled=true \
-  --set config.OPENGENI_SANDBOX_BACKEND=none
+  --values deploy/helm/opengeni/values.local-kubernetes.example.yaml
 ```
 
 Then run conformance through port-forwards:
@@ -204,14 +198,15 @@ Then run conformance through port-forwards:
 kubectl -n opengeni-local port-forward svc/opengeni-local-api 28080:8000
 kubectl -n opengeni-local port-forward svc/opengeni-local-minio 29000:9000
 
-bun run deployment:conformance -- \
+OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
+  bun run deployment:conformance -- \
   --base-url http://127.0.0.1:28080 \
   --object-connect-to opengeni-local-minio:9000:127.0.0.1:29000
 ```
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
-The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, previews, and cloud smoke tests. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
+The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:
 
@@ -507,15 +502,12 @@ After apply, save exact resource names and cleanup commands outside the reposito
 
 ## Previews
 
-`.github/workflows/preview.yml` defines same-repo PR previews and manual branch previews. It is intentionally secret-gated:
-
-- Forked PRs do not deploy.
-- `OPENGENI_PREVIEW_KUBE_CONFIG_B64` points at the preview cluster.
-- `OPENGENI_PREVIEW_REGISTRY` plus registry credentials select where images are pushed.
-- `OPENGENI_PREVIEW_RUNTIME_ENV_B64` becomes the per-preview runtime secret.
-- PR close or manual `teardown=true` uninstalls the Helm release and deletes the namespace.
-
-The preview workflow builds immutable run-tagged API, worker, and web images, deploys isolated in-cluster dependencies, and runs deployment conformance before the preview is considered healthy.
+The public repository does not include a pull-request workflow that deploys to
+maintainer-owned infrastructure. The `preview-pr` and `preview-branch` profiles
+are reusable stack-contract shapes for operator-owned automation. If an operator
+wants preview deployments, they should run `bun run deployment:stack` in their
+own CI/CD environment with their own cluster, registry, secrets, and teardown
+policy.
 
 ## Conformance
 

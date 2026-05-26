@@ -31,25 +31,28 @@ await runCheck("api-health", async () => {
   return `service=${String(health.service ?? "unknown")} environment=${String(health.environment ?? "unknown")}`;
 });
 
-if (args.accessKey) {
-  await runCheck("access-boundary", async () => {
-    const config = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
-    if (config?.auth?.required !== true) {
-      throw new Error("client config did not report auth.required=true");
+await runCheck("access-boundary", async () => {
+  const config = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
+  const authRequired = config?.auth?.required === true;
+  if (!args.accessKey) {
+    if (authRequired) {
+      throw new Error("client config reports auth.required=true; set OPENGENI_CONFORMANCE_ACCESS_KEY or --access-key");
     }
-    const response = await fetch(new URL("/v1/sessions", args.baseUrl), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ initialMessage: "unauthorized conformance probe" }),
-    });
-    if (response.status !== 401) {
-      throw new Error(`/v1/sessions without access key returned HTTP ${response.status}, expected 401`);
-    }
-    return "client config is secret-free and user-facing routes reject missing access keys";
+    return "client config reports auth.required=false; shared-key access boundary is disabled for this deployment";
+  }
+  if (!authRequired) {
+    throw new Error("access key was provided, but client config did not report auth.required=true");
+  }
+  const response = await fetch(new URL("/v1/sessions", args.baseUrl), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ initialMessage: "unauthorized conformance probe" }),
   });
-} else {
-  results.push(skipped("access-boundary", "No access key was provided; shared-key deployment auth was not verified."));
-}
+  if (response.status !== 401) {
+    throw new Error(`/v1/sessions without access key returned HTTP ${response.status}, expected 401`);
+  }
+  return "client config is secret-free and user-facing routes reject missing access keys";
+});
 
 if (args.skipObservability) {
   results.push(skipped("observability", "--skip-observability was set"));

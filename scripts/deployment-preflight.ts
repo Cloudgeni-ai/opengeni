@@ -56,8 +56,10 @@ if (args.json) {
       observability: contract.observability.backend,
     },
     requiredEnvVars,
-    missingEnvVars,
-    envOk: args.checkEnv ? missingEnvVars.length === 0 : undefined,
+    ...(args.checkEnv ? {
+      missingEnvVars,
+      envOk: missingEnvVars.length === 0,
+    } : {}),
     checks,
     liveResults: args.live ? liveResults : undefined,
   }, null, 2));

@@ -86,6 +86,14 @@ jobs:
             --set migrations.image.tag=ci \
             --set migrations.image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             >/tmp/opengeni-digest-rendered.yaml
+          helm template opengeni-azure deploy/helm/opengeni \
+            --namespace opengeni \
+            -f deploy/helm/opengeni/values.azure-managed.example.yaml \
+            >/tmp/opengeni-azure-rendered.yaml
+          helm template opengeni-azure-existing deploy/helm/opengeni \
+            --namespace opengeni \
+            -f deploy/helm/opengeni/values.azure-existing-services.example.yaml \
+            >/tmp/opengeni-azure-existing-rendered.yaml
           helm template opengeni-aws deploy/helm/opengeni \
             --namespace opengeni \
             -f deploy/helm/opengeni/values.aws-managed.example.yaml \
