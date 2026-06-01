@@ -81,6 +81,10 @@ Temporal coordinates the work, but token streams and tool output do not go throu
 - OpenAI Agents SDK
 - Docker and Modal sandbox backends
 
+## Agent Guides
+
+Pair this README with the CloudGeni guide for product integration context and the Infrastructure Agents guide for operating infrastructure-focused agents with repositories, sandbox tools, Terraform/Checkov skills, GitHub App access, and cloud credentials.
+
 ## Quick Start
 
 Prerequisites:
