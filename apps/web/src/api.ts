@@ -31,6 +31,20 @@ export const apiBaseUrl = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const accessKeyStorageKey = "opengeni.accessKey";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly body: string,
+  ) {
+    super(`API ${status}: ${body}`);
+    this.name = "ApiError";
+  }
+}
+
+export function isApiErrorStatus(error: unknown, status: number): boolean {
+  return error instanceof ApiError && error.status === status;
+}
+
 export function getStoredAccessKey(): string | null {
   if (typeof localStorage === "undefined") {
     return null;
@@ -86,7 +100,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`API ${response.status}: ${text}`);
+    throw new ApiError(response.status, text);
   }
   return await response.json() as T;
 }

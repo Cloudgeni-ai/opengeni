@@ -74,6 +74,7 @@ import {
   fetchApiKeys,
   fetchBilling,
   getStoredAccessKey,
+  isApiErrorStatus,
   createApiKey,
   createBillingCheckout,
   reindexDocument,
@@ -277,8 +278,42 @@ export function App() {
       setConnectionState("closed");
       return;
     }
-    void fetchSession(workspaceId, sessionId).then(setSession).catch((error) => toast.error("Failed to load session", { description: String(error) }));
-    void fetchEvents(workspaceId, sessionId).then(setEvents).catch((error) => toast.error("Failed to load events", { description: String(error) }));
+    let cancelled = false;
+    setSession(null);
+    setEvents([]);
+    void (async () => {
+      try {
+        const [nextSession, nextEvents] = await Promise.all([
+          fetchSession(workspaceId, sessionId),
+          fetchEvents(workspaceId, sessionId),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setSession(nextSession);
+        setEvents(nextEvents);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        setSession(null);
+        setEvents([]);
+        setConnectionState("closed");
+        if (isApiErrorStatus(error, 404)) {
+          forgetSession(workspaceId, sessionId);
+          setSessionId(null);
+          if (sessionIdFromPath() === sessionId) {
+            window.history.replaceState({}, "", "/");
+          }
+          toast.error("Session no longer exists", { description: "It was removed from recent sessions." });
+          return;
+        }
+        toast.error("Failed to load session", { description: String(error) });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId, workspaceReady, workspaceId, accessKeyVersion]);
 
   useSessionStream(workspaceReady ? workspaceId : null, workspaceReady ? sessionId : null, lastSequence, accessKeyVersion, (incoming) => {
@@ -727,7 +762,7 @@ export function App() {
               }
               onSubmit={submitInitial}
             />
-            <RecentSessions onSelect={selectSession} />
+            <RecentSessions workspaceId={workspaceId} onSelect={selectSession} />
             <ScheduledTasksPanel
               workspaceId={workspaceId ?? ""}
               clientConfig={clientConfig}
@@ -2646,8 +2681,8 @@ function ConnectionPill({ state }: { state: ConnectionState }) {
   );
 }
 
-function RecentSessions({ onSelect }: { onSelect: (id: string) => void }) {
-  const sessions = recentSessions();
+function RecentSessions({ workspaceId, onSelect }: { workspaceId: string | null; onSelect: (id: string) => void }) {
+  const sessions = workspaceId ? recentSessions(workspaceId) : [];
   if (sessions.length === 0) {
     return null;
   }
@@ -3870,15 +3905,24 @@ function displayModel(value: string): string {
 }
 
 function rememberSession(session: Session) {
-  const items = [{ id: session.id, prompt: session.initialMessage, createdAt: session.createdAt }, ...recentSessions().filter((item) => item.id !== session.id)].slice(0, 8);
-  localStorage.setItem("opengeni-recent-sessions", JSON.stringify(items));
+  const items = [{ id: session.id, prompt: session.initialMessage, createdAt: session.createdAt }, ...recentSessions(session.workspaceId).filter((item) => item.id !== session.id)].slice(0, 8);
+  localStorage.setItem(recentSessionsStorageKey(session.workspaceId), JSON.stringify(items));
 }
 
-function recentSessions(): Array<{ id: string; prompt: string; createdAt: string }> {
+function forgetSession(workspaceId: string, sessionId: string) {
+  const items = recentSessions(workspaceId).filter((item) => item.id !== sessionId);
+  localStorage.setItem(recentSessionsStorageKey(workspaceId), JSON.stringify(items));
+}
+
+function recentSessions(workspaceId: string): Array<{ id: string; prompt: string; createdAt: string }> {
   try {
-    const parsed = JSON.parse(localStorage.getItem("opengeni-recent-sessions") ?? "[]");
+    const parsed = JSON.parse(localStorage.getItem(recentSessionsStorageKey(workspaceId)) ?? "[]");
     return Array.isArray(parsed) ? parsed.filter((item) => item?.id && item?.prompt && item?.createdAt) : [];
   } catch {
     return [];
   }
+}
+
+function recentSessionsStorageKey(workspaceId: string): string {
+  return `opengeni-recent-sessions:${workspaceId}`;
 }
