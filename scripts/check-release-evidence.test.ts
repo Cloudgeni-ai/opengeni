@@ -96,6 +96,7 @@ describe("release evidence checker", () => {
     expect(result.stderr).toContain("missing mandatory gate local-check-workspace-billing");
     expect(result.stderr).toContain("missing mandatory gate stripe-live-mode-readonly-preflight");
     expect(result.stderr).toContain("missing mandatory gate staging-load-soak");
+    expect(result.stderr).toContain("missing mandatory gate staging-runtime-config");
   });
 
   it("fails passed production canary gates with weak JSON evidence", () => {

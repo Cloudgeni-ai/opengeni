@@ -127,6 +127,7 @@ customer-ready operational gates are:
 - `staging-backup-restore`
 - `staging-rollback`
 - `staging-operational-readiness`
+- `staging-runtime-config`
 - `private-ops-boundary`
 
 Use the operational readiness checker to validate the structured staging
@@ -139,6 +140,17 @@ bun run managed:load-soak -- \
   --token "$OPENGENI_CONFORMANCE_PRODUCT_TOKEN" \
   --out-file .agent/generated/staging/load-soak.json
 
+# Capture these with kubectl/helm/Azure tooling, but keep the Secret evidence
+# sanitized. The runtime Secret file must contain key names only, for example:
+# {"name":"opengeni-runtime","keys":["OPENGENI_DATABASE_URL", "..."]}.
+bun run operational:runtime-config -- \
+  --base-url https://staging.app.opengeni.ai \
+  --client-config-json .agent/generated/staging/client-config.json \
+  --configmap-json .agent/generated/staging/opengeni-config.json \
+  --runtime-secret-keys-json .agent/generated/staging/opengeni-runtime-secret-keys.json \
+  --runtime-env-json .agent/generated/staging/runtime-env.json \
+  --out .agent/generated/staging/runtime-config.json
+
 bun run operational:assemble -- \
   --out .agent/generated/staging/operational-readiness.json \
   --environment staging \
@@ -147,7 +159,8 @@ bun run operational:assemble -- \
   --check .agent/generated/staging/backup-restore.json \
   --check .agent/generated/staging/rollback.json \
   --check .agent/generated/staging/observability-alerts.json \
-  --check .agent/generated/staging/private-ops-boundary.json
+  --check .agent/generated/staging/private-ops-boundary.json \
+  --check .agent/generated/staging/runtime-config.json
 
 bun run operational:readiness -- \
   --evidence .agent/generated/staging/operational-readiness.json \
@@ -158,7 +171,11 @@ The evidence must prove a load/soak run with bounded error rate and latency,
 a backup/restore drill for database and object storage, a digest-pinned rollback
 and forward roll with conformance after each step, configured observability and
 alerts, and a private-ops boundary proving public PRs cannot access deployment
-secrets. A skipped or missing operational gate blocks customer-ready status.
+secrets. It must also prove the resolved runtime config matches the expected
+managed posture after Kubernetes `envFrom` precedence, including no overlap
+between ConfigMap keys and sanitized runtime Secret key lists. Do not attach raw
+Kubernetes Secret JSON as runtime-config evidence; record only secret key names.
+A skipped or missing operational gate blocks customer-ready status.
 
 Production canary evidence is also structured and fail-closed. A release
 manifest cannot satisfy the `production-canary` gate with a generic

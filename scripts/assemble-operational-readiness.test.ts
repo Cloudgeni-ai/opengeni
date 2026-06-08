@@ -48,6 +48,15 @@ describe("operational readiness assembler", () => {
         artifactDigestPinned: true,
         secretScanPassed: true,
       }),
+      checkFile(dir, "runtime-config", marker, {
+        clientConfigMatchesExpected: true,
+        configMapMatchesExpected: true,
+        configSecretOverlapAbsent: true,
+        runtimeEnvMatchesExpected: true,
+        expectedReasoningEffort: "low",
+        clientDefaultReasoningEffort: "low",
+        configReasoningEffort: "low",
+      }),
     ];
     const out = join(dir, "operational-readiness.json");
 
@@ -62,6 +71,7 @@ describe("operational readiness assembler", () => {
       "rollback",
       "observability-alerts",
       "private-ops-boundary",
+      "runtime-config",
     ]);
   });
 

@@ -56,6 +56,7 @@ const mandatoryGateIdsByScope: Record<GateScope, string[]> = {
     "staging-backup-restore",
     "staging-rollback",
     "staging-operational-readiness",
+    "staging-runtime-config",
     "private-ops-boundary",
   ],
 };

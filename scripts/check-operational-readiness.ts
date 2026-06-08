@@ -6,6 +6,7 @@ const requiredChecks = [
   "rollback",
   "observability-alerts",
   "private-ops-boundary",
+  "runtime-config",
 ] as const;
 
 type RequiredCheckId = typeof requiredChecks[number];
@@ -113,6 +114,8 @@ function validateRequiredCheck(id: RequiredCheckId): string {
       return validateObservability(metrics);
     case "private-ops-boundary":
       return validatePrivateOps(metrics);
+    case "runtime-config":
+      return validateRuntimeConfig(metrics);
   }
 }
 
@@ -181,6 +184,26 @@ function validatePrivateOps(metrics: Record<string, unknown>): string {
   assertTrue(metrics, "artifactDigestPinned");
   assertTrue(metrics, "secretScanPassed");
   return "private ops boundary and public PR no-secret policy verified";
+}
+
+function validateRuntimeConfig(metrics: Record<string, unknown>): string {
+  assertTrue(metrics, "clientConfigMatchesExpected");
+  assertTrue(metrics, "configMapMatchesExpected");
+  assertTrue(metrics, "configSecretOverlapAbsent");
+  assertTrue(metrics, "runtimeEnvMatchesExpected");
+  const expectedReasoningEffort = stringField(metrics, "expectedReasoningEffort");
+  const clientReasoningEffort = stringField(metrics, "clientDefaultReasoningEffort");
+  const configReasoningEffort = stringField(metrics, "configReasoningEffort");
+  if (!expectedReasoningEffort) {
+    throw new Error("expectedReasoningEffort is missing");
+  }
+  if (clientReasoningEffort !== expectedReasoningEffort) {
+    throw new Error(`clientDefaultReasoningEffort is ${clientReasoningEffort ?? "<missing>"}, expected ${expectedReasoningEffort}`);
+  }
+  if (configReasoningEffort !== expectedReasoningEffort) {
+    throw new Error(`configReasoningEffort is ${configReasoningEffort ?? "<missing>"}, expected ${expectedReasoningEffort}`);
+  }
+  return `runtime config resolves expected reasoning effort ${expectedReasoningEffort}`;
 }
 
 function validateEvidenceFiles(check: Record<string, unknown>): void {

@@ -24,6 +24,7 @@ describe("operational readiness checker", () => {
       "rollback",
       "observability-alerts",
       "private-ops-boundary",
+      "runtime-config",
     ]);
   });
 
@@ -126,6 +127,20 @@ function writeEvidence(
         oidcTrustScoped: true,
         artifactDigestPinned: true,
         secretScanPassed: true,
+      },
+    },
+    {
+      id: "runtime-config",
+      status: "passed",
+      evidence: [marker],
+      metrics: {
+        clientConfigMatchesExpected: true,
+        configMapMatchesExpected: true,
+        configSecretOverlapAbsent: true,
+        runtimeEnvMatchesExpected: true,
+        expectedReasoningEffort: "low",
+        clientDefaultReasoningEffort: "low",
+        configReasoningEffort: "low",
       },
     },
   ].filter((check) => check.id !== options.omit);

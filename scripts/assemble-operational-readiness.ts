@@ -8,6 +8,7 @@ const requiredChecks = [
   "rollback",
   "observability-alerts",
   "private-ops-boundary",
+  "runtime-config",
 ] as const;
 
 interface Args {
