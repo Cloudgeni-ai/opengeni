@@ -6,6 +6,7 @@ import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
 import { MemoryEventBus, parseSseBlock, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
+import { createSignedState, readSignedState } from "@opengeni/github";
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -1155,6 +1156,43 @@ describe("API component integration", () => {
     expect(body.configured).toBe(false);
     expect(body.missing.length).toBeGreaterThan(0);
     });
+
+  test("redirects GitHub install callbacks through OAuth before binding a workspace installation", async () => {
+    const stateSecret = "test-github-install-state-secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        githubClientId: "test-github-client-id",
+        githubAppManifestBaseUrl: "https://staging.app.opengeni.ai",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+    });
+    const context = await defaultAccessContext(app);
+    const state = createSignedState(stateSecret, {
+      accountId: context.defaultAccountId,
+      workspaceId: context.defaultWorkspaceId,
+    });
+
+    const response = await app.request(`/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`);
+    expect(response.status).toBe(302);
+    const location = response.headers.get("location");
+    expect(location).toBeTruthy();
+    const redirect = new URL(location!);
+    expect(`${redirect.origin}${redirect.pathname}`).toBe("https://github.com/login/oauth/authorize");
+    expect(redirect.searchParams.get("client_id")).toBe("test-github-client-id");
+    expect(redirect.searchParams.get("redirect_uri")).toBe("https://staging.app.opengeni.ai/v1/github/oauth/callback");
+    const oauthState = redirect.searchParams.get("state");
+    expect(oauthState).toBeTruthy();
+    const payload = readSignedState(oauthState!, stateSecret);
+    expect(payload).toMatchObject({
+      accountId: context.defaultAccountId,
+      workspaceId: context.defaultWorkspaceId,
+      installationId: 138826628,
+    });
+  });
 
   test("indexes uploaded files into document bases and searches them", async () => {
     const app = createApp({

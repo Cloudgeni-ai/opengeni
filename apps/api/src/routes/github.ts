@@ -10,6 +10,7 @@ import {
   envLinesFromGitHubManifestConversion,
   GitHubAppApiError,
   GitHubAppConfigurationError,
+  githubOAuthAuthorizeUrl,
   githubAppMissingSettings,
   listGitHubAppRepositories,
   organizationAppManifestUrl,
@@ -18,7 +19,7 @@ import {
   verifyGitHubInstallationAccessForUser,
   verifySignedState,
 } from "@opengeni/github";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
@@ -117,7 +118,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.get("/v1/github/setup", async (c) => {
+  const handleGitHubInstallCallback = async (c: Context) => {
     const code = c.req.query("code");
     const state = c.req.query("state");
     const installationIdRaw = c.req.query("installation_id");
@@ -141,24 +142,87 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "missing or invalid GitHub installation_id" });
     }
     if (!code) {
-      throw new HTTPException(400, { message: "GitHub setup requires a user authorization code; enable request_oauth_on_install for this GitHub App" });
-    }
-    try {
-      const installation = await verifyGitHubInstallationAccessForUser(settings, { code, installationId });
-      if (!installation) {
-        throw new HTTPException(404, { message: "GitHub App installation was not found for this app" });
+      const clientId = settings.githubClientId?.trim();
+      if (!clientId) {
+        throw new HTTPException(409, { message: JSON.stringify({ message: "GitHub App is not configured", missing: ["OPENGENI_GITHUB_CLIENT_ID"] }) });
       }
-      if (installation.suspended) {
-        throw new HTTPException(409, { message: "GitHub App installation is suspended" });
-      }
-      await upsertGitHubInstallation(db, {
+      const oauthState = createSignedState(githubStateSecret, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         installationId,
-        accountLogin: installation.accountLogin,
-        accountType: installation.accountType,
       });
-      return c.html(githubSetupSuccessHtml(installation.accountLogin ?? `installation ${installationId}`));
+      const baseUrl = (settings.githubAppManifestBaseUrl ?? settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
+      return c.redirect(githubOAuthAuthorizeUrl({
+        clientId,
+        state: oauthState,
+        redirectUri: `${baseUrl}/v1/github/oauth/callback`,
+      }));
+    }
+    return await completeGitHubInstallationBinding(deps, c, {
+      code,
+      statePayload,
+      installationId,
+    });
+  };
+
+  app.get("/v1/github/setup", handleGitHubInstallCallback);
+  app.get("/v1/github/install/callback", handleGitHubInstallCallback);
+
+  app.get("/v1/github/oauth/callback", async (c) => {
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    if (!code) {
+      throw new HTTPException(400, { message: "missing GitHub OAuth code" });
+    }
+    if (!state) {
+      throw new HTTPException(400, { message: "missing GitHub OAuth state" });
+    }
+    const statePayload = readSignedState(state, githubStateSecret);
+    const installationId = parsePositiveInteger(String(statePayload?.installationId ?? ""));
+    if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string" || installationId === null) {
+      throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
+    }
+    return await completeGitHubInstallationBinding(deps, c, {
+      code,
+      statePayload,
+      installationId,
+    });
+  });
+}
+
+async function completeGitHubInstallationBinding(
+  deps: ApiRouteDeps,
+  c: Context,
+  input: {
+    code: string;
+    statePayload: { accountId?: string; workspaceId?: string };
+    installationId: number;
+  },
+) {
+  const { db, settings } = deps;
+  if (!input.statePayload.workspaceId || !input.statePayload.accountId) {
+    throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
+  }
+  const grant = await requireAccessGrant(c, deps, input.statePayload.workspaceId, "github:manage");
+  if (grant.accountId !== input.statePayload.accountId) {
+    throw new HTTPException(403, { message: "GitHub installation state does not match this workspace" });
+  }
+  try {
+    const installation = await verifyGitHubInstallationAccessForUser(settings, { code: input.code, installationId: input.installationId });
+    if (!installation) {
+      throw new HTTPException(404, { message: "GitHub App installation was not found for this app" });
+    }
+    if (installation.suspended) {
+      throw new HTTPException(409, { message: "GitHub App installation is suspended" });
+    }
+    await upsertGitHubInstallation(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      installationId: input.installationId,
+      accountLogin: installation.accountLogin,
+      accountType: installation.accountType,
+    });
+    return c.html(githubSetupSuccessHtml(installation.accountLogin ?? `installation ${input.installationId}`));
     } catch (error) {
       if (error instanceof HTTPException) {
         throw error;
@@ -168,7 +232,6 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
     }
-  });
 }
 
 export async function listWorkspaceGitHubRepositories(deps: ApiRouteDeps, workspaceId: string) {

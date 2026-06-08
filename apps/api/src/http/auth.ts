@@ -29,7 +29,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path === "/v1/webhooks/stripe") {
     return true;
   }
-  if (path === "/v1/github/setup" || path === "/v1/github/app-manifest/callback") {
+  if (
+    path === "/v1/github/setup" ||
+    path === "/v1/github/install/callback" ||
+    path === "/v1/github/oauth/callback" ||
+    path === "/v1/github/app-manifest/callback"
+  ) {
     return true;
   }
   if (settings.authAllowHealth && path === "/healthz") {

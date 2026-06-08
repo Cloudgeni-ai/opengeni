@@ -84,6 +84,20 @@ export function organizationAppManifestUrl(organization: string, state: string):
   return `https://github.com/organizations/${encodeURIComponent(organization)}/settings/apps/new?state=${state}`;
 }
 
+export function githubOAuthAuthorizeUrl(input: {
+  clientId: string;
+  state: string;
+  redirectUri?: string;
+}): string {
+  const url = new URL("https://github.com/login/oauth/authorize");
+  url.searchParams.set("client_id", input.clientId);
+  url.searchParams.set("state", input.state);
+  if (input.redirectUri) {
+    url.searchParams.set("redirect_uri", input.redirectUri);
+  }
+  return url.toString();
+}
+
 export function createSignedState(
   secret: string,
   payloadOrNow: Record<string, unknown> | number = {},

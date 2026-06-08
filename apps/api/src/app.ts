@@ -251,6 +251,8 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/github\/app-manifest$/, label: "/v1/workspaces/:workspaceId/github/app-manifest" },
   { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
   { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
+  { pattern: /^\/v1\/github\/install\/callback$/, label: "/v1/github/install/callback" },
+  { pattern: /^\/v1\/github\/oauth\/callback$/, label: "/v1/github/oauth/callback" },
 ];
 
 export function routeLabel(pathname: string): string {
