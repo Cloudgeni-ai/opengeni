@@ -118,6 +118,13 @@ export async function signUpEmail(input: { name: string; email: string; password
   });
 }
 
+export async function sendVerificationEmail(input: { email: string }): Promise<{ status: boolean }> {
+  return await authRequest<{ status: boolean }>("/send-verification-email", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function signInEmail(input: { email: string; password: string; rememberMe?: boolean }): Promise<unknown> {
   return await authRequest<unknown>("/sign-in/email", {
     method: "POST",

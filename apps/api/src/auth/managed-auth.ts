@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
 import { betterAuth, type Auth } from "better-auth";
+import { createEmailVerificationToken } from "better-auth/api";
 import { Pool } from "pg";
 import { Resend } from "resend";
 
@@ -89,6 +90,17 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       enabled: true,
       requireEmailVerification: true,
       revokeSessionsOnPasswordReset: true,
+      onExistingUserSignUp: async ({ user }) => {
+        if (!user.emailVerified) {
+          const url = await verificationUrl(settings, user.email);
+          await sendEmail(settings, {
+            to: user.email,
+            subject: "Verify your OpenGeni email",
+            text: `Verify your OpenGeni email: ${url}`,
+            html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p>`,
+          });
+        }
+      },
       sendResetPassword: async ({ user, url }) => {
         await sendEmail(settings, {
           to: user.email,
@@ -191,6 +203,20 @@ async function sendEmail(settings: Settings, input: {
   if (result.error) {
     throw new Error(result.error.message);
   }
+}
+
+async function verificationUrl(settings: Settings, email: string): Promise<string> {
+  if (!settings.betterAuthSecret) {
+    throw new Error("OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email");
+  }
+  if (!settings.publicBaseUrl) {
+    throw new Error("OPENGENI_PUBLIC_BASE_URL is required to send managed auth verification email");
+  }
+  const token = await createEmailVerificationToken(settings.betterAuthSecret, email);
+  const url = new URL("/v1/auth/verify-email", settings.publicBaseUrl);
+  url.searchParams.set("token", token);
+  url.searchParams.set("callbackURL", "/");
+  return url.toString();
 }
 
 function splitCsv(raw: string): string[] {

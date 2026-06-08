@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { authHeadersForAccessKey, resolveApiBaseUrl, streamSessionEvents } from "./api";
+import { authHeadersForAccessKey, resolveApiBaseUrl, sendVerificationEmail, streamSessionEvents } from "./api";
 import type { SessionEvent } from "./types";
 
 describe("web API auth helpers", () => {
@@ -13,6 +13,28 @@ describe("web API auth helpers", () => {
   test("defaults to same-origin API paths for deployed web builds", () => {
     expect(resolveApiBaseUrl(undefined)).toBe("");
     expect(resolveApiBaseUrl("https://opengeni.example.com/")).toBe("https://opengeni.example.com");
+  });
+
+  test("sends managed verification resend requests through Better Auth", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      return Response.json({ status: true });
+    }) as unknown as typeof fetch;
+
+    try {
+      await expect(sendVerificationEmail({ email: "user@example.com" })).resolves.toEqual({ status: true });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const request = requests[0];
+    expect(request).toBeDefined();
+    expect(String(request!.input)).toBe("/v1/auth/send-verification-email");
+    expect(request!.init?.method).toBe("POST");
+    expect(request!.init?.credentials).toBe("include");
+    expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
   });
 });
 

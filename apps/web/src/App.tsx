@@ -83,6 +83,7 @@ import {
   sendApproval,
   sendInterrupt,
   sendUserMessage,
+  sendVerificationEmail,
   searchDocumentBase,
   setStoredAccessKey,
   startGitHubManifest,
@@ -805,6 +806,7 @@ function ManagedAuthPanel(props: {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resendBusy, setResendBusy] = useState(false);
 
   async function submit() {
     if (!email.trim() || password.length < 8 || (mode === "signup" && !name.trim())) {
@@ -818,6 +820,23 @@ function ManagedAuthPanel(props: {
       toast.error(mode === "signup" ? "Sign up failed" : "Sign in failed", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function resendVerification() {
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      toast.error("Enter your email");
+      return;
+    }
+    setResendBusy(true);
+    try {
+      await sendVerificationEmail({ email: normalizedEmail });
+      toast.success("Verification email sent");
+    } catch (error) {
+      toast.error("Failed to send verification email", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setResendBusy(false);
     }
   }
 
@@ -860,6 +879,10 @@ function ManagedAuthPanel(props: {
         <Button type="submit" className="mt-4 w-full" disabled={busy}>
           {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
           {mode === "signup" ? "Create account" : "Sign in"}
+        </Button>
+        <Button type="button" variant="ghost" className="mt-2 w-full" disabled={resendBusy || busy} onClick={() => void resendVerification()}>
+          {resendBusy ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+          Resend verification email
         </Button>
       </form>
     </section>
