@@ -495,6 +495,61 @@ describe("worker activities integration", () => {
     }
   });
 
+  test("runs Modal repository clone hook for repository-backed sessions before SDK sandbox use", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "read repo",
+      resources: [{
+        kind: "repository",
+        uri: "https://github.com/Futhark-AS/aifilesearch.git",
+        ref: "main",
+      }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "modal",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "read repo" } },
+    ]);
+    const sandboxExecCalls: Array<Record<string, unknown>> = [];
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "ok", chunks: ["ok"] }]),
+        sandboxClient: {
+          backendId: "test-modal",
+          create: async () => ({
+            state: { manifest: { root: "/workspace", entries: {}, environment: {} } },
+            execCommand: async (args: Record<string, unknown>) => {
+              sandboxExecCalls.push(args);
+              return { status: 0, output: "" };
+            },
+          }),
+        },
+      }),
+    });
+
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-modal-repo-clone",
+    });
+
+    expect(result.status).toBe("failed");
+    expect(sandboxExecCalls).toHaveLength(1);
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain("clone_repository '/workspace/repos/Futhark-AS/aifilesearch'");
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
+    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("x-access-token");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
+    expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
+    expect(JSON.stringify(events)).toContain("Filesystem sandbox sessions must provide createEditor");
+  });
+
   test("attaches configured MCP tools and executes a prefixed tool call during a run", async () => {
     const mcp = startTestMcpServer();
     try {

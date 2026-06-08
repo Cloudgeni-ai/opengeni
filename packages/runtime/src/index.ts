@@ -180,6 +180,7 @@ export type BuildAgentOptions = {
 };
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
+const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
   const baseConfig = {
@@ -218,6 +219,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ],
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
+  agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources));
   return agent;
 }
 
@@ -592,7 +594,10 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     })
     : refreshedClient;
   const client = resourceClient
-    ? withSandboxLifecycleHooks(resourceClient, sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)), {
+    ? withSandboxLifecycleHooks(resourceClient, [
+      ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+      ...sandboxRepositoryCloneHooksForAgent(agent),
+    ], {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
@@ -942,6 +947,10 @@ export function buildManifest(
       const host = url.hostname.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+      if (settings.sandboxBackend === "modal") {
+        entries[mountPath] = dir();
+        continue;
+      }
       entries[mountPath] = gitRepo({
         host,
         repo,
@@ -1251,6 +1260,141 @@ export function withSandboxLifecycleHooks(
     ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
   };
   return wrapped;
+}
+
+function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+  return agentRepositoryCloneHooks.get(agent) ?? [];
+}
+
+function sandboxRepositoryCloneHooks(settings: Settings, resources: ResourceRef[]): SandboxLifecycleHook[] {
+  if (settings.sandboxBackend !== "modal") {
+    return [];
+  }
+  const repositories = resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
+  if (repositories.length === 0) {
+    return [];
+  }
+  return [{
+    id: "modal-repository-clone",
+    phase: "beforeAgentStart",
+    run: async (session, context) => {
+      await runModalRepositoryCloneHook(session, repositories, context);
+    },
+  }];
+}
+
+export function modalRepositoryCloneCommand(resources: Extract<ResourceRef, { kind: "repository" }>[]): string {
+  const commands = [
+    "set -eu",
+    "export HOME=\"${HOME:-/workspace}\"",
+    "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
+    "ensure_git() {",
+    "  if command -v git >/dev/null 2>&1; then",
+    "    return 0",
+    "  fi",
+    "  if command -v apt-get >/dev/null 2>&1; then",
+    "    export DEBIAN_FRONTEND=noninteractive",
+    "    apt-get update >/dev/null",
+    "    apt-get install -y --no-install-recommends ca-certificates git >/dev/null",
+    "    rm -rf /var/lib/apt/lists/*",
+    "    command -v git >/dev/null 2>&1 && return 0",
+    "  fi",
+    "  echo \"git is not installed in the sandbox and could not be bootstrapped\" >&2",
+    "  exit 127",
+    "}",
+    "ensure_git",
+    "clone_repository() {",
+    "  target=\"$1\"",
+    "  uri=\"$2\"",
+    "  ref=\"$3\"",
+    "  subpath=\"$4\"",
+    "  if [ -e \"$target\" ] && { [ -f \"$target\" ] || [ -n \"$(find \"$target\" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)\" ]; }; then",
+    "    echo \"Repository resource already present at $target\"",
+    "    return 0",
+    "  fi",
+    "  mkdir -p \"$(dirname \"$target\")\"",
+    "  tmp=\"${target}.tmp.$$\"",
+    "  rm -rf \"$tmp\"",
+    "  git init \"$tmp\" >/dev/null",
+    "  git -C \"$tmp\" remote add origin \"$uri\"",
+    "  git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"",
+    "  git -C \"$tmp\" checkout --detach FETCH_HEAD >/dev/null",
+    "  if [ -n \"$subpath\" ]; then",
+    "    if [ ! -e \"$tmp/$subpath\" ]; then",
+    "      echo \"Repository subpath not found: $subpath\" >&2",
+    "      rm -rf \"$tmp\"",
+    "      exit 1",
+    "    fi",
+    "    if [ -d \"$tmp/$subpath\" ]; then",
+    "      mkdir -p \"$target\"",
+    "      cp -a \"$tmp/$subpath/.\" \"$target/\"",
+    "    else",
+    "      rmdir \"$target\" 2>/dev/null || true",
+    "      cp -a \"$tmp/$subpath\" \"$target\"",
+    "    fi",
+    "    rm -rf \"$tmp\"",
+    "  else",
+    "    rmdir \"$target\" 2>/dev/null || true",
+    "    mv \"$tmp\" \"$target\"",
+    "  fi",
+    "}",
+  ];
+  for (const resource of resources) {
+    const url = new URL(resource.uri);
+    const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+    const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+    commands.push([
+      "clone_repository",
+      shellQuote(posixPath.join("/workspace", mountPath)),
+      shellQuote(resource.uri),
+      shellQuote(resource.ref),
+      shellQuote(resource.subpath ? normalizeManifestPath(resource.subpath) : ""),
+    ].join(" "));
+  }
+  return commands.join("\n");
+}
+
+export async function runModalRepositoryCloneHook(
+  session: SandboxSessionLike,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  context: SandboxLifecycleHookContext = { environment: {} },
+): Promise<void> {
+  const payload = { name: "modal-repository-clone", repositoryCount: resources.length };
+  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
+  try {
+    const command = modalRepositoryCloneCommand(resources);
+    if (session.exec) {
+      const result = await session.exec({
+        cmd: command,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 20_000,
+      });
+      assertSandboxCommandSucceeded(result, "Modal repository clone hook");
+    } else if (session.execCommand) {
+      const result = await session.execCommand({
+        cmd: command,
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 20_000,
+      });
+      assertSandboxCommandSucceeded(result, "Modal repository clone hook");
+    } else {
+      throw new Error("Sandbox session does not support command execution");
+    }
+    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload });
+  } catch (error) {
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.failed",
+      payload: {
+        ...payload,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+    throw error;
+  }
 }
 
 export function azureCliLoginCommand(): string {

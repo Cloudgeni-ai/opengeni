@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modalRepositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runModalRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -473,6 +473,73 @@ describe("runtime event normalization", () => {
     expect(serialized).not.toContain("githubInstallationId");
     expect(serialized).not.toContain("githubRepositoryId");
     expect(serialized).not.toContain("x-access-token");
+  });
+
+  test("keeps Modal repository resources out of SDK git repo materialization", () => {
+    const manifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }]);
+
+    expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
+    const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain("git_repo");
+    expect(serialized).not.toContain("githubInstallationId");
+    expect(serialized).not.toContain("githubRepositoryId");
+    expect(serialized).not.toContain("x-access-token");
+  });
+
+  test("clones Modal repository resources inside the sandbox without embedding credentials", () => {
+    const command = modalRepositoryCloneCommand([{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      subpath: "packages/api",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }]);
+
+    expect(command).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
+    expect(command).toContain("ensure_git");
+    expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
+    expect(command).toContain("clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'");
+    expect(command).not.toContain("githubInstallationId");
+    expect(command).not.toContain("githubRepositoryId");
+    expect(command).not.toContain("x-access-token");
+    expect(command).not.toContain("GH_TOKEN=");
+  });
+
+  test("runs Modal repository clone hook as a sandbox lifecycle hook", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const events: string[] = [];
+    await runModalRepositoryCloneHook({
+      execCommand: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { status: 0, output: "" };
+      },
+    } as any, [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }], {
+      environment: { GH_TOKEN: "secret-token" },
+      runAs: "sandbox",
+      onRuntimeEvent: (event) => {
+        events.push(event.type);
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.runAs).toBe("sandbox");
+    expect(calls[0]?.workdir).toBe("/workspace");
+    expect(String(calls[0]?.cmd)).toContain("git init");
+    expect(String(calls[0]?.cmd)).not.toContain("secret-token");
+    expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
   });
 
   test("keeps repository subpaths as git repo manifest subpaths", () => {
