@@ -229,11 +229,10 @@ export function documentOpenAIEmbeddingConfig(settings?: Settings): {
   }
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
-    const defaultQuery = settings.azureOpenaiApiVersion ? { "api-version": settings.azureOpenaiApiVersion } : undefined;
     return {
       apiKey: settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token",
       baseURL,
-      defaultQuery,
+      defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
       defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
         ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
         : undefined,
@@ -251,6 +250,18 @@ function azureDeploymentBaseUrl(settings: Settings): string {
     throw new Error("Azure OpenAI endpoint/deployment settings are incomplete");
   }
   return `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`;
+}
+
+function azureOpenAIDefaultQuery(
+  settings: Pick<Settings, "azureOpenaiApiVersion">,
+  baseURL: string,
+): Record<string, string> | undefined {
+  if (!settings.azureOpenaiApiVersion) return undefined;
+  const normalized = baseURL.replace(/\/+$/, "").toLowerCase();
+  if (normalized.endsWith("/openai/v1")) {
+    return undefined;
+  }
+  return { "api-version": settings.azureOpenaiApiVersion };
 }
 
 export async function createDocumentBase(db: Database, input: CreateDocumentBaseRequest & { accountId: string; workspaceId: string }): Promise<DocumentBase> {

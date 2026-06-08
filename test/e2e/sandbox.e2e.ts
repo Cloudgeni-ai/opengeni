@@ -55,8 +55,10 @@ describe("real Docker sandbox e2e", () => {
     }, { timeoutMs: 180_000 });
 
     const events = await sessionEvents(session.id);
-    const toolOutput = events.find((event) => event.type === "agent.toolCall.output");
-    expect(JSON.stringify(toolOutput?.payload ?? {})).toContain("sandbox-ok");
+    const toolOutputs = events
+      .filter((event) => event.type === "agent.toolCall.output")
+      .map((event) => JSON.stringify(event.payload ?? {}));
+    expect(toolOutputs.some((output) => output.includes("sandbox-ok"))).toBe(true);
     expect(events.some((event) => event.type === "agent.message.completed")).toBe(true);
   }, 240_000);
 

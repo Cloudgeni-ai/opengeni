@@ -121,12 +121,32 @@ describe("documents", () => {
       openaiProvider: "azure",
       azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
       azureOpenaiApiKey: "azure-key",
+      azureOpenaiApiVersion: "2025-04-01-preview",
       openaiApiKey: undefined,
       openaiBaseUrl: undefined,
     } as Parameters<typeof documentOpenAIEmbeddingConfig>[0]);
     expect(config).toMatchObject({
       apiKey: "azure-key",
       baseURL: "https://example.openai.azure.com/openai/v1",
+    });
+    expect(config.defaultQuery).toBeUndefined();
+  });
+
+  test("keeps Azure api-version for deployment-style document embedding base URLs", () => {
+    const config = documentOpenAIEmbeddingConfig({
+      openaiProvider: "azure",
+      azureOpenaiEndpoint: "https://example.openai.azure.com",
+      azureOpenaiDeployment: "gpt-5.5",
+      azureOpenaiApiKey: "azure-key",
+      azureOpenaiApiVersion: "2025-04-01-preview",
+      openaiApiKey: undefined,
+      openaiBaseUrl: undefined,
+    } as Parameters<typeof documentOpenAIEmbeddingConfig>[0]);
+
+    expect(config).toMatchObject({
+      apiKey: "azure-key",
+      baseURL: "https://example.openai.azure.com/openai/deployments/gpt-5.5",
+      defaultQuery: { "api-version": "2025-04-01-preview" },
     });
   });
 });

@@ -13,14 +13,27 @@ describe("Kubernetes rollback evidence", () => {
     const dir = mkdtempSync(join(tmpdir(), "opengeni-rollback-"));
     const rollback = writeJson(dir, "rollback-conformance.json", { ok: true });
     const forward = writeJson(dir, "forward-conformance.json", { ok: true });
+    const componentDigests = writeJson(dir, "component-digests.json", {
+      previous: {
+        api: digestA,
+        worker: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        web: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      },
+      current: {
+        api: digestB,
+        worker: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        web: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      },
+    });
     const out = join(dir, "rollback.json");
 
-    const result = runScript(out, rollback, forward, digestA, digestB);
+    const result = runScript(out, rollback, forward, digestA, digestB, ["--component-digests", componentDigests]);
 
     expect(result.status).toBe(0);
     const payload = JSON.parse(readFileSync(out, "utf8"));
     expect(payload.ok).toBe(true);
     expect(payload.checks[0].metrics.previousArtifactRestored).toBe(true);
+    expect(payload.checks[0].metrics.componentDigestEvidenceValid).toBe(true);
   });
 
   it("fails when forward-roll conformance failed", () => {
@@ -43,6 +56,7 @@ function runScript(
   forward: string,
   previousDigest: string,
   currentDigest: string,
+  extra: string[] = [],
 ): ReturnType<typeof spawnSync<string>> {
   return spawnSync("bun", [
     scriptPath,
@@ -52,6 +66,7 @@ function runScript(
     "--forward-roll-conformance", forward,
     "--rollback-seconds", "240",
     "--out", out,
+    ...extra,
   ], { encoding: "utf8" });
 }
 

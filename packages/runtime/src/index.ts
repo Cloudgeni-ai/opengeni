@@ -160,7 +160,7 @@ export function configureOpenAI(settings: Settings): void {
     setDefaultOpenAIClient(new OpenAI({
       apiKey,
       baseURL,
-      defaultQuery: settings.azureOpenaiApiVersion ? { "api-version": settings.azureOpenaiApiVersion } : undefined,
+      defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
       defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
         ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
         : undefined,
@@ -1393,6 +1393,18 @@ function azureDeploymentBaseUrl(settings: Settings): string {
     throw new Error("Azure OpenAI endpoint/deployment settings are incomplete");
   }
   return `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`;
+}
+
+export function azureOpenAIDefaultQuery(
+  settings: Pick<Settings, "azureOpenaiApiVersion">,
+  baseURL: string,
+): Record<string, string> | undefined {
+  if (!settings.azureOpenaiApiVersion) return undefined;
+  const normalized = baseURL.replace(/\/+$/, "").toLowerCase();
+  if (normalized.endsWith("/openai/v1")) {
+    return undefined;
+  }
+  return { "api-version": settings.azureOpenaiApiVersion };
 }
 
 function bundledSkillsDir(): string {

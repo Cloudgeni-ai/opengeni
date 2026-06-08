@@ -789,11 +789,13 @@ export function requiredRuntimeEnvVars(
   ];
   if (inferredOpenAiProvider(env) === "azure") {
     vars.push(
-      "OPENGENI_AZURE_OPENAI_BASE_URL",
+      env.OPENGENI_AZURE_OPENAI_BASE_URL ? "OPENGENI_AZURE_OPENAI_BASE_URL" : "OPENGENI_AZURE_OPENAI_ENDPOINT",
       "OPENGENI_AZURE_OPENAI_DEPLOYMENT",
-      "OPENGENI_AZURE_OPENAI_API_VERSION",
       "OPENGENI_AZURE_OPENAI_API_KEY",
     );
+    if (azureOpenAIApiVersionRequired(env)) {
+      vars.push("OPENGENI_AZURE_OPENAI_API_VERSION");
+    }
   } else {
     vars.push("OPENGENI_OPENAI_API_KEY");
   }
@@ -1348,10 +1350,16 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS", env.OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS ?? "low,medium,high,xhigh"),
     ...(inferredOpenAiProvider(env) === "azure"
       ? [
-        requiredEnv("OPENGENI_AZURE_OPENAI_BASE_URL", env.OPENGENI_AZURE_OPENAI_BASE_URL),
-        valueEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT),
+        env.OPENGENI_AZURE_OPENAI_BASE_URL
+          ? requiredEnv("OPENGENI_AZURE_OPENAI_BASE_URL", env.OPENGENI_AZURE_OPENAI_BASE_URL)
+          : requiredEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT),
+        ...(env.OPENGENI_AZURE_OPENAI_BASE_URL && env.OPENGENI_AZURE_OPENAI_ENDPOINT
+          ? [valueEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT)]
+          : []),
         requiredEnv("OPENGENI_AZURE_OPENAI_DEPLOYMENT", env.OPENGENI_AZURE_OPENAI_DEPLOYMENT),
-        requiredEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION),
+        azureOpenAIApiVersionRequired(env)
+          ? requiredEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION)
+          : valueEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION),
         requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
       ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
@@ -1426,6 +1434,11 @@ function inferredOpenAiProvider(env: Record<string, string | undefined>): "opena
     return "azure";
   }
   return "openai";
+}
+
+function azureOpenAIApiVersionRequired(env: Record<string, string | undefined>): boolean {
+  const baseUrl = env.OPENGENI_AZURE_OPENAI_BASE_URL?.replace(/\/+$/, "").toLowerCase();
+  return !baseUrl || !baseUrl.endsWith("/openai/v1");
 }
 
 function platformRuntimeEnv(contract: DeploymentContract, key: string): string | undefined {

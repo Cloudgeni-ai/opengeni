@@ -372,6 +372,59 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain("digest: \"sha256:web\"");
   });
 
+  test("does not require legacy Azure api-version for Azure OpenAI v1 base URLs", () => {
+    const contract = contractForProfile("azure-managed", "managed-saas-staging");
+
+    expect(requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/",
+    })).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION");
+    expect(requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/deployments/gpt-5.5",
+    })).toContain("OPENGENI_AZURE_OPENAI_API_VERSION");
+
+    const artifacts = generateRuntimeArtifacts(contract, {
+      temporal_host: { value: "opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "DefaultEndpointsProtocol=https;AccountName=files;AccountKey=secret", sensitive: true },
+      helm_set_values: { value: {} },
+    }, {
+      OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
+      OPENGENI_DELEGATION_SECRET: "delegation",
+      OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_RESEND_API_KEY: "resend",
+      OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
+      OPENGENI_GITHUB_APP_ID: "1",
+      OPENGENI_GITHUB_CLIENT_ID: "github-client",
+      OPENGENI_GITHUB_CLIENT_SECRET: "github-secret",
+      OPENGENI_GITHUB_APP_SLUG: "opengeni-staging",
+      OPENGENI_GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\\ntest\\n-----END PRIVATE KEY-----",
+      OPENGENI_STRIPE_SECRET_KEY: "sk_test",
+      OPENGENI_STRIPE_PUBLISHABLE_KEY: "pk_test",
+      OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+      OPENGENI_MODEL_PRICING_JSON: "{\"gpt-5.5\":{\"inputMicrosPerMillionTokens\":5000000,\"cachedInputMicrosPerMillionTokens\":500000,\"outputMicrosPerMillionTokens\":30000000,\"marginBps\":2500}}",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_OPENAI_MODEL: "gpt-5.5",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.5",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/",
+      OPENGENI_AZURE_OPENAI_DEPLOYMENT: "gpt-5.5",
+      OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
+      OPENGENI_IMAGE_TAG: "release-1",
+      OPENGENI_API_IMAGE_DIGEST: "sha256:api",
+      OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
+      OPENGENI_WEB_IMAGE_DIGEST: "sha256:web",
+      OPENGENI_MODAL_APP_NAME: "opengeni-staging",
+      OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
+      OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+    });
+
+    expect(artifacts.missingEnvVars).toEqual([]);
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_AZURE_OPENAI_BASE_URL=https://example.openai.azure.com/openai/v1/");
+    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION=");
+  });
+
   test("generates preview managed runtime artifacts without external fixture secrets", () => {
     const contract = contractForProfile("preview-pr");
     const artifacts = generateRuntimeArtifacts(contract, {

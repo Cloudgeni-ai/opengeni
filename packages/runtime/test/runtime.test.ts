@@ -1,11 +1,29 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 
 describe("runtime event normalization", () => {
+  test("does not send legacy Azure api-version query for v1 base URLs", () => {
+    const query = azureOpenAIDefaultQuery(
+      { azureOpenaiApiVersion: "2025-04-01-preview" },
+      "https://example.openai.azure.com/openai/v1/",
+    );
+
+    expect(query).toBeUndefined();
+  });
+
+  test("keeps Azure api-version query for deployment-style base URLs", () => {
+    const query = azureOpenAIDefaultQuery(
+      { azureOpenaiApiVersion: "2025-04-01-preview" },
+      "https://example.openai.azure.com/openai/deployments/gpt-5.5",
+    );
+
+    expect(query).toEqual({ "api-version": "2025-04-01-preview" });
+  });
+
   test("maps core SDK text deltas into session deltas", () => {
     const [event] = normalizeSdkEvent(new RunRawModelStreamEvent({
       type: "output_text_delta",
