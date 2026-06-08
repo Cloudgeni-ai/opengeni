@@ -48,6 +48,7 @@
     "operational:private-ops": "bun scripts/check-private-ops-boundary.ts",
     "operational:readiness": "bun scripts/check-operational-readiness.ts",
     "operational:rollback": "bun scripts/kubernetes-rollback-evidence.ts",
+    "production:canary": "bun scripts/check-production-canary-evidence.ts",
     "release:evidence-check": "bun scripts/check-release-evidence.ts",
     "stripe:checkout-live-smoke": "bun scripts/stripe-checkout-live-smoke.ts",
     "stripe:live-readiness": "bun scripts/stripe-live-readiness.ts",

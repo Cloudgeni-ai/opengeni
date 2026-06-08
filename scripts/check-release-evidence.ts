@@ -127,10 +127,13 @@ for (const gate of manifest.gates) {
       failures.push(`required gate ${gate.id} evidence file does not exist: ${path}`);
       continue;
     }
-    const evidenceFailure = failedJsonEvidence(path);
+    const evidenceFailure = failedJsonEvidence(path, gate, manifest);
     if (evidenceFailure) {
       failures.push(`required gate ${gate.id} evidence ${path} failed: ${evidenceFailure}`);
     }
+  }
+  if (gate.id === "production-canary" && gate.status === "passed" && gate.evidence.every((path) => !path.endsWith(".json"))) {
+    failures.push("required gate production-canary must include structured JSON canary evidence");
   }
 }
 
@@ -256,7 +259,7 @@ function gitDirty(): boolean {
   return result.stdout.trim().length > 0;
 }
 
-function failedJsonEvidence(path: string): string | null {
+function failedJsonEvidence(path: string, gate: EvidenceManifest["gates"][number], manifest: EvidenceManifest): string | null {
   if (!path.endsWith(".json")) {
     return null;
   }
@@ -273,6 +276,86 @@ function failedJsonEvidence(path: string): string | null {
     const failed = parsed.results.filter((result) => result && typeof result === "object" && "status" in result && result.status === "failed");
     if (failed.length > 0) {
       return `${failed.length} result(s) are failed`;
+    }
+  }
+  if (gate.id === "production-canary") {
+    return productionCanaryEvidenceFailure(parsed, manifest);
+  }
+  return null;
+}
+
+function productionCanaryEvidenceFailure(parsed: unknown, manifest: EvidenceManifest): string | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "production canary evidence must be a JSON object";
+  }
+  const record = parsed as Record<string, unknown>;
+  const environment = stringValue(record.environment);
+  if (environment !== "production") {
+    return `production canary environment is ${environment ?? "<missing>"}, expected production`;
+  }
+  const baseUrl = stringValue(record.baseUrl);
+  if (!baseUrl) {
+    return "production canary baseUrl is missing";
+  }
+  try {
+    const parsedUrl = new URL(baseUrl);
+    if (parsedUrl.protocol !== "https:") {
+      return `production canary baseUrl must be https, got ${parsedUrl.protocol}`;
+    }
+  } catch (error) {
+    return `production canary baseUrl is invalid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const gitSha = stringValue(record.gitSha);
+  if (gitSha !== manifest.gitSha) {
+    return `production canary gitSha ${gitSha ?? "<missing>"} does not match manifest ${manifest.gitSha}`;
+  }
+  const imageFailure = productionCanaryImageFailure(record.images, manifest.images);
+  if (imageFailure) {
+    return imageFailure;
+  }
+  const required = [
+    "production-deployment",
+    "production-health",
+    "managed-canary-smoke",
+    "production-conformance",
+    "billing-readonly",
+    "observability-canary",
+    "rollback-readiness",
+  ];
+  const results = Array.isArray(record.results) ? record.results : Array.isArray(record.checks) ? record.checks : [];
+  for (const id of required) {
+    const check = results.find((item) => item && typeof item === "object" && !Array.isArray(item) && (item as Record<string, unknown>).id === id) as Record<string, unknown> | undefined;
+    if (!check) {
+      return `production canary evidence is missing ${id}`;
+    }
+    if (check.status !== "passed") {
+      return `production canary check ${id} is ${stringValue(check.status) ?? "<missing>"}`;
+    }
+  }
+  return null;
+}
+
+function productionCanaryImageFailure(raw: unknown, manifestImages: EvidenceManifest["images"]): string | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return "production canary images must be an object";
+  }
+  const images = raw as Record<string, unknown>;
+  for (const component of ["api", "worker", "web"]) {
+    const manifestImage = manifestImages[component];
+    if (!manifestImage) {
+      return `manifest is missing ${component} image required for production canary`;
+    }
+    const image = images[component];
+    if (!image || typeof image !== "object" || Array.isArray(image)) {
+      return `production canary image ${component} is missing`;
+    }
+    const digest = stringValue((image as Record<string, unknown>).digest);
+    if (digest !== manifestImage.digest) {
+      return `production canary image ${component} digest ${digest ?? "<missing>"} does not match manifest ${manifestImage.digest}`;
+    }
+    const ref = stringValue((image as Record<string, unknown>).image);
+    if (!ref || !ref.endsWith(`@${digest}`)) {
+      return `production canary image ${component} is not digest-pinned`;
     }
   }
   return null;

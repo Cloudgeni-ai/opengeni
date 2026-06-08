@@ -160,6 +160,23 @@ and forward roll with conformance after each step, configured observability and
 alerts, and a private-ops boundary proving public PRs cannot access deployment
 secrets. A skipped or missing operational gate blocks customer-ready status.
 
+Production canary evidence is also structured and fail-closed. A release
+manifest cannot satisfy the `production-canary` gate with a generic
+`{"ok":true}` file. Validate the canary bundle before attaching it:
+
+```bash
+bun run production:canary -- \
+  --evidence .agent/generated/production/canary.json \
+  --expected-git-sha "$(git rev-parse HEAD)"
+```
+
+The canary evidence must use `environment=production`, an HTTPS production base
+URL, the exact release Git SHA, digest-pinned API/worker/web images matching the
+release manifest, and passed checks for private production deployment,
+production health/client config, internal managed canary signup/API-key smoke,
+full conformance with no skipped subsystems, read-only billing visibility with
+no live charge creation, observability, and rollback readiness.
+
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
 ```bash

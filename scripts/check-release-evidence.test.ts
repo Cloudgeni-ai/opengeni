@@ -97,6 +97,42 @@ describe("release evidence checker", () => {
     expect(result.stderr).toContain("missing mandatory gate stripe-live-mode-readonly-preflight");
     expect(result.stderr).toContain("missing mandatory gate staging-load-soak");
   });
+
+  it("fails passed production canary gates with weak JSON evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const evidence = join(dir, "production-canary.json");
+    writeFileSync(evidence, JSON.stringify({ ok: true }));
+    const manifest = writeManifest(dir, [{
+      id: "production-canary",
+      status: "passed",
+      requiredFor: ["production-canary"],
+      evidence: [evidence],
+    }]);
+
+    const result = runChecker("--manifest", manifest, "--require", "production-canary", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("production canary environment is <missing>");
+  });
+
+  it("passes production canary scope with strict canary evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const marker = join(dir, "marker.json");
+    writeFileSync(marker, JSON.stringify({ ok: true }));
+    const evidence = join(dir, "production-canary.json");
+    writeFileSync(evidence, JSON.stringify(productionCanaryEvidence(marker)));
+    const manifest = writeManifest(dir, [{
+      id: "production-canary",
+      status: "passed",
+      requiredFor: ["production-canary"],
+      evidence: [evidence],
+    }]);
+
+    const result = runChecker("--manifest", manifest, "--require", "production-canary", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).gatesChecked).toEqual(["production-canary"]);
+  });
 });
 
 function runChecker(...args: string[]): ReturnType<typeof spawnSync<string>> {
@@ -113,8 +149,49 @@ function writeManifest(dir: string, gates: unknown[]): string {
         image: `registry.example/opengeni-api:test@${digest}`,
         digest,
       },
+      worker: {
+        image: `registry.example/opengeni-worker:test@${digest}`,
+        digest,
+      },
+      web: {
+        image: `registry.example/opengeni-web:test@${digest}`,
+        digest,
+      },
     },
     gates,
   }));
   return manifest;
+}
+
+function productionCanaryEvidence(marker: string) {
+  return {
+    ok: true,
+    environment: "production",
+    baseUrl: "https://app.opengeni.ai",
+    gitSha: "4ecb7a7",
+    generatedAt: "2026-06-08T00:00:00.000Z",
+    images: {
+      api: {
+        image: `registry.example/opengeni-api:test@${digest}`,
+        digest,
+      },
+      worker: {
+        image: `registry.example/opengeni-worker:test@${digest}`,
+        digest,
+      },
+      web: {
+        image: `registry.example/opengeni-web:test@${digest}`,
+        digest,
+      },
+    },
+    results: [
+      "production-deployment",
+      "production-health",
+      "managed-canary-smoke",
+      "production-conformance",
+      "billing-readonly",
+      "observability-canary",
+      "rollback-readiness",
+    ].map((id) => ({ id, status: "passed", evidence: [marker] })),
+  };
 }
