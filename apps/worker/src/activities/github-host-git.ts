@@ -9,28 +9,40 @@ type HostGitEnvKey = (typeof HOST_GIT_ENV_KEYS)[number];
 
 let hostGitEnvironmentQueue: Promise<void> = Promise.resolve();
 
-export async function withHostGitHubAppRepositoryAuth<T>(
-  sandboxEnvironment: Record<string, string>,
-  fn: () => Promise<T>,
-): Promise<T> {
+export async function enterHostGitHubAppRepositoryAuth(sandboxEnvironment: Record<string, string>): Promise<() => void> {
   const hostEnvironment = hostGitEnvironmentFromSandboxEnvironment(sandboxEnvironment);
   if (!hostEnvironment) {
-    return await fn();
+    return () => undefined;
   }
 
   const previous = hostGitEnvironmentQueue;
-  let release!: () => void;
+  let releaseQueue!: () => void;
   hostGitEnvironmentQueue = new Promise<void>((resolve) => {
-    release = resolve;
+    releaseQueue = resolve;
   });
   await previous;
 
   const original = snapshotHostGitEnvironment();
+  applyHostGitEnvironment(hostEnvironment);
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    restoreHostGitEnvironment(original);
+    releaseQueue();
+  };
+}
+
+export async function withHostGitHubAppRepositoryAuth<T>(
+  sandboxEnvironment: Record<string, string>,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const release = await enterHostGitHubAppRepositoryAuth(sandboxEnvironment);
   try {
-    applyHostGitEnvironment(hostEnvironment);
     return await fn();
   } finally {
-    restoreHostGitEnvironment(original);
     release();
   }
 }

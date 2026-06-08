@@ -28,7 +28,7 @@ import {
   mergeToolRefs,
 } from "./common";
 import { sandboxEnvironmentForRun } from "./environment";
-import { withHostGitHubAppRepositoryAuth } from "./github-host-git";
+import { enterHostGitHubAppRepositoryAuth } from "./github-host-git";
 import { segmentInput } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -136,54 +136,58 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       });
       const runInput = await segmentInput(db, runtime, agent, trigger);
       await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
-      const stream = await withHostGitHubAppRepositoryAuth(sandboxEnvironment, async () =>
-        await runtime.runStream(agent, runInput, runSettings, {
+      let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>>;
+      let responseUsageCount = 0;
+      const releaseHostGitAuth = await enterHostGitHubAppRepositoryAuth(sandboxEnvironment);
+      try {
+        stream = await runtime.runStream(agent, runInput, runSettings, {
           sandboxEnvironment,
           onRuntimeEvent: async (event) => {
             await publish!([{ type: event.type, payload: event.payload }], true);
           },
-        }),
-      );
-      batcher = createRuntimeBatcher(async (events) => {
-        await publish!(events);
-      });
+        });
+        batcher = createRuntimeBatcher(async (events) => {
+          await publish!(events);
+        });
 
-      const iterator = stream.toStream()[Symbol.asyncIterator]();
-      let streamDone = false;
-      let responseUsageCount = 0;
-      try {
-        while (true) {
-          const next = await nextStreamEvent(iterator, activityContext);
-          if (next.done) {
-            streamDone = true;
-            break;
+        const iterator = stream.toStream()[Symbol.asyncIterator]();
+        let streamDone = false;
+        try {
+          while (true) {
+            const next = await nextStreamEvent(iterator, activityContext);
+            if (next.done) {
+              streamDone = true;
+              break;
+            }
+            const responseUsage = modelResponseUsageFromSdkEvent(next.value);
+            if (responseUsage) {
+              responseUsageCount += 1;
+              await recordModelUsageAndDebitCredits(settings, db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId,
+                model: turn.model,
+                usage: responseUsage.usage,
+                sourceKey: responseUsage.responseId ?? `response-${responseUsageCount}`,
+              });
+              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
+            }
+            const normalized = normalizeSdkEvent(next.value);
+            for (const event of normalized) {
+              await batcher.push(event);
+            }
           }
-          const responseUsage = modelResponseUsageFromSdkEvent(next.value);
-          if (responseUsage) {
-            responseUsageCount += 1;
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              model: turn.model,
-              usage: responseUsage.usage,
-              sourceKey: responseUsage.responseId ?? `response-${responseUsageCount}`,
-            });
-            await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
-          }
-          const normalized = normalizeSdkEvent(next.value);
-          for (const event of normalized) {
-            await batcher.push(event);
+        } finally {
+          if (!streamDone) {
+            await iterator.return?.();
           }
         }
+        await batcher.flush();
+        await stream.completed.catch(() => undefined);
       } finally {
-        if (!streamDone) {
-          await iterator.return?.();
-        }
+        releaseHostGitAuth();
       }
-      await batcher.flush();
-      await stream.completed.catch(() => undefined);
       if (responseUsageCount === 0) {
         await recordModelUsageAndDebitCredits(settings, db, {
           accountId: input.accountId,
