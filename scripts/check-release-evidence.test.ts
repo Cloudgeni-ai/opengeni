@@ -178,6 +178,55 @@ describe("release evidence checker", () => {
       "preview-web-console-smoke",
     ]);
   });
+
+  it("fails staging scope when deployment evidence is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const evidence = join(dir, "conformance.json");
+    writeFileSync(evidence, JSON.stringify({ ok: true, results: [{ id: "health", status: "passed" }] }));
+    const manifest = writeManifest(dir, [{
+      id: "staging-conformance",
+      status: "passed",
+      requiredFor: ["staging"],
+      evidence: [evidence],
+    }]);
+
+    const result = runChecker("--manifest", manifest, "--require", "staging", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("missing mandatory gate staging-deployment");
+  });
+
+  it("passes staging scope with strict deployment evidence and all mandatory staging gates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const marker = join(dir, "marker.json");
+    writeFileSync(marker, JSON.stringify({ ok: true }));
+    const stagingDeployment = join(dir, "staging-deployment.json");
+    writeFileSync(stagingDeployment, JSON.stringify(stagingDeploymentEvidence()));
+    const manifest = writeManifest(dir, [
+      gate("staging-deployment", stagingDeployment, "staging"),
+      gate("staging-managed-smoke", marker, "staging"),
+      gate("staging-stripe-checkout", marker, "staging"),
+      gate("staging-conformance", marker, "staging"),
+      gate("staging-usage-ledger", marker, "staging"),
+      gate("staging-github-private-resource", marker, "staging"),
+      gate("staging-breaking-unscoped-routes", marker, "staging"),
+      gate("staging-web-console-smoke", marker, "staging"),
+    ]);
+
+    const result = runChecker("--manifest", manifest, "--require", "staging", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).gatesChecked).toEqual([
+      "staging-deployment",
+      "staging-managed-smoke",
+      "staging-stripe-checkout",
+      "staging-conformance",
+      "staging-usage-ledger",
+      "staging-github-private-resource",
+      "staging-breaking-unscoped-routes",
+      "staging-web-console-smoke",
+    ]);
+  });
 });
 
 function runChecker(...args: string[]): ReturnType<typeof spawnSync<string>> {
@@ -241,11 +290,11 @@ function productionCanaryEvidence(marker: string) {
   };
 }
 
-function gate(id: string, evidence: string) {
+function gate(id: string, evidence: string, scope = "preview") {
   return {
     id,
     status: "passed",
-    requiredFor: ["preview"],
+    requiredFor: [scope],
     evidence: [evidence],
   };
 }
@@ -285,6 +334,30 @@ function previewDeploymentEvidence() {
     migration: {
       completed: true,
       image: `registry.example/opengeni-api:test@${digest}`,
+    },
+  };
+}
+
+function stagingDeploymentEvidence() {
+  return {
+    ok: true,
+    environment: "staging",
+    baseUrl: "https://staging.app.opengeni.ai",
+    gitSha: "4ecb7a7",
+    generatedAt: "2026-06-08T00:00:00.000Z",
+    images: {
+      api: { image: `registry.example/opengeni-api:test@${digest}`, digest },
+      worker: { image: `registry.example/opengeni-worker:test@${digest}`, digest },
+      web: { image: `registry.example/opengeni-web:test@${digest}`, digest },
+    },
+    deployments: {
+      api: { replicas: 2, readyReplicas: 2, image: `registry.example/opengeni-api:test@${digest}` },
+      worker: { replicas: 2, readyReplicas: 2, image: `registry.example/opengeni-worker:test@${digest}` },
+      web: { replicas: 2, readyReplicas: 2, image: `registry.example/opengeni-web:test@${digest}` },
+    },
+    privateOps: {
+      workflowRunId: "27126701275",
+      workflowRunUrl: "https://github.com/Cloudgeni-ai/opengeni-ops/actions/runs/27126701275",
     },
   };
 }

@@ -36,6 +36,7 @@ const mandatoryGateIdsByScope: Record<GateScope, string[]> = {
     "preview-web-console-smoke",
   ],
   staging: [
+    "staging-deployment",
     "staging-managed-smoke",
     "staging-stripe-checkout",
     "staging-conformance",
@@ -285,6 +286,9 @@ function failedJsonEvidence(path: string, gate: EvidenceManifest["gates"][number
   if (gate.id === "preview-deployment") {
     return previewDeploymentEvidenceFailure(parsed, manifest);
   }
+  if (gate.id === "staging-deployment") {
+    return stagingDeploymentEvidenceFailure(parsed, manifest);
+  }
   return null;
 }
 
@@ -357,6 +361,67 @@ function previewDeploymentEvidenceFailure(parsed: unknown, manifest: EvidenceMan
   const migrationImage = stringValue(migration.image);
   if (!migrationImage || !migrationImage.includes("@sha256:")) {
     return "preview deployment migration image is not digest-pinned";
+  }
+  return null;
+}
+
+function stagingDeploymentEvidenceFailure(parsed: unknown, manifest: EvidenceManifest): string | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "staging deployment evidence must be a JSON object";
+  }
+  const record = parsed as Record<string, unknown>;
+  const environment = stringValue(record.environment);
+  if (environment !== "staging") {
+    return `staging deployment environment is ${environment ?? "<missing>"}, expected staging`;
+  }
+  const baseUrl = stringValue(record.baseUrl);
+  if (!baseUrl) {
+    return "staging deployment baseUrl is missing";
+  }
+  try {
+    const parsedUrl = new URL(baseUrl);
+    if (parsedUrl.protocol !== "https:") {
+      return `staging deployment baseUrl must be https, got ${parsedUrl.protocol}`;
+    }
+  } catch (error) {
+    return `staging deployment baseUrl is invalid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const gitSha = stringValue(record.gitSha);
+  if (gitSha !== manifest.gitSha) {
+    return `staging deployment gitSha ${gitSha ?? "<missing>"} does not match manifest ${manifest.gitSha}`;
+  }
+  const imageFailure = productionCanaryImageFailure(record.images, manifest.images);
+  if (imageFailure) {
+    return imageFailure.replace("production canary", "staging deployment");
+  }
+  const deployments = objectValue(record.deployments);
+  for (const component of ["api", "worker", "web"]) {
+    const deployment = objectValue(deployments[component]);
+    const ready = numberValue(deployment.readyReplicas);
+    const replicas = numberValue(deployment.replicas);
+    const image = stringValue(deployment.image);
+    if (!replicas || replicas < 1) {
+      return `staging deployment ${component} replicas is ${replicas ?? "<missing>"}`;
+    }
+    if (!ready || ready < replicas) {
+      return `staging deployment ${component} readyReplicas is ${ready ?? "<missing>"}, expected ${replicas}`;
+    }
+    if (!image || !image.includes("@sha256:")) {
+      return `staging deployment ${component} image is not digest-pinned`;
+    }
+    const manifestImage = manifest.images[component];
+    if (manifestImage && image !== manifestImage.image) {
+      return `staging deployment ${component} image ${image} does not match manifest ${manifestImage.image}`;
+    }
+  }
+  const privateOps = objectValue(record.privateOps);
+  const workflowRunId = stringValue(privateOps.workflowRunId) ?? stringValue(record.workflowRunId);
+  const workflowRunUrl = stringValue(privateOps.workflowRunUrl) ?? stringValue(record.workflowRunUrl);
+  if (!workflowRunId) {
+    return "staging deployment private ops workflowRunId is missing";
+  }
+  if (!workflowRunUrl) {
+    return "staging deployment private ops workflowRunUrl is missing";
   }
   return null;
 }
