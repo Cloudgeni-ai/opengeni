@@ -28,7 +28,6 @@ import {
   mergeToolRefs,
 } from "./common";
 import { sandboxEnvironmentForRun } from "./environment";
-import { materializeGitHubRepositoriesForRun, type GitHubRepositoryMaterializationSet } from "./repositories";
 import { segmentInput } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -59,7 +58,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    let repositoryMaterializations: GitHubRepositoryMaterializationSet | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
     try {
@@ -122,7 +120,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       const turnTools = mergeToolRefs(session.tools, turn.tools);
       const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources);
-      repositoryMaterializations = await materializeGitHubRepositoriesForRun(runSettings, turnResources);
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
       preparedTools = await runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
@@ -134,7 +131,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         reasoningEffort: turn.reasoningEffort,
         sandboxEnvironment,
         fileResourceDownloads,
-        repositoryMaterializations: repositoryMaterializations.materializations,
         mcpServers: preparedTools.mcpServers,
       });
       const runInput = await segmentInput(db, runtime, agent, trigger);
@@ -284,7 +280,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         error: activityError,
       });
       await preparedTools?.close().catch(() => undefined);
-      await repositoryMaterializations?.cleanup().catch(() => undefined);
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }

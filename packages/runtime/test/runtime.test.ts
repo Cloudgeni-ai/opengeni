@@ -455,37 +455,40 @@ describe("runtime event normalization", () => {
     });
   });
 
-  test("uses local repository materializations without embedding clone credentials in the manifest", () => {
+  test("keeps GitHub App repository resources as git repo manifest entries", () => {
     const manifest = buildManifest(testSettings(), [{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
       ref: "main",
-    }], undefined, [], [{
-      mountPath: "repos/acme/private",
-      sourcePath: "/tmp/opengeni-private-repo",
-      sourceType: "directory",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
     }]);
-    expect(manifest.entries["repos/acme/private"]).toEqual({
-      type: "local_dir",
-      src: "/tmp/opengeni-private-repo",
+    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+      type: "git_repo",
+      host: "github.com",
+      repo: "acme/private",
+      ref: "main",
     });
-    expect(JSON.stringify(manifest)).not.toContain("x-access-token");
+    const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain("githubInstallationId");
+    expect(serialized).not.toContain("githubRepositoryId");
+    expect(serialized).not.toContain("x-access-token");
   });
 
-  test("supports file subpath repository materializations", () => {
+  test("keeps repository subpaths as git repo manifest subpaths", () => {
     const manifest = buildManifest(testSettings(), [{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
       ref: "main",
       mountPath: "repos/acme/private/README.md",
-    }], undefined, [], [{
-      mountPath: "repos/acme/private/README.md",
-      sourcePath: "/tmp/opengeni-private-repo/README.md",
-      sourceType: "file",
+      subpath: "README.md",
     }]);
-    expect(manifest.entries["repos/acme/private/README.md"]).toEqual({
-      type: "local_file",
-      src: "/tmp/opengeni-private-repo/README.md",
+    expect(manifest.entries["repos/acme/private/README.md"]).toMatchObject({
+      type: "git_repo",
+      host: "github.com",
+      repo: "acme/private",
+      ref: "main",
+      subpath: "README.md",
     });
   });
 

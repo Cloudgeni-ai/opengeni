@@ -31,7 +31,6 @@ import {
   gitRepo,
   inContainerMountStrategy,
   localDir,
-  localFile,
   s3Mount,
   skills,
   type SandboxClient,
@@ -115,12 +114,6 @@ export type SandboxFileDownload = {
   sizeBytes?: number;
 };
 
-export type SandboxRepositoryMaterialization = {
-  mountPath: string;
-  sourcePath: string;
-  sourceType: "directory" | "file";
-};
-
 export type OpenGeniRuntime = {
   configure: (settings: Settings) => void;
   buildAgent: (settings: Settings, resources: ResourceRef[], options?: BuildAgentOptions) => Agent<any, any>;
@@ -183,7 +176,6 @@ export type BuildAgentOptions = {
   reasoningEffort?: ReasoningEffort;
   sandboxEnvironment?: Record<string, string>;
   fileResourceDownloads?: SandboxFileDownload[];
-  repositoryMaterializations?: SandboxRepositoryMaterialization[];
   mcpServers?: MCPServer[];
 };
 
@@ -218,7 +210,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
-    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads, options.repositoryMaterializations),
+    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
     ...(runAs ? { runAs } : {}),
     capabilities: [
       ...Capabilities.default(),
@@ -941,26 +933,21 @@ export function buildManifest(
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
-  repositoryMaterializations: SandboxRepositoryMaterialization[] = [],
 ): Manifest {
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [download.fileId, download]));
-  const repositoriesByMountPath = new Map(normalizeSandboxRepositoryMaterializations(repositoryMaterializations).map((materialization) => [materialization.mountPath, materialization]));
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
       const host = url.hostname.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
-      const materialization = repositoriesByMountPath.get(mountPath);
-      entries[mountPath] = materialization
-        ? sandboxRepositorySource(materialization)
-        : gitRepo({
-          host,
-          repo,
-          ref: resource.ref,
-          ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
-        });
+      entries[mountPath] = gitRepo({
+        host,
+        repo,
+        ref: resource.ref,
+        ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
+      });
       continue;
     }
     if (resource.kind === "file") {
@@ -976,13 +963,6 @@ export function buildManifest(
     entries,
     environment,
   });
-}
-
-function sandboxRepositorySource(materialization: SandboxRepositoryMaterialization): any {
-  if (materialization.sourceType === "file") {
-    return localFile({ src: materialization.sourcePath });
-  }
-  return localDir({ src: materialization.sourcePath });
 }
 
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
@@ -1119,13 +1099,6 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
       mountPath,
     };
   });
-}
-
-function normalizeSandboxRepositoryMaterializations(materializations: SandboxRepositoryMaterialization[]): SandboxRepositoryMaterialization[] {
-  return materializations.map((materialization) => ({
-    ...materialization,
-    mountPath: normalizeManifestPath(materialization.mountPath),
-  }));
 }
 
 function assertSafeSandboxFilename(filename: string, fileId: string): void {

@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
@@ -32,7 +29,6 @@ import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
-import { materializeGitHubRepositoriesForRun } from "../../apps/worker/src/activities/repositories";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
 describe("worker activities integration", () => {
@@ -499,54 +495,6 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("preclones GitHub App repository resources as local manifest materializations", async () => {
-    const tempRoot = await mkdtemp(join(tmpdir(), "opengeni-github-materialization-test-"));
-    try {
-      const origin = join(tempRoot, "origin");
-      await mkdir(origin);
-      runGit(["init"], origin);
-      runGit(["config", "user.name", "OpenGeni Test"], origin);
-      runGit(["config", "user.email", "test@example.com"], origin);
-      await writeFile(join(origin, "README.md"), "hello from repo\n");
-      runGit(["add", "README.md"], origin);
-      runGit(["commit", "-m", "initial"], origin);
-      runGit(["branch", "-M", "main"], origin);
-
-      let tokenInput: unknown;
-      const resource: ResourceRef = {
-        kind: "repository",
-        uri: `file://${origin}`,
-        ref: "main",
-        mountPath: "repos/acme/private",
-        githubInstallationId: 123,
-        githubRepositoryId: 456,
-      };
-      const materialized = await materializeGitHubRepositoriesForRun(testSettings({ sandboxBackend: "modal" }), [resource], {
-        createInstallationToken: async (_settings, input) => {
-          tokenInput = input;
-          return "installation-token";
-        },
-      });
-      try {
-        expect(tokenInput).toEqual({ installationId: 123, repositoryIds: [456] });
-        expect(materialized.materializations).toHaveLength(1);
-        expect(materialized.materializations[0]).toMatchObject({
-          mountPath: "repos/acme/private",
-          sourceType: "directory",
-        });
-        const sourcePath = materialized.materializations[0]!.sourcePath;
-        expect(await Bun.file(join(sourcePath, "README.md")).text()).toBe("hello from repo\n");
-        expect(JSON.stringify(materialized.materializations)).not.toContain("installation-token");
-        await materialized.cleanup();
-        await expect(stat(sourcePath)).rejects.toThrow();
-      } finally {
-        await materialized.cleanup();
-      }
-    } finally {
-      await rm(tempRoot, { recursive: true, force: true });
-    }
-  });
-
   test("attaches configured MCP tools and executes a prefixed tool call during a run", async () => {
     const mcp = startTestMcpServer();
     try {
@@ -963,17 +911,4 @@ async function createOwnedScheduledTask(
     workspaceId: grant.workspaceId,
     ...input,
   });
-}
-
-function runGit(args: string[], cwd: string): void {
-  const result = Bun.spawnSync(["git", ...args], {
-    cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (result.exitCode === 0) {
-    return;
-  }
-  const stderr = new TextDecoder().decode(result.stderr).trim();
-  throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
 }
