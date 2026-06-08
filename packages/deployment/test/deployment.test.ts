@@ -409,6 +409,7 @@ describe("deployment contract", () => {
       OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-5.5",
       OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/",
       OPENGENI_AZURE_OPENAI_DEPLOYMENT: "gpt-5.5",
+      OPENGENI_AZURE_OPENAI_API_VERSION: "2025-04-01-preview",
       OPENGENI_AZURE_OPENAI_API_KEY: "azure-openai",
       OPENGENI_IMAGE_TAG: "release-1",
       OPENGENI_API_IMAGE_DIGEST: "sha256:api",

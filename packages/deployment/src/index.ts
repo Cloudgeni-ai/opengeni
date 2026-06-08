@@ -1357,9 +1357,9 @@ function runtimeEnvValues(
           ? [valueEnv("OPENGENI_AZURE_OPENAI_ENDPOINT", env.OPENGENI_AZURE_OPENAI_ENDPOINT)]
           : []),
         requiredEnv("OPENGENI_AZURE_OPENAI_DEPLOYMENT", env.OPENGENI_AZURE_OPENAI_DEPLOYMENT),
-        azureOpenAIApiVersionRequired(env)
-          ? requiredEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION)
-          : valueEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION),
+        ...(azureOpenAIApiVersionRequired(env)
+          ? [requiredEnv("OPENGENI_AZURE_OPENAI_API_VERSION", env.OPENGENI_AZURE_OPENAI_API_VERSION)]
+          : []),
         requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
       ]
       : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
