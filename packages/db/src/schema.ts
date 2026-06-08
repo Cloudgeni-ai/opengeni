@@ -182,3 +182,87 @@ export const scheduledTaskRuns = pgTable("scheduled_task_runs", {
   taskCreated: index("scheduled_task_runs_task_created_idx").on(table.taskId, table.createdAt),
   session: index("scheduled_task_runs_session_idx").on(table.sessionId),
 }));
+
+export const packInstallations = pgTable("pack_installations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  packId: text("pack_id").notNull(),
+  status: text("status").notNull().default("active"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  packId: uniqueIndex("pack_installations_pack_id_idx").on(table.packId),
+  status: index("pack_installations_status_idx").on(table.status),
+}));
+
+export const capabilityCatalogItems = pgTable("capability_catalog_items", {
+  id: text("id").primaryKey(),
+  kind: text("kind").notNull(),
+  source: text("source").notNull().default("manual"),
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category").notNull().default("custom"),
+  tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  homepageUrl: text("homepage_url"),
+  endpointUrl: text("endpoint_url"),
+  installUrl: text("install_url"),
+  authModel: text("auth_model"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  kind: index("capability_catalog_items_kind_idx").on(table.kind),
+  category: index("capability_catalog_items_category_idx").on(table.category),
+  source: index("capability_catalog_items_source_idx").on(table.source),
+}));
+
+export const capabilityInstallations = pgTable("capability_installations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  capabilityId: text("capability_id").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull().default("active"),
+  config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  capabilityId: uniqueIndex("capability_installations_capability_id_idx").on(table.capabilityId),
+  kind: index("capability_installations_kind_idx").on(table.kind),
+  status: index("capability_installations_status_idx").on(table.status),
+}));
+
+export const socialConnections = pgTable("social_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  provider: text("provider").notNull(),
+  accountHandle: text("account_handle").notNull(),
+  accountName: text("account_name"),
+  externalAccountId: text("external_account_id"),
+  status: text("status").notNull().default("connected"),
+  scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+  credentialRef: text("credential_ref"),
+  tokenMetadata: jsonb("token_metadata").$type<Record<string, unknown>>().notNull().default({}),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  providerHandle: uniqueIndex("social_connections_provider_handle_idx").on(table.provider, table.accountHandle),
+  providerStatus: index("social_connections_provider_status_idx").on(table.provider, table.status),
+}));
+
+export const socialPosts = pgTable("social_posts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  connectionId: uuid("connection_id").notNull().references(() => socialConnections.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  externalPostId: text("external_post_id"),
+  url: text("url"),
+  authorHandle: text("author_handle"),
+  text: text("text").notNull(),
+  publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
+  metrics: jsonb("metrics").$type<Record<string, number>>().notNull().default({}),
+  raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  connectionExternalPost: uniqueIndex("social_posts_connection_external_post_idx").on(table.connectionId, table.externalPostId),
+  connectionPublished: index("social_posts_connection_published_idx").on(table.connectionId, table.publishedAt),
+  providerPublished: index("social_posts_provider_published_idx").on(table.provider, table.publishedAt),
+}));

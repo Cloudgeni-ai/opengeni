@@ -1,7 +1,14 @@
 import type {
+  CapabilityCatalogItem,
+  CapabilityInstallation,
+  CapabilityInstallationStatus,
+  CapabilityKind,
+  CapabilitySource,
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  PackInstallation,
+  PackInstallationStatus,
   ResourceRef,
   SandboxBackend,
   ScheduledTask,
@@ -20,10 +27,14 @@ import type {
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
+  SocialConnection,
+  SocialConnectionStatus,
+  SocialPost,
+  SocialProvider,
   ToolRef,
   ReasoningEffort,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
@@ -77,6 +88,66 @@ export type UpdateScheduledTaskInput = Partial<{
   reusableSessionId: string | null;
   metadata: Record<string, unknown>;
 }>;
+
+export type CreatePackInstallationInput = {
+  packId: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type CreateSocialConnectionInput = {
+  provider: SocialProvider;
+  accountHandle: string;
+  accountName?: string | null;
+  externalAccountId?: string | null;
+  status: SocialConnectionStatus;
+  scopes?: string[];
+  credentialRef?: string | null;
+  tokenMetadata?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+export type CreateSocialPostInput = {
+  connectionId: string;
+  externalPostId?: string | null;
+  url?: string | null;
+  authorHandle?: string | null;
+  text: string;
+  publishedAt: Date;
+  metrics?: Record<string, number>;
+  raw?: Record<string, unknown>;
+};
+
+export type CreateCapabilityCatalogItemInput = {
+  id: string;
+  kind: Exclude<CapabilityKind, "pack">;
+  source: CapabilitySource;
+  name: string;
+  description?: string | null;
+  category?: string;
+  tags?: string[];
+  homepageUrl?: string | null;
+  endpointUrl?: string | null;
+  installUrl?: string | null;
+  authModel?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type EnableCapabilityInstallationInput = {
+  capabilityId: string;
+  kind: CapabilityKind;
+  config?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+};
+
+export type EnabledMcpCapabilityServer = {
+  capabilityId: string;
+  id: string;
+  name: string;
+  url: string;
+  allowedTools?: string[];
+  timeoutMs?: number;
+  cacheToolsList?: boolean;
+};
 
 export type EnqueueSessionTurnInput = {
   sessionId: string;
@@ -208,6 +279,278 @@ export async function markFileUploadFailed(db: Database, uploadId: string, fileI
     await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(eq(schema.fileUploads.id, uploadId));
     await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(eq(schema.files.id, fileId));
   });
+}
+
+export async function enablePackInstallation(db: Database, input: CreatePackInstallationInput): Promise<PackInstallation> {
+  const now = new Date();
+  const existing = await getPackInstallation(db, input.packId);
+  if (existing) {
+    const [row] = await db.update(schema.packInstallations).set({
+      status: "active",
+      metadata: input.metadata ?? existing.metadata,
+      enabledAt: now,
+      updatedAt: now,
+    }).where(eq(schema.packInstallations.packId, input.packId)).returning();
+    if (!row) {
+      throw new Error(`Pack installation not found: ${input.packId}`);
+    }
+    return mapPackInstallation(row);
+  }
+  const [row] = await db.insert(schema.packInstallations).values({
+    packId: input.packId,
+    status: "active",
+    metadata: input.metadata ?? {},
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to enable pack installation");
+  }
+  return mapPackInstallation(row);
+}
+
+export async function listPackInstallations(db: Database): Promise<PackInstallation[]> {
+  const rows = await db.select().from(schema.packInstallations).orderBy(desc(schema.packInstallations.updatedAt));
+  return rows.map(mapPackInstallation);
+}
+
+export async function getPackInstallation(db: Database, packId: string): Promise<PackInstallation | null> {
+  const [row] = await db.select().from(schema.packInstallations).where(eq(schema.packInstallations.packId, packId)).limit(1);
+  return row ? mapPackInstallation(row) : null;
+}
+
+export async function updatePackInstallationStatus(db: Database, packId: string, status: PackInstallationStatus): Promise<PackInstallation> {
+  const [row] = await db.update(schema.packInstallations).set({
+    status,
+    updatedAt: new Date(),
+  }).where(eq(schema.packInstallations.packId, packId)).returning();
+  if (!row) {
+    throw new Error(`Pack installation not found: ${packId}`);
+  }
+  return mapPackInstallation(row);
+}
+
+export async function upsertCapabilityCatalogItem(db: Database, input: CreateCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
+  const now = new Date();
+  const values = {
+    id: input.id,
+    kind: input.kind,
+    source: input.source,
+    name: input.name,
+    description: input.description ?? null,
+    category: input.category ?? "custom",
+    tags: input.tags ?? [],
+    homepageUrl: input.homepageUrl ?? null,
+    endpointUrl: input.endpointUrl ?? null,
+    installUrl: input.installUrl ?? null,
+    authModel: input.authModel ?? null,
+    metadata: input.metadata ?? {},
+    updatedAt: now,
+  };
+  const updateValues = {
+    kind: values.kind,
+    source: values.source,
+    name: values.name,
+    description: values.description,
+    category: values.category,
+    tags: values.tags,
+    homepageUrl: values.homepageUrl,
+    endpointUrl: values.endpointUrl,
+    installUrl: values.installUrl,
+    authModel: values.authModel,
+    metadata: values.metadata,
+    updatedAt: values.updatedAt,
+  };
+  const [row] = await db.insert(schema.capabilityCatalogItems).values(values)
+    .onConflictDoUpdate({
+      target: schema.capabilityCatalogItems.id,
+      set: updateValues,
+    })
+    .returning();
+  if (!row) {
+    throw new Error("Failed to upsert capability catalog item");
+  }
+  return mapCapabilityCatalogItem(row);
+}
+
+export async function listCapabilityCatalogItems(db: Database): Promise<CapabilityCatalogItem[]> {
+  const rows = await db.select().from(schema.capabilityCatalogItems).orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
+  return rows.map(mapCapabilityCatalogItem);
+}
+
+export async function getCapabilityCatalogItem(db: Database, capabilityId: string): Promise<CapabilityCatalogItem | null> {
+  const [row] = await db.select().from(schema.capabilityCatalogItems).where(eq(schema.capabilityCatalogItems.id, capabilityId)).limit(1);
+  return row ? mapCapabilityCatalogItem(row) : null;
+}
+
+export async function enableCapabilityInstallation(db: Database, input: EnableCapabilityInstallationInput): Promise<CapabilityInstallation> {
+  const now = new Date();
+  const existing = await getCapabilityInstallation(db, input.capabilityId);
+  if (existing) {
+    const [row] = await db.update(schema.capabilityInstallations).set({
+      kind: input.kind,
+      status: "active",
+      config: input.config ?? existing.config,
+      metadata: input.metadata ?? existing.metadata,
+      enabledAt: now,
+      updatedAt: now,
+    }).where(eq(schema.capabilityInstallations.capabilityId, input.capabilityId)).returning();
+    if (!row) {
+      throw new Error(`Capability installation not found: ${input.capabilityId}`);
+    }
+    return mapCapabilityInstallation(row);
+  }
+  const [row] = await db.insert(schema.capabilityInstallations).values({
+    capabilityId: input.capabilityId,
+    kind: input.kind,
+    status: "active",
+    config: input.config ?? {},
+    metadata: input.metadata ?? {},
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to enable capability installation");
+  }
+  return mapCapabilityInstallation(row);
+}
+
+export async function disableCapabilityInstallation(db: Database, capabilityId: string): Promise<CapabilityInstallation> {
+  const [row] = await db.update(schema.capabilityInstallations).set({
+    status: "disabled",
+    updatedAt: new Date(),
+  }).where(eq(schema.capabilityInstallations.capabilityId, capabilityId)).returning();
+  if (!row) {
+    throw new Error(`Capability installation not found: ${capabilityId}`);
+  }
+  return mapCapabilityInstallation(row);
+}
+
+export async function listCapabilityInstallations(db: Database): Promise<CapabilityInstallation[]> {
+  const rows = await db.select().from(schema.capabilityInstallations).orderBy(desc(schema.capabilityInstallations.updatedAt));
+  return rows.map(mapCapabilityInstallation);
+}
+
+export async function getCapabilityInstallation(db: Database, capabilityId: string): Promise<CapabilityInstallation | null> {
+  const [row] = await db.select().from(schema.capabilityInstallations).where(eq(schema.capabilityInstallations.capabilityId, capabilityId)).limit(1);
+  return row ? mapCapabilityInstallation(row) : null;
+}
+
+export async function listEnabledMcpCapabilityServers(db: Database): Promise<EnabledMcpCapabilityServer[]> {
+  const rows = await db.select({
+    item: schema.capabilityCatalogItems,
+    installation: schema.capabilityInstallations,
+  }).from(schema.capabilityInstallations)
+    .innerJoin(schema.capabilityCatalogItems, eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id))
+    .where(and(
+      eq(schema.capabilityInstallations.kind, "mcp"),
+      eq(schema.capabilityInstallations.status, "active"),
+    ))
+    .orderBy(asc(schema.capabilityCatalogItems.name));
+
+  return rows.flatMap(({ item, installation }) => {
+    if (!item.endpointUrl || item.authModel || !mcpConnectivityOk(installation.metadata)) {
+      return [];
+    }
+    const metadata = item.metadata;
+    const config = installation.config;
+    const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
+    const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
+    const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
+    return [{
+      capabilityId: item.id,
+      id: mcpServerIdForCapability(item.id, metadata),
+      name: item.name,
+      url: item.endpointUrl,
+      ...(allowedTools ? { allowedTools } : {}),
+      ...(timeoutMs ? { timeoutMs } : {}),
+      ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+    }];
+  });
+}
+
+export function mcpServerIdForCapability(capabilityId: string, metadata: Record<string, unknown> = {}): string {
+  const explicit = typeof metadata.mcpServerId === "string" ? metadata.mcpServerId.trim() : "";
+  if (/^[A-Za-z0-9_-]+$/.test(explicit)) {
+    return explicit;
+  }
+  const body = capabilityId
+    .replace(/^[^:]+:/, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 44) || "mcp";
+  return `cap-${body}-${shortHash(capabilityId)}`;
+}
+
+export async function createSocialConnection(db: Database, input: CreateSocialConnectionInput): Promise<SocialConnection> {
+  const [row] = await db.insert(schema.socialConnections).values({
+    provider: input.provider,
+    accountHandle: input.accountHandle,
+    accountName: input.accountName ?? null,
+    externalAccountId: input.externalAccountId ?? null,
+    status: input.status,
+    scopes: input.scopes ?? [],
+    credentialRef: input.credentialRef ?? null,
+    tokenMetadata: input.tokenMetadata ?? {},
+    metadata: input.metadata ?? {},
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to create social connection");
+  }
+  return mapSocialConnection(row);
+}
+
+export async function listSocialConnections(db: Database, limit = 100): Promise<SocialConnection[]> {
+  const rows = await db.select().from(schema.socialConnections).orderBy(desc(schema.socialConnections.createdAt)).limit(limit);
+  return rows.map(mapSocialConnection);
+}
+
+export async function getSocialConnection(db: Database, connectionId: string): Promise<SocialConnection | null> {
+  const [row] = await db.select().from(schema.socialConnections).where(eq(schema.socialConnections.id, connectionId)).limit(1);
+  return row ? mapSocialConnection(row) : null;
+}
+
+export async function requireSocialConnection(db: Database, connectionId: string): Promise<SocialConnection> {
+  const connection = await getSocialConnection(db, connectionId);
+  if (!connection) {
+    throw new Error(`Social connection not found: ${connectionId}`);
+  }
+  return connection;
+}
+
+export async function createSocialPost(db: Database, input: CreateSocialPostInput): Promise<SocialPost> {
+  const connection = await requireSocialConnection(db, input.connectionId);
+  const [row] = await db.insert(schema.socialPosts).values({
+    connectionId: input.connectionId,
+    provider: connection.provider,
+    externalPostId: input.externalPostId ?? null,
+    url: input.url ?? null,
+    authorHandle: input.authorHandle ?? connection.accountHandle,
+    text: input.text,
+    publishedAt: input.publishedAt,
+    metrics: input.metrics ?? {},
+    raw: input.raw ?? {},
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to create social post");
+  }
+  return mapSocialPost(row);
+}
+
+export async function listSocialPosts(db: Database, options: {
+  connectionIds?: string[];
+  since?: Date;
+  limit?: number;
+} = {}): Promise<SocialPost[]> {
+  const conditions: SQL[] = [];
+  if (options.connectionIds?.length) {
+    conditions.push(inArray(schema.socialPosts.connectionId, options.connectionIds));
+  }
+  if (options.since) {
+    conditions.push(gte(schema.socialPosts.publishedAt, options.since));
+  }
+  const limit = options.limit ?? 100;
+  const rows = conditions.length > 0
+    ? await db.select().from(schema.socialPosts).where(and(...conditions)).orderBy(desc(schema.socialPosts.publishedAt)).limit(limit)
+    : await db.select().from(schema.socialPosts).orderBy(desc(schema.socialPosts.publishedAt)).limit(limit);
+  return rows.map(mapSocialPost);
 }
 
 export async function createScheduledTask(db: Database, input: CreateScheduledTaskInput): Promise<ScheduledTask> {
@@ -840,4 +1183,135 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect): PackInstallation {
+  return {
+    id: row.id,
+    packId: row.packId,
+    status: row.status as PackInstallationStatus,
+    metadata: row.metadata,
+    enabledAt: row.enabledAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inferSelect): CapabilityCatalogItem {
+  const runtime = row.kind === "mcp" && row.endpointUrl && !row.authModel
+    ? {
+      available: true,
+      mcpServerId: mcpServerIdForCapability(row.id, row.metadata),
+      transport: "streamable-http",
+      notes: null,
+    }
+    : {
+      available: false,
+      notes: row.kind === "mcp"
+        ? row.authModel
+          ? "Credential injection for remote MCP capabilities is not implemented yet."
+          : "Remote streamable HTTP endpoint is required for runtime use."
+        : null,
+    };
+  return {
+    id: row.id,
+    kind: row.kind as CapabilityKind,
+    source: row.source as CapabilitySource,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    tags: row.tags,
+    homepageUrl: row.homepageUrl,
+    endpointUrl: row.endpointUrl,
+    installUrl: row.installUrl,
+    authModel: row.authModel,
+    tools: [],
+    runtime,
+    enabled: false,
+    enabledReason: null,
+    metadata: row.metadata,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapCapabilityInstallation(row: typeof schema.capabilityInstallations.$inferSelect): CapabilityInstallation {
+  return {
+    id: row.id,
+    capabilityId: row.capabilityId,
+    kind: row.kind as CapabilityKind,
+    status: row.status as CapabilityInstallationStatus,
+    config: row.config,
+    metadata: row.metadata,
+    enabledAt: row.enabledAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapSocialConnection(row: typeof schema.socialConnections.$inferSelect): SocialConnection {
+  return {
+    id: row.id,
+    provider: row.provider as SocialProvider,
+    accountHandle: row.accountHandle,
+    accountName: row.accountName,
+    externalAccountId: row.externalAccountId,
+    status: row.status as SocialConnectionStatus,
+    scopes: row.scopes,
+    credentialRef: row.credentialRef,
+    tokenMetadata: row.tokenMetadata,
+    metadata: row.metadata,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapSocialPost(row: typeof schema.socialPosts.$inferSelect): SocialPost {
+  return {
+    id: row.id,
+    connectionId: row.connectionId,
+    provider: row.provider as SocialProvider,
+    externalPostId: row.externalPostId,
+    url: row.url,
+    authorHandle: row.authorHandle,
+    text: row.text,
+    publishedAt: row.publishedAt.toISOString(),
+    metrics: row.metrics,
+    raw: row.raw,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function stringArrayConfig(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  return values.length > 0 ? [...new Set(values.map((item) => item.trim()))] : undefined;
+}
+
+function positiveIntegerConfig(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0) {
+    return Number(value);
+  }
+  return undefined;
+}
+
+function booleanConfig(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function mcpConnectivityOk(metadata: Record<string, unknown>): boolean {
+  const value = metadata.mcpConnectivity;
+  return !!value && typeof value === "object" && "status" in value && value.status === "ok";
+}
+
+function shortHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }

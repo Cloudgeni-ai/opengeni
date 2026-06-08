@@ -1,0 +1,70 @@
+# Capability Catalog
+
+OpenGeni exposes a workspace-level capability catalog for packs, MCP servers, APIs, skills, and plugins.
+
+The catalog merges:
+
+- built-in OpenGeni packs, APIs, MCP servers, and bundled sandbox skills
+- MCP servers configured through `OPENGENI_MCP_SERVERS`
+- local catalog items added through the API or web app
+- public remote MCP servers discovered from the official MCP Registry
+
+## Runtime Behavior
+
+Remote MCP capabilities with a streamable HTTP endpoint are executable today when they do not require custom request headers or credentials. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks.
+
+Registry entries that declare required headers remain visible in the catalog, but they are marked credential-gated and cannot be enabled until per-capability MCP credential injection is implemented. This prevents a public registry item with a stale, down, or auth-only endpoint from breaking agent turns at runtime.
+
+APIs, skills, and plugins are tracked in the same catalog and install table so operators can build a role-oriented workspace inventory. Built-in APIs and bundled skills are already available. Custom APIs, skills, and plugins need their own adapter or runtime implementation before enabling them changes agent execution.
+
+## API
+
+List the merged catalog:
+
+```bash
+curl http://127.0.0.1:8000/v1/capabilities
+```
+
+Search the official MCP Registry for public remote MCP servers:
+
+```bash
+curl "http://127.0.0.1:8000/v1/capabilities/discovery/mcp-registry?query=social&limit=20"
+```
+
+Add a public remote MCP server to the local catalog:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/capabilities \
+  -H 'content-type: application/json' \
+  -d '{
+    "id": "mcp:example-mcp",
+    "kind": "mcp",
+    "source": "manual",
+    "name": "Example MCP",
+    "endpointUrl": "https://example.com/mcp",
+    "category": "marketing",
+    "tags": ["social", "analytics"]
+  }'
+```
+
+Enable it:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/capabilities/mcp%3Aexample-mcp/enable" \
+  -H 'content-type: application/json' \
+  -d '{"config":{},"metadata":{"enabledBy":"operator"}}'
+```
+
+If the MCP endpoint initializes successfully, the enabled MCP appears in `/v1/config/client` and can be selected as a session tool in the web app. If it fails the probe, the API returns `422` and the capability remains disabled.
+
+## Web Flow
+
+Open the **Capabilities** view in the web app to:
+
+- filter and search the local catalog
+- enable role packs
+- add and enable public MCP Registry results
+- add manual MCP/API/skill/plugin entries
+- select enabled custom MCPs in the agent composer
+
+The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.

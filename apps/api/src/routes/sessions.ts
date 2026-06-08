@@ -20,6 +20,7 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "../dependencies";
+import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -27,6 +28,7 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
+  withDefaultEnabledCapabilityMcpTools,
 } from "../domain/resources";
 import {
   createAndStartSession,
@@ -41,9 +43,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
 
   app.post("/v1/sessions", async (c) => {
-    const payload = CreateSessionRequest.parse(await c.req.json());
+    const rawPayload = await c.req.json();
+    const payload = CreateSessionRequest.parse(rawPayload);
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, settings);
     const resources = normalizeResources(payload.resources);
-    const tools = validateToolRefs(payload.tools, settings);
+    const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
+    const tools = hasOwnProperty(rawPayload, "tools")
+      ? requestedTools
+      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
     validateGitHubRepositorySelection(resources);
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
@@ -102,8 +109,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, sessionId);
     const existing = await requireQueuedTurnForApi(db, sessionId, turnId);
     const payload = UpdateSessionTurnRequest.parse(await c.req.json());
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, settings);
     const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
-    const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, settings) : existing.tools;
+    const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, runtimeSettings) : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -156,10 +164,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/sessions/:sessionId/events", async (c) => {
     const sessionId = c.req.param("sessionId");
-    const event = ClientSessionEvent.parse(await c.req.json());
+    const rawEvent = await c.req.json();
+    const event = ClientSessionEvent.parse(rawEvent);
     if (event.type === "user.message") {
+      const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, settings);
       const requestedResources = normalizeResources(event.payload.resources ?? []);
-      const requestedTools = validateToolRefs(event.payload.tools ?? [], settings);
+      const validatedTools = validateToolRefs(event.payload.tools ?? [], runtimeSettings);
+      const requestedTools = userMessagePayloadHasOwnProperty(rawEvent, "tools")
+        ? validatedTools
+        : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, runtimeSettings);
       const requestedModel = event.payload.model ?? null;
       const requestedReasoningEffort = event.payload.reasoningEffort ?? null;
       if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
@@ -249,4 +262,16 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(accepted, 202);
   });
+}
+
+function hasOwnProperty(value: unknown, key: string): boolean {
+  return Boolean(value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = (value as { payload?: unknown }).payload;
+  return hasOwnProperty(payload, key);
 }

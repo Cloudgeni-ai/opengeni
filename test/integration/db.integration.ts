@@ -6,8 +6,10 @@ import {
   createScheduledTaskRun,
   createSession,
   createTurn,
+  enableCapabilityInstallation,
   finishTurn,
   getLatestRunState,
+  listEnabledMcpCapabilityServers,
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEvents,
@@ -15,6 +17,7 @@ import {
   setSessionStatus,
   updateScheduledTask,
   updateScheduledTaskRun,
+  upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import { expectContiguousSequences, startTestServices, type TestServices } from "@opengeni/testing";
 
@@ -155,5 +158,47 @@ describe("DB integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, task.id);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.error).toBe("no worker");
+  });
+
+  test("exports only runtime-ready enabled MCP capability servers", async () => {
+    const capabilityId = `mcp:test-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(dbClient.db, {
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Test MCP",
+      endpointUrl: "https://example.com/mcp",
+      metadata: { mcpServerId: "cap-test-ready" },
+    });
+    await enableCapabilityInstallation(dbClient.db, {
+      capabilityId,
+      kind: "mcp",
+      metadata: {},
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db)).some((server) => server.capabilityId === capabilityId)).toBe(false);
+
+    await enableCapabilityInstallation(dbClient.db, {
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db)).some((server) => server.capabilityId === capabilityId)).toBe(true);
+
+    const gatedCapabilityId = `mcp:gated-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(dbClient.db, {
+      id: gatedCapabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Gated MCP",
+      endpointUrl: "https://secure.example/mcp",
+      authModel: "credential_ref",
+      metadata: { mcpServerId: "cap-test-gated" },
+    });
+    await enableCapabilityInstallation(dbClient.db, {
+      capabilityId: gatedCapabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db)).some((server) => server.capabilityId === gatedCapabilityId)).toBe(false);
   });
 });

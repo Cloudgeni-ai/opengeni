@@ -12,12 +12,16 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "./dependencies";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import { settingsWithEnabledCapabilityMcpServers } from "./domain/capabilities";
 import { requireAccessKey } from "./http/auth";
+import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerFileRoutes } from "./routes/files";
 import { registerGitHubRoutes } from "./routes/github";
+import { registerPackRoutes } from "./routes/packs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSocialRoutes } from "./routes/social";
 
 export type {
   ApiRouteDeps,
@@ -33,6 +37,7 @@ export {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
+  withDefaultEnabledCapabilityMcpTools,
 } from "./domain/resources";
 export { workflowIdForSession } from "./domain/sessions";
 export { replaySessionEvents, sseSessionStream } from "./http/sse";
@@ -124,25 +129,28 @@ export function createApp(deps: AppDependencies): Hono {
     "content-type": "text/plain; version=0.0.4; charset=utf-8",
   }));
 
-  app.get("/v1/config/client", (c) => c.json(ClientConfig.parse({
-    defaultModel: deps.settings.openaiModel,
-    allowedModels: configuredAllowedModels(deps.settings),
-    defaultReasoningEffort: deps.settings.openaiReasoningEffort,
-    allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
-    mcpServers: deps.settings.mcpServers.map((server) => ({
-      id: server.id,
-      name: server.name ?? server.id,
-    })),
-    fileUploads: {
-      enabled: objectStorage !== null,
-      maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
-    },
-    auth: {
-      required: deps.settings.authRequired,
-      headerName: "authorization",
-      scheme: "bearer",
-    },
-  })));
+  app.get("/v1/config/client", async (c) => {
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(deps.db, deps.settings);
+    return c.json(ClientConfig.parse({
+      defaultModel: deps.settings.openaiModel,
+      allowedModels: configuredAllowedModels(deps.settings),
+      defaultReasoningEffort: deps.settings.openaiReasoningEffort,
+      allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
+      mcpServers: runtimeSettings.mcpServers.map((server) => ({
+        id: server.id,
+        name: server.name ?? server.id,
+      })),
+      fileUploads: {
+        enabled: objectStorage !== null,
+        maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
+      },
+      auth: {
+        required: deps.settings.authRequired,
+        headerName: "authorization",
+        scheme: "bearer",
+      },
+    }));
+  });
 
   app.all("/v1/mcp", async (c) => {
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
@@ -154,6 +162,9 @@ export function createApp(deps: AppDependencies): Hono {
   registerFileRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
+  registerSocialRoutes(app, routeDeps);
+  registerCapabilityRoutes(app, routeDeps);
+  registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
 
@@ -177,6 +188,10 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
   { pattern: /^\/v1\/mcp$/, label: "/v1/mcp" },
   { pattern: /^\/v1\/mcp\/docs$/, label: "/v1/mcp/docs" },
+  { pattern: /^\/v1\/capabilities$/, label: "/v1/capabilities" },
+  { pattern: /^\/v1\/capabilities\/discovery\/mcp-registry$/, label: "/v1/capabilities/discovery/mcp-registry" },
+  { pattern: /^\/v1\/capabilities\/[^/]+\/enable$/, label: "/v1/capabilities/:id/enable" },
+  { pattern: /^\/v1\/capabilities\/[^/]+\/disable$/, label: "/v1/capabilities/:id/disable" },
   { pattern: /^\/v1\/sessions$/, label: "/v1/sessions" },
   { pattern: /^\/v1\/sessions\/[^/]+\/events\/stream$/, label: "/v1/sessions/:id/events/stream" },
   { pattern: /^\/v1\/sessions\/[^/]+\/events$/, label: "/v1/sessions/:id/events" },
@@ -194,6 +209,13 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/trigger$/, label: "/v1/scheduled-tasks/:id/trigger" },
   { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/runs$/, label: "/v1/scheduled-tasks/:id/runs" },
   { pattern: /^\/v1\/scheduled-tasks\/[^/]+$/, label: "/v1/scheduled-tasks/:id" },
+  { pattern: /^\/v1\/packs$/, label: "/v1/packs" },
+  { pattern: /^\/v1\/packs\/installations$/, label: "/v1/packs/installations" },
+  { pattern: /^\/v1\/packs\/[^/]+\/scheduled-tasks$/, label: "/v1/packs/:id/scheduled-tasks" },
+  { pattern: /^\/v1\/packs\/[^/]+\/enable$/, label: "/v1/packs/:id/enable" },
+  { pattern: /^\/v1\/packs\/[^/]+$/, label: "/v1/packs/:id" },
+  { pattern: /^\/v1\/social\/connections$/, label: "/v1/social/connections" },
+  { pattern: /^\/v1\/social\/posts$/, label: "/v1/social/posts" },
   { pattern: /^\/v1\/document-bases$/, label: "/v1/document-bases" },
   { pattern: /^\/v1\/document-bases\/[^/]+\/documents$/, label: "/v1/document-bases/:id/documents" },
   { pattern: /^\/v1\/document-bases\/[^/]+\/search$/, label: "/v1/document-bases/:id/search" },

@@ -15,6 +15,7 @@ import {
 import { HTTPException } from "hono/http-exception";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
+import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   normalizeResources,
   validateFileResources,
@@ -141,7 +142,8 @@ async function validateScheduledTaskAgentConfig(input: {
   payload: { agentConfig: ScheduledTaskAgentConfig };
 }): Promise<ScheduledTaskAgentConfig> {
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
-  const tools = validateToolRefs(input.payload.agentConfig.tools ?? [], input.settings);
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(input.db, input.settings);
+  const tools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });

@@ -272,6 +272,32 @@ describe("API component integration", () => {
     expect(payload.fileUploads).toEqual({ enabled: false, maxSizeBytes: 5_000_000_000 });
   });
 
+  test("returns 409 when disabling a never-enabled capability", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const capabilityId = `skill:test-${crypto.randomUUID()}`;
+    const created = await app.request("/v1/capabilities", {
+      method: "POST",
+      body: JSON.stringify({
+        id: capabilityId,
+        kind: "skill",
+        source: "manual",
+        name: "Test Skill",
+        category: "test",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(201);
+
+    const disabled = await app.request(`/v1/capabilities/${encodeURIComponent(capabilityId)}/disable`, { method: "POST" });
+    expect(disabled.status).toBe(409);
+    expect(await disabled.text()).toContain("capability is not currently enabled");
+  });
+
   test("enforces shared-key auth on user-facing routes when enabled", async () => {
     const app = createApp({
       settings: testSettings({
@@ -360,6 +386,68 @@ describe("API component integration", () => {
     const listed = await app.request("/v1/scheduled-tasks");
     expect(listed.status).toBe(200);
     expect((await listed.json() as Array<{ id: string }>).some((item) => item.id === task.id)).toBe(true);
+  });
+
+  test("creates marketing social scheduled tasks from connected accounts only", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: firstPartyMcpSettings(services.databaseUrl),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const suffix = crypto.randomUUID();
+
+    const enabled = await app.request("/v1/packs/marketing-social-daily-analysis/enable", {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabled.status).toBeLessThan(300);
+
+    const activeResponse = await app.request("/v1/social/connections", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "linkedin",
+        accountHandle: `active-${suffix}`,
+        accountName: "Active Company",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(activeResponse.status).toBe(201);
+    const activeConnection = await activeResponse.json() as { id: string };
+
+    const disabledResponse = await app.request("/v1/social/connections", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "linkedin",
+        accountHandle: `disabled-${suffix}`,
+        accountName: "Disabled Company",
+        status: "disabled",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disabledResponse.status).toBe(201);
+    const disabledConnection = await disabledResponse.json() as { id: string };
+
+    const created = await app.request("/v1/packs/marketing-social-daily-analysis/scheduled-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        connectionIds: [],
+        documentBaseIds: [],
+        timeZone: "UTC",
+        hour: 9,
+        minute: 0,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const createdBody = await created.text();
+    expect(created.status, createdBody).toBe(201);
+    const task = JSON.parse(createdBody) as { metadata: Record<string, unknown>; agentConfig: { metadata: Record<string, unknown> } };
+    expect(task.metadata.socialConnectionIds).toEqual([activeConnection.id]);
+    expect(task.agentConfig.metadata.socialConnectionIds).toEqual([activeConnection.id]);
+    expect(task.metadata.socialConnectionIds).not.toContain(disabledConnection.id);
+    expect(workflow.synced).toHaveLength(1);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
@@ -1055,5 +1143,21 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
     objectStorageSandboxEndpoint: endpoint,
     objectStorageAccessKeyId: "minioadmin",
     objectStorageSecretAccessKey: "minioadmin",
+  });
+}
+
+function firstPartyMcpSettings(databaseUrl: string) {
+  return testSettings({
+    databaseUrl,
+    mcpServers: [
+      { id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:8000/v1/mcp", cacheToolsList: true },
+      {
+        id: "docs",
+        name: "Document Search",
+        url: "http://127.0.0.1:8000/v1/mcp/docs",
+        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+        cacheToolsList: false,
+      },
+    ],
   });
 }

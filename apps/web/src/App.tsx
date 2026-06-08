@@ -14,14 +14,18 @@ import {
   FileSearchIcon,
   GitBranchIcon,
   GitPullRequestIcon,
+  GlobeIcon,
   ImageIcon,
   Loader2Icon,
   LockIcon,
+  PackageIcon,
   PanelRightIcon,
   PauseIcon,
+  PlugIcon,
   PlusIcon,
   PlayIcon,
   RefreshCwIcon,
+  SearchIcon,
   SparkleIcon,
   SquareIcon,
   TerminalIcon,
@@ -54,10 +58,15 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   addDocumentToBase,
+  createCapability,
   createSession,
   createDocumentBase,
   createScheduledTask,
   deleteScheduledTask,
+  disableCapability,
+  discoverMcpRegistryCapabilities,
+  enableCapability,
+  fetchCapabilities,
   fetchClientConfig,
   fetchDocumentBases,
   fetchDocuments,
@@ -86,7 +95,10 @@ import {
   clearStoredAccessKey,
 } from "./api";
 import type {
+  CapabilityCatalogItem,
+  CapabilityKind,
   ClientConfig,
+  CreateCapabilityInput,
   DocumentBase,
   DocumentSearchResult,
   FileAsset,
@@ -164,7 +176,7 @@ type ConversationTurn = ConversationUserTurn | ConversationAssistantTurn | Conve
 
 export function App() {
   const [sessionId, setSessionId] = useState(() => sessionIdFromPath());
-  const [activeView, setActiveView] = useState<"agent" | "documents">("agent");
+  const [activeView, setActiveView] = useState<"agent" | "documents" | "capabilities">("agent");
   const [session, setSession] = useState<Session | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
@@ -183,6 +195,8 @@ export function App() {
   const [githubOrg, setGithubOrg] = useState("");
   const [openGeniToolEnabled, setOpenGeniToolEnabled] = useState(true);
   const [documentSearchEnabled, setDocumentSearchEnabled] = useState(false);
+  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(() => new Set());
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -238,6 +252,16 @@ export function App() {
   const approvals = events.flatMap((event) => event.type === "session.requiresAction" ? approvalItems(event.payload) : []);
   const canSendFollowUp = session?.status === "idle";
   const sessionRunning = session?.status === "running" || session?.status === "queued";
+  const customMcpServers = useMemo(() => enabledCustomMcpServers(clientConfig), [clientConfig]);
+
+  useEffect(() => {
+    if (!clientConfig) {
+      return;
+    }
+    const availableIds = customMcpServers.map((server) => server.id);
+    setSelectedCapabilityToolIds((current) => selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current));
+    previousCapabilityToolIds.current = new Set(availableIds);
+  }, [clientConfig, customMcpServers]);
 
   async function refreshGitHub() {
     setRepoBusy(true);
@@ -256,11 +280,20 @@ export function App() {
     }
   }
 
+  async function refreshClientConfig() {
+    const config = await fetchClientConfig();
+    setClientConfig(config);
+    setModel((current) => config.allowedModels.includes(current) ? current : config.defaultModel);
+    if (isUiReasoningEffort(config.defaultReasoningEffort)) {
+      setReasoningEffort((current) => config.allowedReasoningEfforts.includes(current) ? current : config.defaultReasoningEffort as IntelligenceEffort);
+    }
+  }
+
   async function submitInitial(submission: TurnSubmission) {
     setBusy(true);
     try {
       const selectedResources = buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs);
-      const selectedTools = buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled);
+      const selectedTools = buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]);
       const created = await createSession({
         initialMessage: submission.text,
         resources: [...selectedResources, ...(submission.resources ?? [])],
@@ -300,7 +333,7 @@ export function App() {
       await sendUserMessage(session.id, {
         ...submission,
         text: submission.text.trim(),
-        tools: buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled),
+        tools: buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]),
         model,
         reasoningEffort,
       });
@@ -419,6 +452,16 @@ export function App() {
             <FileSearchIcon className="size-3.5" />
             <span className="hidden sm:inline">Documents</span>
           </Button>
+          <Button
+            type="button"
+            variant={activeView === "capabilities" ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setActiveView("capabilities")}
+            className="h-8 px-2.5 text-xs"
+          >
+            <PlugIcon className="size-3.5" />
+            <span className="hidden sm:inline">Capabilities</span>
+          </Button>
         </nav>
 
         {session && activeView === "agent" ? (
@@ -494,7 +537,11 @@ export function App() {
       ) : (
         <>
 
-      {activeView === "documents" ? (
+      {activeView === "capabilities" ? (
+        <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+          <CapabilitiesWorkspace onRuntimeChanged={() => void refreshClientConfig()} />
+        </div>
+      ) : activeView === "documents" ? (
         <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
           <DocumentsWorkspace fileUploadsEnabled={clientConfig?.fileUploads.enabled === true} />
         </div>
@@ -563,6 +610,12 @@ export function App() {
                     disabled={busy}
                     onToggle={() => setOpenGeniToolEnabled((enabled) => !enabled)}
                   />
+                  <EnabledMcpToolPicker
+                    servers={customMcpServers}
+                    selectedIds={selectedCapabilityToolIds}
+                    disabled={busy}
+                    onChange={setSelectedCapabilityToolIds}
+                  />
                 </div>
               }
               onSubmit={submitInitial}
@@ -594,11 +647,14 @@ export function App() {
             fileUploadsEnabled={clientConfig?.fileUploads.enabled === true}
             documentSearchEnabled={documentSearchEnabled}
             openGeniToolEnabled={openGeniToolEnabled}
+            customMcpServers={customMcpServers}
+            selectedCapabilityToolIds={selectedCapabilityToolIds}
             clientConfig={clientConfig}
             model={model}
             reasoningEffort={reasoningEffort}
             onDocumentSearchToggle={() => setDocumentSearchEnabled((enabled) => !enabled)}
             onOpenGeniToolToggle={() => setOpenGeniToolEnabled((enabled) => !enabled)}
+            onCapabilityToolIdsChange={setSelectedCapabilityToolIds}
             onModelChange={setModel}
             onReasoningEffortChange={setReasoningEffort}
             onSubmit={submitFollowUp}
@@ -969,6 +1025,470 @@ function RepositoryContextPicker(props: {
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+type CapabilityFilter = "all" | CapabilityKind;
+
+function CapabilitiesWorkspace({ onRuntimeChanged }: { onRuntimeChanged: () => void }) {
+  const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [filter, setFilter] = useState<CapabilityFilter>("all");
+  const [query, setQuery] = useState("");
+  const [registryQuery, setRegistryQuery] = useState("");
+  const [registryBusy, setRegistryBusy] = useState(false);
+  const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
+  const [addForm, setAddForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
+  const visibleItems = useMemo(() => filterCapabilityCatalogItems(items, filter, query), [items, filter, query]);
+  const counts = useMemo(() => capabilityCounts(items), [items]);
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function refresh() {
+    setLoading(true);
+    try {
+      const catalog = await fetchCapabilities();
+      setItems(catalog.items);
+    } catch (error) {
+      toast.error("Failed to load capabilities", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleCapability(item: CapabilityCatalogItem) {
+    setBusyId(item.id);
+    try {
+      if (item.enabled && item.source !== "built_in" && item.source !== "configured") {
+        await disableCapability(item.id);
+        toast.success("Capability disabled");
+      } else if (!item.enabled) {
+        await enableCapability(item.id);
+        toast.success("Capability enabled");
+      }
+      await refresh();
+      if (item.kind === "mcp") {
+        onRuntimeChanged();
+      }
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Capability update failed");
+      toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function searchRegistry() {
+    setRegistryBusy(true);
+    try {
+      setRegistryResults(await discoverMcpRegistryCapabilities({ query: registryQuery, limit: 30 }));
+    } catch (error) {
+      toast.error("MCP Registry search failed", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setRegistryBusy(false);
+    }
+  }
+
+  async function addRegistryItem(item: CapabilityCatalogItem, enableAfterAdd: boolean) {
+    setBusyId(item.id);
+    try {
+      const created = await createCapability(createInputFromCatalogItem(item));
+      if (enableAfterAdd) {
+        await enableCapability(created.id);
+      }
+      await refresh();
+      if (enableAfterAdd) {
+        onRuntimeChanged();
+      }
+      toast.success(enableAfterAdd ? "Public MCP added and enabled" : "Public MCP added");
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to add public MCP");
+      toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function submitManualCapability() {
+    const input = capabilityInputFromForm(addForm);
+    if (!input) {
+      toast.error("Capability name is required");
+      return;
+    }
+    setBusyId("new");
+    try {
+      const created = await createCapability(input);
+      if (addForm.enableAfterAdd) {
+        await enableCapability(created.id);
+      }
+      setAddForm(emptyCapabilityForm());
+      await refresh();
+      if (created.kind === "mcp" && addForm.enableAfterAdd) {
+        onRuntimeChanged();
+      }
+      toast.success(addForm.enableAfterAdd ? "Capability added and enabled" : "Capability added");
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to add capability");
+      toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col text-left">
+      <div className="flex flex-col gap-3 border-b border-[color:var(--color-border)] pb-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-base font-semibold">
+            <PlugIcon className="size-4 text-[color:var(--color-brand)]" />
+            Capabilities
+          </div>
+          <p className="mt-1 text-sm leading-5 text-[color:var(--color-fg-muted)]">
+            Enable packs, MCPs, APIs, skills, and plugins for this workspace.
+          </p>
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <div className="relative min-w-56 flex-1 sm:flex-none">
+            <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-[color:var(--color-fg-subtle)]" />
+            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search catalog" className="h-9 pl-8 text-sm" />
+          </div>
+          <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading} className="h-9">
+            <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        {(["all", "pack", "mcp", "api", "skill", "plugin"] as CapabilityFilter[]).map((kind) => (
+          <Button
+            key={kind}
+            type="button"
+            variant={filter === kind ? "secondary" : "ghost"}
+            size="sm"
+            onClick={() => setFilter(kind)}
+            className="h-8 text-xs"
+          >
+            {capabilityKindIcon(kind)}
+            {capabilityFilterLabel(kind)}
+            <span className="ml-1 rounded-full border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{counts[kind]}</span>
+          </Button>
+        ))}
+      </div>
+
+      <div className="mt-5 grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
+        <div className="min-w-0">
+          {loading ? (
+            <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
+              <Loader2Icon className="size-4 animate-spin" />
+              Loading capabilities
+            </div>
+          ) : visibleItems.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-sm text-[color:var(--color-fg-muted)]">
+              No capabilities match this filter.
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              {visibleItems.map((item) => (
+                <CapabilityRow
+                  key={item.id}
+                  item={item}
+                  busy={busyId === item.id}
+                  onToggle={() => void toggleCapability(item)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <aside className="min-w-0 space-y-4 border-t border-[color:var(--color-border)] pt-4 xl:border-t-0 xl:border-l xl:pl-4 xl:pt-0">
+          <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <GlobeIcon className="size-4 text-[color:var(--color-brand)]" />
+              Public MCP Registry
+            </div>
+            <div className="mt-3 flex gap-2">
+              <Input
+                value={registryQuery}
+                onChange={(event) => setRegistryQuery(event.target.value)}
+                placeholder="Search remote MCPs"
+                className="h-8 text-xs"
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void searchRegistry();
+                }}
+              />
+              <Button type="button" size="sm" disabled={registryBusy} onClick={() => void searchRegistry()} className="h-8 shrink-0 text-xs">
+                {registryBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
+                Search
+              </Button>
+            </div>
+            <div className="mt-3 max-h-[28rem] space-y-2 overflow-auto pr-1">
+              {registryResults.length === 0 ? (
+                <div className="rounded-md border border-dashed border-[color:var(--color-border)] p-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  Search returns public remote MCP servers that expose streamable HTTP endpoints.
+                </div>
+              ) : registryResults.map((item) => (
+                <div key={item.id} className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
+                  <div className="min-w-0 truncate text-xs font-medium">{item.name}</div>
+                  {item.description ? <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-muted)]">{item.description}</p> : null}
+                  <div className="mt-2 truncate font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{item.endpointUrl}</div>
+                  <div className="mt-2 flex justify-end gap-1.5">
+                    <Button type="button" variant="ghost" size="xs" disabled={busyId === item.id} onClick={() => void addRegistryItem(item, false)}>
+                      <PlusIcon className="size-3" />
+                      Add
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      disabled={busyId === item.id || !item.runtime.available}
+                      title={!item.runtime.available ? item.runtime.notes ?? "This MCP is not available for runtime use yet." : undefined}
+                      onClick={() => void addRegistryItem(item, true)}
+                    >
+                      {busyId === item.id ? <Loader2Icon className="size-3 animate-spin" /> : <CheckIcon className="size-3" />}
+                      Enable
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <PlusIcon className="size-4 text-[color:var(--color-brand)]" />
+              Add Capability
+            </div>
+            <div className="mt-3 grid gap-2">
+              <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2">
+                <select
+                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                  value={addForm.kind}
+                  onChange={(event) => setAddForm((current) => ({ ...current, kind: event.target.value as CapabilityFormState["kind"] }))}
+                >
+                  <option value="mcp">MCP</option>
+                  <option value="api">API</option>
+                  <option value="skill">Skill</option>
+                  <option value="plugin">Plugin</option>
+                </select>
+                <Input value={addForm.name} onChange={(event) => setAddForm((current) => ({ ...current, name: event.target.value }))} placeholder="Name" className="h-8 text-xs" />
+              </div>
+              <Input value={addForm.endpointUrl} onChange={(event) => setAddForm((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="Endpoint URL" className="h-8 text-xs" />
+              <Input value={addForm.homepageUrl} onChange={(event) => setAddForm((current) => ({ ...current, homepageUrl: event.target.value }))} placeholder="Homepage URL" className="h-8 text-xs" />
+              <Input value={addForm.installUrl} onChange={(event) => setAddForm((current) => ({ ...current, installUrl: event.target.value }))} placeholder="Install URL" className="h-8 text-xs" />
+              <Input value={addForm.category} onChange={(event) => setAddForm((current) => ({ ...current, category: event.target.value }))} placeholder="Category" className="h-8 text-xs" />
+              <Input value={addForm.tags} onChange={(event) => setAddForm((current) => ({ ...current, tags: event.target.value }))} placeholder="Tags, comma separated" className="h-8 text-xs" />
+              <textarea
+                value={addForm.description}
+                onChange={(event) => setAddForm((current) => ({ ...current, description: event.target.value }))}
+                placeholder="Description"
+                className="min-h-16 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-xs"
+              />
+              <label className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+                <input
+                  type="checkbox"
+                  checked={addForm.enableAfterAdd}
+                  onChange={(event) => setAddForm((current) => ({ ...current, enableAfterAdd: event.target.checked }))}
+                />
+                Enable after adding
+              </label>
+              <Button type="button" onClick={() => void submitManualCapability()} disabled={busyId === "new"} className="h-8">
+                {busyId === "new" ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+                Add capability
+              </Button>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function CapabilityRow({ item, busy, onToggle }: {
+  item: CapabilityCatalogItem;
+  busy: boolean;
+  onToggle: () => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const canToggle = item.enabled
+    ? item.kind === "pack" || (item.source !== "built_in" && item.source !== "configured")
+    : item.kind !== "mcp" || item.runtime.available;
+  const toggleTitle = !canToggle && item.kind === "mcp"
+    ? item.runtime.notes ?? "This MCP is not available for runtime use yet."
+    : undefined;
+  const packContents = summarizePackContents(item);
+  return (
+    <article className="grid min-w-0 gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-brand)]">
+            {capabilityKindIcon(item.kind)}
+          </span>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <h3 className="truncate text-sm font-medium">{item.name}</h3>
+              <CapabilityStatusPill enabled={item.enabled} source={item.source} reason={item.enabledReason} />
+            </div>
+            <div className="mt-0.5 flex min-w-0 flex-wrap gap-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">
+              <span>{item.kind}</span>
+              <span>{item.source.replaceAll("_", " ")}</span>
+              <span>{item.category}</span>
+              {item.runtime.mcpServerId ? <span className="font-mono">{item.runtime.mcpServerId}</span> : null}
+            </div>
+          </div>
+        </div>
+        {item.description ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-[color:var(--color-fg-muted)]">{item.description}</p> : null}
+        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
+          {item.tags.slice(0, 5).map((tag) => (
+            <span key={tag} className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{tag}</span>
+          ))}
+          {item.endpointUrl ? <CapabilityLink href={item.endpointUrl} label="endpoint" /> : null}
+          {item.homepageUrl ? <CapabilityLink href={item.homepageUrl} label="home" /> : null}
+          {item.installUrl && item.installUrl !== item.homepageUrl ? <CapabilityLink href={item.installUrl} label="install" /> : null}
+        </div>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        {packContents?.hasContents ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => setExpanded((current) => !current)}
+            className="h-8 text-xs"
+            aria-expanded={expanded}
+          >
+            <ChevronDownIcon className={cn("size-3.5 transition-transform", expanded && "rotate-180")} />
+            Contents
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          size="sm"
+          variant={item.enabled ? "secondary" : "default"}
+          disabled={busy || !canToggle}
+          onClick={onToggle}
+          className="h-8 min-w-24 text-xs"
+          title={toggleTitle}
+        >
+          {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : item.enabled ? <CheckIcon className="size-3.5" /> : <PlusIcon className="size-3.5" />}
+          {item.enabled ? (canToggle ? "Disable" : "Ready") : "Enable"}
+        </Button>
+      </div>
+      {packContents && expanded ? <PackContentsPanel contents={packContents} /> : null}
+    </article>
+  );
+}
+
+function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
+  return (
+    <div className="grid gap-3 border-t border-[color:var(--color-border)] pt-3 lg:col-span-2 md:grid-cols-2">
+      <PackContentsSection title="MCPs">
+        {contents.mcpServerIds.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {contents.mcpServerIds.map((id) => (
+              <span key={id} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{id}</span>
+            ))}
+          </div>
+        ) : <PackEmptyText />}
+        {contents.firstPartyMcpTools.length > 0 ? (
+          <div className="mt-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+            Tools: {contents.firstPartyMcpTools.join(", ")}
+          </div>
+        ) : null}
+      </PackContentsSection>
+
+      <PackContentsSection title="Skills">
+        {contents.skills.length > 0 ? (
+          <div className="flex flex-wrap gap-1.5">
+            {contents.skills.map((skill) => (
+              <span key={skill} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{skill}</span>
+            ))}
+          </div>
+        ) : <PackEmptyText />}
+      </PackContentsSection>
+
+      <PackContentsSection title="Connectors">
+        {contents.connectors.length > 0 ? (
+          <div className="grid gap-2">
+            {contents.connectors.map((connector) => (
+              <div key={connector.id} className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="truncate text-xs font-medium">{connector.name}</span>
+                  {connector.required ? <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[10px] text-amber-300">required</span> : null}
+                </div>
+                <div className="mt-0.5 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                  {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : <PackEmptyText />}
+      </PackContentsSection>
+
+      <PackContentsSection title="Knowledge">
+        {contents.knowledge.length > 0 ? (
+          <div className="grid gap-2">
+            {contents.knowledge.map((knowledge) => (
+              <div key={knowledge.id} className="min-w-0">
+                <div className="truncate text-xs font-medium">{knowledge.name}</div>
+                {knowledge.description ? <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{knowledge.description}</div> : null}
+              </div>
+            ))}
+          </div>
+        ) : <PackEmptyText />}
+      </PackContentsSection>
+
+      <PackContentsSection title="Schedules">
+        {contents.scheduledTaskTemplates.length > 0 ? (
+          <div className="grid gap-2">
+            {contents.scheduledTaskTemplates.map((template) => (
+              <div key={template.id} className="min-w-0">
+                <div className="truncate text-xs font-medium">{template.name}</div>
+                <div className="mt-0.5 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{template.scheduleSummary}</div>
+              </div>
+            ))}
+          </div>
+        ) : <PackEmptyText />}
+      </PackContentsSection>
+    </div>
+  );
+}
+
+function PackContentsSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="min-w-0">
+      <div className="mb-1.5 text-[11px] font-semibold text-[color:var(--color-fg-subtle)]">{title}</div>
+      {children}
+    </section>
+  );
+}
+
+function PackEmptyText() {
+  return <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">None declared.</div>;
+}
+
+function CapabilityStatusPill(props: { enabled: boolean; source: string; reason: string | null }) {
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+        props.enabled
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+          : "border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-fg-subtle)]",
+      )}
+    >
+      {props.enabled ? props.reason ?? "enabled" : props.source === "manual" ? "added" : "available"}
+    </span>
+  );
+}
+
+function CapabilityLink({ href, label }: { href: string; label: string }) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer noopener" className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-brand)] hover:bg-[color:var(--color-surface-2)]">
+      {label}
+    </a>
   );
 }
 
@@ -1374,6 +1894,67 @@ function OpenGeniToolToggle(props: {
   );
 }
 
+function EnabledMcpToolPicker(props: {
+  servers: Array<{ id: string; name: string }>;
+  selectedIds: Set<string>;
+  disabled?: boolean;
+  onChange: (ids: Set<string>) => void;
+}) {
+  if (props.servers.length === 0) {
+    return null;
+  }
+  const selectedCount = props.selectedIds.size;
+  function toggle(id: string) {
+    const next = new Set(props.selectedIds);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    props.onChange(next);
+  }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant={selectedCount > 0 ? "secondary" : "ghost"}
+          size="sm"
+          disabled={props.disabled}
+          aria-label="Enabled MCP tools"
+          className={cn(
+            "h-8 max-w-[12rem] gap-1.5 rounded-full border px-2.5 text-xs",
+            selectedCount > 0
+              ? "border-[color:var(--color-brand)]/35 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
+              : "border-transparent text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
+          )}
+        >
+          <PlugIcon className="size-3.5" />
+          <span className="truncate">{selectedCount > 0 ? `${selectedCount} tool${selectedCount === 1 ? "" : "s"}` : "Tools"}</span>
+          <ChevronDownIcon className="size-3 shrink-0" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-72 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl">
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">Enabled MCPs</DropdownMenuLabel>
+        {props.servers.map((server) => (
+          <DropdownMenuItem
+            key={server.id}
+            onSelect={(event) => {
+              event.preventDefault();
+              toggle(server.id);
+            }}
+            className="h-9 cursor-pointer rounded-md px-2 text-sm"
+          >
+            <span className="min-w-0 flex-1 truncate">{server.name}</span>
+            <span className="ml-2 max-w-24 truncate font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{server.id}</span>
+            {props.selectedIds.has(server.id) ? <CheckIcon className="ml-2 size-4 shrink-0" /> : null}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function ModelPicker(props: {
   config: ClientConfig | null;
   model: string;
@@ -1441,11 +2022,14 @@ function SessionChatPane(props: {
   fileUploadsEnabled: boolean;
   documentSearchEnabled: boolean;
   openGeniToolEnabled: boolean;
+  customMcpServers: Array<{ id: string; name: string }>;
+  selectedCapabilityToolIds: Set<string>;
   clientConfig: ClientConfig | null;
   model: string;
   reasoningEffort: IntelligenceEffort;
   onDocumentSearchToggle: () => void;
   onOpenGeniToolToggle: () => void;
+  onCapabilityToolIdsChange: (ids: Set<string>) => void;
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (effort: IntelligenceEffort) => void;
   onSubmit: (submission: TurnSubmission) => void;
@@ -1566,7 +2150,7 @@ function SessionChatPane(props: {
               ) : undefined
             }
             controlsStart={
-              <div className="flex min-w-0 items-center gap-1.5">
+                <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
                   config={props.clientConfig}
                   model={props.model}
@@ -1584,6 +2168,12 @@ function SessionChatPane(props: {
                   enabled={props.openGeniToolEnabled}
                   disabled={props.busy || !props.canSendFollowUp}
                   onToggle={props.onOpenGeniToolToggle}
+                />
+                <EnabledMcpToolPicker
+                  servers={props.customMcpServers}
+                  selectedIds={props.selectedCapabilityToolIds}
+                  disabled={props.busy || !props.canSendFollowUp}
+                  onChange={props.onCapabilityToolIdsChange}
                 />
               </div>
             }
@@ -2776,6 +3366,272 @@ function useSessionStream(
   }, [sessionId, accessKeyVersion]);
 }
 
+type CapabilityFormState = {
+  kind: Exclude<CapabilityKind, "pack">;
+  name: string;
+  description: string;
+  category: string;
+  tags: string;
+  endpointUrl: string;
+  homepageUrl: string;
+  installUrl: string;
+  enableAfterAdd: boolean;
+};
+
+function emptyCapabilityForm(): CapabilityFormState {
+  return {
+    kind: "mcp",
+    name: "",
+    description: "",
+    category: "custom",
+    tags: "",
+    endpointUrl: "",
+    homepageUrl: "",
+    installUrl: "",
+    enableAfterAdd: true,
+  };
+}
+
+export function filterCapabilityCatalogItems(items: CapabilityCatalogItem[], filter: CapabilityFilter, query: string): CapabilityCatalogItem[] {
+  const normalized = query.trim().toLowerCase();
+  return items.filter((item) => {
+    if (filter !== "all" && item.kind !== filter) {
+      return false;
+    }
+    if (!normalized) {
+      return true;
+    }
+    return [
+      item.name,
+      item.description,
+      item.kind,
+      item.source,
+      item.category,
+      item.endpointUrl,
+      item.homepageUrl,
+      item.installUrl,
+      ...item.tags,
+      JSON.stringify(item.metadata),
+    ].filter(Boolean).join(" ").toLowerCase().includes(normalized);
+  });
+}
+
+export function capabilityErrorToast(error: unknown, fallbackTitle: string): { title: string; description: string } {
+  const description = cleanApiErrorMessage(error instanceof Error ? error.message : String(error));
+  if (/^MCP capability ".+" could not be enabled because OpenGeni could not initialize /.test(description)) {
+    return { title: "MCP connection failed", description };
+  }
+  return { title: fallbackTitle, description };
+}
+
+function cleanApiErrorMessage(message: string): string {
+  return message.replace(/^API\s+\d+:\s*/i, "").trim();
+}
+
+type PackConnectorSummary = {
+  id: string;
+  name: string;
+  authModel: string | null;
+  providers: string[];
+  scopes: string[];
+  required: boolean;
+};
+
+type PackKnowledgeSummary = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+type PackScheduledTaskTemplateSummary = {
+  id: string;
+  name: string;
+  scheduleSummary: string;
+};
+
+type PackContentsSummary = {
+  hasContents: boolean;
+  mcpServerIds: string[];
+  firstPartyMcpTools: string[];
+  skills: string[];
+  connectors: PackConnectorSummary[];
+  knowledge: PackKnowledgeSummary[];
+  scheduledTaskTemplates: PackScheduledTaskTemplateSummary[];
+};
+
+export function summarizePackContents(item: CapabilityCatalogItem): PackContentsSummary | null {
+  if (item.kind !== "pack") {
+    return null;
+  }
+  const metadata = item.metadata;
+  const mcpServerIds = uniqueStrings(item.tools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id));
+  const firstPartyMcpTools = uniqueStrings(stringArray(metadata.firstPartyMcpTools));
+  const skills = uniqueStrings([
+    stringValue(metadata.skill),
+    ...stringArray(metadata.skills),
+  ]);
+  const connectors = recordArray(metadata.connectors).map((connector) => ({
+    id: stringValue(connector.id) ?? stringValue(connector.name) ?? "connector",
+    name: stringValue(connector.name) ?? stringValue(connector.id) ?? "Connector",
+    authModel: stringValue(connector.authModel),
+    providers: stringArray(connector.providers),
+    scopes: stringArray(connector.scopes),
+    required: connector.required === true,
+  }));
+  const knowledge = recordArray(metadata.knowledge).map((entry) => ({
+    id: stringValue(entry.id) ?? stringValue(entry.name) ?? "knowledge",
+    name: stringValue(entry.name) ?? stringValue(entry.id) ?? "Knowledge",
+    description: stringValue(entry.description),
+  }));
+  const scheduledTaskTemplates = recordArray(metadata.scheduledTaskTemplates).map((template) => ({
+    id: stringValue(template.id) ?? stringValue(template.name) ?? "schedule",
+    name: stringValue(template.name) ?? stringValue(template.id) ?? "Scheduled task",
+    scheduleSummary: scheduleSummaryForMetadata(template.defaultSchedule),
+  }));
+  return {
+    hasContents: mcpServerIds.length > 0
+      || firstPartyMcpTools.length > 0
+      || skills.length > 0
+      || connectors.length > 0
+      || knowledge.length > 0
+      || scheduledTaskTemplates.length > 0,
+    mcpServerIds,
+    firstPartyMcpTools,
+    skills,
+    connectors,
+    knowledge,
+    scheduledTaskTemplates,
+  };
+}
+
+function scheduleSummaryForMetadata(value: unknown): string {
+  const schedule = recordValue(value);
+  if (!schedule) {
+    return "Custom schedule";
+  }
+  const type = stringValue(schedule.type);
+  if (type === "calendar") {
+    const hour = numberValue(schedule.hour);
+    const minute = numberValue(schedule.minute);
+    const timeZone = stringValue(schedule.timeZone) ?? "UTC";
+    if (hour !== null && minute !== null) {
+      return `Calendar at ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${timeZone}`;
+    }
+    return `Calendar schedule in ${timeZone}`;
+  }
+  if (type === "interval") {
+    const everySeconds = numberValue(schedule.everySeconds);
+    return everySeconds ? `Every ${everySeconds} seconds` : "Interval schedule";
+  }
+  if (type === "once") {
+    return stringValue(schedule.runAt) ? `Once at ${stringValue(schedule.runAt)}` : "One-time schedule";
+  }
+  return type ? `${type} schedule` : "Custom schedule";
+}
+
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(recordValue).filter((entry): entry is Record<string, unknown> => Boolean(entry)) : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(stringValue).filter((entry): entry is string => Boolean(entry)) : [];
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+}
+
+function capabilityCounts(items: CapabilityCatalogItem[]): Record<CapabilityFilter, number> {
+  return {
+    all: items.length,
+    pack: items.filter((item) => item.kind === "pack").length,
+    mcp: items.filter((item) => item.kind === "mcp").length,
+    api: items.filter((item) => item.kind === "api").length,
+    skill: items.filter((item) => item.kind === "skill").length,
+    plugin: items.filter((item) => item.kind === "plugin").length,
+  };
+}
+
+function capabilityFilterLabel(kind: CapabilityFilter): string {
+  return kind === "all" ? "All" : kind === "mcp" ? "MCPs" : `${kind[0]!.toUpperCase()}${kind.slice(1)}s`;
+}
+
+function capabilityKindIcon(kind: CapabilityFilter): ReactNode {
+  const className = "size-3.5";
+  if (kind === "pack") return <PackageIcon className={className} />;
+  if (kind === "mcp") return <PlugIcon className={className} />;
+  if (kind === "api") return <GlobeIcon className={className} />;
+  if (kind === "skill") return <SparkleIcon className={className} />;
+  if (kind === "plugin") return <WrenchIcon className={className} />;
+  return <FilesIcon className={className} />;
+}
+
+function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateCapabilityInput {
+  return {
+    id: item.id,
+    kind: item.kind as Exclude<CapabilityKind, "pack">,
+    source: item.source,
+    name: item.name,
+    ...(item.description ? { description: item.description } : {}),
+    category: item.category,
+    tags: item.tags,
+    ...(item.homepageUrl ? { homepageUrl: item.homepageUrl } : {}),
+    ...(item.endpointUrl ? { endpointUrl: item.endpointUrl } : {}),
+    ...(item.installUrl ? { installUrl: item.installUrl } : {}),
+    ...(item.authModel ? { authModel: item.authModel } : {}),
+    metadata: item.metadata,
+  };
+}
+
+function capabilityInputFromForm(form: CapabilityFormState): CreateCapabilityInput | null {
+  const name = form.name.trim();
+  if (!name) {
+    return null;
+  }
+  return {
+    kind: form.kind,
+    source: "manual",
+    name,
+    ...(form.description.trim() ? { description: form.description.trim() } : {}),
+    category: form.category.trim() || "custom",
+    tags: form.tags.split(",").map((tag) => tag.trim()).filter(Boolean),
+    ...(form.endpointUrl.trim() ? { endpointUrl: form.endpointUrl.trim() } : {}),
+    ...(form.homepageUrl.trim() ? { homepageUrl: form.homepageUrl.trim() } : {}),
+    ...(form.installUrl.trim() ? { installUrl: form.installUrl.trim() } : {}),
+  };
+}
+
+function enabledCustomMcpServers(config: ClientConfig | null): Array<{ id: string; name: string }> {
+  if (!config) {
+    return [];
+  }
+  const builtIns = new Set(["opengeni", "docs", "files"]);
+  return config.mcpServers.filter((server) => !builtIns.has(server.id));
+}
+
+export function selectedAvailableCapabilityToolIds(current: Set<string>, availableIds: string[], previouslyAvailableIds: Set<string> = new Set()): Set<string> {
+  const available = new Set(availableIds);
+  const next = new Set([...current].filter((id) => available.has(id)));
+  for (const id of availableIds) {
+    if (id && !previouslyAvailableIds.has(id)) {
+      next.add(id);
+    }
+  }
+  return next;
+}
+
 function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], selected: Set<number>, selectedRefs: Record<number, string>): ResourceRef[] {
   const raw = [
     ...repos.filter((repo) => selected.has(repo.id)).map((repo) => ({
@@ -2833,10 +3689,15 @@ function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
   return resource.kind === "repository" && resource.uri === uri;
 }
 
-export function buildTools(existing: ToolRef[] | undefined, documentSearchEnabled: boolean, openGeniEnabled: boolean): ToolRef[] {
+export function buildTools(existing: ToolRef[] | undefined, documentSearchEnabled: boolean, openGeniEnabled: boolean, extraMcpServerIds: string[] = []): ToolRef[] {
   const out = [...(existing ?? [])];
   if (openGeniEnabled && !out.some((tool) => tool.kind === "mcp" && tool.id === "opengeni")) {
     out.push({ kind: "mcp", id: "opengeni" });
+  }
+  for (const id of extraMcpServerIds) {
+    if (id && !out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
+      out.push({ kind: "mcp", id });
+    }
   }
   if (documentSearchEnabled) {
     for (const id of ["docs", "files"]) {

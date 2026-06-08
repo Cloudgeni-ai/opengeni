@@ -1,5 +1,8 @@
 import type {
+  CapabilityCatalogItem,
+  CapabilityCatalogResponse,
   ClientConfig,
+  CreateCapabilityInput,
   CreateFileUploadResponse,
   DocumentBase,
   DocumentSearchResult,
@@ -94,6 +97,46 @@ export function createSession(input: {
 
 export function fetchClientConfig(): Promise<ClientConfig> {
   return request<ClientConfig>("/v1/config/client");
+}
+
+export function fetchCapabilities(): Promise<CapabilityCatalogResponse> {
+  return request<CapabilityCatalogResponse>("/v1/capabilities");
+}
+
+export function createCapability(input: CreateCapabilityInput): Promise<CapabilityCatalogItem> {
+  return request<CapabilityCatalogItem>("/v1/capabilities", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function enableCapability(capabilityId: string, input: { config?: Record<string, unknown>; metadata?: Record<string, unknown> } = {}): Promise<unknown> {
+  return request(`/v1/capabilities/${encodeURIComponent(capabilityId)}/enable`, {
+    method: "POST",
+    body: JSON.stringify({
+      config: input.config ?? {},
+      metadata: input.metadata ?? {},
+    }),
+  });
+}
+
+export function disableCapability(capabilityId: string): Promise<unknown> {
+  return request(`/v1/capabilities/${encodeURIComponent(capabilityId)}/disable`, {
+    method: "POST",
+  });
+}
+
+export async function discoverMcpRegistryCapabilities(input: { query?: string; limit?: number } = {}): Promise<CapabilityCatalogItem[]> {
+  const params = new URLSearchParams();
+  if (input.query?.trim()) {
+    params.set("query", input.query.trim());
+  }
+  if (input.limit) {
+    params.set("limit", String(input.limit));
+  }
+  const suffix = params.toString() ? `?${params}` : "";
+  const response = await request<{ items: CapabilityCatalogItem[] }>(`/v1/capabilities/discovery/mcp-registry${suffix}`);
+  return response.items;
 }
 
 export function fetchSession(sessionId: string): Promise<Session> {

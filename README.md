@@ -1,6 +1,6 @@
 # OpenGeni
 
-OpenGeni is a self-hostable managed agent service for long-running infrastructure work.
+OpenGeni is a self-hostable managed agent service for long-running workspace and infrastructure work.
 
 It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs. The included React app is one client for that API; other products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
 
@@ -84,6 +84,8 @@ Temporal coordinates the work, but token streams and tool output do not go throu
 ## Agent Guides
 
 Pair this README with the [CloudGeni Infrastructure Agents Guide](https://github.com/Cloudgeni-ai/infrastructure-agents-guide) for architecture patterns and operating guidance around infrastructure-focused agents, including repositories, sandbox tools, Terraform/Checkov skills, GitHub App access, and cloud credentials.
+
+The capability catalog lets operators see and enable packs, MCP tools, APIs, skills, and plugins for the same runtime. See [docs/capabilities.md](docs/capabilities.md) for the unified catalog and [docs/packs.md](docs/packs.md) for the marketing social daily analysis pack.
 
 ## Quick Start
 
