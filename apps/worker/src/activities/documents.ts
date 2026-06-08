@@ -11,7 +11,7 @@ export function createDocumentActivities(services: () => Promise<ActivityService
       if (!objectStorage) {
         throw new Error("object storage is not configured");
       }
-      return await indexDocumentNow(db, objectStorage, input.documentId, documentServices);
+      return await indexDocumentNow(db, objectStorage, input.workspaceId, input.documentId, documentServices);
     },
   };
 }

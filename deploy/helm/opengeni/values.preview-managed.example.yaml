@@ -1,0 +1,75 @@
+# Managed preview profile. This is for trusted maintainer/operator previews,
+# not production. It uses disposable in-cluster data-plane fixtures but the
+# real OpenGeni API, web, worker, model provider, and sandbox backend.
+
+api:
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+worker:
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+web:
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+migrations:
+  backoffLimit: 12
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+config:
+  OPENGENI_ENVIRONMENT: preview
+  OPENGENI_AUTH_REQUIRED: "false"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_PRODUCT_ACCESS_MODE: managed
+  OPENGENI_BILLING_MODE: stripe
+  OPENGENI_ENTITLEMENTS_MODE: managed
+  OPENGENI_USAGE_LIMITS_MODE: managed
+  OPENGENI_SANDBOX_BACKEND: modal
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+postgres:
+  enabled: true
+  persistence:
+    size: 2Gi
+
+temporal:
+  enabled: true
+
+nats:
+  enabled: true
+
+minio:
+  enabled: true
+  corsAllowOrigin: "*"
+  persistence:
+    size: 2Gi
+
+ingress:
+  enabled: true
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  otel:
+    enabled: false
+  collector:
+    enabled: false

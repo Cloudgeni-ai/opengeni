@@ -21,6 +21,8 @@ export async function createAndStartSession(input: {
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
+  accountId: string;
+  workspaceId: string;
   initialMessage: string;
   resources: ResourceRef[];
   tools: ToolRef[];
@@ -31,6 +33,8 @@ export async function createAndStartSession(input: {
   metadata: Record<string, unknown>;
 }) {
   const session = await createSession(input.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
     resources: input.resources,
     tools: input.tools,
@@ -47,7 +51,7 @@ export async function createAndStartSession(input: {
     ...(input.resources.length ? { resources: input.resources } : {}),
     ...(input.tools.length ? { tools: input.tools } : {}),
   };
-  const events = await appendAndPublishEvents(input.db, input.bus, session.id, [
+  const events = await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [
     { type: "session.created", payload: { status: "queued" } },
     {
       type: "user.message",
@@ -61,8 +65,10 @@ export async function createAndStartSession(input: {
     throw new HTTPException(500, { message: "failed to append initial user event" });
   }
   const workflowId = workflowIdForSession(session.id);
-  await setTemporalWorkflowId(input.db, session.id, workflowId);
+  await setTemporalWorkflowId(input.db, session.workspaceId, session.id, workflowId);
   const turn = await enqueueSessionTurn(input.db, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
     sessionId: session.id,
     triggerEventId: userEvent.id,
     temporalWorkflowId: workflowId,
@@ -75,21 +81,21 @@ export async function createAndStartSession(input: {
     sandboxBackend: input.sandboxBackend,
     metadata: {},
   });
-  await appendAndPublishEvents(input.db, input.bus, session.id, [{
+  await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [{
     type: "turn.queued",
     turnId: turn.id,
     payload: { turnId: turn.id, triggerEventId: userEvent.id, source: turn.source },
   }]);
-  await input.workflowClient.wakeSessionWorkflow({ sessionId: session.id, workflowId });
-  return await requireSession(input.db, session.id);
+  await input.workflowClient.wakeSessionWorkflow({ accountId: session.accountId, workspaceId: session.workspaceId, sessionId: session.id, workflowId });
+  return await requireSession(input.db, session.workspaceId, session.id);
 }
 
 export function workflowIdForSession(sessionId: string): string {
   return `session-${sessionId}`;
 }
 
-export async function requireQueuedTurnForApi(db: Database, sessionId: string, turnId: string): Promise<SessionTurn> {
-  const turn = await getSessionTurn(db, turnId);
+export async function requireQueuedTurnForApi(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
+  const turn = await getSessionTurn(db, workspaceId, turnId);
   if (!turn || turn.sessionId !== sessionId) {
     throw new HTTPException(404, { message: "session turn not found" });
   }

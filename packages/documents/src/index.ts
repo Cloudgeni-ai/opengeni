@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type { AddDocumentRequest, CreateDocumentBaseRequest, Document, DocumentBase, DocumentSearchResult, FileAsset } from "@opengeni/contracts";
-import { requireFile, type Database } from "@opengeni/db";
+import { requireFile, withRlsContext, withWorkspaceRls, type Database } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
 import { LiteParse } from "@llamaindex/liteparse";
@@ -253,75 +253,98 @@ function azureDeploymentBaseUrl(settings: Settings): string {
   return `${endpoint}/openai/deployments/${settings.azureOpenaiDeployment}`;
 }
 
-export async function createDocumentBase(db: Database, input: CreateDocumentBaseRequest): Promise<DocumentBase> {
-  const [row] = await db.insert(schema.documentBases).values({
-    name: input.name.trim(),
-    description: input.description?.trim() || null,
-  }).returning();
-  if (!row) throw new Error("Failed to create document base");
-  return mapDocumentBase(row);
+export async function createDocumentBase(db: Database, input: CreateDocumentBaseRequest & { accountId: string; workspaceId: string }): Promise<DocumentBase> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.documentBases).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      name: input.name.trim(),
+      description: input.description?.trim() || null,
+    }).returning();
+    if (!row) throw new Error("Failed to create document base");
+    return mapDocumentBase(row);
+  });
 }
 
-export async function listDocumentBases(db: Database): Promise<DocumentBase[]> {
-  const rows = await db.select().from(schema.documentBases).orderBy(desc(schema.documentBases.createdAt));
-  return rows.map(mapDocumentBase);
+export async function listDocumentBases(db: Database, workspaceId: string): Promise<DocumentBase[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.documentBases)
+      .where(eq(schema.documentBases.workspaceId, workspaceId))
+      .orderBy(desc(schema.documentBases.createdAt));
+    return rows.map(mapDocumentBase);
+  });
 }
 
-export async function getDocumentBase(db: Database, baseId: string): Promise<DocumentBase | null> {
-  const [row] = await db.select().from(schema.documentBases).where(eq(schema.documentBases.id, baseId)).limit(1);
-  return row ? mapDocumentBase(row) : null;
+export async function getDocumentBase(db: Database, workspaceId: string, baseId: string): Promise<DocumentBase | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.documentBases).where(and(eq(schema.documentBases.workspaceId, workspaceId), eq(schema.documentBases.id, baseId))).limit(1);
+    return row ? mapDocumentBase(row) : null;
+  });
 }
 
-export async function addDocumentToBase(db: Database, input: AddDocumentRequest & { baseId: string }): Promise<Document> {
-  const base = await getDocumentBase(db, input.baseId);
-  if (!base) throw new Error(`Document base not found: ${input.baseId}`);
-  const file = await requireReadyFile(db, input.fileId);
-  const now = new Date();
-  const [existing] = await db.select().from(schema.documents)
-    .where(and(eq(schema.documents.baseId, input.baseId), eq(schema.documents.fileId, input.fileId)))
-    .limit(1);
-  if (existing) {
-    return mapDocument(existing);
-  }
-  const [row] = await db.insert(schema.documents).values({
-    baseId: input.baseId,
-    fileId: input.fileId,
-    status: "queued",
-    title: file.filename,
-    parser: DEFAULT_DOCUMENT_PARSER,
-    updatedAt: now,
-  }).returning();
-  if (!row) throw new Error("Failed to create document");
-  return mapDocument(row);
+export async function addDocumentToBase(db: Database, input: AddDocumentRequest & { accountId: string; workspaceId: string; baseId: string }): Promise<Document> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
+    if (!base) throw new Error(`Document base not found: ${input.baseId}`);
+    const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
+    const now = new Date();
+    const [existing] = await scopedDb.select().from(schema.documents)
+      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.baseId, input.baseId), eq(schema.documents.fileId, input.fileId)))
+      .limit(1);
+    if (existing) {
+      return mapDocument(existing);
+    }
+    const [row] = await scopedDb.insert(schema.documents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      baseId: input.baseId,
+      fileId: input.fileId,
+      status: "queued",
+      title: file.filename,
+      parser: DEFAULT_DOCUMENT_PARSER,
+      updatedAt: now,
+    }).returning();
+    if (!row) throw new Error("Failed to create document");
+    return mapDocument(row);
+  });
 }
 
-export async function listDocuments(db: Database, baseId: string): Promise<Document[]> {
-  const rows = await db.select().from(schema.documents)
-    .where(eq(schema.documents.baseId, baseId))
-    .orderBy(asc(schema.documents.createdAt));
-  return rows.map(mapDocument);
+export async function listDocuments(db: Database, workspaceId: string, baseId: string): Promise<Document[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.documents)
+      .where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.baseId, baseId)))
+      .orderBy(asc(schema.documents.createdAt));
+    return rows.map(mapDocument);
+  });
 }
 
-export async function getDocument(db: Database, documentId: string): Promise<Document | null> {
-  const [row] = await db.select().from(schema.documents).where(eq(schema.documents.id, documentId)).limit(1);
-  return row ? mapDocument(row) : null;
+export async function getDocument(db: Database, workspaceId: string, documentId: string): Promise<Document | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.documents).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).limit(1);
+    return row ? mapDocument(row) : null;
+  });
 }
 
 export async function indexDocumentNow(
   db: Database,
   objectStorage: ObjectStorage,
+  workspaceId: string,
   documentId: string,
   services: DocumentServices = createDocumentServices(),
 ): Promise<Document> {
-  const [document] = await db.select().from(schema.documents).where(eq(schema.documents.id, documentId)).limit(1);
+  const [document] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    await scopedDb.select().from(schema.documents).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).limit(1)
+  );
   if (!document) throw new Error(`Document not found: ${documentId}`);
-  const file = await requireReadyFile(db, document.fileId);
-  await db.update(schema.documents).set({
-    status: "indexing",
-    parser: services.parser.name,
-    error: null,
-    updatedAt: new Date(),
-  }).where(eq(schema.documents.id, documentId));
+  const file = await requireReadyFile(db, workspaceId, document.fileId);
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.documents).set({
+      status: "indexing",
+      parser: services.parser.name,
+      error: null,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)));
+  });
   try {
     const bytes = await objectStorage.getFileBytes(file);
     const parsed = await services.parser.parse(bytes, file);
@@ -330,10 +353,12 @@ export async function indexDocumentNow(
     if (embeddings.length !== chunks.length) {
       throw new Error(`Embedding provider returned ${embeddings.length} embeddings for ${chunks.length} chunks`);
     }
-    await db.transaction(async (tx) => {
-      await tx.delete(schema.documentChunks).where(eq(schema.documentChunks.documentId, documentId));
+    await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+      await tx.delete(schema.documentChunks).where(and(eq(schema.documentChunks.workspaceId, workspaceId), eq(schema.documentChunks.documentId, documentId)));
       if (chunks.length > 0) {
         await tx.insert(schema.documentChunks).values(chunks.map((chunk, index) => ({
+          accountId: document.accountId,
+          workspaceId: document.workspaceId,
           documentId,
           baseId: document.baseId,
           fileId: file.id,
@@ -350,52 +375,58 @@ export async function indexDocumentNow(
         chunkCount: chunks.length,
         error: null,
         updatedAt: new Date(),
-      }).where(eq(schema.documents.id, documentId));
-    });
+      }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)));
+    }));
   } catch (error) {
-    const [failed] = await db.update(schema.documents).set({
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-      updatedAt: new Date(),
-    }).where(eq(schema.documents.id, documentId)).returning();
+    const [failed] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+      await scopedDb.update(schema.documents).set({
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt: new Date(),
+      }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).returning()
+    );
     if (!failed) throw error;
     return mapDocument(failed);
   }
-  const updated = await getDocument(db, documentId);
+  const updated = await getDocument(db, workspaceId, documentId);
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
   return updated;
 }
 
 export async function searchDocuments(
   db: Database,
-  input: { query: string; baseIds?: string[]; limit?: number },
+  input: { workspaceId: string; query: string; baseIds?: string[]; limit?: number },
   services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
 ): Promise<DocumentSearchResult[]> {
   const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
   const queryEmbedding = await services.embedder.embedQuery(input.query);
   validateEmbedding(queryEmbedding, services.embedder.dimensions, services.embedder.model);
   const distance = sql<number>`${schema.documentChunks.embedding} <=> ${vectorLiteral(queryEmbedding)}::vector`;
-  const rows = await db.select({
-    chunkId: schema.documentChunks.id,
-    documentId: schema.documentChunks.documentId,
-    baseId: schema.documentChunks.baseId,
-    fileId: schema.documentChunks.fileId,
-    title: schema.documents.title,
-    text: schema.documentChunks.text,
-    chunkIndex: schema.documentChunks.chunkIndex,
-    metadata: schema.documentChunks.metadata,
-    distance,
-  }).from(schema.documentChunks)
-    .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-    .where(and(
-      eq(schema.documents.status, "ready"),
-      eq(schema.documentChunks.embeddingModel, services.embedder.model),
-      input.baseIds && input.baseIds.length > 0 ? inArray(schema.documentChunks.baseId, input.baseIds) : undefined,
-    ))
-    .orderBy(distance)
-    .limit(limit);
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      chunkId: schema.documentChunks.id,
+      documentId: schema.documentChunks.documentId,
+      baseId: schema.documentChunks.baseId,
+      fileId: schema.documentChunks.fileId,
+      title: schema.documents.title,
+      text: schema.documentChunks.text,
+      chunkIndex: schema.documentChunks.chunkIndex,
+      metadata: schema.documentChunks.metadata,
+      distance,
+    }).from(schema.documentChunks)
+      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+      .where(and(
+        eq(schema.documents.status, "ready"),
+        eq(schema.documentChunks.workspaceId, input.workspaceId),
+        eq(schema.documentChunks.embeddingModel, services.embedder.model),
+        input.baseIds && input.baseIds.length > 0 ? inArray(schema.documentChunks.baseId, input.baseIds) : undefined,
+      ))
+      .orderBy(distance)
+      .limit(limit)
+  );
   return rows.map((row) => ({
     chunkId: row.chunkId,
+    workspaceId: input.workspaceId,
     documentId: row.documentId,
     baseId: row.baseId,
     fileId: row.fileId,
@@ -407,23 +438,26 @@ export async function searchDocuments(
   }));
 }
 
-export async function getDocumentChunk(db: Database, chunkId: string): Promise<DocumentSearchResult | null> {
-  const [row] = await db.select({
-    chunkId: schema.documentChunks.id,
-    documentId: schema.documentChunks.documentId,
-    baseId: schema.documentChunks.baseId,
-    fileId: schema.documentChunks.fileId,
-    title: schema.documents.title,
-    text: schema.documentChunks.text,
-    chunkIndex: schema.documentChunks.chunkIndex,
-    metadata: schema.documentChunks.metadata,
-  }).from(schema.documentChunks)
-    .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-    .where(and(eq(schema.documentChunks.id, chunkId), eq(schema.documents.status, "ready")))
-    .limit(1);
+export async function getDocumentChunk(db: Database, workspaceId: string, chunkId: string): Promise<DocumentSearchResult | null> {
+  const [row] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      chunkId: schema.documentChunks.id,
+      documentId: schema.documentChunks.documentId,
+      baseId: schema.documentChunks.baseId,
+      fileId: schema.documentChunks.fileId,
+      title: schema.documents.title,
+      text: schema.documentChunks.text,
+      chunkIndex: schema.documentChunks.chunkIndex,
+      metadata: schema.documentChunks.metadata,
+    }).from(schema.documentChunks)
+      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+      .where(and(eq(schema.documentChunks.workspaceId, workspaceId), eq(schema.documentChunks.id, chunkId), eq(schema.documents.status, "ready")))
+      .limit(1)
+  );
   if (!row) return null;
   return {
     chunkId: row.chunkId,
+    workspaceId,
     documentId: row.documentId,
     baseId: row.baseId,
     fileId: row.fileId,
@@ -479,8 +513,8 @@ export function deterministicEmbedding(text: string, dimensions = DEFAULT_DOCUME
   return values.map((value) => Number((value / norm).toFixed(6)));
 }
 
-async function requireReadyFile(db: Database, fileId: string): Promise<FileAsset> {
-  const file = await requireFile(db, fileId);
+async function requireReadyFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset> {
+  const file = await requireFile(db, workspaceId, fileId);
   if (file.status !== "ready") {
     throw new Error(`File ${fileId} is ${file.status}`);
   }
@@ -550,6 +584,7 @@ function vectorLiteral(values: number[]): string {
 function mapDocumentBase(row: typeof schema.documentBases.$inferSelect): DocumentBase {
   return {
     id: row.id,
+    workspaceId: row.workspaceId,
     name: row.name,
     description: row.description,
     createdAt: row.createdAt.toISOString(),
@@ -560,6 +595,7 @@ function mapDocumentBase(row: typeof schema.documentBases.$inferSelect): Documen
 function mapDocument(row: typeof schema.documents.$inferSelect): Document {
   return {
     id: row.id,
+    workspaceId: row.workspaceId,
     baseId: row.baseId,
     fileId: row.fileId,
     status: row.status as Document["status"],

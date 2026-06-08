@@ -8,7 +8,11 @@ import {
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
-import { requireFile, type Database } from "@opengeni/db";
+import {
+  listGitHubInstallationIdsForWorkspace,
+  requireFile,
+  type Database,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
@@ -100,7 +104,7 @@ export function mergeResourceRefs(existing: ResourceRef[], additions: ResourceRe
   }
 }
 
-export function validateGitHubRepositorySelection(resources: ResourceRef[]): void {
+export function validateGitHubRepositorySelectionShape(resources: ResourceRef[]): number | null {
   const selected = resources.flatMap((resource) => {
     if (resource.kind !== "repository") {
       return [];
@@ -123,7 +127,7 @@ export function validateGitHubRepositorySelection(resources: ResourceRef[]): voi
     return [{ installationId, repositoryId }];
   });
   if (selected.length === 0) {
-    return;
+    return null;
   }
   const installationId = selected[0]!.installationId;
   if (selected.some((item) => item.installationId !== installationId)) {
@@ -131,9 +135,23 @@ export function validateGitHubRepositorySelection(resources: ResourceRef[]): voi
       message: "GitHub App repository resources must belong to one installation",
     });
   }
+  return installationId;
 }
 
-export async function validateFileResources(db: Database, resources: ResourceRef[]): Promise<void> {
+export async function validateGitHubRepositorySelection(db: Database, workspaceId: string, resources: ResourceRef[]): Promise<void> {
+  const installationId = validateGitHubRepositorySelectionShape(resources);
+  if (installationId === null) {
+    return;
+  }
+  const linkedInstallationIds = new Set(await listGitHubInstallationIdsForWorkspace(db, workspaceId));
+  if (!linkedInstallationIds.has(installationId)) {
+    throw new HTTPException(422, {
+      message: "GitHub App repository resources must belong to a GitHub App installation linked to this workspace",
+    });
+  }
+}
+
+export async function validateFileResources(db: Database, workspaceId: string, resources: ResourceRef[]): Promise<void> {
   const fileIds = new Set<string>();
   for (const resource of resources) {
     if (resource.kind !== "file") {
@@ -143,7 +161,7 @@ export async function validateFileResources(db: Database, resources: ResourceRef
       throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
     }
     fileIds.add(resource.fileId);
-    const file = await requireFile(db, resource.fileId).catch(() => null);
+    const file = await requireFile(db, workspaceId, resource.fileId).catch(() => null);
     if (!file) {
       throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
     }

@@ -47,6 +47,9 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.web.containerPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.startup) | nindent 12 }}

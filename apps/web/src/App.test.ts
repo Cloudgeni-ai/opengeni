@@ -234,6 +234,8 @@ describe("applySessionStatusEvents", () => {
 function session(): Session {
   return {
     id: "session-1",
+    accountId: "account-1",
+    workspaceId: "workspace-1",
     status: "running",
     initialMessage: "Inspect the repo",
     resources: [],
@@ -263,6 +265,8 @@ function scheduledTaskAgentConfig(): ScheduledTask["agentConfig"] {
 function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
     id: "00000000-0000-4000-8000-000000000100",
+    accountId: "account-1",
+    workspaceId: "workspace-1",
     name: "Task",
     status: "active",
     schedule,
@@ -281,6 +285,7 @@ function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<Sched
 function event(sequence: number, type: string, payload: unknown): SessionEvent {
   return {
     id: `event-${sequence}`,
+    workspaceId: "workspace-1",
     sessionId: "session-1",
     turnId: "turn-1",
     sequence,

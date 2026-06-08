@@ -14,20 +14,25 @@
     "@aws-sdk/client-s3": "^3.1044.0",
     "@aws-sdk/s3-request-presigner": "^3.1044.0",
     "@hono/zod-validator": "^0.7.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
+    "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
-    "@opengeni/documents": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/storage": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@temporalio/client": "^1.17.0",
+    "better-auth": "^1.6.14",
     "hono": "^4.12.18",
+    "pg": "^8.21.0",
+    "resend": "^6.12.4",
+    "stripe": "^22.2.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {
+    "@types/pg": "^8.20.0",
     "typescript": "^6.0.3"
   }
 }

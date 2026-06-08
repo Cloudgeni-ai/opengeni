@@ -11,13 +11,18 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "./dependencies";
+import { requireAccessGrant } from "./access";
+import { createManagedAuth } from "./auth/managed-auth";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerFileRoutes } from "./routes/files";
+import { registerApiKeyRoutes } from "./routes/api-keys";
+import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerWorkspaceRoutes } from "./routes/workspaces";
 
 export type {
   ApiRouteDeps,
@@ -32,12 +37,14 @@ export {
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
+  validateGitHubRepositorySelectionShape,
   validateToolRefs,
 } from "./domain/resources";
 export { workflowIdForSession } from "./domain/sessions";
 export { replaySessionEvents, sseSessionStream } from "./http/sse";
 
 export function createApp(deps: AppDependencies): Hono {
+  const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
   const objectStorage = createObjectStorage(deps.settings);
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
   const getDocumentServices = () => {
@@ -45,16 +52,17 @@ export function createApp(deps: AppDependencies): Hono {
     return documentServices;
   };
   const documentIndexer = deps.documentIndexer ?? {
-    indexDocument: async ({ documentId }: { documentId: string }) => {
+    indexDocument: async ({ workspaceId, documentId }: { workspaceId: string; documentId: string }) => {
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      return await indexDocumentNow(deps.db, objectStorage, documentId, getDocumentServices());
+      return await indexDocumentNow(deps.db, objectStorage, workspaceId, documentId, getDocumentServices());
     },
   };
   const routeDeps: ApiRouteDeps = {
     ...deps,
     githubStateSecret: deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
+    managedAuth,
     objectStorage,
     documentIndexer,
     getDocumentServices,
@@ -63,6 +71,7 @@ export function createApp(deps: AppDependencies): Hono {
   const observability = deps.observability ?? createObservability(deps.settings, { component: "api" });
 
   app.use("*", cors({
+    credentials: true,
     origin: (origin) => {
       if (!origin) {
         return null;
@@ -96,6 +105,8 @@ export function createApp(deps: AppDependencies): Hono {
         route,
         status,
         durationMs: Math.round(durationSeconds * 1000),
+        traceId: span.traceId,
+        spanId: span.spanId,
       });
     } catch (error) {
       const status = httpStatusForError(error);
@@ -108,11 +119,24 @@ export function createApp(deps: AppDependencies): Hono {
         },
         error,
       });
+      observability.error("HTTP request failed", {
+        method: c.req.method,
+        route,
+        status,
+        durationMs: Math.round(durationSeconds * 1000),
+        traceId: span.traceId,
+        spanId: span.spanId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   });
 
   app.use("*", requireAccessKey(deps.settings));
+
+  if (managedAuth) {
+    app.on(["GET", "POST"], "/v1/auth/*", (c) => managedAuth.handler(c.req.raw));
+  }
 
   app.get("/healthz", (c) => c.json({
     service: deps.settings.serviceName,
@@ -137,27 +161,42 @@ export function createApp(deps: AppDependencies): Hono {
       enabled: objectStorage !== null,
       maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
     },
-    auth: {
-      required: deps.settings.authRequired,
-      headerName: "authorization",
-      scheme: "bearer",
-    },
+    productAccessMode: deps.settings.productAccessMode,
+    auth: clientAuthConfig(deps.settings),
   })));
 
-  app.all("/v1/mcp", async (c) => {
+  app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId, "workspace:read");
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const mcp = buildOpenGeniMcpServer(routeDeps);
+    const mcp = buildOpenGeniMcpServer(routeDeps, grant);
     await mcp.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });
 
   registerFileRoutes(app, routeDeps);
+  registerApiKeyRoutes(app, routeDeps);
+  registerBillingRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
+  registerWorkspaceRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
 
   return app;
+}
+
+function clientAuthConfig(settings: AppDependencies["settings"]) {
+  if (settings.productAccessMode === "managed") {
+    return { mode: "managedSession" as const, session: "cookie" as const };
+  }
+  if (settings.productAccessMode === "configured") {
+    return { mode: "configuredToken" as const, headerName: "authorization" as const, scheme: "bearer" as const };
+  }
+  if (settings.authRequired) {
+    return { mode: "deploymentKey" as const, headerName: "x-opengeni-access-key" as const };
+  }
+  return { mode: "none" as const };
 }
 
 export function allowedCorsOrigin(pattern: string, origin: string): boolean {
@@ -175,35 +214,43 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
-  { pattern: /^\/v1\/mcp$/, label: "/v1/mcp" },
-  { pattern: /^\/v1\/mcp\/docs$/, label: "/v1/mcp/docs" },
-  { pattern: /^\/v1\/sessions$/, label: "/v1/sessions" },
-  { pattern: /^\/v1\/sessions\/[^/]+\/events\/stream$/, label: "/v1/sessions/:id/events/stream" },
-  { pattern: /^\/v1\/sessions\/[^/]+\/events$/, label: "/v1/sessions/:id/events" },
-  { pattern: /^\/v1\/sessions\/[^/]+\/turns\/reorder$/, label: "/v1/sessions/:id/turns/reorder" },
-  { pattern: /^\/v1\/sessions\/[^/]+\/turns\/[^/]+$/, label: "/v1/sessions/:id/turns/:turnId" },
-  { pattern: /^\/v1\/sessions\/[^/]+\/turns$/, label: "/v1/sessions/:id/turns" },
-  { pattern: /^\/v1\/sessions\/[^/]+$/, label: "/v1/sessions/:id" },
-  { pattern: /^\/v1\/files\/uploads$/, label: "/v1/files/uploads" },
-  { pattern: /^\/v1\/files\/uploads\/[^/]+\/complete$/, label: "/v1/files/uploads/:id/complete" },
-  { pattern: /^\/v1\/files\/[^/]+\/download-url$/, label: "/v1/files/:id/download-url" },
-  { pattern: /^\/v1\/files\/[^/]+$/, label: "/v1/files/:id" },
-  { pattern: /^\/v1\/scheduled-tasks$/, label: "/v1/scheduled-tasks" },
-  { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/pause$/, label: "/v1/scheduled-tasks/:id/pause" },
-  { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/resume$/, label: "/v1/scheduled-tasks/:id/resume" },
-  { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/trigger$/, label: "/v1/scheduled-tasks/:id/trigger" },
-  { pattern: /^\/v1\/scheduled-tasks\/[^/]+\/runs$/, label: "/v1/scheduled-tasks/:id/runs" },
-  { pattern: /^\/v1\/scheduled-tasks\/[^/]+$/, label: "/v1/scheduled-tasks/:id" },
-  { pattern: /^\/v1\/document-bases$/, label: "/v1/document-bases" },
-  { pattern: /^\/v1\/document-bases\/[^/]+\/documents$/, label: "/v1/document-bases/:id/documents" },
-  { pattern: /^\/v1\/document-bases\/[^/]+\/search$/, label: "/v1/document-bases/:id/search" },
-  { pattern: /^\/v1\/document-bases\/[^/]+$/, label: "/v1/document-bases/:id" },
-  { pattern: /^\/v1\/documents\/[^/]+\/reindex$/, label: "/v1/documents/:id/reindex" },
-  { pattern: /^\/v1\/github\/app$/, label: "/v1/github/app" },
-  { pattern: /^\/v1\/github\/repositories$/, label: "/v1/github/repositories" },
-  { pattern: /^\/v1\/github\/repositories\/sync$/, label: "/v1/github/repositories/sync" },
-  { pattern: /^\/v1\/github\/app-manifest$/, label: "/v1/github/app-manifest" },
+  { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
+  { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
+  { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
+  { pattern: /^\/v1\/billing\/entitlements$/, label: "/v1/billing/entitlements" },
+  { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/, label: "/v1/workspaces/:workspaceId/mcp" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/docs$/, label: "/v1/workspaces/:workspaceId/mcp/docs" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions$/, label: "/v1/workspaces/:workspaceId/sessions" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/, label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events$/, label: "/v1/workspaces/:workspaceId/sessions/:id/events" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns\/reorder$/, label: "/v1/workspaces/:workspaceId/sessions/:id/turns/reorder" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns\/[^/]+$/, label: "/v1/workspaces/:workspaceId/sessions/:id/turns/:turnId" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns$/, label: "/v1/workspaces/:workspaceId/sessions/:id/turns" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+$/, label: "/v1/workspaces/:workspaceId/sessions/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/files\/uploads$/, label: "/v1/workspaces/:workspaceId/files/uploads" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/files\/uploads\/[^/]+\/complete$/, label: "/v1/workspaces/:workspaceId/files/uploads/:id/complete" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/files\/[^/]+\/download-url$/, label: "/v1/workspaces/:workspaceId/files/:id/download-url" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/files\/[^/]+$/, label: "/v1/workspaces/:workspaceId/files/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/, label: "/v1/workspaces/:workspaceId/api-keys" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/api-keys\/[^/]+$/, label: "/v1/workspaces/:workspaceId/api-keys/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+\/pause$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id/pause" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+\/resume$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id/resume" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+\/trigger$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id/trigger" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+\/runs$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id/runs" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases$/, label: "/v1/workspaces/:workspaceId/document-bases" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/documents\/[^/]+\/reindex$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId/reindex" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/documents$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/documents" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/search$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/search" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+$/, label: "/v1/workspaces/:workspaceId/document-bases/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/github\/app$/, label: "/v1/workspaces/:workspaceId/github/app" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories$/, label: "/v1/workspaces/:workspaceId/github/repositories" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories\/sync$/, label: "/v1/workspaces/:workspaceId/github/repositories/sync" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/github\/app-manifest$/, label: "/v1/workspaces/:workspaceId/github/app-manifest" },
   { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
+  { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
 ];
 
 export function routeLabel(pathname: string): string {

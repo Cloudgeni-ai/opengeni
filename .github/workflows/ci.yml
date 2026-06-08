@@ -28,6 +28,9 @@ jobs:
       - name: Test
         run: bun test
 
+      - name: Workspace auth/billing static guard
+        run: bun scripts/check-workspace-billing-static.ts
+
   deployment:
     name: Deployment artifacts
     runs-on: ubuntu-latest

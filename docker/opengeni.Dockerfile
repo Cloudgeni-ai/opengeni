@@ -22,6 +22,10 @@ RUN bun install --frozen-lockfile
 
 COPY . .
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 RUN chown -R bun:bun /app
 USER bun

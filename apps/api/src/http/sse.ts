@@ -2,7 +2,7 @@ import type { SessionEvent } from "@opengeni/contracts";
 import { listSessionEvents, type Database } from "@opengeni/db";
 import { formatSse, type EventBus } from "@opengeni/events";
 
-export async function sseSessionStream(db: Database, bus: EventBus, sessionId: string, after: number, signal: AbortSignal): Promise<Response> {
+export async function sseSessionStream(db: Database, bus: EventBus, workspaceId: string, sessionId: string, after: number, signal: AbortSignal): Promise<Response> {
   const encoder = new TextEncoder();
   let controller: ReadableStreamDefaultController<Uint8Array>;
   let lastSent = after;
@@ -18,7 +18,7 @@ export async function sseSessionStream(db: Database, bus: EventBus, sessionId: s
           return;
         }
         if (event.sequence > lastSent + 1) {
-          const missing = await listSessionEvents(db, sessionId, lastSent, event.sequence - lastSent - 1);
+          const missing = await listSessionEvents(db, workspaceId, sessionId, lastSent, event.sequence - lastSent - 1);
           for (const missed of missing) {
             if (missed.sequence > lastSent) {
               controller.enqueue(encoder.encode(formatSse(missed)));
@@ -30,7 +30,7 @@ export async function sseSessionStream(db: Database, bus: EventBus, sessionId: s
         lastSent = event.sequence;
       };
 
-      unsubscribe = await bus.subscribe(sessionId, async (events) => {
+      unsubscribe = await bus.subscribe(workspaceId, sessionId, async (events) => {
         if (replaying) {
           buffered.push(...events);
           return;
@@ -40,7 +40,7 @@ export async function sseSessionStream(db: Database, bus: EventBus, sessionId: s
         }
       });
 
-      await replaySessionEvents((cursor, limit) => listSessionEvents(db, sessionId, cursor, limit), send, after);
+      await replaySessionEvents((cursor, limit) => listSessionEvents(db, workspaceId, sessionId, cursor, limit), send, after);
       replaying = false;
       for (const event of buffered.sort((a, b) => a.sequence - b.sequence)) {
         await send(event);

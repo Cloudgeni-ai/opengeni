@@ -20,7 +20,7 @@ describe("GitHub app manifest helpers", () => {
     expect(verifySignedState(state, "secret", 5000)).toBe(false);
   });
 
-  test("omits webhooks for localhost and includes them for public https", () => {
+  test("omits webhooks until a signed GitHub webhook receiver is shipped", () => {
     const local = buildGitHubAppManifest({
       appName: "Local",
       baseUrl: "http://127.0.0.1:8000",
@@ -28,6 +28,7 @@ describe("GitHub app manifest helpers", () => {
       includeCiPermissions: true,
     });
     expect(local.hook_attributes).toBeUndefined();
+    expect(local.request_oauth_on_install).toBe(true);
 
     const hosted = buildGitHubAppManifest({
       appName: "Hosted",
@@ -35,10 +36,9 @@ describe("GitHub app manifest helpers", () => {
       public: false,
       includeCiPermissions: true,
     });
-    expect(hosted.hook_attributes).toEqual({
-      url: "https://agents.example.com/v1/github/webhook",
-      active: true,
-    });
+    expect(hosted.hook_attributes).toBeUndefined();
+    expect(hosted.default_events).toBeUndefined();
+    expect(hosted.request_oauth_on_install).toBe(true);
   });
 
   test("renders env lines with escaped private key", () => {

@@ -1,5 +1,9 @@
 import { GitHubAppManifestCreate } from "@opengeni/contracts";
 import {
+  listGitHubInstallationIdsForWorkspace,
+  upsertGitHubInstallation,
+} from "@opengeni/db";
+import {
   buildGitHubAppManifest,
   convertGitHubAppManifest,
   createSignedState,
@@ -10,31 +14,42 @@ import {
   listGitHubAppRepositories,
   organizationAppManifestUrl,
   personalAppManifestUrl,
+  readSignedState,
+  verifyGitHubInstallationAccessForUser,
   verifySignedState,
 } from "@opengeni/github";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
 
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { settings, githubStateSecret } = deps;
+  const { db, settings, githubStateSecret } = deps;
 
-  app.get("/v1/github/app", (c) => {
+  app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
     const missing = githubAppMissingSettings(settings);
     const slug = settings.githubAppSlug?.trim() || null;
+    const state = createSignedState(githubStateSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    });
     return c.json({
       configured: missing.length === 0,
       appId: settings.githubAppId ?? null,
       clientId: settings.githubClientId ?? null,
       appSlug: slug,
-      installUrl: slug ? `https://github.com/apps/${slug}/installations/new` : null,
+      installUrl: slug ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}` : null,
       missing,
     });
   });
 
-  app.get("/v1/github/repositories", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/github/repositories", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listGitHubAppRepositories(settings) });
+      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
         throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
@@ -43,9 +58,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.post("/v1/github/repositories/sync", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/github/repositories/sync", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listGitHubAppRepositories(settings) });
+      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
         throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
@@ -54,16 +71,22 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.post("/v1/github/app-manifest", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/github/app-manifest", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
     const payload = GitHubAppManifestCreate.parse(await c.req.json());
     const baseUrl = (settings.githubAppManifestBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
-    const state = createSignedState(githubStateSecret);
+    const state = createSignedState(githubStateSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    });
     const appName = payload.appName?.trim() || "OpenGeni";
     const manifest = buildGitHubAppManifest({
       appName,
       baseUrl,
       public: payload.public,
       includeCiPermissions: payload.includeCiPermissions,
+      setupUrl: `${baseUrl}/v1/github/setup`,
     });
     const organization = payload.organization?.trim();
     return c.json({
@@ -86,13 +109,71 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       const conversion = await convertGitHubAppManifest(code);
       const envLines = envLinesFromGitHubManifestConversion(conversion);
       const slug = String(conversion.slug ?? "");
-      const installUrl = slug ? `https://github.com/apps/${slug}/installations/new` : "";
+      const installUrl = slug ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}` : "";
       return c.html(githubSuccessHtml(envLines, installUrl));
     } catch (error) {
       const message = error instanceof GitHubAppApiError ? error.message : String(error);
       throw new HTTPException(502, { message });
     }
   });
+
+  app.get("/v1/github/setup", async (c) => {
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    const installationIdRaw = c.req.query("installation_id");
+    const setupAction = c.req.query("setup_action") ?? null;
+    if (!state) {
+      throw new HTTPException(400, { message: "missing GitHub installation state" });
+    }
+    const statePayload = readSignedState(state, githubStateSecret);
+    if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string") {
+      throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
+    }
+    const grant = await requireAccessGrant(c, deps, statePayload.workspaceId, "github:manage");
+    if (grant.accountId !== statePayload.accountId) {
+      throw new HTTPException(403, { message: "GitHub installation state does not match this workspace" });
+    }
+    if (setupAction === "request" && !installationIdRaw) {
+      return c.html(githubSetupPendingHtml());
+    }
+    const installationId = parsePositiveInteger(installationIdRaw);
+    if (installationId === null) {
+      throw new HTTPException(400, { message: "missing or invalid GitHub installation_id" });
+    }
+    if (!code) {
+      throw new HTTPException(400, { message: "GitHub setup requires a user authorization code; enable request_oauth_on_install for this GitHub App" });
+    }
+    try {
+      const installation = await verifyGitHubInstallationAccessForUser(settings, { code, installationId });
+      if (!installation) {
+        throw new HTTPException(404, { message: "GitHub App installation was not found for this app" });
+      }
+      if (installation.suspended) {
+        throw new HTTPException(409, { message: "GitHub App installation is suspended" });
+      }
+      await upsertGitHubInstallation(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        installationId,
+        accountLogin: installation.accountLogin,
+        accountType: installation.accountType,
+      });
+      return c.html(githubSetupSuccessHtml(installation.accountLogin ?? `installation ${installationId}`));
+    } catch (error) {
+      if (error instanceof HTTPException) {
+        throw error;
+      }
+      if (error instanceof GitHubAppConfigurationError) {
+        throw new HTTPException(409, { message: JSON.stringify({ message: error.message, missing: error.missing }) });
+      }
+      throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+}
+
+export async function listWorkspaceGitHubRepositories(deps: ApiRouteDeps, workspaceId: string) {
+  const installationIds = await listGitHubInstallationIdsForWorkspace(deps.db, workspaceId);
+  return await listGitHubAppRepositories(deps.settings, { installationIds });
 }
 
 function githubSuccessHtml(envLines: string[], installUrl: string): string {
@@ -100,6 +181,22 @@ function githubSuccessHtml(envLines: string[], installUrl: string): string {
   const escaped = escapeHtml(envText);
   const install = installUrl ? `<a class="button secondary" href="${escapeHtml(installUrl)}">Install on repositories</a>` : "";
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Created</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(760px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0 0 18px;color:#d4d4d8}.env-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 8px}.env-header h2{margin:0;font-size:13px;line-height:1.2;text-transform:uppercase;letter-spacing:.08em;color:#a1a1aa}pre{white-space:pre-wrap;word-break:break-word;max-height:380px;overflow:auto;background:#09090b;border:1px solid #27272a;border-radius:8px;padding:16px;font-size:13px;line-height:1.5}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}.button,button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;border-radius:6px;border:1px solid #3f3f46;padding:0 12px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;text-decoration:none;cursor:pointer}.button.secondary{background:transparent;color:#fafafa}.button.secondary:hover,button.secondary:hover{background:#27272a}button:disabled{cursor:not-allowed;opacity:.7}</style></head><body><main><h1>GitHub App created</h1><p>Add these values to .env, then restart API and worker.</p><div class="env-header"><h2>Environment variables</h2><button id="copy-env" type="button">Copy env</button></div><pre id="env-lines">${escaped}</pre><div class="actions">${install}</div><script>(()=>{const button=document.getElementById("copy-env");const env=document.getElementById("env-lines");async function copyText(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const area=document.createElement("textarea");area.value=text;area.setAttribute("readonly","");area.style.position="fixed";area.style.inset="-9999px";document.body.append(area);area.select();document.execCommand("copy");area.remove();}button?.addEventListener("click",async()=>{try{await copyText(env?.textContent||"");button.textContent="Copied";setTimeout(()=>button.textContent="Copy env",1600);}catch{button.textContent="Copy failed";setTimeout(()=>button.textContent="Copy env",2200);}});})();</script></main></body></html>`;
+}
+
+function githubSetupSuccessHtml(account: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Connected</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App connected</h1><p>${escapeHtml(account)} is now available to this OpenGeni workspace.</p></main></body></html>`;
+}
+
+function githubSetupPendingHtml(): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GitHub App Requested</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:8px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px;line-height:1.2}p{margin:0;color:#d4d4d8}</style></head><body><main><h1>GitHub App request sent</h1><p>An organization administrator must approve the installation before OpenGeni can connect it to this workspace.</p></main></body></html>`;
+}
+
+function parsePositiveInteger(value: string | undefined | null): number | null {
+  if (!value || !/^\d+$/.test(value)) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 function escapeHtml(value: string): string {

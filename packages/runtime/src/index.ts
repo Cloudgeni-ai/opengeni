@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts, sandboxLifecycleHookIds } from "@opengeni/config";
-import type { ReasoningEffort, ResourceRef, SessionEventType, ToolRef } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   connectMcpServers,
@@ -30,6 +30,8 @@ import {
   file,
   gitRepo,
   inContainerMountStrategy,
+  localDir,
+  localFile,
   s3Mount,
   skills,
   type SandboxClient,
@@ -48,6 +50,16 @@ ensureReadableStreamFrom();
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
   payload: unknown;
+};
+
+export type ModelResponseUsage = {
+  responseId?: string;
+  usage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
+  };
 };
 
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
@@ -103,10 +115,16 @@ export type SandboxFileDownload = {
   sizeBytes?: number;
 };
 
+export type SandboxRepositoryMaterialization = {
+  mountPath: string;
+  sourcePath: string;
+  sourceType: "directory" | "file";
+};
+
 export type OpenGeniRuntime = {
   configure: (settings: Settings) => void;
   buildAgent: (settings: Settings, resources: ResourceRef[], options?: BuildAgentOptions) => Agent<any, any>;
-  prepareTools: (settings: Settings, tools: ToolRef[]) => Promise<PreparedAgentTools>;
+  prepareTools: (settings: Settings, tools: ToolRef[], options?: PrepareToolsOptions) => Promise<PreparedAgentTools>;
   prepareInput: (agent: Agent<any, any>, input: AgentSegmentInput, options?: PrepareInputOptions) => Promise<PreparedAgentInput>;
   runStream: (agent: Agent<any, any>, input: PreparedAgentInput, settings: Settings, options?: RunAgentStreamOptions) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
@@ -165,6 +183,7 @@ export type BuildAgentOptions = {
   reasoningEffort?: ReasoningEffort;
   sandboxEnvironment?: Record<string, string>;
   fileResourceDownloads?: SandboxFileDownload[];
+  repositoryMaterializations?: SandboxRepositoryMaterialization[];
   mcpServers?: MCPServer[];
 };
 
@@ -199,7 +218,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
-    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
+    defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads, options.repositoryMaterializations),
     ...(runAs ? { runAs } : {}),
     capabilities: [
       ...Capabilities.default(),
@@ -225,27 +244,35 @@ export type PreparedAgentTools = {
   close: () => Promise<void>;
 };
 
-export async function prepareAgentTools(settings: Settings, tools: ToolRef[]): Promise<PreparedAgentTools> {
+export type PrepareToolsOptions = {
+  accountId?: string;
+  workspaceId?: string;
+  subjectId?: string;
+  subjectLabel?: string;
+};
+
+export async function prepareAgentTools(settings: Settings, tools: ToolRef[], options: PrepareToolsOptions = {}): Promise<PreparedAgentTools> {
   if (tools.length === 0) {
     return { mcpServers: [], close: async () => {} };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
-  const servers = tools.map((tool) => {
+  const servers = await Promise.all(tools.map(async (tool) => {
     const config = registry.get(tool.id);
     if (!config) {
       throw new Error(`Unknown MCP server id: ${tool.id}`);
     }
+    const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
     return new PrefixedMcpServer(new MCPServerStreamableHttp({
-      url: config.url,
+      url,
       name: config.name ?? config.id,
       cacheToolsList: config.cacheToolsList,
-      ...firstPartyMcpRequestInit(settings, config),
+      ...await firstPartyMcpRequestInit(settings, config, options),
       ...(config.timeoutMs ? {
         timeout: config.timeoutMs,
         clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
       } : {}),
     }), config.id, config.allowedTools);
-  });
+  }));
   const connected = await connectMcpServers(servers, {
     connectInParallel: true,
     strict: true,
@@ -258,22 +285,48 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[]): P
   };
 }
 
-function firstPartyMcpRequestInit(settings: Settings, config: Settings["mcpServers"][number]): { requestInit: { headers: Record<string, string> } } | {} {
-  if (!settings.authRequired || !settings.accessKey || !isFirstPartyMcpServer(settings, config)) {
+async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
+  if (!isFirstPartyMcpServer(settings, config)) {
+    return {};
+  }
+  const headers: Record<string, string> = {};
+  if (settings.authRequired && settings.accessKey) {
+    headers["x-opengeni-access-key"] = settings.accessKey;
+  }
+  if (settings.delegationSecret && options.accountId && options.workspaceId) {
+    headers.authorization = `Bearer ${await signDelegatedAccessToken(settings.delegationSecret, {
+      accountId: options.accountId,
+      workspaceId: options.workspaceId,
+      subjectId: options.subjectId ?? "worker:first-party-mcp",
+      ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
+      permissions: firstPartyMcpPermissions,
+      exp: Math.floor(Date.now() / 1000) + 60 * 60,
+    })}`;
+  }
+  if (Object.keys(headers).length === 0) {
     return {};
   }
   return {
     requestInit: {
-      headers: {
-        authorization: `Bearer ${settings.accessKey}`,
-      },
+      headers,
     },
   };
 }
 
+const firstPartyMcpPermissions: Permission[] = [
+  "workspace:read",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+];
+
 function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"][number]): boolean {
   if (!["opengeni", "files", "docs"].includes(config.id)) {
     return false;
+  }
+  if (config.url.includes("{workspaceId}")) {
+    return true;
   }
   const url = normalizeUrl(config.url);
   if (!url) {
@@ -282,8 +335,38 @@ function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"
   return firstPartyMcpUrls(settings).some((candidate) => candidate === url);
 }
 
+function firstPartyMcpServerUrlForRun(settings: Settings, config: Settings["mcpServers"][number], workspaceId: string | undefined): string | null {
+  if (!workspaceId || !["opengeni", "files", "docs"].includes(config.id)) {
+    return null;
+  }
+  if (config.url.includes("{workspaceId}")) {
+    return config.url.replaceAll("{workspaceId}", workspaceId);
+  }
+  if (!isFirstPartyMcpServer(settings, config)) {
+    return null;
+  }
+  const rawBase = settings.opengeniMcpUrl?.includes("{workspaceId}")
+    ? settings.opengeniMcpUrl.replaceAll("{workspaceId}", workspaceId)
+    : settings.opengeniMcpUrl
+      ? scopedMcpUrlFromConfiguredBase(settings.opengeniMcpUrl, workspaceId)
+      : `http://127.0.0.1:${settings.apiPort}/v1/workspaces/${workspaceId}/mcp`;
+  const url = new URL(rawBase);
+  if (config.id === "docs") {
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
+  }
+  return url.toString();
+}
+
+function scopedMcpUrlFromConfiguredBase(raw: string, workspaceId: string): string {
+  const url = new URL(raw);
+  url.pathname = `/v1/workspaces/${workspaceId}/mcp`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function firstPartyMcpUrls(settings: Settings): string[] {
-  const base = normalizeUrl(settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/mcp`);
+  const base = normalizeUrl(settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`);
   if (!base) {
     return [];
   }
@@ -779,6 +862,66 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
   return out;
 }
 
+export function modelResponseUsageFromSdkEvent(event: RunStreamEvent): ModelResponseUsage | null {
+  const response = modelResponseFromSdkEvent(event);
+  const usage = usageFromResponse(response);
+  if (!usage) {
+    return null;
+  }
+  const responseId = typeof response?.id === "string"
+    ? response.id
+    : typeof response?.responseId === "string"
+      ? response.responseId
+      : undefined;
+  return {
+    ...(responseId ? { responseId } : {}),
+    usage,
+  };
+}
+
+function modelResponseFromSdkEvent(event: RunStreamEvent): any {
+  if (event.type === "raw_model_stream_event") {
+    const data = (event as any).data;
+    if (data?.type === "response_done") {
+      return data.response;
+    }
+  }
+  if (isOpenAIResponsesRawModelStreamEvent(event)) {
+    const raw = (event as any).data?.event;
+    if (raw?.type === "response.completed") {
+      return raw.response;
+    }
+  }
+  return null;
+}
+
+function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
+  const raw = response?.usage;
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const usage = {
+    ...numberProp(raw, "inputTokens", "inputTokens", "input_tokens"),
+    ...numberProp(raw, "outputTokens", "outputTokens", "output_tokens"),
+    ...numberProp(raw, "totalTokens", "totalTokens", "total_tokens"),
+    ...inputTokenDetailsProp(raw),
+  };
+  return Object.keys(usage).length > 0 ? usage : null;
+}
+
+function numberProp(raw: Record<string, unknown>, outputKey: "inputTokens" | "outputTokens" | "totalTokens", camel: string, snake: string): Partial<ModelResponseUsage["usage"]> {
+  const value = raw[camel] ?? raw[snake];
+  return typeof value === "number" && Number.isFinite(value) ? { [outputKey]: value } : {};
+}
+
+function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
+  const details = raw.inputTokensDetails ?? raw.input_tokens_details;
+  if (!details || typeof details !== "object") {
+    return {};
+  }
+  return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+}
+
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
   return interruptions.map((item: any) => {
     if (typeof item?.toJSON === "function") {
@@ -798,21 +941,26 @@ export function buildManifest(
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
+  repositoryMaterializations: SandboxRepositoryMaterialization[] = [],
 ): Manifest {
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [download.fileId, download]));
+  const repositoriesByMountPath = new Map(normalizeSandboxRepositoryMaterializations(repositoryMaterializations).map((materialization) => [materialization.mountPath, materialization]));
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
       const host = url.hostname.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
-      entries[mountPath] = gitRepo({
-        host,
-        repo,
-        ref: resource.ref,
-        ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
-      });
+      const materialization = repositoriesByMountPath.get(mountPath);
+      entries[mountPath] = materialization
+        ? sandboxRepositorySource(materialization)
+        : gitRepo({
+          host,
+          repo,
+          ref: resource.ref,
+          ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
+        });
       continue;
     }
     if (resource.kind === "file") {
@@ -828,6 +976,13 @@ export function buildManifest(
     entries,
     environment,
   });
+}
+
+function sandboxRepositorySource(materialization: SandboxRepositoryMaterialization): any {
+  if (materialization.sourceType === "file") {
+    return localFile({ src: materialization.sourcePath });
+  }
+  return localDir({ src: materialization.sourcePath });
 }
 
 function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: string): any {
@@ -964,6 +1119,13 @@ function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): Sandbo
       mountPath,
     };
   });
+}
+
+function normalizeSandboxRepositoryMaterializations(materializations: SandboxRepositoryMaterialization[]): SandboxRepositoryMaterialization[] {
+  return materializations.map((materialization) => ({
+    ...materialization,
+    mountPath: normalizeManifestPath(materialization.mountPath),
+  }));
 }
 
 function assertSafeSandboxFilename(filename: string, fileId: string): void {

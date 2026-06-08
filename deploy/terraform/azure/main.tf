@@ -9,6 +9,7 @@ locals {
   acr_name            = replace("${var.name_prefix}acr", "-", "")
   aks_name            = "${var.name_prefix}-aks"
   key_vault_name      = substr(replace("${var.name_prefix}-kv", "-", ""), 0, 24)
+  aks_egress_ip_name  = "${var.name_prefix}-aks-egress-ip"
   postgres_name       = coalesce(var.postgres.name, "${var.name_prefix}-postgres")
   storage_account_name = substr(
     coalesce(var.object_storage.account_name, replace("${var.name_prefix}files", "-", "")),
@@ -32,6 +33,15 @@ resource "azurerm_container_registry" "this" {
   location            = var.location
   sku                 = "Standard"
   admin_enabled       = false
+  tags                = local.tags
+}
+
+resource "azurerm_public_ip" "aks_egress" {
+  name                = local.aks_egress_ip_name
+  resource_group_name = local.resource_group_name
+  location            = var.location
+  allocation_method   = "Static"
+  sku                 = "Standard"
   tags                = local.tags
 }
 
@@ -61,6 +71,16 @@ resource "azurerm_kubernetes_cluster" "this" {
     type = "SystemAssigned"
   }
 
+  network_profile {
+    network_plugin    = "azure"
+    load_balancer_sku = "standard"
+    outbound_type     = "loadBalancer"
+
+    load_balancer_profile {
+      outbound_ip_address_ids = [azurerm_public_ip.aks_egress.id]
+    }
+  }
+
   dynamic "microsoft_defender" {
     for_each = var.aks.microsoft_defender_log_analytics_workspace_id == null ? [] : [var.aks.microsoft_defender_log_analytics_workspace_id]
 
@@ -81,6 +101,13 @@ resource "azurerm_role_assignment" "aks_acr_pull" {
   principal_id         = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
   role_definition_name = "AcrPull"
   scope                = azurerm_container_registry.this.id
+}
+
+resource "azurerm_role_assignment" "aks_network_public_ip" {
+  count                = var.create_aks_network_role_assignment ? 1 : 0
+  principal_id         = azurerm_kubernetes_cluster.this.identity[0].principal_id
+  role_definition_name = "Network Contributor"
+  scope                = azurerm_public_ip.aks_egress.id
 }
 
 resource "azurerm_key_vault" "this" {
@@ -123,6 +150,14 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "azure_services" {
   server_id        = azurerm_postgresql_flexible_server.this[0].id
   start_ip_address = "0.0.0.0"
   end_ip_address   = "0.0.0.0"
+}
+
+resource "azurerm_postgresql_flexible_server_firewall_rule" "aks_egress" {
+  count            = var.postgres.mode == "managed" ? 1 : 0
+  name             = "allow-aks-egress"
+  server_id        = azurerm_postgresql_flexible_server.this[0].id
+  start_ip_address = azurerm_public_ip.aks_egress.ip_address
+  end_ip_address   = azurerm_public_ip.aks_egress.ip_address
 }
 
 resource "azurerm_postgresql_flexible_server_firewall_rule" "custom" {

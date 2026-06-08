@@ -73,6 +73,12 @@ variable "create_acr_pull_role_assignment" {
   default     = true
 }
 
+variable "create_aks_network_role_assignment" {
+  description = "Whether Terraform should grant the AKS control-plane identity Network Contributor on the static AKS public IP. Required for Kubernetes load balancers to attach the configured outbound IP."
+  type        = bool
+  default     = true
+}
+
 variable "postgres" {
   description = "Postgres mode. Use managed to create Azure Database for PostgreSQL Flexible Server or external to connect an existing compatible server."
   type = object({

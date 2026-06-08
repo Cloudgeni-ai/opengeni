@@ -22,6 +22,7 @@ export interface ComposerHandle {
 }
 
 interface ComposerProps {
+  workspaceId: string;
   placeholder?: string;
   submitLabel?: string;
   disabled?: boolean;
@@ -62,6 +63,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     controlsBeforeSubmit,
     submitAction,
     fileUploadsEnabled = true,
+    workspaceId,
     onSubmit,
   },
   handleRef,
@@ -127,7 +129,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         status: "uploading",
         previewUrl,
       }]);
-      void uploadFileAsset(file).then((asset) => {
+      void uploadFileAsset(workspaceId, file).then((asset) => {
         setAttachments((current) => current.map((attachment) => attachment.id === id
           ? { ...attachment, status: "ready", file: asset, name: asset.filename, contentType: asset.contentType, sizeBytes: asset.sizeBytes }
           : attachment));

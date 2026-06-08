@@ -33,6 +33,13 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: ""
+  OPENGENI_PRODUCT_ACCESS_MODE: local
+  OPENGENI_BILLING_MODE: disabled
+  OPENGENI_ENTITLEMENTS_MODE: none
+  OPENGENI_USAGE_LIMITS_MODE: none
+  OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
+  OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
   OPENGENI_OBJECT_STORAGE_REGION: us-east-1
@@ -44,8 +51,11 @@ config:
 secret:
   create: false
   existingSecret: opengeni-runtime
-  # When OPENGENI_AUTH_REQUIRED is true, provide OPENGENI_ACCESS_KEY through
-  # this secret or an ExternalSecret. Never commit real access keys in values.
+  # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
+  # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
+  # NATS, Temporal, sandbox, and object-storage secrets through this secret or
+  # an ExternalSecret. Never commit real secrets in values.
   stringData: {}
 
 externalSecret:
@@ -275,6 +285,10 @@ migrations:
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
+  secret:
+    # Optional separate secret for migration/admin-only settings such as
+    # OPENGENI_MIGRATIONS_DATABASE_URL. If empty, the runtime secret is reused.
+    existingSecret: ""
   command: ["bun", "run", "db:migrate"]
   backoffLimit: 6
   annotations:
@@ -372,6 +386,7 @@ minio:
   bucket: opengeni-files
   publicEndpoint: ""
   sandboxEndpoint: ""
+  corsAllowOrigin: ""
   service:
     apiPort: 9000
     consolePort: 9001
@@ -401,6 +416,9 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
           pathType: Exact
           service: api
   tls: []

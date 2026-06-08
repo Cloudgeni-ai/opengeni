@@ -1,14 +1,15 @@
 import {
   DeploymentProfileId,
-  deploymentProfiles,
+  ProductOverlayId,
+  contractForProfile,
   generateRuntimeArtifacts,
-  parseDeploymentContract,
   type TerraformOutputs,
 } from "@opengeni/deployment";
 import { mkdir } from "node:fs/promises";
 
 interface Args {
   profile: string;
+  productOverlay: string;
   terraformOutput: string;
   outDir: string;
   json: boolean;
@@ -17,7 +18,8 @@ interface Args {
 
 const args = parseArgs(process.argv.slice(2));
 const profileId = DeploymentProfileId.parse(args.profile);
-const contract = parseDeploymentContract(deploymentProfiles[profileId]);
+const overlay = ProductOverlayId.parse(args.productOverlay);
+const contract = contractForProfile(profileId, overlay);
 const terraformOutputs = await readTerraformOutputs(args.terraformOutput);
 const artifacts = generateRuntimeArtifacts(contract, terraformOutputs, process.env);
 
@@ -66,6 +68,7 @@ if (!args.allowMissing && artifacts.missingEnvVars.length > 0) {
 function parseArgs(values: string[]): Args {
   const out: Args = {
     profile: "local-compose",
+    productOverlay: "none",
     terraformOutput: "",
     outDir: ".agent/generated/deployment",
     json: false,
@@ -88,6 +91,15 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--profile=")) {
       out.profile = value.slice("--profile=".length);
+      continue;
+    }
+    if (value === "--product-overlay") {
+      out.productOverlay = requiredArg(values, index, "--product-overlay");
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--product-overlay=")) {
+      out.productOverlay = value.slice("--product-overlay=".length);
       continue;
     }
     if (value === "--terraform-output") {

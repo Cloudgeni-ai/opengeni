@@ -1,4 +1,13 @@
-import { ReasoningEffort, SandboxBackend } from "@opengeni/contracts";
+import {
+  BillingMode,
+  Entitlements,
+  EntitlementsMode,
+  ProductAccessMode,
+  ReasoningEffort,
+  SandboxBackend,
+  StaticUsageLimits,
+  UsageLimitsMode,
+} from "@opengeni/contracts";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -64,6 +73,14 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  publicBaseUrl: z.string().url().optional(),
+  productAccessMode: ProductAccessMode.default("local"),
+  billingMode: BillingMode.default("disabled"),
+  entitlementsMode: EntitlementsMode.default("none"),
+  usageLimitsMode: UsageLimitsMode.default("none"),
+  staticEntitlementsJson: z.string().default("{}"),
+  staticUsageLimitsJson: z.string().default("{}"),
+  delegationSecret: z.string().optional(),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -77,6 +94,7 @@ const SettingsSchema = z.object({
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-5.5"),
   openaiAllowedModels: z.string().default("gpt-5.5,gpt-5.4,gpt-5.4-mini"),
+  modelPricingJson: z.string().default("{}"),
   openaiReasoningEffort: ReasoningEffort.default("high"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -136,6 +154,15 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
+  betterAuthSecret: z.string().optional(),
+  betterAuthAllowedHosts: z.string().default(""),
+  betterAuthCookieDomain: z.string().optional(),
+  betterAuthTrustedOrigins: z.string().default(""),
+  resendApiKey: z.string().optional(),
+  emailFrom: z.string().default("OpenGeni <noreply@app.opengeni.ai>"),
+  stripeSecretKey: z.string().optional(),
+  stripePublishableKey: z.string().optional(),
+  stripeWebhookSecret: z.string().optional(),
   mcpServers: z.array(z.object({
     id: z.string().min(1).regex(registryId),
     name: z.string().min(1).optional(),
@@ -148,6 +175,92 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+export type ModelPricing = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+  marginBps?: number | undefined;
+};
+export type ModelUsageInput = {
+  inputTokens?: number | undefined;
+  outputTokens?: number | undefined;
+  totalTokens?: number | undefined;
+  inputTokensDetails?: Record<string, number> | Array<Record<string, number>> | undefined;
+  requestUsageEntries?: ModelUsageInput[] | undefined;
+};
+
+export type StaticUsageLimitsConfig = StaticUsageLimits;
+export type EntitlementsConfig = Entitlements;
+
+const ModelPricingSchema = z.object({
+  inputMicrosPerMillionTokens: z.number().int().nonnegative(),
+  cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+  outputMicrosPerMillionTokens: z.number().int().nonnegative(),
+  marginBps: z.number().int().min(0).max(100_000).optional(),
+});
+
+export const defaultModelPricing: Record<string, ModelPricing> = {
+  "gpt-5.5": {
+    inputMicrosPerMillionTokens: 5_000_000,
+    cachedInputMicrosPerMillionTokens: 500_000,
+    outputMicrosPerMillionTokens: 30_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.4": {
+    inputMicrosPerMillionTokens: 2_500_000,
+    cachedInputMicrosPerMillionTokens: 250_000,
+    outputMicrosPerMillionTokens: 15_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.4-mini": {
+    inputMicrosPerMillionTokens: 750_000,
+    cachedInputMicrosPerMillionTokens: 75_000,
+    outputMicrosPerMillionTokens: 4_500_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.2": {
+    inputMicrosPerMillionTokens: 1_750_000,
+    cachedInputMicrosPerMillionTokens: 175_000,
+    outputMicrosPerMillionTokens: 14_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.2-chat-latest": {
+    inputMicrosPerMillionTokens: 1_750_000,
+    cachedInputMicrosPerMillionTokens: 175_000,
+    outputMicrosPerMillionTokens: 14_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.2-codex": {
+    inputMicrosPerMillionTokens: 1_750_000,
+    cachedInputMicrosPerMillionTokens: 175_000,
+    outputMicrosPerMillionTokens: 14_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5.1": {
+    inputMicrosPerMillionTokens: 1_250_000,
+    cachedInputMicrosPerMillionTokens: 125_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5": {
+    inputMicrosPerMillionTokens: 1_250_000,
+    cachedInputMicrosPerMillionTokens: 125_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5-mini": {
+    inputMicrosPerMillionTokens: 250_000,
+    cachedInputMicrosPerMillionTokens: 25_000,
+    outputMicrosPerMillionTokens: 2_000_000,
+    marginBps: 2_500,
+  },
+  "gpt-5-nano": {
+    inputMicrosPerMillionTokens: 50_000,
+    cachedInputMicrosPerMillionTokens: 5_000,
+    outputMicrosPerMillionTokens: 400_000,
+    marginBps: 2_500,
+  },
+};
 
 function optional(name: string): string | undefined {
   const value = process.env[name];
@@ -170,6 +283,14 @@ export function getSettings(): Settings {
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint: optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders: optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
+    publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
+    billingMode: optional("OPENGENI_BILLING_MODE"),
+    entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
+    usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
+    staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
+    staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
+    delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -183,6 +304,7 @@ export function getSettings(): Settings {
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
+    modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
@@ -242,6 +364,15 @@ export function getSettings(): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
+    betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
+    betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
+    betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
+    betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
+    resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
+    emailFrom: optional("OPENGENI_EMAIL_FROM"),
+    stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
+    stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
+    stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
@@ -266,6 +397,47 @@ export function collectSandboxEnvironment(settings: Settings, source: NodeJS.Pro
 
 export function configuredAllowedModels(settings: Settings): string[] {
   return uniqueValues([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
+}
+
+export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
+  const configured = parseModelPricingJson(settings.modelPricingJson);
+  return {
+    ...defaultModelPricing,
+    ...configured,
+  };
+}
+
+export function configuredStaticUsageLimits(settings: Settings): StaticUsageLimitsConfig {
+  return parseStaticUsageLimitsJson(settings.staticUsageLimitsJson);
+}
+
+export function configuredEntitlements(settings: Settings): EntitlementsConfig {
+  if (settings.entitlementsMode === "none") {
+    return {};
+  }
+  const configured = parseStaticEntitlementsJson(settings.staticEntitlementsJson);
+  if (settings.entitlementsMode === "static") {
+    return configured;
+  }
+  return {
+    "managed.auth.email_password": true,
+    "managed.billing.prepaid_credits": settings.billingMode === "stripe",
+    "managed.api_keys": true,
+    "managed.workspaces": true,
+    "managed.github_app": Boolean(settings.githubAppId && settings.githubAppPrivateKey),
+    ...configured,
+  };
+}
+
+export function calculateModelUsageCostMicros(settings: Settings, model: string, usage: ModelUsageInput): number {
+  const pricing = configuredModelPricing(settings)[model];
+  if (!pricing) {
+    throw new Error(`Missing model pricing for ${model}`);
+  }
+  const entries = usage.requestUsageEntries && usage.requestUsageEntries.length > 0 ? usage.requestUsageEntries : [usage];
+  const rawCost = entries.reduce((sum, entry) => sum + calculateEntryCostMicros(pricing, entry), 0);
+  const marginBps = pricing.marginBps ?? 0;
+  return Math.ceil(rawCost * (10_000 + marginBps) / 10_000);
 }
 
 export function configuredAllowedReasoningEfforts(settings: Settings): Array<z.infer<typeof ReasoningEffort>> {
@@ -386,6 +558,88 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
   }
 }
 
+export function parseModelPricingJson(raw: string): Record<string, ModelPricing> {
+  if (!raw.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_MODEL_PRICING_JSON must be valid JSON: ${message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name");
+  }
+  const out: Record<string, ModelPricing> = {};
+  for (const [model, value] of Object.entries(parsed)) {
+    if (!model.trim()) {
+      throw new Error("OPENGENI_MODEL_PRICING_JSON contains an empty model name");
+    }
+    out[model] = ModelPricingSchema.parse(value);
+  }
+  return out;
+}
+
+export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
+  if (!raw.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_STATIC_USAGE_LIMITS_JSON must be valid JSON: ${message}`);
+  }
+  return StaticUsageLimits.parse(parsed);
+}
+
+export function parseStaticEntitlementsJson(raw: string): EntitlementsConfig {
+  if (!raw.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_STATIC_ENTITLEMENTS_JSON must be valid JSON: ${message}`);
+  }
+  return Entitlements.parse(parsed);
+}
+
+function calculateEntryCostMicros(pricing: ModelPricing, entry: ModelUsageInput): number {
+  const inputTokens = positiveInt(entry.inputTokens);
+  const outputTokens = positiveInt(entry.outputTokens);
+  const cachedTokens = Math.min(inputTokens, cachedInputTokens(entry));
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
+  const cachedInputRate = pricing.cachedInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+  return Math.ceil((uncachedInputTokens * pricing.inputMicrosPerMillionTokens) / 1_000_000)
+    + Math.ceil((cachedTokens * cachedInputRate) / 1_000_000)
+    + Math.ceil((outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000);
+}
+
+function cachedInputTokens(entry: ModelUsageInput): number {
+  const details = Array.isArray(entry.inputTokensDetails)
+    ? entry.inputTokensDetails
+    : entry.inputTokensDetails
+      ? [entry.inputTokensDetails]
+      : [];
+  let total = 0;
+  for (const detail of details) {
+    total += positiveInt(detail.cached_tokens)
+      + positiveInt(detail.cachedInputTokens)
+      + positiveInt(detail.cached_input_tokens);
+  }
+  return total;
+}
+
+function positiveInt(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -418,16 +672,59 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
 }
 
 function firstPartyMcpServerUrl(settings: Settings): string {
-  return settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/mcp`;
+  return settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`;
 }
 
 function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
-  const url = new URL(mcpUrl);
-  url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
-  return url.toString();
+  return `${mcpUrl.replace(/\/+$/, "")}/docs`;
 }
 
 function validateSettings(settings: Settings): void {
+  if (settings.productAccessMode === "managed") {
+    if (!settings.publicBaseUrl) {
+      throw new Error("OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (!settings.betterAuthSecret) {
+      throw new Error("OPENGENI_BETTER_AUTH_SECRET is required when OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (!settings.delegationSecret) {
+      throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
+      throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
+    }
+  }
+  if (settings.billingMode === "stripe") {
+    if (!settings.stripeSecretKey || !settings.stripeWebhookSecret) {
+      throw new Error("OPENGENI_STRIPE_SECRET_KEY and OPENGENI_STRIPE_WEBHOOK_SECRET are required when OPENGENI_BILLING_MODE=stripe");
+    }
+  }
+  if (settings.productAccessMode !== "managed" && settings.billingMode === "stripe") {
+    throw new Error("OPENGENI_BILLING_MODE=stripe requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
+  }
+  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+    const pricing = configuredModelPricing(settings);
+    const missing = configuredAllowedModels(settings).filter((model) => !pricing[model]);
+    if (missing.length > 0) {
+      throw new Error(`Missing model pricing for managed billing model(s): ${missing.join(", ")}. Set OPENGENI_MODEL_PRICING_JSON.`);
+    }
+  }
+  if (settings.usageLimitsMode === "static") {
+    const limits = configuredStaticUsageLimits(settings);
+    if (Object.keys(limits).length === 0) {
+      throw new Error("OPENGENI_STATIC_USAGE_LIMITS_JSON must define at least one cap when OPENGENI_USAGE_LIMITS_MODE=static");
+    }
+  } else {
+    parseStaticUsageLimitsJson(settings.staticUsageLimitsJson);
+  }
+  if (settings.entitlementsMode === "static") {
+    const entitlements = parseStaticEntitlementsJson(settings.staticEntitlementsJson);
+    if (Object.keys(entitlements).length === 0) {
+      throw new Error("OPENGENI_STATIC_ENTITLEMENTS_JSON must define at least one feature when OPENGENI_ENTITLEMENTS_MODE=static");
+    }
+  } else {
+    parseStaticEntitlementsJson(settings.staticEntitlementsJson);
+  }
   if (settings.authRequired && !settings.accessKey) {
     throw new Error("OPENGENI_ACCESS_KEY is required when OPENGENI_AUTH_REQUIRED=true");
   }

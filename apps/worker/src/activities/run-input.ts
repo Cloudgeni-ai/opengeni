@@ -23,10 +23,11 @@ export async function segmentInput(
     }
     const text = await userMessageTextWithAttachments(
       db,
+      trigger.workspaceId,
       payload.text,
       Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
     );
-    const latestState = await getLatestRunState(db, trigger.sessionId);
+    const latestState = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
     return await runtime.prepareInput(agent, {
       kind: "message",
       text,
@@ -39,7 +40,7 @@ export async function segmentInput(
       decision?: unknown;
       message?: unknown;
     };
-    const state = await getLatestRunState(db, trigger.sessionId);
+    const state = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
@@ -56,6 +57,7 @@ export async function segmentInput(
 
 export async function userMessageTextWithAttachments(
   db: Database,
+  workspaceId: string,
   text: string,
   resources: ResourceRef[],
 ): Promise<string> {
@@ -64,7 +66,7 @@ export async function userMessageTextWithAttachments(
     if (resource.kind !== "file") {
       continue;
     }
-    const file = await requireFile(db, resource.fileId);
+    const file = await requireFile(db, workspaceId, resource.fileId);
     attachedFiles.push(`- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`);
   }
   if (attachedFiles.length === 0) {

@@ -6,6 +6,8 @@ import {
   updateScheduledTask,
 } from "@opengeni/db";
 import type { Hono } from "hono";
+import { requireAccessGrant } from "../access";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
@@ -19,60 +21,91 @@ import { boundedLimit } from "../http/common";
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, workflowClient, objectStorage } = deps;
 
-  app.post("/v1/scheduled-tasks", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const payload = CreateScheduledTaskRequest.parse(await c.req.json());
-    const task = await createValidatedScheduledTask({ settings, db, objectStorage, payload });
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "schedule:create", quantity: 1 });
+    const task = await createValidatedScheduledTask({ settings, db, objectStorage, grant, payload });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     return c.json(task, 201);
   });
 
-  app.get("/v1/scheduled-tasks", async (c) => {
-    return c.json(await listScheduledTasks(db, boundedLimit(c.req.query("limit"))));
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    return c.json(await listScheduledTasks(db, workspaceId, boundedLimit(c.req.query("limit"))));
   });
 
-  app.get("/v1/scheduled-tasks/:taskId", async (c) => {
-    return c.json(await requireScheduledTaskForApi(db, c.req.param("taskId")));
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    return c.json(await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId")));
   });
 
-  app.patch("/v1/scheduled-tasks/:taskId", async (c) => {
+  app.patch("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const taskId = c.req.param("taskId");
-    const existing = await requireScheduledTaskForApi(db, taskId);
+    const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
     const payload = UpdateScheduledTaskRequest.parse(await c.req.json());
     const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, existing, payload });
-    const task = await updateScheduledTask(db, taskId, update);
+    const task = await updateScheduledTask(db, workspaceId, taskId, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 
-  app.post("/v1/scheduled-tasks/:taskId/pause", async (c) => {
-    const existing = await requireScheduledTaskForApi(db, c.req.param("taskId"));
-    const task = await updateScheduledTask(db, existing.id, { status: "paused" });
+  app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/pause", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await updateScheduledTask(db, workspaceId, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 
-  app.post("/v1/scheduled-tasks/:taskId/resume", async (c) => {
-    const existing = await requireScheduledTaskForApi(db, c.req.param("taskId"));
-    const task = await updateScheduledTask(db, existing.id, { status: "active" });
+  app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/resume", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const existing = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const task = await updateScheduledTask(db, workspaceId, existing.id, { status: "active" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
   });
 
-  app.post("/v1/scheduled-tasks/:taskId/trigger", async (c) => {
-    const task = await requireScheduledTaskForApi(db, c.req.param("taskId"));
-    await workflowClient.triggerScheduledTask({ taskId: task.id });
+  app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    await workflowClient.triggerScheduledTask({ task });
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "scheduled_task.fired",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      idempotencyKey: `scheduled_task.fired:${workspaceId}:${task.id}:manual:${crypto.randomUUID()}`,
+    });
     return c.json(task, 202);
   });
 
-  app.delete("/v1/scheduled-tasks/:taskId", async (c) => {
-    const task = await requireScheduledTaskForApi(db, c.req.param("taskId"));
+  app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     await workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId });
-    await deleteScheduledTask(db, task.id);
+    await deleteScheduledTask(db, workspaceId, task.id);
     return c.json({ ok: true });
   });
 
-  app.get("/v1/scheduled-tasks/:taskId/runs", async (c) => {
-    const task = await requireScheduledTaskForApi(db, c.req.param("taskId"));
-    return c.json(await listScheduledTaskRuns(db, task.id, boundedLimit(c.req.query("limit"))));
+  app.get("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/runs", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    return c.json(await listScheduledTaskRuns(db, workspaceId, task.id, boundedLimit(c.req.query("limit"))));
   });
 }

@@ -44,6 +44,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "opengeni.minioSecretName" . }}
                   key: {{ .Values.minio.auth.secretKeyKey }}
+            {{- if .Values.minio.corsAllowOrigin }}
+            - name: MINIO_API_CORS_ALLOW_ORIGIN
+              value: {{ .Values.minio.corsAllowOrigin | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /minio/health/ready

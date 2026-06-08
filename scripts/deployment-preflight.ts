@@ -1,10 +1,10 @@
 import {
   DeploymentProfileId,
+  ProductOverlayId,
   type DeploymentContract,
   type PreflightCheckId,
-  deploymentProfiles,
+  contractForProfile,
   missingRuntimeEnvVars,
-  parseDeploymentContract,
   preflightChecksFor,
   requiredRuntimeEnvVars,
 } from "@opengeni/deployment";
@@ -13,6 +13,7 @@ import net from "node:net";
 
 interface Args {
   profile: string;
+  productOverlay: string;
   json: boolean;
   list: boolean;
   checkEnv: boolean;
@@ -35,7 +36,8 @@ if (args.list) {
 }
 
 const profileId = DeploymentProfileId.parse(args.profile);
-const contract = parseDeploymentContract(deploymentProfiles[profileId]);
+const overlay = ProductOverlayId.parse(args.productOverlay);
+const contract = contractForProfile(profileId, overlay);
 const checks = preflightChecksFor(contract);
 const requiredEnvVars = requiredRuntimeEnvVars(contract);
 const missingEnvVars = args.checkEnv ? missingRuntimeEnvVars(contract) : [];
@@ -52,6 +54,10 @@ if (args.json) {
       objectStorage: contract.objectStorage.mode,
       secrets: contract.secrets.mode,
       access: contract.access.mode,
+      productAccess: contract.product.accessMode,
+      billing: contract.product.billingMode,
+      entitlements: contract.product.entitlementsMode,
+      usageLimits: contract.product.usageLimitsMode,
       sandbox: contract.sandbox.backend,
       observability: contract.observability.backend,
     },
@@ -88,6 +94,10 @@ console.log(`  nats: ${contract.nats.mode}`);
 console.log(`  object storage: ${contract.objectStorage.mode} (${contract.objectStorage.api})`);
 console.log(`  secrets: ${contract.secrets.mode}`);
 console.log(`  access: ${contract.access.mode}`);
+console.log(`  product access: ${contract.product.accessMode}`);
+console.log(`  billing: ${contract.product.billingMode}`);
+console.log(`  entitlements: ${contract.product.entitlementsMode}`);
+console.log(`  usage limits: ${contract.product.usageLimitsMode}`);
 console.log(`  sandbox: ${contract.sandbox.backend}`);
 console.log(`  observability: ${contract.observability.backend}`);
 console.log("");
@@ -128,6 +138,7 @@ if (args.live) {
 function parseArgs(values: string[]): Args {
   const out: Args = {
     profile: "local-compose",
+    productOverlay: "none",
     json: false,
     list: false,
     checkEnv: false,
@@ -163,6 +174,19 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--profile=")) {
       out.profile = value.slice("--profile=".length);
+      continue;
+    }
+    if (value === "--product-overlay") {
+      const next = values[index + 1];
+      if (!next) {
+        throw new Error("--product-overlay requires a value");
+      }
+      out.productOverlay = next;
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--product-overlay=")) {
+      out.productOverlay = value.slice("--product-overlay=".length);
       continue;
     }
     throw new Error(`Unknown argument: ${value}`);

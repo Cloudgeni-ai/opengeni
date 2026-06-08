@@ -9,7 +9,7 @@ data:
   {{ $key }}: {{ $value | quote }}
   {{- end }}
   {{- if not (hasKey .Values.config "OPENGENI_MCP_URL") }}
-  OPENGENI_MCP_URL: {{ printf "http://%s-api:%d/v1/mcp" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}
+  OPENGENI_MCP_URL: {{ printf "http://%s-api:%d/v1/workspaces/{workspaceId}/mcp" (include "opengeni.fullname" .) (.Values.api.service.port | int) | quote }}
   {{- end }}
   {{- if .Values.nats.enabled }}
   OPENGENI_NATS_URL: {{ printf "nats://%s-nats:%d" (include "opengeni.fullname" .) (.Values.nats.clientPort | int) | quote }}

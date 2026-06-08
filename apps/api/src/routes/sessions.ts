@@ -19,6 +19,8 @@ import {
 import { appendAndPublishEvents } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireAccessGrant } from "../access";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   mergeResourceRefs,
@@ -40,21 +42,26 @@ import { sseSessionStream } from "../http/sse";
 export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
 
-  app.post("/v1/sessions", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const payload = CreateSessionRequest.parse(await c.req.json());
     const resources = normalizeResources(payload.resources);
     const tools = validateToolRefs(payload.tools, settings);
-    validateGitHubRepositorySelection(resources);
+    await validateGitHubRepositorySelection(db, workspaceId, resources);
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
-    await validateFileResources(db, resources);
+    await validateFileResources(db, workspaceId, resources);
     const model = payload.model ?? settings.openaiModel;
     const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
     const session = await createAndStartSession({
       db,
       bus,
       workflowClient,
+      accountId: grant.accountId,
+      workspaceId,
       initialMessage: payload.initialMessage,
       resources,
       tools,
@@ -64,53 +71,74 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
       metadata: payload.metadata,
     });
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "session",
+      sourceResourceId: session.id,
+      idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
+    });
     return c.json(session, 202);
   });
 
-  app.get("/v1/sessions/:sessionId", async (c) => {
-    const session = await getSession(db, c.req.param("sessionId"));
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const session = await getSession(db, workspaceId, c.req.param("sessionId"));
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
   });
 
-  app.get("/v1/sessions/:sessionId/events", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, sessionId);
+    await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? 0);
     const limit = Number(c.req.query("limit") ?? 500);
-    return c.json(await listSessionEvents(db, sessionId, Number.isFinite(after) ? after : 0, Number.isFinite(limit) ? limit : 500));
+    return c.json(await listSessionEvents(db, workspaceId, sessionId, Number.isFinite(after) ? after : 0, Number.isFinite(limit) ? limit : 500));
   });
 
-  app.get("/v1/sessions/:sessionId/events/stream", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, sessionId);
+    await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
-    return sseSessionStream(db, bus, sessionId, Number.isFinite(after) ? after : 0, c.req.raw.signal);
+    return sseSessionStream(db, bus, workspaceId, sessionId, Number.isFinite(after) ? after : 0, c.req.raw.signal);
   });
 
-  app.get("/v1/sessions/:sessionId/turns", async (c) => {
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/turns", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, sessionId);
-    return c.json(await listSessionTurns(db, sessionId, boundedLimit(c.req.query("limit"))));
+    await assertSessionExists(db, workspaceId, sessionId);
+    return c.json(await listSessionTurns(db, workspaceId, sessionId, boundedLimit(c.req.query("limit"))));
   });
 
-  app.patch("/v1/sessions/:sessionId/turns/:turnId", async (c) => {
+  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const turnId = c.req.param("turnId");
-    await assertSessionExists(db, sessionId);
-    const existing = await requireQueuedTurnForApi(db, sessionId, turnId);
+    await assertSessionExists(db, workspaceId, sessionId);
+    const existing = await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
     const payload = UpdateSessionTurnRequest.parse(await c.req.json());
     const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
     const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, settings) : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
-    await validateFileResources(db, resources);
-    const session = await requireSession(db, sessionId);
-    validateGitHubRepositorySelection([...session.resources, ...resources]);
-    const turn = await updateQueuedSessionTurn(db, turnId, {
+    await validateFileResources(db, workspaceId, resources);
+    const session = await requireSession(db, workspaceId, sessionId);
+    await validateGitHubRepositorySelection(db, workspaceId, [...session.resources, ...resources]);
+    const turn = await updateQueuedSessionTurn(db, workspaceId, turnId, {
       ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
       ...(payload.model !== undefined ? { model: payload.model } : {}),
       ...(payload.reasoningEffort !== undefined ? { reasoningEffort: payload.reasoningEffort } : {}),
@@ -119,7 +147,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       resources,
       tools,
     });
-    await appendAndPublishEvents(db, bus, sessionId, [{
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
       type: "turn.updated",
       turnId: turn.id,
       payload: { turnId: turn.id },
@@ -127,26 +155,30 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(turn);
   });
 
-  app.post("/v1/sessions/:sessionId/turns/reorder", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/reorder", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    await assertSessionExists(db, sessionId);
+    await assertSessionExists(db, workspaceId, sessionId);
     const payload = ReorderSessionTurnsRequest.parse(await c.req.json());
-    const turns = await reorderQueuedSessionTurns(db, sessionId, payload.turnIds);
-    await appendAndPublishEvents(db, bus, sessionId, [{
+    const turns = await reorderQueuedSessionTurns(db, workspaceId, sessionId, payload.turnIds);
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
       type: "turn.updated",
       payload: { reorderedTurnIds: payload.turnIds },
     }]);
-    await workflowClient.wakeSessionWorkflow({ sessionId, workflowId: workflowIdForSession(sessionId) });
+    await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
     return c.json(turns);
   });
 
-  app.delete("/v1/sessions/:sessionId/turns/:turnId", async (c) => {
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/turns/:turnId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const turnId = c.req.param("turnId");
-    await assertSessionExists(db, sessionId);
-    await requireQueuedTurnForApi(db, sessionId, turnId);
-    const turn = await cancelQueuedSessionTurn(db, turnId);
-    await appendAndPublishEvents(db, bus, sessionId, [{
+    await assertSessionExists(db, workspaceId, sessionId);
+    await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
+    const turn = await cancelQueuedSessionTurn(db, workspaceId, turnId);
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
       type: "turn.cancelled",
       turnId: turn.id,
       payload: { turnId: turn.id, triggerEventId: turn.triggerEventId },
@@ -154,7 +186,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(turn);
   });
 
-  app.post("/v1/sessions/:sessionId/events", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     const event = ClientSessionEvent.parse(await c.req.json());
     if (event.type === "user.message") {
@@ -162,15 +196,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       const requestedTools = validateToolRefs(event.payload.tools ?? [], settings);
       const requestedModel = event.payload.model ?? null;
       const requestedReasoningEffort = event.payload.reasoningEffort ?? null;
+      await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
       if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      await validateFileResources(db, requestedResources);
-      const appended = await appendSessionEventsWithLockedSessionUpdate(db, sessionId, (lockedSession) => {
+      await validateFileResources(db, workspaceId, requestedResources);
+      const existingSession = await requireSession(db, workspaceId, sessionId);
+      await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
+      const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, (lockedSession) => {
         if (lockedSession.status === "failed" || lockedSession.status === "cancelled") {
           throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
         }
-        validateGitHubRepositorySelection([...lockedSession.resources, ...requestedResources]);
         const nextResources = mergeResourceRefs(lockedSession.resources, requestedResources);
         const nextTools = mergeToolRefs(lockedSession.tools, requestedTools);
         const shouldQueueSession = lockedSession.status === "idle";
@@ -196,7 +232,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           },
         };
       }).then(async (events) => {
-        await bus.publish(sessionId, events);
+        await bus.publish(workspaceId, sessionId, events);
         return events;
       });
       const accepted = appended[0];
@@ -204,8 +240,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(500, { message: "failed to append client event" });
       }
       const workflowId = workflowIdForSession(sessionId);
-      const session = await requireSession(db, sessionId);
+      const session = await requireSession(db, workspaceId, sessionId);
       const turn = await enqueueSessionTurn(db, {
+        accountId: grant.accountId,
+        workspaceId,
         sessionId,
         triggerEventId: accepted.id,
         temporalWorkflowId: workflowId,
@@ -218,16 +256,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         sandboxBackend: session.sandboxBackend,
         metadata: {},
       });
-      await appendAndPublishEvents(db, bus, sessionId, [{
+      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
         type: "turn.queued",
         turnId: turn.id,
         payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
       }]);
-      await workflowClient.wakeSessionWorkflow({ sessionId, workflowId });
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "session_turn",
+        sourceResourceId: turn.id,
+        idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
+      });
+      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId });
       return c.json(accepted, 202);
     }
 
-    const session = await requireSession(db, sessionId);
+    const session = await requireSession(db, workspaceId, sessionId);
     if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
       throw new HTTPException(409, { message: `session is ${session.status}; no approval is pending` });
     }
@@ -236,7 +285,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload: event.payload,
       ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
     }];
-    const appended = await appendAndPublishEvents(db, bus, sessionId, eventsToAppend);
+    const appended = await appendAndPublishEvents(db, bus, workspaceId, sessionId, eventsToAppend);
     const accepted = appended[0];
     if (!accepted) {
       throw new HTTPException(500, { message: "failed to append client event" });

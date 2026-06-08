@@ -1,5 +1,9 @@
 import type {
   ClientConfig,
+  AccessContext,
+  AuthSession,
+  ApiKey,
+  BillingBalance,
   CreateFileUploadResponse,
   DocumentBase,
   DocumentSearchResult,
@@ -25,6 +29,7 @@ export function resolveApiBaseUrl(value: string | undefined): string {
 
 export const apiBaseUrl = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 const accessKeyStorageKey = "opengeni.accessKey";
+let activeAuthConfig: ClientConfig["auth"] | null = null;
 
 export function getStoredAccessKey(): string | null {
   if (typeof localStorage === "undefined") {
@@ -48,8 +53,21 @@ export function clearStoredAccessKey(): void {
   localStorage.removeItem(accessKeyStorageKey);
 }
 
-export function authHeadersForAccessKey(value: string | null): Record<string, string> {
-  return value ? { authorization: `Bearer ${value}` } : {};
+export function configureClientAuth(auth: ClientConfig["auth"]): void {
+  activeAuthConfig = auth;
+}
+
+export function authHeadersForAccessKey(value: string | null, auth: ClientConfig["auth"] | null = activeAuthConfig): Record<string, string> {
+  if (!value) {
+    return {};
+  }
+  if (auth?.mode === "deploymentKey") {
+    return { "x-opengeni-access-key": value };
+  }
+  if (auth?.mode === "configuredToken") {
+    return { authorization: `Bearer ${value}` };
+  }
+  return { authorization: `Bearer ${value}` };
 }
 
 function authHeaders(): Record<string, string> {
@@ -59,6 +77,7 @@ function authHeaders(): Record<string, string> {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       ...authHeaders(),
@@ -72,14 +91,53 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return await response.json() as T;
 }
 
+async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${apiBaseUrl}/v1/auth${path}`, {
+    ...init,
+    credentials: "include",
+    headers: {
+      "content-type": "application/json",
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Auth ${response.status}: ${text}`);
+  }
+  return await response.json() as T;
+}
+
+export async function fetchAuthSession(): Promise<AuthSession | null> {
+  return await authRequest<AuthSession | null>("/get-session", { method: "GET" });
+}
+
+export async function signUpEmail(input: { name: string; email: string; password: string }): Promise<unknown> {
+  return await authRequest<unknown>("/sign-up/email", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function signInEmail(input: { email: string; password: string; rememberMe?: boolean }): Promise<unknown> {
+  return await authRequest<unknown>("/sign-in/email", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function signOutManaged(): Promise<unknown> {
+  return await authRequest<unknown>("/sign-out", { method: "POST" });
+}
+
 export function createSession(input: {
+  workspaceId: string;
   initialMessage: string;
   resources: ResourceRef[];
   tools?: ToolRef[];
   model?: string;
   reasoningEffort?: ReasoningEffort;
 }): Promise<Session> {
-  return request<Session>("/v1/sessions", {
+  return request<Session>(workspacePath(input.workspaceId, "/sessions"), {
     method: "POST",
     body: JSON.stringify({
       initialMessage: input.initialMessage,
@@ -92,20 +150,30 @@ export function createSession(input: {
   });
 }
 
-export function fetchClientConfig(): Promise<ClientConfig> {
-  return request<ClientConfig>("/v1/config/client");
+export async function fetchClientConfig(): Promise<ClientConfig> {
+  const config = await request<ClientConfig>("/v1/config/client");
+  configureClientAuth(config.auth);
+  return config;
 }
 
-export function fetchSession(sessionId: string): Promise<Session> {
-  return request<Session>(`/v1/sessions/${sessionId}`);
+export function fetchAccessContext(): Promise<AccessContext> {
+  return request<AccessContext>("/v1/access/me");
 }
 
-export async function fetchEvents(sessionId: string, after = 0): Promise<SessionEvent[]> {
+export function fetchWorkspaces(): Promise<import("./types").Workspace[]> {
+  return request<import("./types").Workspace[]>("/v1/workspaces");
+}
+
+export function fetchSession(workspaceId: string, sessionId: string): Promise<Session> {
+  return request<Session>(workspacePath(workspaceId, `/sessions/${sessionId}`));
+}
+
+export async function fetchEvents(workspaceId: string, sessionId: string, after = 0): Promise<SessionEvent[]> {
   const limit = 500;
   const events: SessionEvent[] = [];
   let cursor = after;
   while (true) {
-    const page = await request<SessionEvent[]>(`/v1/sessions/${sessionId}/events?after=${cursor}&limit=${limit}`);
+    const page = await request<SessionEvent[]>(workspacePath(workspaceId, `/sessions/${sessionId}/events?after=${cursor}&limit=${limit}`));
     events.push(...page);
     if (page.length < limit) {
       return events;
@@ -114,8 +182,8 @@ export async function fetchEvents(sessionId: string, after = 0): Promise<Session
   }
 }
 
-export function sendUserMessage(sessionId: string, submission: TurnSubmission): Promise<SessionEvent> {
-  return request<SessionEvent>(`/v1/sessions/${sessionId}/events`, {
+export function sendUserMessage(workspaceId: string, sessionId: string, submission: TurnSubmission): Promise<SessionEvent> {
+  return request<SessionEvent>(workspacePath(workspaceId, `/sessions/${sessionId}/events`), {
     method: "POST",
     body: JSON.stringify({
       type: "user.message",
@@ -131,8 +199,8 @@ export function sendUserMessage(sessionId: string, submission: TurnSubmission): 
   });
 }
 
-export async function uploadFileAsset(file: File): Promise<FileAsset> {
-  const upload = await request<CreateFileUploadResponse>("/v1/files/uploads", {
+export async function uploadFileAsset(workspaceId: string, file: File): Promise<FileAsset> {
+  const upload = await request<CreateFileUploadResponse>(workspacePath(workspaceId, "/files/uploads"), {
     method: "POST",
     body: JSON.stringify({
       filename: file.name || "file",
@@ -148,60 +216,60 @@ export async function uploadFileAsset(file: File): Promise<FileAsset> {
   if (!put.ok) {
     throw new Error(`Object storage upload failed: ${put.status} ${await put.text()}`);
   }
-  const completed = await request<{ file: FileAsset }>(`/v1/files/uploads/${upload.uploadId}/complete`, {
+  const completed = await request<{ file: FileAsset }>(workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`), {
     method: "POST",
   });
   return completed.file;
 }
 
-export async function fetchFileDownloadUrl(fileId: string): Promise<FileDownloadUrlResponse> {
-  return await request<FileDownloadUrlResponse>(`/v1/files/${fileId}/download-url`, {
+export async function fetchFileDownloadUrl(workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
+  return await request<FileDownloadUrlResponse>(workspacePath(workspaceId, `/files/${fileId}/download-url`), {
     method: "POST",
   });
 }
 
-export async function fetchFileAsset(fileId: string): Promise<FileAsset> {
-  return await request<FileAsset>(`/v1/files/${fileId}`);
+export async function fetchFileAsset(workspaceId: string, fileId: string): Promise<FileAsset> {
+  return await request<FileAsset>(workspacePath(workspaceId, `/files/${fileId}`));
 }
 
-export function createDocumentBase(input: { name: string; description?: string }): Promise<DocumentBase> {
-  return request<DocumentBase>("/v1/document-bases", {
+export function createDocumentBase(workspaceId: string, input: { name: string; description?: string }): Promise<DocumentBase> {
+  return request<DocumentBase>(workspacePath(workspaceId, "/document-bases"), {
     method: "POST",
     body: JSON.stringify(input),
   });
 }
 
-export function fetchDocumentBases(): Promise<DocumentBase[]> {
-  return request<DocumentBase[]>("/v1/document-bases");
+export function fetchDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
+  return request<DocumentBase[]>(workspacePath(workspaceId, "/document-bases"));
 }
 
-export function fetchDocuments(baseId: string): Promise<IndexedDocument[]> {
-  return request<IndexedDocument[]>(`/v1/document-bases/${baseId}/documents`);
+export function fetchDocuments(workspaceId: string, baseId: string): Promise<IndexedDocument[]> {
+  return request<IndexedDocument[]>(workspacePath(workspaceId, `/document-bases/${baseId}/documents`));
 }
 
-export function addDocumentToBase(baseId: string, fileId: string): Promise<IndexedDocument> {
-  return request<IndexedDocument>(`/v1/document-bases/${baseId}/documents`, {
+export function addDocumentToBase(workspaceId: string, baseId: string, fileId: string): Promise<IndexedDocument> {
+  return request<IndexedDocument>(workspacePath(workspaceId, `/document-bases/${baseId}/documents`), {
     method: "POST",
     body: JSON.stringify({ fileId }),
   });
 }
 
-export function reindexDocument(documentId: string): Promise<IndexedDocument> {
-  return request<IndexedDocument>(`/v1/documents/${documentId}/reindex`, {
+export function reindexDocument(workspaceId: string, baseId: string, documentId: string): Promise<IndexedDocument> {
+  return request<IndexedDocument>(workspacePath(workspaceId, `/document-bases/${baseId}/documents/${documentId}/reindex`), {
     method: "POST",
   });
 }
 
-export async function searchDocumentBase(baseId: string, query: string): Promise<DocumentSearchResult[]> {
-  const response = await request<{ results: DocumentSearchResult[] }>(`/v1/document-bases/${baseId}/search`, {
+export async function searchDocumentBase(workspaceId: string, baseId: string, query: string): Promise<DocumentSearchResult[]> {
+  const response = await request<{ results: DocumentSearchResult[] }>(workspacePath(workspaceId, `/document-bases/${baseId}/search`), {
     method: "POST",
     body: JSON.stringify({ query, limit: 8 }),
   });
   return response.results;
 }
 
-export function sendInterrupt(sessionId: string, reason?: string): Promise<SessionEvent> {
-  return request<SessionEvent>(`/v1/sessions/${sessionId}/events`, {
+export function sendInterrupt(workspaceId: string, sessionId: string, reason?: string): Promise<SessionEvent> {
+  return request<SessionEvent>(workspacePath(workspaceId, `/sessions/${sessionId}/events`), {
     method: "POST",
     body: JSON.stringify({
       type: "user.interrupt",
@@ -211,8 +279,8 @@ export function sendInterrupt(sessionId: string, reason?: string): Promise<Sessi
   });
 }
 
-export function sendApproval(sessionId: string, approvalId: string, decision: "approve" | "reject"): Promise<SessionEvent> {
-  return request<SessionEvent>(`/v1/sessions/${sessionId}/events`, {
+export function sendApproval(workspaceId: string, sessionId: string, approvalId: string, decision: "approve" | "reject"): Promise<SessionEvent> {
+  return request<SessionEvent>(workspacePath(workspaceId, `/sessions/${sessionId}/events`), {
     method: "POST",
     body: JSON.stringify({
       type: "user.approvalDecision",
@@ -222,14 +290,15 @@ export function sendApproval(sessionId: string, approvalId: string, decision: "a
   });
 }
 
-function streamUrl(sessionId: string, after: number): string {
-  const path = `${apiBaseUrl}/v1/sessions/${sessionId}/events/stream`;
+function streamUrl(workspaceId: string, sessionId: string, after: number): string {
+  const path = `${apiBaseUrl}${workspacePath(workspaceId, `/sessions/${sessionId}/events/stream`)}`;
   const url = new URL(path, window.location.origin);
   url.searchParams.set("after", String(after));
   return url.toString();
 }
 
 export async function streamSessionEvents(
+  workspaceId: string,
   sessionId: string,
   after: number,
   onEvent: (event: SessionEvent) => void,
@@ -245,7 +314,7 @@ export async function streamSessionEvents(
   while (!signal?.aborted) {
     options.onState?.("connecting");
     try {
-      await readSessionEventStream(sessionId, cursor, (event) => {
+      await readSessionEventStream(workspaceId, sessionId, cursor, (event) => {
         cursor = Math.max(cursor, event.sequence);
         retryDelayMs = baseDelayMs;
         options.onState?.("live");
@@ -288,13 +357,15 @@ class SessionStreamHttpError extends Error {
 }
 
 async function readSessionEventStream(
+  workspaceId: string,
   sessionId: string,
   after: number,
   onEvent: (event: SessionEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(streamUrl(sessionId, after), {
+  const response = await fetch(streamUrl(workspaceId, sessionId, after), {
     headers: authHeaders(),
+    credentials: "include",
     signal,
   });
   if (!response.ok) {
@@ -391,44 +462,51 @@ function parseSseEvent(block: string): SessionEvent | null {
   return data ? JSON.parse(data) as SessionEvent : null;
 }
 
-export async function fetchGitHubStatus(): Promise<{ configured: boolean; missing: string[]; installUrl: string | null }> {
-  return await request("/v1/github/app");
+export async function fetchGitHubStatus(workspaceId: string): Promise<{ configured: boolean; missing: string[]; installUrl: string | null }> {
+  return await request(workspacePath(workspaceId, "/github/app"));
 }
 
-export async function fetchGitHubRepositories(): Promise<GitHubRepository[]> {
-  const payload = await request<{ repositories: GitHubRepository[] }>("/v1/github/repositories");
+export async function fetchGitHubRepositories(workspaceId: string): Promise<GitHubRepository[]> {
+  const payload = await request<{ repositories: GitHubRepository[] }>(workspacePath(workspaceId, "/github/repositories"));
   return payload.repositories;
 }
 
-export async function startGitHubManifest(organization?: string): Promise<{ actionUrl: string; manifest: Record<string, unknown>; state: string }> {
-  return await request("/v1/github/app-manifest", {
+export async function startGitHubManifest(workspaceId: string, organization?: string): Promise<{ actionUrl: string; manifest: Record<string, unknown>; state: string }> {
+  return await request(workspacePath(workspaceId, "/github/app-manifest"), {
     method: "POST",
     body: JSON.stringify({ organization: organization || undefined, public: false, includeCiPermissions: true }),
   });
 }
 
-export function fetchScheduledTasks(): Promise<ScheduledTask[]> {
-  return request<ScheduledTask[]>("/v1/scheduled-tasks");
+export function fetchScheduledTasks(workspaceId: string): Promise<ScheduledTask[]> {
+  return request<ScheduledTask[]>(workspacePath(workspaceId, "/scheduled-tasks"));
 }
 
-export function fetchScheduledTaskRuns(taskId: string): Promise<ScheduledTaskRun[]> {
-  return request<ScheduledTaskRun[]>(`/v1/scheduled-tasks/${taskId}/runs`);
+export function fetchScheduledTaskRuns(workspaceId: string, taskId: string): Promise<ScheduledTaskRun[]> {
+  return request<ScheduledTaskRun[]>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}/runs`));
 }
 
 export function createScheduledTask(input: {
+  workspaceId: string;
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   runMode: ScheduledTask["runMode"];
   overlapPolicy: ScheduledTask["overlapPolicy"];
   agentConfig: ScheduledTaskAgentConfig;
 }): Promise<ScheduledTask> {
-  return request<ScheduledTask>("/v1/scheduled-tasks", {
+  return request<ScheduledTask>(workspacePath(input.workspaceId, "/scheduled-tasks"), {
     method: "POST",
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      name: input.name,
+      schedule: input.schedule,
+      runMode: input.runMode,
+      overlapPolicy: input.overlapPolicy,
+      agentConfig: input.agentConfig,
+    }),
   });
 }
 
-export function updateScheduledTask(taskId: string, input: Partial<{
+export function updateScheduledTask(workspaceId: string, taskId: string, input: Partial<{
   name: string;
   schedule: ScheduledTaskScheduleSpec;
   runMode: ScheduledTask["runMode"];
@@ -436,24 +514,56 @@ export function updateScheduledTask(taskId: string, input: Partial<{
   agentConfig: ScheduledTaskAgentConfig;
   status: ScheduledTask["status"];
 }>): Promise<ScheduledTask> {
-  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}`, {
+  return request<ScheduledTask>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}`), {
     method: "PATCH",
     body: JSON.stringify(input),
   });
 }
 
-export function pauseScheduledTask(taskId: string): Promise<ScheduledTask> {
-  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/pause`, { method: "POST" });
+export function pauseScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}/pause`), { method: "POST" });
 }
 
-export function resumeScheduledTask(taskId: string): Promise<ScheduledTask> {
-  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/resume`, { method: "POST" });
+export function resumeScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}/resume`), { method: "POST" });
 }
 
-export function triggerScheduledTask(taskId: string): Promise<ScheduledTask> {
-  return request<ScheduledTask>(`/v1/scheduled-tasks/${taskId}/trigger`, { method: "POST" });
+export function triggerScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+  return request<ScheduledTask>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}/trigger`), { method: "POST" });
 }
 
-export function deleteScheduledTask(taskId: string): Promise<{ ok: true }> {
-  return request<{ ok: true }>(`/v1/scheduled-tasks/${taskId}`, { method: "DELETE" });
+export function deleteScheduledTask(workspaceId: string, taskId: string): Promise<{ ok: true }> {
+  return request<{ ok: true }>(workspacePath(workspaceId, `/scheduled-tasks/${taskId}`), { method: "DELETE" });
+}
+
+export async function fetchApiKeys(workspaceId: string): Promise<ApiKey[]> {
+  const payload = await request<{ apiKeys: ApiKey[] }>(workspacePath(workspaceId, "/api-keys"));
+  return payload.apiKeys;
+}
+
+export async function createApiKey(workspaceId: string, input: { name: string; permissions: string[]; expiresAt?: string | null }): Promise<{ apiKey: ApiKey; token: string }> {
+  return await request<{ apiKey: ApiKey; token: string }>(workspacePath(workspaceId, "/api-keys"), {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function revokeApiKey(workspaceId: string, apiKeyId: string): Promise<ApiKey> {
+  return request<ApiKey>(workspacePath(workspaceId, `/api-keys/${apiKeyId}`), { method: "DELETE" });
+}
+
+export function fetchBilling(accountId?: string): Promise<{ balance: BillingBalance; mode: string }> {
+  const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+  return request<{ balance: BillingBalance; mode: string }>(`/v1/billing${query}`);
+}
+
+export function createBillingCheckout(packageId: string, accountId?: string): Promise<{ url: string; checkoutSessionId: string }> {
+  return request<{ url: string; checkoutSessionId: string }>("/v1/billing/checkout", {
+    method: "POST",
+    body: JSON.stringify({ packageId, accountId }),
+  });
+}
+
+function workspacePath(workspaceId: string, path: string): string {
+  return `/v1/workspaces/${workspaceId}${path}`;
 }

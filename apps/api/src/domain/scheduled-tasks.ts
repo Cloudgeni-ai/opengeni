@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  AccessGrant,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
@@ -11,6 +12,7 @@ import {
   getScheduledTask,
   updateScheduledTask,
   type Database,
+  type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import type { SessionWorkflowClient } from "../dependencies";
@@ -26,13 +28,16 @@ export async function createValidatedScheduledTask(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;
+  grant: AccessGrant;
   payload: CreateScheduledTaskPayload;
 }): Promise<ScheduledTask> {
-  const agentConfig = await validateScheduledTaskAgentConfig(input);
+  const agentConfig = await validateScheduledTaskAgentConfig({ ...input, workspaceId: input.grant.workspaceId });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
   return await createScheduledTask(input.db, {
     id,
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
     name: trimmedScheduledTaskName(input.payload.name),
     status: input.payload.status,
     schedule: input.payload.schedule,
@@ -50,8 +55,8 @@ export async function validatedScheduledTaskUpdate(input: {
   objectStorage: ObjectStorageDependency;
   existing: ScheduledTask;
   payload: UpdateScheduledTaskPayload;
-}): Promise<Parameters<typeof updateScheduledTask>[2]> {
-  const update: Parameters<typeof updateScheduledTask>[2] = {};
+}): Promise<UpdateScheduledTaskInput> {
+  const update: UpdateScheduledTaskInput = {};
   if (input.payload.name !== undefined) {
     update.name = trimmedScheduledTaskName(input.payload.name);
   }
@@ -76,14 +81,15 @@ export async function validatedScheduledTaskUpdate(input: {
       settings: input.settings,
       db: input.db,
       objectStorage: input.objectStorage,
+      workspaceId: input.existing.workspaceId,
       payload: { agentConfig: input.payload.agentConfig },
     });
   }
   return update;
 }
 
-export async function requireScheduledTaskForApi(db: Database, taskId: string): Promise<ScheduledTask> {
-  const task = await getScheduledTask(db, taskId);
+export async function requireScheduledTaskForApi(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask> {
+  const task = await getScheduledTask(db, workspaceId, taskId);
   if (!task) {
     throw new HTTPException(404, { message: "scheduled task not found" });
   }
@@ -91,7 +97,7 @@ export async function requireScheduledTaskForApi(db: Database, taskId: string): 
 }
 
 export async function restoreScheduledTask(db: Database, task: ScheduledTask): Promise<ScheduledTask> {
-  return await updateScheduledTask(db, task.id, {
+  return await updateScheduledTask(db, task.workspaceId, task.id, {
     name: task.name,
     status: task.status,
     schedule: task.schedule,
@@ -111,7 +117,7 @@ export async function syncCreatedScheduledTask(input: {
   try {
     await input.workflowClient.syncScheduledTask({ task: input.task });
   } catch (error) {
-    await deleteScheduledTask(input.db, input.task.id).catch(() => undefined);
+    await deleteScheduledTask(input.db, input.task.workspaceId, input.task.id).catch(() => undefined);
     throw error;
   }
 }
@@ -139,6 +145,7 @@ async function validateScheduledTaskAgentConfig(input: {
   db: Database;
   objectStorage: ObjectStorageDependency;
   payload: { agentConfig: ScheduledTaskAgentConfig };
+  workspaceId: string;
 }): Promise<ScheduledTaskAgentConfig> {
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const tools = validateToolRefs(input.payload.agentConfig.tools ?? [], input.settings);
@@ -146,11 +153,11 @@ async function validateScheduledTaskAgentConfig(input: {
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
   }
-  validateGitHubRepositorySelection(resources);
+  await validateGitHubRepositorySelection(input.db, input.workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !input.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
-  await validateFileResources(input.db, resources);
+  await validateFileResources(input.db, input.workspaceId, resources);
   return {
     ...input.payload.agentConfig,
     prompt,

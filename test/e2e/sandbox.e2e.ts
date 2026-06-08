@@ -4,6 +4,7 @@ import { buildSandboxImage, freePort, runCommand, startProcess, startTestService
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 let apiPort = 0;
+let workspaceId = "";
 
 describe("real Docker sandbox e2e", () => {
   let services: TestServices;
@@ -22,6 +23,7 @@ describe("real Docker sandbox e2e", () => {
       ready: async () => (await fetch(`http://127.0.0.1:${apiPort}/healthz`).catch(() => null))?.ok === true,
       timeoutMs: 45_000,
     });
+    workspaceId = await discoverWorkspaceId();
     worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
       cwd: repoRoot,
       env,
@@ -36,7 +38,7 @@ describe("real Docker sandbox e2e", () => {
   }, 60_000);
 
   test("runs SDK shell tool calls inside the real Docker sandbox", async () => {
-    const create = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions`, {
+    const create = await fetch(apiPath("/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -59,7 +61,7 @@ describe("real Docker sandbox e2e", () => {
   }, 240_000);
 
   test("materializes uploaded file resources inside the real Docker sandbox", async () => {
-    const upload = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads`, {
+    const upload = await fetch(apiPath("/files/uploads"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -76,12 +78,12 @@ describe("real Docker sandbox e2e", () => {
       headers: uploadBody.requiredHeaders,
     });
     expect(put.ok).toBe(true);
-    const complete = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads/${uploadBody.uploadId}/complete`, {
+    const complete = await fetch(apiPath(`/files/uploads/${uploadBody.uploadId}/complete`), {
       method: "POST",
     });
     expect(complete.ok).toBe(true);
 
-    const create = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions`, {
+    const create = await fetch(apiPath("/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -109,7 +111,7 @@ describe("real Docker sandbox e2e", () => {
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
       "base64",
     ));
-    const upload = await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads`, {
+    const upload = await fetch(apiPath("/files/uploads"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -126,9 +128,9 @@ describe("real Docker sandbox e2e", () => {
       headers: uploadBody.requiredHeaders,
     });
     expect(put.ok).toBe(true);
-    expect((await fetch(`http://127.0.0.1:${apiPort}/v1/files/uploads/${uploadBody.uploadId}/complete`, { method: "POST" })).ok).toBe(true);
+    expect((await fetch(apiPath(`/files/uploads/${uploadBody.uploadId}/complete`), { method: "POST" })).ok).toBe(true);
 
-    const create = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions`, {
+    const create = await fetch(apiPath("/sessions"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -179,9 +181,21 @@ describe("real Docker sandbox e2e", () => {
 });
 
 async function sessionEvents(sessionId: string): Promise<SessionEvent[]> {
-  const response = await fetch(`http://127.0.0.1:${apiPort}/v1/sessions/${sessionId}/events?limit=200`);
+  const response = await fetch(apiPath(`/sessions/${sessionId}/events?limit=200`));
   expect(response.ok).toBe(true);
   return await response.json() as SessionEvent[];
+}
+
+async function discoverWorkspaceId(): Promise<string> {
+  const response = await fetch(`http://127.0.0.1:${apiPort}/v1/access/me`);
+  expect(response.ok).toBe(true);
+  const context = await response.json() as { defaultWorkspaceId?: string };
+  expect(typeof context.defaultWorkspaceId).toBe("string");
+  return context.defaultWorkspaceId!;
+}
+
+function apiPath(path: string): string {
+  return `http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}${path}`;
 }
 
 function stackEnv(services: TestServices, apiPort: number): Record<string, string> {
@@ -194,6 +208,7 @@ function stackEnv(services: TestServices, apiPort: number): Record<string, strin
     OPENGENI_TEMPORAL_TASK_QUEUE: `sandbox-e2e-${crypto.randomUUID()}`,
     OPENGENI_API_HOST: "127.0.0.1",
     OPENGENI_API_PORT: String(apiPort),
+    OPENGENI_PRODUCT_ACCESS_MODE: "local",
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",
     OPENGENI_SANDBOX_BACKEND: "docker",

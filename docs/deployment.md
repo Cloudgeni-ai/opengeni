@@ -65,16 +65,100 @@ bun run deployment:conformance -- --base-url https://opengeni.example.com
 ```
 
 For deployments with the built-in shared-key boundary enabled, pass the same key
-used by the backend. Conformance verifies that client config is secret-free,
-protected routes reject missing keys, and authenticated API/SSE requests work:
+used by the backend. Conformance sends it as `x-opengeni-access-key`, verifies
+that client config is secret-free, verifies protected routes reject missing
+keys, discovers the workspace through `/v1/access/me`, and then exercises
+workspace-scoped API/SSE requests:
 
 ```bash
-OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
+OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   bun run deployment:conformance -- --base-url https://opengeni.example.com
 ```
 
-If the target reports `auth.required=true` and no conformance access key is
+For managed deployments, conformance should use an OpenGeni product API key for
+the test workspace:
+
+```bash
+OPENGENI_CONFORMANCE_PRODUCT_TOKEN="$OPENGENI_TEST_WORKSPACE_API_KEY" \
+  bun run deployment:conformance -- --base-url https://staging.app.opengeni.ai
+```
+
+If the target reports deployment-key auth and no conformance deployment key is
 provided, conformance fails instead of treating auth as a skipped check.
+
+Revenue launch requires a separate live Stripe read-only preflight. Test-mode
+Checkout/webhook evidence proves the integration code path, but it does not
+prove live account activation, live top-up Price IDs, or the production webhook
+endpoint. The live preflight performs only Stripe read calls and prefix/object
+checks; it does not create Products, Prices, webhooks, customers, Checkout
+Sessions, PaymentIntents, refunds, disputes, or charges:
+
+```bash
+STRIPE_LIVE_SECRET_KEY=sk_live_... \
+STRIPE_LIVE_PUBLISHABLE_KEY=pk_live_... \
+OPENGENI_STRIPE_LIVE_TOPUP_PRICE_25=price_... \
+OPENGENI_STRIPE_LIVE_TOPUP_PRICE_100=price_... \
+OPENGENI_STRIPE_LIVE_TOPUP_PRICE_500=price_... \
+OPENGENI_STRIPE_LIVE_TOPUP_PRICE_1000=price_... \
+OPENGENI_STRIPE_LIVE_WEBHOOK_URL=https://app.opengeni.ai/v1/webhooks/stripe \
+  bun run stripe:live-readiness
+```
+
+The gate fails if live keys are missing, the account is not
+`charges_enabled`/`payouts_enabled`/`details_submitted`, any package Price is
+inactive, not `one_time`, not USD, or not the exact `$25`, `$100`, `$500`, or
+`$1,000` amount, or if the live webhook endpoint is missing required OpenGeni
+events. A failed or skipped live preflight blocks real-payment readiness even
+when staging and preview test-mode billing pass.
+
+Customer-ready release evidence is stricter than a successful staging smoke.
+The release manifest must be checked with the customer-ready scope:
+
+```bash
+bun run check:customer-ready
+```
+
+That scope expands to local, preview, staging, production canary, real-payments,
+and customer-ready operational gates. The checker requires fixed gate IDs, so a
+manifest cannot pass by omitting hard evidence. The first-release mandatory
+customer-ready operational gates are:
+
+- `staging-load-soak`
+- `staging-backup-restore`
+- `staging-rollback`
+- `staging-operational-readiness`
+- `private-ops-boundary`
+
+Use the operational readiness checker to validate the structured staging
+evidence before attaching it to those gates:
+
+```bash
+bun run managed:load-soak -- \
+  --base-url https://staging.app.opengeni.ai \
+  --workspace-id "$OPENGENI_CONFORMANCE_WORKSPACE_ID" \
+  --token "$OPENGENI_CONFORMANCE_PRODUCT_TOKEN" \
+  --out-file .agent/generated/staging/load-soak.json
+
+bun run operational:assemble -- \
+  --out .agent/generated/staging/operational-readiness.json \
+  --environment staging \
+  --base-url https://staging.app.opengeni.ai \
+  --check .agent/generated/staging/load-soak.json \
+  --check .agent/generated/staging/backup-restore.json \
+  --check .agent/generated/staging/rollback.json \
+  --check .agent/generated/staging/observability-alerts.json \
+  --check .agent/generated/staging/private-ops-boundary.json
+
+bun run operational:readiness -- \
+  --evidence .agent/generated/staging/operational-readiness.json \
+  --environment staging
+```
+
+The evidence must prove a load/soak run with bounded error rate and latency,
+a backup/restore drill for database and object storage, a digest-pinned rollback
+and forward roll with conformance after each step, configured observability and
+alerts, and a private-ops boundary proving public PRs cannot access deployment
+secrets. A skipped or missing operational gate blocks customer-ready status.
 
 For private in-cluster MinIO behind a local port-forward, keep the presigned URL host intact with curl's connect mapping:
 
@@ -300,7 +384,11 @@ The secret must provide runtime values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
 - `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
-- `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` for the temporary built-in shared-key boundary, unless an external gateway supplies authentication
+- `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
+- `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
+- `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
+- `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
+- `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
 - sandbox backend credentials when required
 
 Do not commit real secret values.
@@ -316,9 +404,15 @@ Sandbox file mount support is also backend-specific:
 
 ## Security Boundary
 
-OpenGeni ships a deliberately small shared-key boundary for deployment smoke and early self-hosted use. Set `OPENGENI_AUTH_REQUIRED=true` and provide `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager. The browser stores the key only in local storage and sends it as `Authorization: Bearer ...`; the API also accepts `X-OpenGeni-Access-Key` for simple automation.
+OpenGeni separates deployment edge access from product access. `OPENGENI_AUTH_REQUIRED=true` is an optional deployment shared-key boundary for smoke tests and simple self-hosting. It is not the tenant model and it does not create users, accounts, workspaces, or billing state. Set `OPENGENI_ACCESS_KEY` through a Kubernetes Secret, ExternalSecret, or provider secret manager; clients send it as `x-opengeni-access-key`.
 
-This is not full product auth. It does not provide users, tenancy, RBAC, audit identity, SSO, or rate limiting. Long-lived public deployments should still sit behind a gateway or ingress stack that provides:
+Product access is controlled by `OPENGENI_PRODUCT_ACCESS_MODE`:
+
+- `local` bootstraps a local default account/workspace.
+- `configured` supports self-hosted embedded deployments with delegated bearer tokens or the deployment shared-key boundary.
+- `managed` uses Better Auth for browser human auth, OpenGeni-owned API keys for product/API access, Stripe prepaid credits, usage, limits, and local entitlement mirrors.
+
+Long-lived public deployments should still sit behind a gateway or ingress stack that provides:
 
 - TLS termination with a managed certificate.
 - Authentication and authorization for every user-facing route.
@@ -413,7 +507,7 @@ Minimum production alerts:
 
 - API availability: `/healthz` is unavailable from the ingress or synthetic probe for more than 2 minutes.
 - API errors: 5xx ratio is above 2% for 10 minutes, or any critical route stays above 5% for 5 minutes.
-- API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
+- API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
 - Worker failures: `runAgentSegment` failure ratio is above 5% for 10 minutes.
 - Worker duration: p95 `runAgentSegment` duration is above the expected model/tool budget for 15 minutes.
 - Scheduler health: manual scheduled-task conformance does not dispatch a session through Temporal within the configured timeout.
@@ -508,6 +602,21 @@ are reusable stack-contract shapes for operator-owned automation. If an operator
 wants preview deployments, they should run `bun run deployment:stack` in their
 own CI/CD environment with their own cluster, registry, secrets, and teardown
 policy.
+
+Preview profiles are managed-product previews, not fake demos. They use
+disposable in-cluster Postgres, Temporal, NATS, and MinIO fixtures so state can
+be torn down safely, but they still run the real API, web app, worker, model
+provider, and configured sandbox backend. The checked-in
+`values.preview-managed.example.yaml` file keeps replicas small and enables the
+fixture data plane; generated private runtime artifacts must still provide
+managed auth, Resend, Stripe test mode, GitHub App, model-provider, Modal, and
+image digest values. Do not use `OPENGENI_SANDBOX_BACKEND=none` for previews
+that are meant to validate product behavior.
+
+Preview deployments should be private or maintainer-gated even when signup is
+enabled. The source repo may contain the contract, Helm values shape, and
+conformance scripts, but not provider secrets, kubeconfigs, Terraform state,
+preview tenant data, or unsanitized evidence.
 
 ## Conformance
 

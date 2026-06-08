@@ -17,61 +17,103 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { requireAccessGrant } from "../access";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
 
-  app.post("/v1/document-bases", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/document-bases", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     const payload = CreateDocumentBaseRequest.parse(await c.req.json());
-    return c.json(DocumentBase.parse(await createDocumentBase(db, payload)), 201);
+    return c.json(DocumentBase.parse(await createDocumentBase(db, { ...payload, accountId: grant.accountId, workspaceId })), 201);
   });
 
-  app.get("/v1/document-bases", async (c) => {
-    return c.json((await listDocumentBases(db)).map((base) => DocumentBase.parse(base)));
+  app.get("/v1/workspaces/:workspaceId/document-bases", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    return c.json((await listDocumentBases(db, workspaceId)).map((base) => DocumentBase.parse(base)));
   });
 
-  app.get("/v1/document-bases/:baseId", async (c) => {
-    const base = await getDocumentBase(db, c.req.param("baseId"));
+  app.get("/v1/workspaces/:workspaceId/document-bases/:baseId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const base = await getDocumentBase(db, workspaceId, c.req.param("baseId"));
     if (!base) {
       throw new HTTPException(404, { message: "document base not found" });
     }
     return c.json(DocumentBase.parse(base));
   });
 
-  app.post("/v1/document-bases/:baseId/documents", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 1 });
     const payload = AddDocumentRequest.parse(await c.req.json());
     try {
-      const document = await addDocumentToBase(db, { baseId: c.req.param("baseId"), fileId: payload.fileId });
+      const document = await addDocumentToBase(db, { accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId"), fileId: payload.fileId });
       const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
-      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ documentId: document.id }) ?? document);
+      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ workspaceId, documentId: document.id }) ?? document);
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "document.indexed",
+        quantity: indexed.chunkCount,
+        unit: "chunk",
+        sourceResourceType: "document",
+        sourceResourceId: indexed.id,
+        idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+      });
       return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
     } catch (error) {
       throw documentHttpException(error);
     }
   });
 
-  app.get("/v1/document-bases/:baseId/documents", async (c) => {
-    return c.json((await listDocuments(db, c.req.param("baseId"))).map((document) => Document.parse(document)));
+  app.get("/v1/workspaces/:workspaceId/document-bases/:baseId/documents", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    return c.json((await listDocuments(db, workspaceId, c.req.param("baseId"))).map((document) => Document.parse(document)));
   });
 
-  app.post("/v1/documents/:documentId/reindex", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 1 });
     try {
-      const document = await getDocument(db, c.req.param("documentId"));
+      const document = await getDocument(db, workspaceId, c.req.param("documentId"));
       if (!document) {
         throw new HTTPException(404, { message: "document not found" });
       }
       if (document.status !== "failed") {
         throw new HTTPException(422, { message: "only failed documents can be retried" });
       }
-      return c.json(Document.parse(await documentIndexer.indexDocument({ documentId: document.id }) ?? document));
+      if (document.baseId !== c.req.param("baseId")) {
+        throw new HTTPException(404, { message: "document not found" });
+      }
+      const indexed = await documentIndexer.indexDocument({ workspaceId, documentId: document.id }) ?? document;
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "document.indexed",
+        quantity: indexed.chunkCount,
+        unit: "chunk",
+        sourceResourceType: "document",
+        sourceResourceId: indexed.id,
+        idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+      });
+      return c.json(Document.parse(indexed));
     } catch (error) {
       if (error instanceof HTTPException) {
         throw error;
@@ -80,14 +122,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
-  app.post("/v1/document-bases/:baseId/search", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/search", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const payload = DocumentSearchRequest.parse(await c.req.json());
-    const base = await getDocumentBase(db, c.req.param("baseId"));
+    const base = await getDocumentBase(db, workspaceId, c.req.param("baseId"));
     if (!base) {
       throw new HTTPException(404, { message: "document base not found" });
     }
     return c.json({
       results: await searchDocuments(db, {
+        workspaceId,
         baseIds: [base.id],
         query: payload.query,
         limit: payload.limit,
@@ -95,9 +140,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
-  app.all("/v1/mcp/docs", async (c) => {
+  app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const server = buildDocumentsMcpServer(db, getDocumentServices());
+    const server = buildDocumentsMcpServer(db, workspaceId, getDocumentServices());
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });

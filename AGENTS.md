@@ -70,7 +70,7 @@ MinIO is the local S3-compatible object storage default for Docker Compose and o
 ## Architecture Notes
 
 - Public clients talk only to the API.
-- Browser streaming uses `GET /v1/sessions/:id/events/stream` with SSE.
+- Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
 - Core NATS is the realtime bus between producers and API instances.
 - Postgres is the durable event store and replay source.
 - Temporal is orchestration only. Token streams do not go through workflow history.

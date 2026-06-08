@@ -1,8 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type { Context, MiddlewareHandler } from "hono";
 
-const bearerPrefix = "Bearer ";
-
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
     if (!settings.authRequired || isAuthExempt(c, settings)) {
@@ -13,9 +11,7 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
       await next();
       return;
     }
-    return c.json({ error: "unauthorized" }, 401, {
-      "www-authenticate": 'Bearer realm="opengeni"',
-    });
+    return c.json({ error: "unauthorized" }, 401);
   };
 }
 
@@ -25,6 +21,15 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   }
   const path = new URL(c.req.url).pathname;
   if (path === "/v1/config/client") {
+    return true;
+  }
+  if (path === "/v1/auth" || path.startsWith("/v1/auth/")) {
+    return true;
+  }
+  if (path === "/v1/webhooks/stripe") {
+    return true;
+  }
+  if (path === "/v1/github/setup" || path === "/v1/github/app-manifest/callback") {
     return true;
   }
   if (settings.authAllowHealth && path === "/healthz") {
@@ -40,10 +45,8 @@ function isAuthorized(c: Context, expected: string | undefined): boolean {
   if (!expected) {
     return false;
   }
-  const authorization = c.req.header("authorization");
-  const bearer = authorization?.startsWith(bearerPrefix) ? authorization.slice(bearerPrefix.length) : undefined;
   const explicit = c.req.header("x-opengeni-access-key");
-  return constantTimeEqual(bearer, expected) || constantTimeEqual(explicit, expected);
+  return constantTimeEqual(explicit, expected);
 }
 
 function constantTimeEqual(actual: string | undefined, expected: string): boolean {

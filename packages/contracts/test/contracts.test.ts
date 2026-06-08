@@ -75,11 +75,12 @@ describe("contracts", () => {
       allowedReasoningEfforts: ["low", "medium", "high"],
       mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
       fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
-      auth: { required: true, headerName: "authorization", scheme: "bearer" },
+      productAccessMode: "managed",
+      auth: { mode: "managedSession", session: "cookie" },
     });
     expect(payload.defaultReasoningEffort).toBe("high");
     expect(payload.fileUploads.enabled).toBe(true);
-    expect(payload.auth.required).toBe(true);
+    expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
   });
 
@@ -139,9 +140,11 @@ describe("contracts", () => {
 
   test("accepts full realtime bus messages", () => {
     const message = SessionBusMessage.parse({
+      workspaceId: "00000000-0000-4000-8000-000000000100",
       sessionId: "00000000-0000-4000-8000-000000000001",
       events: [{
         id: "00000000-0000-4000-8000-000000000002",
+        workspaceId: "00000000-0000-4000-8000-000000000100",
         sessionId: "00000000-0000-4000-8000-000000000001",
         sequence: 1,
         type: "agent.message.delta",

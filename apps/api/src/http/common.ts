@@ -9,8 +9,8 @@ export function boundedLimit(raw: string | undefined): number {
   return Math.min(500, Math.max(1, Math.floor(limit)));
 }
 
-export async function assertSessionExists(db: Database, sessionId: string): Promise<void> {
-  if (!await getSession(db, sessionId)) {
+export async function assertSessionExists(db: Database, workspaceId: string, sessionId: string): Promise<void> {
+  if (!await getSession(db, workspaceId, sessionId)) {
     throw new HTTPException(404, { message: "session not found" });
   }
 }

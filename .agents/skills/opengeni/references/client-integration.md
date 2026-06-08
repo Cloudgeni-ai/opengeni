@@ -9,9 +9,11 @@ Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`.
 Ask or infer:
 
 - API base URL for the deployed OpenGeni service.
+- Workspace id to operate in, or credentials that can discover/create one through `/v1/access/me` and `/v1/workspaces`.
 - Whether the user needs a browser UI, server-side integration, CLI, SDK wrapper, or docs.
 - Whether file upload, repository attachment, MCP tools, approvals, interrupts, or schedules are in scope.
-- Whether the shared-key access boundary is enabled in the target deployment, and whether a product gateway, reverse proxy, VPN, or tenancy layer sits in front of OpenGeni.
+- Which product access mode the target uses: `local`, `configured`, or `managed`.
+- Whether the deployment shared-key boundary is enabled, and whether a product gateway, reverse proxy, VPN, or tenancy layer sits in front of OpenGeni.
 - Whether exact source behavior is needed. If yes, inspect the repo or the deployed service contract rather than trusting this reference.
 
 ## Client Mental Model
@@ -19,14 +21,15 @@ Ask or infer:
 A client should treat OpenGeni as a durable agent-work API:
 
 1. Read client config and capabilities.
-2. Create a session with an initial task.
-3. Subscribe to the session event stream.
-4. Render events into a timeline/status view.
-5. Send follow-up user messages or control events.
-6. Upload files before attaching them as resources.
-7. Attach repositories/files/tools to sessions or turns.
-8. Handle approvals, interrupts, failed states, and reconnect/replay.
-9. Optionally create and manage scheduled tasks.
+2. Resolve the workspace id from `/v1/access/me`, list/create workspaces if allowed, or use a known workspace id.
+3. Create a session with an initial task under `/v1/workspaces/:workspaceId/sessions`.
+4. Subscribe to the workspace-scoped session event stream.
+5. Render events into a timeline/status view.
+6. Send follow-up user messages or control events.
+7. Upload files before attaching them as resources.
+8. Attach repositories/files/tools to sessions or turns.
+9. Handle approvals, interrupts, failed states, and reconnect/replay.
+10. Optionally create and manage scheduled tasks.
 
 The client should not talk directly to the worker, NATS, Temporal, Postgres, or sandbox backend. Those are OpenGeni internals.
 
@@ -52,15 +55,16 @@ If only a deployment is available:
 
 Prefer this shape, adjusted to the current contracts:
 
-1. **Prepare access**: if shared-key auth is enabled, collect the deployment access key and send it as `Authorization: Bearer ...` or `X-OpenGeni-Access-Key`.
-2. **Fetch config**: get default model, allowed models, reasoning efforts, MCP providers, and whether file uploads are enabled.
-3. **Prepare resources**: upload files first; select repository resources from available repo/source picker; select MCP tool providers by id.
-4. **Create session**: send initial message plus selected resources/tools/model/sandbox options.
-5. **Connect SSE**: stream events from the returned session id. Use the last event sequence as the reconnect cursor.
-6. **Render timeline**: display user messages, agent deltas/completions, reasoning, tool calls, sandbox operations, approvals, status changes, failures, and final output according to current event types.
-7. **Send follow-ups**: post a user message into the existing session; the API queues another turn.
-8. **Control work**: send interrupt or approval-decision events when the session requires action.
-9. **Replay**: on reload or reconnect, list events after the last known sequence before resuming the live stream.
+1. **Prepare access**: for managed/configured product API access, send `Authorization: Bearer <token>`. For the optional deployment shared-key boundary, send `x-opengeni-access-key: <key>`. Do not conflate these two keys.
+2. **Fetch config**: get product access mode, default model, allowed models, reasoning efforts, MCP providers, and whether file uploads are enabled.
+3. **Resolve workspace**: call `/v1/access/me` and use `defaultWorkspaceId`, or list/create workspaces through `/v1/workspaces` if the grant allows it.
+4. **Prepare resources**: upload files under the workspace first; select repository resources from available repo/source picker; select MCP tool providers by id.
+5. **Create session**: send initial message plus selected resources/tools/model/sandbox options to `/v1/workspaces/:workspaceId/sessions`.
+6. **Connect SSE**: stream events from `/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`. Use the last event sequence as the reconnect cursor.
+7. **Render timeline**: display user messages, agent deltas/completions, reasoning, tool calls, sandbox operations, approvals, status changes, failures, and final output according to current event types.
+8. **Send follow-ups**: post a user message into the existing workspace-scoped session; the API queues another turn.
+9. **Control work**: send interrupt or approval-decision events when the session requires action.
+10. **Replay**: on reload or reconnect, list events after the last known sequence before resuming the live stream.
 
 ## Event Handling Rules
 
@@ -76,7 +80,7 @@ Use the event log as the source of truth for the UI:
 
 The client should not send large file bytes through session creation. Use the upload API flow:
 
-1. Create an upload with filename, content type, size, and optional checksum.
+1. Create a workspace-scoped upload with filename, content type, size, and optional checksum.
 2. PUT bytes to the returned object-storage URL with required headers.
 3. Complete the upload so OpenGeni verifies metadata and marks the file ready.
 4. Attach the resulting file id as a file resource on a session, turn, or scheduled task.
@@ -122,11 +126,13 @@ Examples: nightly infrastructure drift scan, weekly repo review, one-shot migrat
 Use client-centered language:
 
 - "Create a session, stream events, and send follow-ups through the API."
+- "Use workspace-scoped API paths; resource ids alone do not authorize access."
 - "Embed durable agent work into your SaaS without running the agent in your web server."
 - "Attach files, repositories, and MCP tool providers to a run."
 - "Replay the event log after reloads or network drops."
 - "Handle approvals and interrupts as normal API events."
-- "Self-hosted deployments can enable a simple shared-key boundary, but production products should still put real auth, tenancy, and policy in front of OpenGeni."
+- "Self-hosted configured deployments can use delegated bearer tokens or the deployment shared-key boundary without Better Auth."
+- "Managed deployments use Better Auth for browser sign-up and OpenGeni API keys for headless product integration."
 
 Avoid implying clients call Temporal, NATS, Postgres, the worker, or the sandbox directly.
 

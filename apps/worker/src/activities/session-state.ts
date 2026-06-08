@@ -16,10 +16,10 @@ import type {
 export function createSessionStateActivities(services: () => Promise<ActivityServices>) {
   async function failSession(input: RunAgentSegmentInput & { error?: string }): Promise<void> {
     const { db, bus } = await services();
-    const session = await requireSession(db, input.sessionId);
-    const trigger = await getSessionEvent(db, input.triggerEventId);
+    const session = await requireSession(db, input.workspaceId, input.sessionId);
+    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     const turnId = session.activeTurnId ?? null;
-    await appendAndPublishEvents(db, bus, input.sessionId, [
+    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
       {
         type: "turn.failed",
         turnId,
@@ -36,19 +36,19 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       },
     ]);
     if (turnId) {
-      await finishTurn(db, turnId, "failed");
+      await finishTurn(db, input.workspaceId, turnId, "failed");
     }
-    await setSessionStatus(db, input.sessionId, "failed", null);
+    await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
   }
 
   async function interruptActiveTurn(input: RunAgentSegmentInput): Promise<void> {
     const { db, bus } = await services();
-    const session = await requireSession(db, input.sessionId);
+    const session = await requireSession(db, input.workspaceId, input.sessionId);
     if (!session.activeTurnId) {
       return;
     }
-    const trigger = await getSessionEvent(db, input.triggerEventId);
-    await appendAndPublishEvents(db, bus, input.sessionId, [
+    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
+    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
       {
         turnId: session.activeTurnId,
         type: "turn.cancelled",
@@ -60,20 +60,20 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
         payload: { status: "queued" },
       },
     ]);
-    await finishTurn(db, session.activeTurnId, "cancelled");
-    await setSessionStatus(db, input.sessionId, "queued", null);
+    await finishTurn(db, input.workspaceId, session.activeTurnId, "cancelled");
+    await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
   }
 
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {
     const { db } = await services();
-    return await claimNextQueuedTurnDb(db, input.sessionId, input.workflowId);
+    return await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
   }
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db } = await services();
-    const session = await requireSession(db, input.sessionId);
+    const session = await requireSession(db, input.workspaceId, input.sessionId);
     if (session.status === "queued" || session.status === "running") {
-      await setSessionStatus(db, input.sessionId, "idle", null);
+      await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
     }
   }
 

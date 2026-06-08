@@ -33,7 +33,7 @@ spec:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
             - secretRef:
-                name: {{ include "opengeni.secretName" . }}
+                name: {{ include "opengeni.migrationSecretName" . }}
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}

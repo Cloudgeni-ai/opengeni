@@ -43,6 +43,7 @@ config:
   OPENGENI_AUTH_REQUIRED: "true"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
   OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
@@ -71,6 +72,9 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
           pathType: Exact
           service: api
 

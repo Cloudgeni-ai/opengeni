@@ -13,7 +13,10 @@ export type TestMcpServer = {
   close: () => void;
 };
 
-export function startTestMcpServer(options: { requiredAuthorization?: string } = {}): TestMcpServer {
+export function startTestMcpServer(options: {
+  requiredAuthorization?: string;
+  requiredHeaders?: Record<string, string>;
+} = {}): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -28,6 +31,14 @@ export function startTestMcpServer(options: { requiredAuthorization?: string } =
           status: 401,
           headers: { "content-type": "application/json" },
         });
+      }
+      for (const [name, expected] of Object.entries(options.requiredHeaders ?? {})) {
+        if (request.headers.get(name) !== expected) {
+          return new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
       }
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,

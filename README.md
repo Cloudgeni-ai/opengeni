@@ -28,9 +28,17 @@ This repository is early, but it now includes the baseline files expected for pu
 
 ## Public Preview / Security Boundary
 
-OpenGeni is intended to be self-hosted behind a trusted product, gateway, VPN, or reverse proxy. The base API includes a deliberately small shared-key access boundary for early self-hosted deployments and smoke tests: set `OPENGENI_AUTH_REQUIRED=true` and provide `OPENGENI_ACCESS_KEY` through a secret. The browser stores that key only client-side and sends it as `Authorization: Bearer ...`; automation can also use `X-OpenGeni-Access-Key`.
+OpenGeni's core API is workspace-scoped. Canonical protected routes include the workspace id in the URL, and every request resolves to an internal access grant before route code touches workspace-owned data.
 
-This is not a replacement for product-grade authentication, tenancy, RBAC, audit policy, quotas, or per-user scoped permissions. Do not expose the API or worker control plane directly to the public internet without at least the shared-key boundary and, for production, an external access-control layer. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
+There are three product access modes:
+
+- `local`: local development bootstrap account/workspace, subject `dev`, broad permissions.
+- `configured`: self-hosted or embedded deployments using configured deployment keys or delegated bearer tokens from a parent product.
+- `managed`: OpenGeni owns email/password sign-up through Better Auth, workspaces, OpenGeni API keys, prepaid Stripe credits, usage, and limits.
+
+The optional deployment shared-key boundary is still available for infra smoke tests and simple self-hosting. It uses `x-opengeni-access-key`, not `Authorization`. Product API keys and delegated tokens use `Authorization: Bearer ...`.
+
+Do not expose a production deployment without a deliberate access mode, RLS-tested database role posture, rate limits, real model/sandbox credentials, and reviewed sandbox preparation policy. Sandbox preparation profiles and env allowlists can make host credentials available to agent sandboxes, so review `.env` before running live sessions.
 
 ## Architecture
 
@@ -224,7 +232,7 @@ OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
 OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 ```
 
-When the manifest base URL is public HTTPS, the generated app also includes webhook settings. Localhost manifests skip webhooks and still work for repository listing, clone tokens, commits, pushes, and pull requests.
+The generated app requests user authorization during install so OpenGeni can prove that the installer can access the installation before binding it to a workspace. First-release manifests do not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
 
 The generated GitHub URL is only the manifest form target. Opening or copying that URL by itself only sends `state`, so GitHub shows an empty app form instead of the prefilled manifest.
 
@@ -247,28 +255,32 @@ Core endpoints:
 
 - `GET /healthz`
 - `GET /v1/config/client`
-- `POST /v1/sessions`
-- `GET /v1/sessions/:sessionId`
-- `GET /v1/sessions/:sessionId/events`
-- `GET /v1/sessions/:sessionId/events/stream`
-- `POST /v1/sessions/:sessionId/events`
+- `GET /v1/access/me`
+- `GET /v1/workspaces`
+- `POST /v1/workspaces`
+- `POST /v1/workspaces/:workspaceId/sessions`
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId`
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events`
+- `GET /v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`
+- `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
 GitHub endpoints:
 
-- `GET /v1/github/app`
-- `GET /v1/github/repositories`
-- `POST /v1/github/repositories/sync`
-- `POST /v1/github/app-manifest`
+- `GET /v1/workspaces/:workspaceId/github/app`
+- `GET /v1/workspaces/:workspaceId/github/repositories`
+- `POST /v1/workspaces/:workspaceId/github/repositories/sync`
+- `POST /v1/workspaces/:workspaceId/github/app-manifest`
 - `GET /v1/github/app-manifest/callback`
+- `GET /v1/github/setup`
 
 Document endpoints:
 
-- `GET /v1/document-bases`
-- `POST /v1/document-bases`
-- `GET /v1/document-bases/:baseId/documents`
-- `POST /v1/document-bases/:baseId/documents`
-- `POST /v1/document-bases/:baseId/search`
-- `POST /v1/documents/:documentId/reindex`
+- `GET /v1/workspaces/:workspaceId/document-bases`
+- `POST /v1/workspaces/:workspaceId/document-bases`
+- `GET /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
+- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
+- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/search`
+- `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex`
 
 ## Testing
 
@@ -294,7 +306,7 @@ Integration and E2E tests use Bun's test runner. Deterministic SDK-level tests u
 ## Development Notes
 
 - Public clients should treat the API as the source of truth.
-- Browser streaming uses `GET /v1/sessions/:id/events/stream`.
+- Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream`.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent segments unless each model, tool, and sandbox boundary has been made idempotent.
 - Docker sandbox file resources from local S3-compatible storage are materialized into the sandbox before the run. Attach file resources before the first run when using the Docker backend.
 - Sandbox preparation profiles are explicit. Model provider credentials are not automatically exposed inside sandboxes unless configured.
@@ -314,9 +326,8 @@ The project license is Apache-2.0. Bundled HashiCorp Terraform-oriented agent sk
 
 ## Roadmap
 
-- Authentication, tenancy, API keys, and scoped client permissions.
-- Outbound webhooks for event delivery.
 - First-class `agents` and `environments` API resources.
+- Outbound webhooks for event delivery.
 - Client SDK for event streaming, timeline projection, rendering, approvals, and interrupts.
 - More OpenAI Agents SDK-compatible sandbox backends.
 - Native mid-session file mounts for Docker sandboxes once the SDK supports privilege-safe late in-container mounts.

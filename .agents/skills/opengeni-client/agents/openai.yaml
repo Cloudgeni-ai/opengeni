@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni Client"
+  short_description: "Integrate customer agents and products with the OpenGeni API."
+  default_prompt: "Use OpenGeni from my product API or coding agent."

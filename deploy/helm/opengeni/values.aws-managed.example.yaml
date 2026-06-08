@@ -76,6 +76,7 @@ config:
   OPENGENI_AUTH_REQUIRED: "true"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
   OPENGENI_OBJECT_STORAGE_BACKEND: aws-s3
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
   OPENGENI_OBJECT_STORAGE_REGION: AWS_REGION
@@ -100,6 +101,9 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
           pathType: Exact
           service: api
 

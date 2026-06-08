@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
+  bootstrapWorkspace,
   completeFileUpload,
+  applyCreditLedgerEntry,
   createTurn,
   createDb,
   createFileUpload,
@@ -11,18 +16,23 @@ import {
   createSession,
   finishTurn,
   getSession,
+  getBillingBalance,
   getLatestRunState,
+  listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
+  recordUsageEvent,
   requireScheduledTask,
   saveRunState,
   setSessionStatus,
 } from "@opengeni/db";
+import type { AccessGrant, ResourceRef, SandboxBackend, ScheduledTaskAgentConfig } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
+import { materializeGitHubRepositoriesForRun } from "../../apps/worker/src/activities/repositories";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
 describe("worker activities integration", () => {
@@ -44,14 +54,15 @@ describe("worker activities integration", () => {
   }, 60_000);
 
   test("streams scripted SDK model deltas into persisted session events", async () => {
-    const session = await createSession(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "run",
       resources: [],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
     const activities = createActivities({
@@ -64,17 +75,19 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-activity",
     });
     expect(result.status).toBe("idle");
-    const events = await listSessionEvents(dbClient.db, session.id, 0, 50);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "agent.message.delta")).toBe(true);
     expect(events.some((event) => event.type === "turn.completed")).toBe(true);
     expect(latestStatus(events)).toBe("idle");
-    expect((await getSession(dbClient.db, session.id))?.status).toBe("idle");
-    expect(await getLatestRunState(dbClient.db, session.id)).not.toBeNull();
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).not.toBeNull();
   });
 
   test("uses saved SDK history for follow-up turns", async () => {
@@ -82,7 +95,8 @@ describe("worker activities integration", () => {
       { outputText: "first answer", chunks: ["first ", "answer"] },
       { outputText: "second answer", chunks: ["second ", "answer"] },
     ]);
-    const session = await createSession(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "first question",
       resources: [],
       metadata: {},
@@ -95,18 +109,22 @@ describe("worker activities integration", () => {
       bus,
       runtime: createProductionAgentRuntime({ model }),
     });
-    const [firstTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [firstTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "first question" } },
     ]);
     await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: firstTrigger!.id,
       workflowId: "workflow-followup",
     });
-    const [secondTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [secondTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "second question" } },
     ]);
     await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: secondTrigger!.id,
       workflowId: "workflow-followup",
@@ -120,28 +138,29 @@ describe("worker activities integration", () => {
   });
 
   test("adds per-turn file resource paths to model text", async () => {
+    const grant = await testGrant(dbClient.db);
     const fileId = crypto.randomUUID();
-    const upload = await createFileUpload(dbClient.db, {
+    const upload = await createOwnedFileUpload(dbClient.db, grant, {
       fileId,
       filename: "diagram.png",
       safeFilename: "diagram.png",
       contentType: "image/png",
       sizeBytes: 4,
       bucket: "opengeni-files",
-      objectKey: `files/${fileId}/original/diagram.png`,
+      objectKey: `workspaces/${grant.workspaceId}/files/${fileId}/original/diagram.png`,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await completeFileUpload(dbClient.db, upload.uploadId);
+    await completeFileUpload(dbClient.db, grant.workspaceId, upload.uploadId);
     const model = new ScriptedModel([{ outputText: "saw image", chunks: ["saw ", "image"] }]);
     const resource = { kind: "file" as const, fileId, mountPath: `files/${fileId}` };
-    const session = await createSession(dbClient.db, {
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "look at this",
       resources: [resource],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "look at this", resources: [resource] } },
     ]);
     const activities = createActivities({
@@ -152,6 +171,8 @@ describe("worker activities integration", () => {
     });
 
     await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-image-context",
@@ -166,28 +187,29 @@ describe("worker activities integration", () => {
   });
 
   test("does not require object storage reads for attached file path context", async () => {
+    const grant = await testGrant(dbClient.db);
     const fileId = crypto.randomUUID();
-    const upload = await createFileUpload(dbClient.db, {
+    const upload = await createOwnedFileUpload(dbClient.db, grant, {
       fileId,
       filename: "large.png",
       safeFilename: "large.png",
       contentType: "image/png",
       sizeBytes: 10,
       bucket: "opengeni-files",
-      objectKey: `files/${fileId}/original/large.png`,
+      objectKey: `workspaces/${grant.workspaceId}/files/${fileId}/original/large.png`,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await completeFileUpload(dbClient.db, upload.uploadId);
+    await completeFileUpload(dbClient.db, grant.workspaceId, upload.uploadId);
     const model = new ScriptedModel([{ outputText: "noted", chunks: ["noted"] }]);
     const resource = { kind: "file" as const, fileId, mountPath: `files/${fileId}` };
-    const session = await createSession(dbClient.db, {
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "look at this",
       resources: [resource],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "look at this", resources: [resource] } },
     ]);
     const activities = createActivities({
@@ -198,6 +220,8 @@ describe("worker activities integration", () => {
     });
 
     await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-oversized-image-context",
@@ -210,14 +234,15 @@ describe("worker activities integration", () => {
   });
 
   test("marks session failed when scripted model throws", async () => {
-    const session = await createSession(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "fail",
       resources: [],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "fail" } },
     ]);
     const activities = createActivities({
@@ -230,16 +255,19 @@ describe("worker activities integration", () => {
     });
 
     await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-fail",
     })).resolves.toEqual({ status: "failed" });
-    const events = await listSessionEvents(dbClient.db, session.id, 0, 50);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
-    expect((await getSession(dbClient.db, session.id))?.status).toBe("failed");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
   });
 
   test("records worker observability when setup fails before a turn starts", async () => {
+    const grant = await testGrant(dbClient.db);
     const exported: Array<{ body: any }> = [];
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -263,6 +291,8 @@ describe("worker activities integration", () => {
     });
 
     await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: crypto.randomUUID(),
       triggerEventId: crypto.randomUUID(),
       workflowId: "workflow-missing-session",
@@ -277,35 +307,40 @@ describe("worker activities integration", () => {
   });
 
   test("does not publish turn failure before turn start when status update fails", async () => {
-    const session = await createSession(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "run",
       resources: [],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
     const turnId = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       temporalWorkflowId: "workflow-status-update-fails",
       triggerEventId: trigger!.id,
-      source: "user",
-      prompt: "run",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "high",
-      sandboxBackend: "none",
-      metadata: {},
     });
     const failingDb = new Proxy(dbClient.db, {
       get(target, prop, receiver) {
-        if (prop === "update") {
-          return () => {
-            throw new Error("status update failed");
-          };
+        if (prop === "transaction") {
+          return async (fn: (tx: typeof dbClient.db) => Promise<unknown>, ...args: unknown[]) => await (target.transaction as any)(async (tx: typeof dbClient.db) => {
+            const failingTx = new Proxy(tx, {
+              get(txTarget, txProp, txReceiver) {
+                if (txProp === "update") {
+                  return () => {
+                    throw new Error("status update failed");
+                  };
+                }
+                const value = Reflect.get(txTarget, txProp, txReceiver);
+                return typeof value === "function" ? value.bind(txTarget) : value;
+              },
+            }) as typeof dbClient.db;
+            return await fn(failingTx);
+          }, ...args);
         }
         const value = Reflect.get(target, prop, receiver);
         return typeof value === "function" ? value.bind(target) : value;
@@ -321,51 +356,49 @@ describe("worker activities integration", () => {
     });
 
     await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-status-update-fails",
       turnId,
     })).rejects.toThrow("status update failed");
 
-    const eventTypes = (await listSessionEvents(dbClient.db, session.id, 0, 50)).map((event) => event.type);
+    const eventTypes = (await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50)).map((event) => event.type);
     expect(eventTypes).not.toContain("turn.started");
     expect(eventTypes).not.toContain("turn.failed");
   });
 
   test("marks approval reruns running before resuming the agent", async () => {
     const workflowId = "workflow-approval-rerun";
-    const session = await createSession(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "needs approval",
       resources: [],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [initialTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+    const [initialTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "needs approval" } },
     ]);
     const turnId = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       temporalWorkflowId: workflowId,
       triggerEventId: initialTrigger!.id,
-      source: "user",
-      prompt: "needs approval",
-      resources: [],
-      tools: [],
-      model: "scripted-model",
-      reasoningEffort: "high",
-      sandboxBackend: "none",
-      metadata: {},
     });
-    await finishTurn(dbClient.db, turnId, "requires_action");
+    await finishTurn(dbClient.db, grant.workspaceId, turnId, "requires_action");
     await saveRunState(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       turnId,
       serializedRunState: "saved-state",
       pendingApprovals: [{ id: "approval-1" }],
     });
-    await setSessionStatus(dbClient.db, session.id, "requires_action", turnId);
-    const [approvalTrigger] = await appendSessionEvents(dbClient.db, session.id, [
+    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "requires_action", turnId);
+    const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.approvalDecision", payload: { approvalId: "approval-1", decision: "approve" } },
     ]);
     let observedDuringRun: { status?: string; activeTurnId?: string | null } | null = null;
@@ -378,7 +411,7 @@ describe("worker activities integration", () => {
         return { input: "approved" };
       },
       runStream: async () => {
-        const stored = await getSession(dbClient.db, session.id);
+        const stored = await getSession(dbClient.db, grant.workspaceId, session.id);
         observedDuringRun = {
           status: stored?.status,
           activeTurnId: stored?.activeTurnId,
@@ -401,6 +434,8 @@ describe("worker activities integration", () => {
     });
 
     await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
       sessionId: session.id,
       triggerEventId: approvalTrigger!.id,
       workflowId,
@@ -408,7 +443,7 @@ describe("worker activities integration", () => {
     })).resolves.toEqual({ status: "idle" });
 
     expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turnId });
-    expect((await getSession(dbClient.db, session.id))?.status).toBe("idle");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
   test("sets Docker and Modal sandbox home defaults", async () => {
@@ -464,6 +499,54 @@ describe("worker activities integration", () => {
     }
   });
 
+  test("preclones GitHub App repository resources as local manifest materializations", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "opengeni-github-materialization-test-"));
+    try {
+      const origin = join(tempRoot, "origin");
+      await mkdir(origin);
+      runGit(["init"], origin);
+      runGit(["config", "user.name", "OpenGeni Test"], origin);
+      runGit(["config", "user.email", "test@example.com"], origin);
+      await writeFile(join(origin, "README.md"), "hello from repo\n");
+      runGit(["add", "README.md"], origin);
+      runGit(["commit", "-m", "initial"], origin);
+      runGit(["branch", "-M", "main"], origin);
+
+      let tokenInput: unknown;
+      const resource: ResourceRef = {
+        kind: "repository",
+        uri: `file://${origin}`,
+        ref: "main",
+        mountPath: "repos/acme/private",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      };
+      const materialized = await materializeGitHubRepositoriesForRun(testSettings({ sandboxBackend: "modal" }), [resource], {
+        createInstallationToken: async (_settings, input) => {
+          tokenInput = input;
+          return "installation-token";
+        },
+      });
+      try {
+        expect(tokenInput).toEqual({ installationId: 123, repositoryIds: [456] });
+        expect(materialized.materializations).toHaveLength(1);
+        expect(materialized.materializations[0]).toMatchObject({
+          mountPath: "repos/acme/private",
+          sourceType: "directory",
+        });
+        const sourcePath = materialized.materializations[0]!.sourcePath;
+        expect(await Bun.file(join(sourcePath, "README.md")).text()).toBe("hello from repo\n");
+        expect(JSON.stringify(materialized.materializations)).not.toContain("installation-token");
+        await materialized.cleanup();
+        await expect(stat(sourcePath)).rejects.toThrow();
+      } finally {
+        await materialized.cleanup();
+      }
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   test("attaches configured MCP tools and executes a prefixed tool call during a run", async () => {
     const mcp = startTestMcpServer();
     try {
@@ -478,7 +561,8 @@ describe("worker activities integration", () => {
           chunks: ["used ", "document ", "search"],
         },
       ]);
-      const session = await createSession(dbClient.db, {
+      const grant = await testGrant(dbClient.db);
+      const session = await createOwnedSession(dbClient.db, grant, {
         initialMessage: "search docs",
         resources: [],
         tools: [{ kind: "mcp", id: "docs" }],
@@ -486,7 +570,7 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendSessionEvents(dbClient.db, session.id, [
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "search docs" } },
       ]);
       const activities = createActivities({
@@ -507,6 +591,8 @@ describe("worker activities integration", () => {
       });
 
       const result = await activities.runAgentSegment({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
         sessionId: session.id,
         triggerEventId: trigger!.id,
         workflowId: "workflow-mcp",
@@ -516,13 +602,148 @@ describe("worker activities integration", () => {
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
       expect(JSON.stringify(model.requests[0])).toContain("docs__search_documents");
       expect(JSON.stringify(model.requests[0])).not.toContain("docs__fetch_document");
-      const events = await listSessionEvents(dbClient.db, session.id, 0, 50);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
       expect(events.some((event) => event.type === "agent.toolCall.created")).toBe(true);
       expect(events.some((event) => event.type === "agent.toolCall.output")).toBe(true);
       expect(latestStatus(events)).toBe("idle");
     } finally {
       mcp.close();
     }
+  });
+
+  test("records and debits model usage once per streamed provider response", async () => {
+    const mcp = startTestMcpServer();
+    try {
+      const model = new ScriptedModel([
+        {
+          id: "scripted-response-tool",
+          output: [
+            functionCall("docs__search_documents", { query: "network policy" }, "call-doc-search"),
+          ],
+        },
+        {
+          id: "scripted-response-final",
+          outputText: "used document search",
+          chunks: ["used ", "document ", "search"],
+        },
+      ]);
+      const grant = await testGrant(dbClient.db);
+      await applyCreditLedgerEntry(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        type: "manual_adjustment",
+        amountMicros: 1_000_000,
+        sourceType: "test",
+        sourceId: "per-response-usage",
+        idempotencyKey: `test-credit:${grant.workspaceId}:per-response-usage`,
+      });
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "search docs",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "search docs" } },
+      ]);
+      const activities = createActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+          billingMode: "stripe",
+          modelPricingJson: JSON.stringify({
+            "scripted-model": {
+              inputMicrosPerMillionTokens: 1_000_000,
+              outputMicrosPerMillionTokens: 1_000_000,
+            },
+          }),
+          mcpServers: [{
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            allowedTools: ["search_documents"],
+            cacheToolsList: false,
+          }],
+        }),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+
+      const result = await activities.runAgentSegment({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-per-response-usage",
+      });
+
+      expect(result.status).toBe("idle");
+      expect(model.calls).toBe(2);
+      const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
+      const tokenEvents = usage.filter((event) => event.eventType === "model.tokens");
+      expect(tokenEvents).toHaveLength(2);
+      expect(tokenEvents.map((event) => event.sourceResourceId?.split(":").at(-1)).sort()).toEqual([
+        "scripted-response-final",
+        "scripted-response-tool",
+      ]);
+      expect(usage.filter((event) => event.eventType === "model.cost")).toHaveLength(2);
+      const balance = await getBillingBalance(dbClient.db, grant.accountId);
+      expect(balance.balanceMicros).toBeLessThan(1_000_000);
+      expect(balance.balanceMicros).toBeGreaterThan(0);
+    } finally {
+      mcp.close();
+    }
+  });
+
+  test("allows the worker to run an already accepted turn at the exact monthly run cap", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "allowed first run",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "allowed first run" } },
+    ]);
+    await recordUsageEvent(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "session",
+      sourceResourceId: session.id,
+      idempotencyKey: `test-agent-run-created:${session.id}`,
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "within cap", chunks: ["within ", "cap"] }]),
+      }),
+    });
+
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-exact-run-cap",
+    });
+
+    expect(result.status).toBe("idle");
+    expect(latestStatus(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50))).toBe("idle");
   });
 
   test("uses MCP tools added by a follow-up turn", async () => {
@@ -539,7 +760,8 @@ describe("worker activities integration", () => {
           chunks: ["used ", "follow-up ", "document ", "search"],
         },
       ]);
-      const session = await createSession(dbClient.db, {
+      const grant = await testGrant(dbClient.db);
+      const session = await createOwnedSession(dbClient.db, grant, {
         initialMessage: "start",
         resources: [],
         tools: [],
@@ -547,7 +769,7 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendSessionEventsAndUpdateSession(dbClient.db, session.id, [
+      const [trigger] = await appendSessionEventsAndUpdateSession(dbClient.db, grant.workspaceId, session.id, [
         {
           type: "user.message",
           payload: {
@@ -576,6 +798,8 @@ describe("worker activities integration", () => {
       });
 
       const result = await activities.runAgentSegment({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
         sessionId: session.id,
         triggerEventId: trigger!.id,
         workflowId: "workflow-follow-up-mcp",
@@ -590,7 +814,8 @@ describe("worker activities integration", () => {
   });
 
   test("dispatches scheduled tasks into new sessions and run history", async () => {
-    const task = await createScheduledTask(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
       status: "active",
       schedule: { type: "interval", everySeconds: 3600 },
@@ -616,22 +841,23 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
-    const result = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "scheduled" });
+    const result = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "scheduled" });
 
     expect(result.action).toBe("start");
     expect(result.workflowId).toBe(`session-${result.sessionId}`);
-    const session = await getSession(dbClient.db, result.sessionId);
+    const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
     expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
-    const events = await listSessionEvents(dbClient.db, result.sessionId, 0, 10);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
     expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({ text: "inspect nightly", scheduledTaskId: task.id });
-    const [run] = await listScheduledTaskRuns(dbClient.db, task.id);
+    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
   });
 
   test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
-    const task = await createScheduledTask(dbClient.db, {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-reusable",
       status: "active",
       schedule: { type: "interval", everySeconds: 3600 },
@@ -657,18 +883,97 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
-    const first = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "scheduled" });
-    const stored = await requireScheduledTask(dbClient.db, task.id);
-    const second = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "manual" });
+    const first = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "scheduled" });
+    const stored = await requireScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    const second = await activities.dispatchScheduledTaskRun({ workspaceId: grant.workspaceId, taskId: task.id, triggerType: "manual" });
 
     expect(first.action).toBe("start");
     expect(second.action).toBe("signal");
     expect(second.sessionId).toBe(first.sessionId);
     expect(stored.reusableSessionId).toBe(first.sessionId);
-    const events = await listSessionEvents(dbClient.db, first.sessionId, 0, 10);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
     expect(events.filter((event) => event.type === "user.message")).toHaveLength(2);
-    const runs = await listScheduledTaskRuns(dbClient.db, task.id);
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
   });
 });
+
+type TestDb = ReturnType<typeof createDb>["db"];
+
+async function testGrant(db: TestDb): Promise<AccessGrant> {
+  const id = crypto.randomUUID();
+  const context = await bootstrapWorkspace(db, {
+    accountExternalSource: "test:worker",
+    accountExternalId: `account:${id}`,
+    accountName: "Worker integration account",
+    workspaceExternalSource: "test:worker",
+    workspaceExternalId: `workspace:${id}`,
+    workspaceName: "Worker integration workspace",
+    subjectId: `test:worker:${id}`,
+    subjectLabel: "Worker integration",
+  });
+  const grant = context.workspaceGrants[0];
+  if (!grant) {
+    throw new Error("Worker test did not create a workspace grant");
+  }
+  return grant;
+}
+
+async function createOwnedSession(
+  db: TestDb,
+  grant: AccessGrant,
+  input: Omit<Parameters<typeof createSession>[1], "accountId" | "workspaceId">,
+) {
+  return await createSession(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    ...input,
+  });
+}
+
+async function appendOwnedEvents(
+  db: TestDb,
+  grant: AccessGrant,
+  sessionId: string,
+  events: Parameters<typeof appendSessionEvents>[3],
+) {
+  return await appendSessionEvents(db, grant.workspaceId, sessionId, events);
+}
+
+async function createOwnedFileUpload(
+  db: TestDb,
+  grant: AccessGrant,
+  input: Omit<Parameters<typeof createFileUpload>[1], "accountId" | "workspaceId">,
+) {
+  return await createFileUpload(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    ...input,
+  });
+}
+
+async function createOwnedScheduledTask(
+  db: TestDb,
+  grant: AccessGrant,
+  input: Omit<Parameters<typeof createScheduledTask>[1], "accountId" | "workspaceId">,
+) {
+  return await createScheduledTask(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    ...input,
+  });
+}
+
+function runGit(args: string[], cwd: string): void {
+  const result = Bun.spawnSync(["git", ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode === 0) {
+    return;
+  }
+  const stderr = new TextDecoder().decode(result.stderr).trim();
+  throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+}

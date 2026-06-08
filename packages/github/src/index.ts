@@ -17,6 +17,21 @@ export class GitHubAppConfigurationError extends Error {
 
 export class GitHubAppApiError extends Error {}
 
+export type GitHubAppInstallationSummary = {
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+  suspended: boolean;
+};
+
+export type GitHubSignedStatePayload = {
+  nonce: string;
+  iat: number;
+  accountId?: string;
+  workspaceId?: string;
+  [key: string]: unknown;
+};
+
 export function githubAppMissingSettings(settings: Settings): string[] {
   const required: Record<string, string | undefined> = {
     OPENGENI_GITHUB_APP_ID: settings.githubAppId,
@@ -33,6 +48,7 @@ export function buildGitHubAppManifest(input: {
   baseUrl: string;
   public: boolean;
   includeCiPermissions: boolean;
+  setupUrl?: string;
 }): Record<string, unknown> {
   const base = input.baseUrl.replace(/\/+$/, "");
   const permissions: Record<string, string> = {
@@ -40,27 +56,22 @@ export function buildGitHubAppManifest(input: {
     contents: "write",
     pull_requests: "write",
   };
-  const events = ["pull_request", "push"];
   if (input.includeCiPermissions) {
     permissions.actions = "read";
     permissions.checks = "read";
     permissions.statuses = "write";
-    events.push("check_run", "workflow_run");
   }
   const manifest: Record<string, unknown> = {
     name: input.appName,
     url: base,
     redirect_url: `${base}/v1/github/app-manifest/callback`,
     public: input.public,
-    request_oauth_on_install: false,
+    request_oauth_on_install: true,
     default_permissions: permissions,
   };
-  if (isPublicHttpsUrl(base)) {
-    manifest.hook_attributes = {
-      url: `${base}/v1/github/webhook`,
-      active: true,
-    };
-    manifest.default_events = events;
+  if (input.setupUrl) {
+    manifest.setup_url = input.setupUrl;
+    manifest.setup_on_update = true;
   }
   return manifest;
 }
@@ -73,8 +84,15 @@ export function organizationAppManifestUrl(organization: string, state: string):
   return `https://github.com/organizations/${encodeURIComponent(organization)}/settings/apps/new?state=${state}`;
 }
 
-export function createSignedState(secret: string, now = Math.floor(Date.now() / 1000)): string {
+export function createSignedState(
+  secret: string,
+  payloadOrNow: Record<string, unknown> | number = {},
+  nowArg = Math.floor(Date.now() / 1000),
+): string {
+  const payloadInput = typeof payloadOrNow === "number" ? {} : payloadOrNow;
+  const now = typeof payloadOrNow === "number" ? payloadOrNow : nowArg;
   const payload = {
+    ...payloadInput,
     nonce: randomBytes(16).toString("base64url"),
     iat: now,
   };
@@ -82,26 +100,30 @@ export function createSignedState(secret: string, now = Math.floor(Date.now() / 
   return `${encoded}.${signStatePayload(encoded, secret)}`;
 }
 
-export function verifySignedState(state: string, secret: string, now = Math.floor(Date.now() / 1000)): boolean {
+export function readSignedState(state: string, secret: string, now = Math.floor(Date.now() / 1000)): GitHubSignedStatePayload | null {
   const [encoded, signature] = state.split(".", 2);
   if (!encoded || !signature) {
-    return false;
+    return null;
   }
   const expected = signStatePayload(encoded, secret);
   if (!safeEqual(signature, expected)) {
-    return false;
+    return null;
   }
   let payload: unknown;
   try {
     payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
   } catch {
-    return false;
+    return null;
   }
-  if (!payload || typeof payload !== "object" || typeof (payload as { iat?: unknown }).iat !== "number") {
-    return false;
+  if (!payload || typeof payload !== "object" || typeof (payload as { iat?: unknown }).iat !== "number" || typeof (payload as { nonce?: unknown }).nonce !== "string") {
+    return null;
   }
   const age = now - (payload as { iat: number }).iat;
-  return age >= 0 && age <= stateMaxAgeSeconds;
+  return age >= 0 && age <= stateMaxAgeSeconds ? payload as GitHubSignedStatePayload : null;
+}
+
+export function verifySignedState(state: string, secret: string, now = Math.floor(Date.now() / 1000)): boolean {
+  return readSignedState(state, secret, now) !== null;
 }
 
 export function envLinesFromGitHubManifestConversion(payload: Record<string, unknown>): string[] {
@@ -131,10 +153,44 @@ export async function convertGitHubAppManifest(code: string): Promise<Record<str
   return payload as Record<string, unknown>;
 }
 
-export async function listGitHubAppRepositories(settings: Settings): Promise<GitHubRepository[]> {
+export async function listGitHubAppInstallationSummaries(settings: Settings): Promise<GitHubAppInstallationSummary[]> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
+  }
+  const jwt = await createGitHubAppJwt(settings);
+  const installations = await listInstallations(jwt);
+  return installations.map(installationSummaryFromPayload);
+}
+
+export async function getGitHubAppInstallationSummary(settings: Settings, installationId: number): Promise<GitHubAppInstallationSummary | null> {
+  const installations = await listGitHubAppInstallationSummaries(settings);
+  return installations.find((installation) => installation.installationId === installationId) ?? null;
+}
+
+export async function verifyGitHubInstallationAccessForUser(settings: Settings, input: {
+  code: string;
+  installationId: number;
+}): Promise<GitHubAppInstallationSummary> {
+  const token = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
+  const installations = await listUserAccessibleInstallations(token);
+  const installation = installations.find((candidate) => candidate.installationId === input.installationId);
+  if (!installation) {
+    throw new GitHubAppApiError("GitHub installation is not accessible to the installing user");
+  }
+  return installation;
+}
+
+export async function listGitHubAppRepositories(settings: Settings, input: {
+  installationIds?: number[];
+} = {}): Promise<GitHubRepository[]> {
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const allowedInstallations = input.installationIds ? new Set(input.installationIds) : null;
+  if (allowedInstallations && allowedInstallations.size === 0) {
+    return [];
   }
   const jwt = await createGitHubAppJwt(settings);
   const installations = await listInstallations(jwt);
@@ -145,6 +201,9 @@ export async function listGitHubAppRepositories(settings: Settings): Promise<Git
     }
     const installationId = asInt(installation.id);
     if (installationId === null) {
+      continue;
+    }
+    if (allowedInstallations && !allowedInstallations.has(installationId)) {
       continue;
     }
     const account = typeof installation.account === "object" && installation.account ? installation.account as Record<string, unknown> : {};
@@ -210,6 +269,51 @@ async function listInstallations(token: string): Promise<Array<Record<string, un
   }
 }
 
+async function exchangeGitHubOAuthCodeForUserToken(settings: Settings, code: string): Promise<string> {
+  if (!settings.githubClientId || !settings.githubClientSecret) {
+    throw new GitHubAppConfigurationError(githubAppMissingSettings(settings));
+  }
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      client_id: settings.githubClientId,
+      client_secret: settings.githubClientSecret,
+      code,
+    }),
+  });
+  if (!response.ok) {
+    throw new GitHubAppApiError(await githubErrorMessage(response));
+  }
+  const payload = await response.json();
+  if (!payload || typeof payload !== "object" || typeof payload.access_token !== "string") {
+    throw new GitHubAppApiError("GitHub returned an invalid OAuth token payload");
+  }
+  return payload.access_token;
+}
+
+async function listUserAccessibleInstallations(token: string): Promise<GitHubAppInstallationSummary[]> {
+  const out: GitHubAppInstallationSummary[] = [];
+  for (let page = 1; ; page += 1) {
+    const payload = await githubGet("/user/installations", token, { per_page: "100", page: String(page) });
+    const installations: unknown[] | null = payload && typeof payload === "object" && Array.isArray(payload.installations)
+      ? payload.installations as unknown[]
+      : null;
+    if (!installations) {
+      throw new GitHubAppApiError("GitHub returned an invalid user installations payload");
+    }
+    out.push(...installations
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      .map(installationSummaryFromPayload));
+    if (installations.length < 100) {
+      return out;
+    }
+  }
+}
+
 async function createInstallationToken(appJwt: string, input: {
   installationId: number;
   repositoryIds?: number[];
@@ -249,6 +353,20 @@ async function listInstallationRepositories(token: string, installationId: numbe
       return out;
     }
   }
+}
+
+function installationSummaryFromPayload(payload: Record<string, unknown>): GitHubAppInstallationSummary {
+  const installationId = asInt(payload.id);
+  if (installationId === null) {
+    throw new GitHubAppApiError("GitHub returned an installation without id");
+  }
+  const account = typeof payload.account === "object" && payload.account ? payload.account as Record<string, unknown> : {};
+  return {
+    installationId,
+    accountLogin: typeof account.login === "string" ? account.login : null,
+    accountType: typeof account.type === "string" ? account.type : null,
+    suspended: Boolean(payload.suspended_at),
+  };
 }
 
 async function githubGet(path: string, token: string, params: Record<string, string>): Promise<any> {
@@ -332,23 +450,4 @@ function asInt(value: unknown): number | null {
     return Number(value);
   }
   return null;
-}
-
-function isPublicHttpsUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:") {
-      return false;
-    }
-    const host = url.hostname.toLowerCase();
-    if (host === "localhost" || host.endsWith(".localhost")) {
-      return false;
-    }
-    if (/^(10\.|127\.|172\.(1[6-9]|2\d|3[0-1])\.|192\.168\.)/.test(host)) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
 }

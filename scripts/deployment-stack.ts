@@ -1,12 +1,13 @@
 import {
   DeploymentProfileId,
-  deploymentProfiles,
-  parseDeploymentContract,
+  ProductOverlayId,
+  contractForProfile,
   stackPlanFor,
 } from "@opengeni/deployment";
 
 interface Args {
   profile: string;
+  productOverlay: string;
   json: boolean;
   list: boolean;
 }
@@ -21,7 +22,8 @@ if (args.list) {
 }
 
 const profileId = DeploymentProfileId.parse(args.profile);
-const plan = stackPlanFor(parseDeploymentContract(deploymentProfiles[profileId]));
+const overlay = ProductOverlayId.parse(args.productOverlay);
+const plan = stackPlanFor(contractForProfile(profileId, overlay), overlay, process.env);
 
 if (args.json) {
   console.log(JSON.stringify(plan, null, 2));
@@ -92,6 +94,7 @@ function printList(title: string, values: string[]): void {
 function parseArgs(values: string[]): Args {
   const out: Args = {
     profile: "local-compose",
+    productOverlay: "none",
     json: false,
     list: false,
   };
@@ -116,6 +119,19 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--profile=")) {
       out.profile = value.slice("--profile=".length);
+      continue;
+    }
+    if (value === "--product-overlay") {
+      const next = values[index + 1];
+      if (!next) {
+        throw new Error("--product-overlay requires a value");
+      }
+      out.productOverlay = next;
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--product-overlay=")) {
+      out.productOverlay = value.slice("--product-overlay=".length);
       continue;
     }
     throw new Error(`Unknown argument: ${value}`);

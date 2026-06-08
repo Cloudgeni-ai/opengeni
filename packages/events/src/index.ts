@@ -5,36 +5,36 @@ import { connect, JSONCodec, type NatsConnection, type Subscription } from "nats
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
 
 export type EventBus = {
-  publish: (sessionId: string, events: SessionEvent[]) => Promise<void>;
-  subscribe: (sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>) => Promise<() => void>;
+  publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
+  subscribe: (workspaceId: string, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>) => Promise<() => void>;
   close: () => Promise<void>;
 };
 
 export async function createNatsEventBus(natsUrl: string): Promise<EventBus> {
   const nc = await connect({ servers: natsUrl });
   return {
-    publish: async (sessionId, events) => {
+    publish: async (workspaceId, sessionId, events) => {
       if (events.length === 0) {
         return;
       }
-      nc.publish(sessionSubject(sessionId), codec.encode({ sessionId, events }));
+      nc.publish(sessionSubject(workspaceId, sessionId), codec.encode({ workspaceId, sessionId, events }));
       await nc.flush();
     },
-    subscribe: async (sessionId, onEvents) => subscribeSession(nc, sessionId, onEvents),
+    subscribe: async (workspaceId, sessionId, onEvents) => subscribeSession(nc, workspaceId, sessionId, onEvents),
     close: async () => {
       await nc.drain();
     },
   };
 }
 
-export async function appendAndPublishEvents(db: Database, bus: EventBus, sessionId: string, events: AppendEventInput[]): Promise<SessionEvent[]> {
-  const appended = await appendSessionEvents(db, sessionId, events);
-  await bus.publish(sessionId, appended);
+export async function appendAndPublishEvents(db: Database, bus: EventBus, workspaceId: string, sessionId: string, events: AppendEventInput[]): Promise<SessionEvent[]> {
+  const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
+  await bus.publish(workspaceId, sessionId, appended);
   return appended;
 }
 
-function subscribeSession(nc: NatsConnection, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>): () => void {
-  const sub: Subscription = nc.subscribe(sessionSubject(sessionId));
+function subscribeSession(nc: NatsConnection, workspaceId: string, sessionId: string, onEvents: (events: SessionEvent[]) => void | Promise<void>): () => void {
+  const sub: Subscription = nc.subscribe(sessionSubject(workspaceId, sessionId));
   void (async () => {
     for await (const msg of sub) {
       const decoded = codec.decode(msg.data) as SessionBusMessage | SessionEvent;

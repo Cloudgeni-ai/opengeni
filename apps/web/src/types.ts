@@ -105,15 +105,18 @@ export type ClientConfig = {
     enabled: boolean;
     maxSizeBytes: number;
   };
-  auth: {
-    required: boolean;
-    headerName: "authorization";
-    scheme: "bearer";
-  };
+  productAccessMode: "local" | "configured" | "managed";
+  auth:
+    | { mode: "none" }
+    | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
+    | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
+    | { mode: "managedSession"; session: "cookie" };
 };
 
 export type Session = {
   id: string;
+  accountId: string;
+  workspaceId: string;
   status: SessionStatus;
   initialMessage: string;
   resources: ResourceRef[];
@@ -130,6 +133,7 @@ export type Session = {
 
 export type SessionEvent = {
   id: string;
+  workspaceId: string;
   sessionId: string;
   sequence: number;
   type: string;
@@ -169,6 +173,8 @@ export type ScheduledTaskAgentConfig = {
 
 export type ScheduledTask = {
   id: string;
+  accountId: string;
+  workspaceId: string;
   name: string;
   status: "active" | "paused";
   schedule: ScheduledTaskScheduleSpec;
@@ -184,6 +190,8 @@ export type ScheduledTask = {
 
 export type ScheduledTaskRun = {
   id: string;
+  accountId: string;
+  workspaceId: string;
   taskId: string;
   status: "queued" | "dispatched" | "failed";
   triggerType: "scheduled" | "manual";
@@ -194,4 +202,78 @@ export type ScheduledTaskRun = {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type Workspace = {
+  id: string;
+  accountId: string;
+  name: string;
+  slug: string | null;
+  externalSource: string | null;
+  externalId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AccessGrant = {
+  workspaceId: string;
+  accountId: string;
+  subjectId: string;
+  subjectLabel?: string;
+  permissions: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type AccountGrant = {
+  accountId: string;
+  subjectId: string;
+  subjectLabel?: string;
+  role: string;
+  permissions: string[];
+};
+
+export type AccessContext = {
+  mode: "local" | "configured" | "managed";
+  subjectId: string;
+  subjectLabel?: string;
+  accountGrants: AccountGrant[];
+  workspaceGrants: AccessGrant[];
+  defaultAccountId?: string;
+  defaultWorkspaceId?: string;
+};
+
+export type ApiKey = {
+  id: string;
+  accountId: string;
+  workspaceId: string | null;
+  name: string;
+  prefix: string;
+  permissions: string[];
+  expiresAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type BillingBalance = {
+  accountId: string;
+  balanceMicros: number;
+  currency: string;
+  updatedAt: string;
+};
+
+export type AuthSession = {
+  session: {
+    id: string;
+    userId: string;
+    expiresAt: string;
+  };
+  user: {
+    id: string;
+    name: string;
+    email: string;
+    emailVerified?: boolean;
+    image?: string | null;
+  };
 };

@@ -24,6 +24,7 @@ describe("Temporal workflow integration", () => {
 
   test("dispatches initial and follow-up user message activities", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const calls: unknown[] = [];
     const queuedTurns = [queuedTurn("event-1")];
     const worker = await testWorker(nativeConnection, taskQueue, {
@@ -42,7 +43,7 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
       });
       await waitFor(() => calls.length === 1);
       queuedTurns.push(queuedTurn("event-2"));
@@ -56,6 +57,7 @@ describe("Temporal workflow integration", () => {
 
   test("waits for approval before resuming a requires_action segment", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const calls: unknown[] = [];
     const queuedTurns = [queuedTurn("event-1")];
     const worker = await testWorker(nativeConnection, taskQueue, {
@@ -74,7 +76,7 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
       });
       await waitFor(() => calls.length === 1);
       await Bun.sleep(300);
@@ -89,6 +91,7 @@ describe("Temporal workflow integration", () => {
 
   test("does not retry failed agent activities", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     let attempts = 0;
     const failures: unknown[] = [];
     const queuedTurns = [queuedTurn("event-1")];
@@ -110,7 +113,7 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
       });
       await handle.result();
       expect(attempts).toBe(1);
@@ -123,6 +126,7 @@ describe("Temporal workflow integration", () => {
 
   test("idle interrupt marks the session idle without cancelling a turn", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const idleMarks: unknown[] = [];
     const interrupts: unknown[] = [];
     const worker = await testWorker(nativeConnection, taskQueue, {
@@ -143,11 +147,11 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ sessionId }],
+        args: [{ ...scope, sessionId }],
       });
       await handle.signal("interrupt", "interrupt-event");
       await handle.result();
-      expect(idleMarks).toEqual([{ sessionId }]);
+      expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
       expect(interrupts).toHaveLength(0);
     } finally {
       worker.shutdown();
@@ -157,6 +161,7 @@ describe("Temporal workflow integration", () => {
 
   test("interrupt during an active run cancels the active turn and continues queued work", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const sessionId = crypto.randomUUID();
     const workflowId = `wf-${crypto.randomUUID()}`;
     const first = queuedTurn("event-1");
@@ -189,15 +194,15 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId,
-        args: [{ sessionId, initialEventId: first.triggerEventId }],
+        args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
       });
       await waitFor(() => runs.length === 1);
       queuedTurns.push(second);
       await handle.signal("userMessage", second.triggerEventId);
       await handle.signal("interrupt", "interrupt-event");
       await waitFor(() => runs.length === 2);
-      expect(interrupts).toEqual([{ sessionId, triggerEventId: "interrupt-event", workflowId }]);
-      expect(runs[1]).toMatchObject({ sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
+      expect(interrupts).toEqual([{ ...scope, sessionId, triggerEventId: "interrupt-event", workflowId }]);
+      expect(runs[1]).toMatchObject({ ...scope, sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
     } finally {
       allowFirstRunToFinish = true;
       worker.shutdown();
@@ -207,6 +212,7 @@ describe("Temporal workflow integration", () => {
 
   test("interrupt while awaiting approval cancels the blocked turn and continues queued work", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const sessionId = crypto.randomUUID();
     const workflowId = `wf-${crypto.randomUUID()}`;
     const first = queuedTurn("event-1");
@@ -232,15 +238,15 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId,
-        args: [{ sessionId, initialEventId: first.triggerEventId }],
+        args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
       });
       await waitFor(() => runs.length === 1);
       queuedTurns.push(second);
       await handle.signal("userMessage", second.triggerEventId);
       await handle.signal("interrupt", "interrupt-event");
       await waitFor(() => runs.length === 2);
-      expect(interrupts).toEqual([{ sessionId, triggerEventId: "interrupt-event", workflowId }]);
-      expect(runs[1]).toMatchObject({ sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
+      expect(interrupts).toEqual([{ ...scope, sessionId, triggerEventId: "interrupt-event", workflowId }]);
+      expect(runs[1]).toMatchObject({ ...scope, sessionId, turnId: second.id, triggerEventId: second.triggerEventId, workflowId });
     } finally {
       worker.shutdown();
       await run;
@@ -249,6 +255,7 @@ describe("Temporal workflow integration", () => {
 
   test("dispatches document index workflow activity", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const calls: unknown[] = [];
     const worker = await testWorker(nativeConnection, taskQueue, {
       indexDocument: async (input: unknown) => {
@@ -276,10 +283,10 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("documentIndexWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ documentId: "document-1" }],
+        args: [{ workspaceId: scope.workspaceId, documentId: "document-1" }],
       });
       const result = await handle.result();
-      expect(calls).toEqual([{ documentId: "document-1" }]);
+      expect(calls).toEqual([{ workspaceId: scope.workspaceId, documentId: "document-1" }]);
       expect(result).toMatchObject({ id: "document-1", status: "ready" });
     } finally {
       worker.shutdown();
@@ -289,6 +296,7 @@ describe("Temporal workflow integration", () => {
 
   test("scheduled task fire workflow starts a session child workflow", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const dispatches: unknown[] = [];
     const runs: unknown[] = [];
     const queuedTurns: Array<{ id: string; triggerEventId: string }> = [];
@@ -301,6 +309,8 @@ describe("Temporal workflow integration", () => {
         queuedTurns.push(queuedTurn(triggerEventId));
         return {
           action: "start",
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
           sessionId,
           triggerEventId,
           workflowId: childWorkflowId,
@@ -321,7 +331,7 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("scheduledTaskFireWorkflow", {
         taskQueue,
         workflowId: `scheduled-fire-${crypto.randomUUID()}`,
-        args: [{ taskId: crypto.randomUUID(), triggerType: "scheduled" }],
+        args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "scheduled" }],
       });
       await handle.result();
       await waitFor(() => runs.length === 1);
@@ -330,7 +340,8 @@ describe("Temporal workflow integration", () => {
       await client.workflow.getHandle(childWorkflowId).signal("userMessage", followUpEventId);
       await waitFor(() => runs.length === 2);
       expect(dispatches).toHaveLength(1);
-      expect(runs[0]).toMatchObject({ sessionId, triggerEventId, workflowId: childWorkflowId });
+      expect(dispatches[0]).toMatchObject({ workspaceId: scope.workspaceId, triggerType: "scheduled" });
+      expect(runs[0]).toMatchObject({ ...scope, sessionId, triggerEventId, workflowId: childWorkflowId });
     } finally {
       worker.shutdown();
       await run;
@@ -339,6 +350,7 @@ describe("Temporal workflow integration", () => {
 
   test("scheduled task fire workflow signals a reusable session workflow", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
     const calls: unknown[] = [];
     const sessionId = crypto.randomUUID();
     const workflowId = `session-${sessionId}`;
@@ -349,6 +361,8 @@ describe("Temporal workflow integration", () => {
         queuedTurns.push(queuedTurn(triggerEventId));
         return {
           action: "signal",
+          accountId: scope.accountId,
+          workspaceId: scope.workspaceId,
           sessionId,
           triggerEventId,
           workflowId,
@@ -369,17 +383,17 @@ describe("Temporal workflow integration", () => {
       await client.workflow.start("sessionWorkflow", {
         taskQueue,
         workflowId,
-        args: [{ sessionId, initialEventId: "event-1" }],
+        args: [{ ...scope, sessionId, initialEventId: "event-1" }],
       });
       await waitFor(() => calls.length === 1);
       const fire = await client.workflow.start("scheduledTaskFireWorkflow", {
         taskQueue,
         workflowId: `scheduled-fire-${crypto.randomUUID()}`,
-        args: [{ taskId: crypto.randomUUID(), triggerType: "manual" }],
+        args: [{ ...scope, taskId: crypto.randomUUID(), triggerType: "manual" }],
       });
       await fire.result();
       await waitFor(() => calls.length === 2);
-      expect(calls[1]).toMatchObject({ sessionId, triggerEventId });
+      expect(calls[1]).toMatchObject({ ...scope, sessionId, triggerEventId });
     } finally {
       worker.shutdown();
       await run;
@@ -391,6 +405,13 @@ function queuedTurn(triggerEventId: string): { id: string; triggerEventId: strin
   return {
     id: crypto.randomUUID(),
     triggerEventId,
+  };
+}
+
+function workflowScope(): { accountId: string; workspaceId: string } {
+  return {
+    accountId: crypto.randomUUID(),
+    workspaceId: crypto.randomUUID(),
   };
 }
 

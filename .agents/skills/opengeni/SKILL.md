@@ -10,7 +10,7 @@ description: >-
 
 Use this skill as an orientation layer, not as frozen API documentation. OpenGeni evolves through the codebase, so code wins over this skill whenever they differ.
 
-OpenGeni is a self-hostable agent service. Public clients talk to an API. The API persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
+OpenGeni is a workspace-scoped agent control plane. Public clients talk to an API. The API resolves every protected request to an access grant, persists sessions and events, accepts user/control events, exposes replay/SSE streams, handles uploads, and talks to Temporal. A worker runs OpenAI Agents SDK turns inside a configured sandbox backend. Postgres is durable state, NATS is live fanout, object storage holds uploaded file bytes, Temporal coordinates work and schedules, and MCP servers provide pluggable tools.
 
 Canonical source repo: `https://github.com/Cloudgeni-ai/opengeni`. This skill may be installed outside that repo, which is normal. If the current workspace is not OpenGeni, first determine whether the user wants client integration against a deployed OpenGeni service, source-level changes, deployment help, or conceptual explanation. For source-level exactness, inspect or fetch the repo; for client integration, ask for or infer the deployed API base URL and inspect the running API/client config where possible.
 
@@ -29,7 +29,7 @@ rg -n "app\\.(get|post|patch|delete|all)\\(|/v1/|SessionEvent|ResourceRef|ToolRe
 Then open the smallest source files that answer the question:
 
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
-- Public shapes: `packages/contracts/src/index.ts`.
+- Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
@@ -49,12 +49,27 @@ rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentSegment|c
 
 ## Client Integration
 
-For external clients, SaaS integrations, SDK wrappers, or UIs on top of OpenGeni, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client creates sessions, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
+For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
+
+## Access, Workspaces, Billing
+
+Keep these boundaries explicit:
+
+- Workspace scoping is core. Durable operational resources live under a workspace and public operational routes must use `/v1/workspaces/:workspaceId/...`.
+- Old unscoped operational routes are deleted, not soft-deprecated. Do not add compatibility aliases unless the user explicitly changes that product decision.
+- Better Auth is only the managed-mode browser human auth resolver. It is not the tenant model and should not appear in core session/file/document/schedule route code.
+- OpenGeni product API keys are owned by OpenGeni and use `Authorization: Bearer`. The optional deployment shared key uses `x-opengeni-access-key`.
+- Billing, Stripe, prepaid credits, entitlements, usage, and limits belong in billing/access modules. Core route/domain code should check local providers/interfaces, not call Stripe directly.
+- Product access mode (`local`, `configured`, `managed`) is separate from deployment/infrastructure profile (`azure-managed`, existing services, local Kubernetes, previews, and so on).
+- RLS is defense-in-depth. Do not claim RLS-backed isolation from app-level checks alone; verify policies with a non-owner DB role and current workspace/account settings.
 
 ## Mental Model
 
 Keep these concepts straight while working:
 
+- **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
+- **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installations, usage, and first-party MCP.
+- **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
 - **Turn**: one queued/running unit of agent work inside a session. Follow-ups and scheduled task firings become turns.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
@@ -79,6 +94,7 @@ For architecture, documentation, implementation, debugging, or operational work,
 6. Read runtime code for Agents SDK, sandbox, MCP, manifests, resume, and model provider behavior.
 7. Read config parsing for environment variables and pluggability.
 8. Mark every claim as shipped, configurable, delegated to a backend/provider, or roadmap/not shipped.
+9. For workspace/auth/billing changes, run or inspect `scripts/check-workspace-billing-static.ts` and the workspace isolation integration test so old route/provider-boundary drift is caught.
 
 Do not rely on this skill for exact route lists, env var lists, event types, model names, or backend names. Re-discover those from contracts/config/routes every time exactness matters.
 
@@ -102,6 +118,7 @@ After edits, run the smallest relevant verification first, then broader checks i
 bun run typecheck
 bun test
 bun run test:integration
+bun scripts/check-workspace-billing-static.ts
 ```
 
 Use the full local stack only when the task requires real Temporal/NATS/Postgres/sandbox behavior:
@@ -183,7 +200,7 @@ Use careful wording:
 
 Avoid absolute claims until verified in current code:
 
-- Auth, tenancy, RBAC, API keys.
+- Auth, tenancy, RBAC, API keys, billing, and RLS unless verified in current code and tests.
 - Webhooks and outbound event delivery.
 - Exactly-once public API idempotency.
 - Dead-letter queues or automatic retries.

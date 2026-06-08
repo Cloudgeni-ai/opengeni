@@ -20,6 +20,8 @@ export type ActivityServices = {
 export type ActivityDependencies = Partial<ActivityServices>;
 
 export type RunAgentSegmentInput = {
+  accountId: string;
+  workspaceId: string;
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
@@ -27,27 +29,33 @@ export type RunAgentSegmentInput = {
 };
 
 export type ClaimNextQueuedTurnInput = {
+  workspaceId: string;
   sessionId: string;
   workflowId: string;
 };
 
 export type MarkSessionIdleInput = {
+  workspaceId: string;
   sessionId: string;
 };
 
 export type DispatchScheduledTaskRunInput = {
+  workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
 };
 
 export type DispatchScheduledTaskRunResult = {
   action: "start" | "signal";
+  accountId: string;
+  workspaceId: string;
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
 };
 
 export type IndexDocumentInput = {
+  workspaceId: string;
   documentId: string;
 };
 

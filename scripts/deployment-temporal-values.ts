@@ -23,6 +23,7 @@ export function renderTemporalValues(env: Record<string, string | undefined>): s
   const secretKey = env.TEMPORAL_POSTGRES_SECRET_KEY?.trim() || "password";
   const defaultDatabase = env.TEMPORAL_POSTGRES_DEFAULT_DATABASE?.trim() || "temporal";
   const visibilityDatabase = env.TEMPORAL_POSTGRES_VISIBILITY_DATABASE?.trim() || "temporal_visibility";
+  const createDatabase = booleanEnv(env, "TEMPORAL_POSTGRES_CREATE_DATABASE", true);
   const shards = positiveIntegerEnv(env, "TEMPORAL_NUM_HISTORY_SHARDS", "128");
   const tlsEnabled = booleanEnv(env, "TEMPORAL_POSTGRES_TLS_ENABLED", false);
   const tlsCaFile = env.TEMPORAL_POSTGRES_TLS_CA_FILE?.trim();
@@ -46,7 +47,7 @@ ${tlsCaMount}  replicaCount: 1
       datastores:
         default:
           sql:
-            createDatabase: true
+            createDatabase: ${yamlScalar(String(createDatabase))}
             manageSchema: true
             pluginName: postgres12
             driverName: postgres12
@@ -61,7 +62,7 @@ ${tlsCaMount}  replicaCount: 1
             maxConnLifetime: 1h${tlsYaml}
         visibility:
           sql:
-            createDatabase: true
+            createDatabase: ${yamlScalar(String(createDatabase))}
             manageSchema: true
             pluginName: postgres12
             driverName: postgres12
@@ -144,7 +145,7 @@ function renderCaMount(volumeName: string, configMapName: string, configMapKey: 
 }
 
 function yamlScalar(value: string): string {
-  if (/^[0-9]+$/.test(value)) {
+  if (/^(true|false|[0-9]+)$/.test(value)) {
     return value;
   }
   return JSON.stringify(value);

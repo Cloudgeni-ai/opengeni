@@ -6,6 +6,8 @@ describe("web API auth helpers", () => {
   test("builds bearer authorization headers from a client-side access key", () => {
     expect(authHeadersForAccessKey(null)).toEqual({});
     expect(authHeadersForAccessKey("secret")).toEqual({ authorization: "Bearer secret" });
+    expect(authHeadersForAccessKey("secret", { mode: "configuredToken", headerName: "authorization", scheme: "bearer" })).toEqual({ authorization: "Bearer secret" });
+    expect(authHeadersForAccessKey("secret", { mode: "deploymentKey", headerName: "x-opengeni-access-key" })).toEqual({ "x-opengeni-access-key": "secret" });
   });
 
   test("defaults to same-origin API paths for deployed web builds", () => {
@@ -36,7 +38,7 @@ describe("web API SSE helpers", () => {
     }) as unknown as typeof fetch;
 
     try {
-      await streamSessionEvents("session-id", 5, (incoming) => {
+      await streamSessionEvents("workspace-id", "session-id", 5, (incoming) => {
         received.push(incoming.sequence);
         if (incoming.sequence === 7) {
           abort.abort();
@@ -69,7 +71,7 @@ describe("web API SSE helpers", () => {
     }) as unknown as typeof fetch;
 
     try {
-      await expect(streamSessionEvents("session-id", 5, () => undefined, {
+      await expect(streamSessionEvents("workspace-id", "session-id", 5, () => undefined, {
         reconnectDelayMs: 0,
         maxReconnectDelayMs: 0,
       })).rejects.toThrow("API 401: missing key");
@@ -85,6 +87,7 @@ describe("web API SSE helpers", () => {
 function event(sequence: number): SessionEvent {
   return {
     id: `event-${sequence}`,
+    workspaceId: "workspace-id",
     sessionId: "session-id",
     sequence,
     type: "agent.message.delta",

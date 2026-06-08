@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -15,6 +15,65 @@ describe("runtime event normalization", () => {
     expect(event).toEqual({
       type: "agent.message.delta",
       payload: { text: "hello" },
+    });
+  });
+
+  test("extracts model usage from streamed response completion events", () => {
+    const usage = modelResponseUsageFromSdkEvent({
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: {
+          id: "resp-1",
+          usage: {
+            inputTokens: 10,
+            outputTokens: 5,
+            totalTokens: 15,
+            inputTokensDetails: { cached_tokens: 3 },
+          },
+        },
+      },
+    } as any);
+
+    expect(usage).toEqual({
+      responseId: "resp-1",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+        inputTokensDetails: { cached_tokens: 3 },
+      },
+    });
+  });
+
+  test("extracts model usage from raw Responses completion events", () => {
+    const usage = modelResponseUsageFromSdkEvent(new RunRawModelStreamEvent({
+      type: "model",
+      providerData: {
+        rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+      },
+      event: {
+        type: "response.completed",
+        response: {
+          id: "resp-2",
+          usage: {
+            input_tokens: 20,
+            output_tokens: 8,
+            total_tokens: 28,
+            input_tokens_details: { cached_tokens: 4 },
+          },
+        },
+      },
+    } as any));
+
+    expect(usage).toEqual({
+      responseId: "resp-2",
+      usage: {
+        inputTokens: 20,
+        outputTokens: 8,
+        totalTokens: 28,
+        inputTokensDetails: { cached_tokens: 4 },
+      },
     });
   });
 
@@ -378,6 +437,40 @@ describe("runtime event normalization", () => {
     });
   });
 
+  test("uses local repository materializations without embedding clone credentials in the manifest", () => {
+    const manifest = buildManifest(testSettings(), [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+    }], undefined, [], [{
+      mountPath: "repos/acme/private",
+      sourcePath: "/tmp/opengeni-private-repo",
+      sourceType: "directory",
+    }]);
+    expect(manifest.entries["repos/acme/private"]).toEqual({
+      type: "local_dir",
+      src: "/tmp/opengeni-private-repo",
+    });
+    expect(JSON.stringify(manifest)).not.toContain("x-access-token");
+  });
+
+  test("supports file subpath repository materializations", () => {
+    const manifest = buildManifest(testSettings(), [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      mountPath: "repos/acme/private/README.md",
+    }], undefined, [], [{
+      mountPath: "repos/acme/private/README.md",
+      sourcePath: "/tmp/opengeni-private-repo/README.md",
+      sourceType: "file",
+    }]);
+    expect(manifest.entries["repos/acme/private/README.md"]).toEqual({
+      type: "local_file",
+      src: "/tmp/opengeni-private-repo/README.md",
+    });
+  });
+
   test("applies only missing manifest entries to resumed sandbox sessions", async () => {
     const current = buildManifest(testSettings(), [{
       kind: "repository",
@@ -559,7 +652,7 @@ describe("runtime event normalization", () => {
 
   test("sends the shared access key to first-party MCP servers", async () => {
     const accessKey = "local-mcp-access-key";
-    const mcp = startTestMcpServer({ requiredAuthorization: `Bearer ${accessKey}` });
+    const mcp = startTestMcpServer({ requiredHeaders: { "x-opengeni-access-key": accessKey } });
     const prepared = await prepareAgentTools(testSettings({
       authRequired: true,
       accessKey,

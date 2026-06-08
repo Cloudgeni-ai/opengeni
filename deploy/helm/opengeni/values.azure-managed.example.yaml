@@ -60,15 +60,22 @@ config:
   OPENGENI_AUTH_REQUIRED: "true"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
+  OPENGENI_PRODUCT_ACCESS_MODE: configured
+  OPENGENI_BILLING_MODE: disabled
+  OPENGENI_ENTITLEMENTS_MODE: none
+  OPENGENI_USAGE_LIMITS_MODE: none
+  OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
+  OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
   OPENGENI_OBJECT_STORAGE_BACKEND: azure-blob
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
-  # Keep none for API/object-storage smoke tests. Modal is supported with Azure
-  # Blob by materializing attached file resources into the sandbox before the
-  # agent starts.
-  OPENGENI_SANDBOX_BACKEND: none
+  # Production/customer-ready gates must use a real sandbox backend. Modal is
+  # supported with Azure Blob by materializing attached file resources into the
+  # sandbox before the agent starts.
+  OPENGENI_SANDBOX_BACKEND: modal
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
 ingress:
@@ -88,6 +95,9 @@ ingress:
           pathType: Prefix
           service: api
         - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
           pathType: Exact
           service: api
 

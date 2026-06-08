@@ -6,7 +6,8 @@ interface Args {
   agentMessage: string;
   sandboxBackend: string | null;
   objectConnectTo: string | null;
-  accessKey: string | null;
+  deploymentAccessKey: string | null;
+  productToken: string | null;
   skipAgent: boolean;
   skipStorage: boolean;
   skipObservability: boolean;
@@ -22,6 +23,7 @@ interface CheckResult {
 
 const args = parseArgs(process.argv.slice(2));
 const results: CheckResult[] = [];
+let workspaceId: string | null = null;
 
 await runCheck("api-health", async () => {
   const health = await getJson(new URL("/healthz", args.baseUrl));
@@ -33,25 +35,38 @@ await runCheck("api-health", async () => {
 
 await runCheck("access-boundary", async () => {
   const config = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
-  const authRequired = config?.auth?.required === true;
-  if (!args.accessKey) {
-    if (authRequired) {
-      throw new Error("client config reports auth.required=true; set OPENGENI_CONFORMANCE_ACCESS_KEY or --access-key");
+  const authMode = config?.auth?.mode ?? "unknown";
+  if (authMode === "deploymentKey") {
+    if (!args.deploymentAccessKey) {
+      throw new Error("client config requires x-opengeni-access-key; set OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or --deployment-access-key");
     }
-    return "client config reports auth.required=false; shared-key access boundary is disabled for this deployment";
+    const response = await fetch(new URL("/v1/access/me", args.baseUrl));
+    if (response.status !== 401) {
+      throw new Error(`/v1/access/me without deployment access key returned HTTP ${response.status}, expected 401`);
+    }
+    return "client config is secret-free and protected API routes reject missing deployment access keys";
   }
-  if (!authRequired) {
-    throw new Error("access key was provided, but client config did not report auth.required=true");
+  if (args.deploymentAccessKey) {
+    throw new Error(`deployment access key was provided, but client auth mode is ${authMode}`);
   }
-  const response = await fetch(new URL("/v1/sessions", args.baseUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ initialMessage: "unauthorized conformance probe" }),
-  });
-  if (response.status !== 401) {
-    throw new Error(`/v1/sessions without access key returned HTTP ${response.status}, expected 401`);
+  if (authMode === "managedSession") {
+    return "client config advertises managed session auth; product API probes require a conformance product token";
   }
-  return "client config is secret-free and user-facing routes reject missing access keys";
+  return `client config auth mode is ${authMode}; deployment shared-key boundary is disabled`;
+});
+
+await runCheck("workspace-discovery", async () => {
+  const context = await getJson(new URL("/v1/access/me", args.baseUrl));
+  workspaceId = typeof context?.defaultWorkspaceId === "string" ? context.defaultWorkspaceId : null;
+  if (!workspaceId) {
+    const workspaces = await getJson(new URL("/v1/workspaces", args.baseUrl));
+    const first = Array.isArray(workspaces) ? workspaces.find((workspace) => typeof workspace?.id === "string") : null;
+    workspaceId = first?.id ?? null;
+  }
+  if (!workspaceId) {
+    throw new Error("/v1/access/me and /v1/workspaces did not expose a workspace id for conformance");
+  }
+  return `workspace=${workspaceId}`;
 });
 
 if (args.skipObservability) {
@@ -84,12 +99,12 @@ if (args.skipAgent) {
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
     }
-    const session = await postJson(new URL("/v1/sessions", args.baseUrl), payload);
+    const session = await postJson(workspaceUrl("/sessions"), payload);
     sessionId = stringField(session, "id");
     const deadline = Date.now() + args.timeoutSeconds * 1000;
     let lastStatus = stringField(session, "status");
     while (Date.now() < deadline) {
-      const current = await getJson(new URL(`/v1/sessions/${sessionId}`, args.baseUrl));
+      const current = await getJson(workspaceUrl(`/sessions/${sessionId}`));
       lastStatus = stringField(current, "status");
       if (["idle", "failed", "cancelled"].includes(lastStatus)) {
         break;
@@ -103,7 +118,7 @@ if (args.skipAgent) {
   });
 
   await runCheck("event-replay", async () => {
-    const events = await getJson(new URL(`/v1/sessions/${sessionId}/events?limit=200`, args.baseUrl));
+    const events = await getJson(workspaceUrl(`/sessions/${sessionId}/events?limit=200`));
     if (!Array.isArray(events)) {
       throw new Error("events response was not an array");
     }
@@ -119,7 +134,7 @@ if (args.skipAgent) {
   await runCheck("sse-replay", async () => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5_000);
-    const response = await fetch(new URL(`/v1/sessions/${sessionId}/events/stream?after=0`, args.baseUrl), {
+    const response = await fetch(workspaceUrl(`/sessions/${sessionId}/events/stream?after=0`), {
       headers: requestHeaders(true),
       signal: controller.signal,
     });
@@ -140,11 +155,11 @@ if (args.skipAgent) {
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
     }
-    const session = await postJson(new URL("/v1/sessions", args.baseUrl), payload);
+    const session = await postJson(workspaceUrl("/sessions"), payload);
     const toolSessionId = stringField(session, "id");
     const status = await waitForTerminalSessionStatus(toolSessionId, args.timeoutSeconds);
     if (status !== "idle") {
-      const events = await getJson(new URL(`/v1/sessions/${toolSessionId}/events?limit=200`, args.baseUrl)).catch(() => []);
+      const events = await getJson(workspaceUrl(`/sessions/${toolSessionId}/events?limit=200`)).catch(() => []);
       throw new Error(`session ${toolSessionId} with selected MCP tool ended with status ${status}${turnFailureSuffix(events)}`);
     }
     return `session ${toolSessionId} reached idle with OpenGeni MCP selected`;
@@ -154,7 +169,7 @@ if (args.skipAgent) {
     results.push(skipped("scheduled-task", "--skip-scheduled-tasks was set"));
   } else {
     await runCheck("scheduled-task", async () => {
-      const task = await postJson(new URL("/v1/scheduled-tasks", args.baseUrl), {
+      const task = await postJson(workspaceUrl("/scheduled-tasks"), {
         name: `conformance-${crypto.randomUUID()}`,
         status: "paused",
         schedule: {
@@ -175,11 +190,11 @@ if (args.skipAgent) {
       });
       const taskId = stringField(task, "id");
       try {
-        await postJson(new URL(`/v1/scheduled-tasks/${taskId}/trigger`, args.baseUrl), {});
+        await postJson(workspaceUrl(`/scheduled-tasks/${taskId}/trigger`), {});
         const deadline = Date.now() + args.timeoutSeconds * 1000;
         let runSessionId: string | null = null;
         while (Date.now() < deadline) {
-          const runs = await getJson(new URL(`/v1/scheduled-tasks/${taskId}/runs?limit=5`, args.baseUrl));
+          const runs = await getJson(workspaceUrl(`/scheduled-tasks/${taskId}/runs?limit=5`));
           if (!Array.isArray(runs)) {
             throw new Error("scheduled task runs response was not an array");
           }
@@ -195,7 +210,7 @@ if (args.skipAgent) {
         }
         let status = "unknown";
         while (Date.now() < deadline) {
-          const current = await getJson(new URL(`/v1/sessions/${runSessionId}`, args.baseUrl));
+          const current = await getJson(workspaceUrl(`/sessions/${runSessionId}`));
           status = stringField(current, "status");
           if (["idle", "failed", "cancelled"].includes(status)) {
             break;
@@ -207,7 +222,7 @@ if (args.skipAgent) {
         }
         return `task ${taskId} dispatched session ${runSessionId}`;
       } finally {
-        await deleteJson(new URL(`/v1/scheduled-tasks/${taskId}`, args.baseUrl)).catch(() => undefined);
+        await deleteJson(workspaceUrl(`/scheduled-tasks/${taskId}`)).catch(() => undefined);
       }
     });
   }
@@ -218,7 +233,7 @@ if (args.skipStorage) {
 } else {
   await runCheck("object-storage", async () => {
     const content = `opengeni conformance ${crypto.randomUUID()}`;
-    const upload = await postJson(new URL("/v1/files/uploads", args.baseUrl), {
+    const upload = await postJson(workspaceUrl("/files/uploads"), {
       filename: "conformance.txt",
       contentType: "text/plain",
       sizeBytes: new TextEncoder().encode(content).byteLength,
@@ -229,8 +244,8 @@ if (args.skipStorage) {
     const headers = recordField(upload, "requiredHeaders");
     await preflightObjectPut(putUrl, new URL(args.baseUrl).origin, Object.keys(headers), args.objectConnectTo);
     await putObject(putUrl, content, headers, args.objectConnectTo);
-    await postJson(new URL(`/v1/files/uploads/${uploadId}/complete`, args.baseUrl), {});
-    const download = await postJson(new URL(`/v1/files/${fileId}/download-url`, args.baseUrl), {});
+    await postJson(workspaceUrl(`/files/uploads/${uploadId}/complete`), {});
+    const download = await postJson(workspaceUrl(`/files/${fileId}/download-url`), {});
     const downloaded = await getObject(stringField(download, "url"), args.objectConnectTo);
     if (downloaded !== content) {
       throw new Error("downloaded object did not match uploaded content");
@@ -239,8 +254,10 @@ if (args.skipStorage) {
   });
 }
 
+const ok = !results.some((result) => result.status === "failed");
+
 if (args.json) {
-  console.log(JSON.stringify({ results }, null, 2));
+  console.log(JSON.stringify({ ok, results }, null, 2));
 } else {
   console.log("OpenGeni deployment conformance");
   for (const result of results) {
@@ -248,7 +265,7 @@ if (args.json) {
   }
 }
 
-if (results.some((result) => result.status === "failed")) {
+if (!ok) {
   process.exit(1);
 }
 
@@ -300,7 +317,7 @@ async function waitForTerminalSessionStatus(sessionId: string, timeoutSeconds: n
   const deadline = Date.now() + timeoutSeconds * 1000;
   let status = "unknown";
   while (Date.now() < deadline) {
-    const current = await getJson(new URL(`/v1/sessions/${sessionId}`, args.baseUrl));
+    const current = await getJson(workspaceUrl(`/sessions/${sessionId}`));
     status = stringField(current, "status");
     if (["idle", "failed", "cancelled"].includes(status)) {
       break;
@@ -445,7 +462,8 @@ function parseArgs(values: string[]): Args {
     agentMessage: process.env.OPENGENI_CONFORMANCE_AGENT_MESSAGE ?? "Reply with exactly: opengeni conformance ok",
     sandboxBackend: process.env.OPENGENI_CONFORMANCE_SANDBOX_BACKEND ?? "none",
     objectConnectTo: process.env.OPENGENI_CONFORMANCE_OBJECT_CONNECT_TO ?? null,
-    accessKey: process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ?? null,
+    deploymentAccessKey: process.env.OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY ?? process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ?? null,
+    productToken: process.env.OPENGENI_CONFORMANCE_PRODUCT_TOKEN ?? process.env.OPENGENI_CONFORMANCE_ACCESS_TOKEN ?? null,
     skipAgent: false,
     skipStorage: false,
     skipObservability: false,
@@ -496,8 +514,12 @@ function parseArgs(values: string[]): Args {
       out.objectConnectTo = requiredNext(values, ++index, value);
       continue;
     }
-    if (value === "--access-key") {
-      out.accessKey = requiredNext(values, ++index, value);
+    if (value === "--deployment-access-key" || value === "--access-key") {
+      out.deploymentAccessKey = requiredNext(values, ++index, value);
+      continue;
+    }
+    if (value === "--product-token" || value === "--access-token") {
+      out.productToken = requiredNext(values, ++index, value);
       continue;
     }
     if (value.startsWith("--base-url=")) {
@@ -508,8 +530,20 @@ function parseArgs(values: string[]): Args {
       out.objectConnectTo = value.slice("--object-connect-to=".length);
       continue;
     }
+    if (value.startsWith("--deployment-access-key=")) {
+      out.deploymentAccessKey = value.slice("--deployment-access-key=".length);
+      continue;
+    }
     if (value.startsWith("--access-key=")) {
-      out.accessKey = value.slice("--access-key=".length);
+      out.deploymentAccessKey = value.slice("--access-key=".length);
+      continue;
+    }
+    if (value.startsWith("--product-token=")) {
+      out.productToken = value.slice("--product-token=".length);
+      continue;
+    }
+    if (value.startsWith("--access-token=")) {
+      out.productToken = value.slice("--access-token=".length);
       continue;
     }
     throw new Error(`Unknown argument: ${value}`);
@@ -526,9 +560,18 @@ function parseArgs(values: string[]): Args {
 
 function requestHeaders(auth: boolean, extra: Record<string, string> = {}): Record<string, string> {
   return {
-    ...(auth && args.accessKey ? { authorization: `Bearer ${args.accessKey}` } : {}),
+    ...(auth && args.deploymentAccessKey ? { "x-opengeni-access-key": args.deploymentAccessKey } : {}),
+    ...(auth && args.productToken ? { authorization: `Bearer ${args.productToken}` } : {}),
     ...extra,
   };
+}
+
+function workspaceUrl(path: string): URL {
+  if (!workspaceId) {
+    throw new Error("workspace-discovery did not run or did not find a workspace id");
+  }
+  const suffix = path.startsWith("/") ? path : `/${path}`;
+  return new URL(`/v1/workspaces/${workspaceId}${suffix}`, args.baseUrl);
 }
 
 function requiredNext(values: string[], index: number, flag: string): string {

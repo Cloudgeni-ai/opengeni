@@ -5,19 +5,20 @@ import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
+import type { ManagedAuth } from "./auth/managed-auth";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
-  wakeSessionWorkflow: (input: { sessionId: string; workflowId: string }) => Promise<void>;
+  wakeSessionWorkflow: (input: { accountId: string; workspaceId: string; sessionId: string; workflowId: string }) => Promise<void>;
   signalApprovalDecision: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   signalInterrupt: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
-  triggerScheduledTask: (input: { taskId: string }) => Promise<void>;
+  triggerScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
 };
 
 export type DocumentIndexClient = {
-  indexDocument: (input: { documentId: string }) => Promise<Document | void>;
+  indexDocument: (input: { workspaceId: string; documentId: string }) => Promise<Document | void>;
 };
 
 export type AppDependencies = {
@@ -29,6 +30,7 @@ export type AppDependencies = {
   documentServices?: DocumentServices;
   observability?: Observability;
   githubStateSecret?: string;
+  managedAuth?: ManagedAuth | null;
 };
 
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;

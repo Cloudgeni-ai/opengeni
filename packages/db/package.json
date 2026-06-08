@@ -8,6 +8,7 @@
   "scripts": {
     "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
+    "provision-roles": "bun src/provision-roles.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

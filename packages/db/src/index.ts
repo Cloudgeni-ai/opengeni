@@ -1,7 +1,13 @@
 import type {
+  AccessContext,
+  AccessGrant,
+  ApiKey,
+  BillingBalance,
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  ManagedAccount,
+  Permission,
   ResourceRef,
   SandboxBackend,
   ScheduledTask,
@@ -22,17 +28,26 @@ import type {
   SessionTurnStatus,
   ToolRef,
   ReasoningEffort,
+  UsageEvent,
+  Workspace,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema";
 
+export { sql as dbSql } from "drizzle-orm";
+
 export type Database = PostgresJsDatabase<typeof schema>;
 
 export type DbClient = {
   db: Database;
   close: () => Promise<void>;
+};
+
+export type RlsContext = {
+  accountId: string;
+  workspaceId?: string | null;
 };
 
 export function createDb(databaseUrl: string): DbClient {
@@ -43,6 +58,682 @@ export function createDb(databaseUrl: string): DbClient {
       await client.end();
     },
   };
+}
+
+export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
+  await db.execute(sql`select set_config('opengeni.account_id', ${context.accountId}, true)`);
+  await db.execute(sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`);
+}
+
+export async function withRlsContext<T>(
+  db: Database,
+  context: RlsContext,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await db.transaction(async (tx) => {
+    await setRlsContext(tx as unknown as Database, context);
+    return await fn(tx as unknown as Database);
+  });
+}
+
+export async function rlsContextForWorkspace(db: Database, workspaceId: string): Promise<RlsContext> {
+  const [row] = await db.select({ accountId: schema.workspaces.accountId })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return { accountId: row.accountId, workspaceId };
+}
+
+export async function withWorkspaceRls<T>(
+  db: Database,
+  workspaceId: string,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+}
+
+export async function withAccountRls<T>(
+  db: Database,
+  accountId: string,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(db, { accountId, workspaceId: null }, fn);
+}
+
+export const allWorkspacePermissions: Permission[] = [
+  "workspace:read",
+  "workspace:admin",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:manage",
+  "github:use",
+  "api_keys:manage",
+];
+
+export const allAccountPermissions: Permission[] = [
+  "account:read",
+  "account:admin",
+  "members:manage",
+  "workspace:create",
+  "billing:read",
+  "billing:manage",
+  "api_keys:manage",
+];
+
+export type BootstrapWorkspaceInput = {
+  accountExternalSource: string;
+  accountExternalId: string;
+  accountName: string;
+  workspaceExternalSource: string;
+  workspaceExternalId: string;
+  workspaceName: string;
+  subjectId: string;
+  subjectLabel?: string;
+  accountPermissions?: Permission[];
+  workspacePermissions?: Permission[];
+};
+
+export async function bootstrapWorkspace(db: Database, input: BootstrapWorkspaceInput): Promise<AccessContext> {
+  return await db.transaction(async (tx) => {
+    const [account] = await tx.insert(schema.managedAccounts).values({
+      name: input.accountName,
+      externalSource: input.accountExternalSource,
+      externalId: input.accountExternalId,
+    }).onConflictDoUpdate({
+      target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
+      set: {
+        name: input.accountName,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!account) {
+      throw new Error("Failed to bootstrap account");
+    }
+    const [workspace] = await tx.insert(schema.workspaces).values({
+      accountId: account.id,
+      name: input.workspaceName,
+      externalSource: input.workspaceExternalSource,
+      externalId: input.workspaceExternalId,
+    }).onConflictDoUpdate({
+      target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+      set: {
+        name: input.workspaceName,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!workspace) {
+      throw new Error("Failed to bootstrap workspace");
+    }
+    const workspacePermissions = input.workspacePermissions ?? allWorkspacePermissions;
+    await tx.insert(schema.workspaceMemberships).values({
+      accountId: account.id,
+      workspaceId: workspace.id,
+      subjectId: input.subjectId,
+      subjectLabel: input.subjectLabel ?? null,
+      role: "owner",
+      permissions: workspacePermissions,
+    }).onConflictDoUpdate({
+      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+      set: {
+        subjectLabel: input.subjectLabel ?? null,
+        role: "owner",
+        permissions: workspacePermissions,
+        updatedAt: new Date(),
+      },
+    });
+    return {
+      mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
+      subjectId: input.subjectId,
+      ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+      accountGrants: [{
+        accountId: account.id,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        role: "owner",
+        permissions: input.accountPermissions ?? allAccountPermissions,
+      }],
+      workspaceGrants: [{
+        workspaceId: workspace.id,
+        accountId: account.id,
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        permissions: workspacePermissions,
+      }],
+      defaultAccountId: account.id,
+      defaultWorkspaceId: workspace.id,
+    };
+  });
+}
+
+export async function ensureManagedAccessForUser(db: Database, input: {
+  userId: string;
+  email: string;
+  name: string;
+}): Promise<AccessContext> {
+  const subjectId = `user:${input.userId}`;
+  const subjectLabel = input.email || input.name;
+  return await db.transaction(async (tx) => {
+    const [account] = await tx.insert(schema.managedAccounts).values({
+      name: input.name || input.email,
+      externalSource: "better-auth:user",
+      externalId: input.userId,
+    }).onConflictDoUpdate({
+      target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
+      set: {
+        name: input.name || input.email,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!account) {
+      throw new Error("Failed to ensure managed account");
+    }
+    const [defaultWorkspace] = await tx.insert(schema.workspaces).values({
+      accountId: account.id,
+      name: "Default workspace",
+      slug: "default",
+      externalSource: "better-auth:user",
+      externalId: `${input.userId}:default`,
+    }).onConflictDoUpdate({
+      target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+      set: {
+        name: "Default workspace",
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!defaultWorkspace) {
+      throw new Error("Failed to ensure default workspace");
+    }
+    await tx.insert(schema.workspaceMemberships).values({
+      accountId: account.id,
+      workspaceId: defaultWorkspace.id,
+      subjectId,
+      subjectLabel,
+      role: "owner",
+      permissions: allWorkspacePermissions,
+    }).onConflictDoUpdate({
+      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+      set: {
+        subjectLabel,
+        role: "owner",
+        permissions: allWorkspacePermissions,
+        updatedAt: new Date(),
+      },
+    });
+    const memberships = await tx.select({
+      membership: schema.workspaceMemberships,
+      workspace: schema.workspaces,
+    }).from(schema.workspaceMemberships)
+      .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
+      .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+      .orderBy(desc(schema.workspaces.createdAt));
+    return {
+      mode: "managed",
+      subjectId,
+      subjectLabel,
+      accountGrants: [{
+        accountId: account.id,
+        subjectId,
+        subjectLabel,
+        role: "owner",
+        permissions: allAccountPermissions,
+      }],
+      workspaceGrants: memberships.map((row) => ({
+        workspaceId: row.workspace.id,
+        accountId: row.workspace.accountId,
+        subjectId,
+        subjectLabel,
+        permissions: row.membership.permissions as Permission[],
+      })),
+      defaultAccountId: account.id,
+      defaultWorkspaceId: defaultWorkspace.id,
+    };
+  });
+}
+
+export async function getWorkspace(db: Database, workspaceId: string): Promise<Workspace | null> {
+  const [row] = await db.select().from(schema.workspaces).where(eq(schema.workspaces.id, workspaceId)).limit(1);
+  return row ? mapWorkspace(row) : null;
+}
+
+export async function getManagedAccount(db: Database, accountId: string): Promise<ManagedAccount | null> {
+  const [row] = await db.select().from(schema.managedAccounts).where(eq(schema.managedAccounts.id, accountId)).limit(1);
+  return row ? mapAccount(row) : null;
+}
+
+export async function requireWorkspace(db: Database, workspaceId: string): Promise<Workspace> {
+  const workspace = await getWorkspace(db, workspaceId);
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return workspace;
+}
+
+export async function listWorkspacesForSubject(db: Database, subjectId: string, limit = 100): Promise<Workspace[]> {
+  const rows = await db.select({ workspace: schema.workspaces }).from(schema.workspaceMemberships)
+    .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
+    .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+    .orderBy(desc(schema.workspaces.createdAt))
+    .limit(limit);
+  return rows.map((row) => mapWorkspace(row.workspace));
+}
+
+export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
+  const [{ count } = { count: 0 }] = await db.select({
+    count: sql<number>`count(*)::int`,
+  }).from(schema.workspaces).where(eq(schema.workspaces.accountId, accountId));
+  return Number(count);
+}
+
+export async function createWorkspace(db: Database, input: {
+  accountId: string;
+  name: string;
+  slug?: string | null;
+  externalSource?: string | null;
+  externalId?: string | null;
+}): Promise<Workspace> {
+  const [row] = await db.insert(schema.workspaces).values({
+    accountId: input.accountId,
+    name: input.name,
+    slug: input.slug ?? null,
+    externalSource: input.externalSource ?? null,
+    externalId: input.externalId ?? null,
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to create workspace");
+  }
+  return mapWorkspace(row);
+}
+
+export async function grantWorkspaceAccess(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  subjectLabel?: string;
+  role?: string;
+  permissions: Permission[];
+}): Promise<void> {
+  await db.insert(schema.workspaceMemberships).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    subjectLabel: input.subjectLabel ?? null,
+    role: input.role ?? "member",
+    permissions: input.permissions,
+  }).onConflictDoUpdate({
+    target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+    set: {
+      subjectLabel: input.subjectLabel ?? null,
+      role: input.role ?? "member",
+      permissions: input.permissions,
+      updatedAt: new Date(),
+    },
+  });
+}
+
+export async function updateWorkspace(db: Database, workspaceId: string, input: {
+  name?: string;
+  slug?: string | null;
+}): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.slug !== undefined ? { slug: input.slug } : {}),
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return mapWorkspace(row);
+}
+
+export async function getWorkspaceGrant(db: Database, subjectId: string, workspaceId: string): Promise<AccessGrant | null> {
+  const [row] = await db.select({
+    membership: schema.workspaceMemberships,
+    workspace: schema.workspaces,
+  }).from(schema.workspaceMemberships)
+    .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
+    .where(and(eq(schema.workspaceMemberships.subjectId, subjectId), eq(schema.workspaceMemberships.workspaceId, workspaceId)))
+    .limit(1);
+  return row ? {
+    workspaceId: row.workspace.id,
+    accountId: row.workspace.accountId,
+    subjectId: row.membership.subjectId,
+    ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
+    permissions: row.membership.permissions as Permission[],
+  } : null;
+}
+
+export async function createApiKey(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  name: string;
+  prefix: string;
+  keyHash: string;
+  permissions: Permission[];
+  expiresAt?: Date | null;
+}): Promise<ApiKey> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.apiKeys).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      name: input.name,
+      prefix: input.prefix,
+      keyHash: input.keyHash,
+      permissions: input.permissions,
+      expiresAt: input.expiresAt ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create API key");
+    }
+    return mapApiKey(row);
+  });
+}
+
+export async function listApiKeys(db: Database, workspaceId: string): Promise<ApiKey[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.apiKeys)
+      .where(eq(schema.apiKeys.workspaceId, workspaceId))
+      .orderBy(desc(schema.apiKeys.createdAt));
+    return rows.map(mapApiKey);
+  });
+}
+
+export async function countActiveApiKeysForWorkspace(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.workspaceId, workspaceId), sql`${schema.apiKeys.revokedAt} is null`, sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`));
+    return Number(count);
+  });
+}
+
+export async function revokeApiKey(db: Database, workspaceId: string, apiKeyId: string): Promise<ApiKey> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.apiKeys).set({
+      revokedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.apiKeys.workspaceId, workspaceId), eq(schema.apiKeys.id, apiKeyId))).returning();
+    if (!row) {
+      throw new Error(`API key not found: ${apiKeyId}`);
+    }
+    return mapApiKey(row);
+  });
+}
+
+export async function findActiveApiKeyByHash(db: Database, keyHash: string): Promise<ApiKey | null> {
+  return await db.transaction(async (tx) => {
+    await tx.execute(sql`select set_config('opengeni.api_key_hash', ${keyHash}, true)`);
+    const [row] = await tx.select().from(schema.apiKeys)
+      .where(and(eq(schema.apiKeys.keyHash, keyHash), sql`${schema.apiKeys.revokedAt} is null`, sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    const now = new Date();
+    await tx.update(schema.apiKeys).set({ lastUsedAt: now, updatedAt: now }).where(eq(schema.apiKeys.id, row.id));
+    return mapApiKey({ ...row, lastUsedAt: now });
+  });
+}
+
+export type GitHubInstallation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function upsertGitHubInstallation(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  installationId: number;
+  accountLogin?: string | null;
+  accountType?: string | null;
+}): Promise<GitHubInstallation> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.githubInstallations).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      installationId: input.installationId,
+      accountLogin: input.accountLogin ?? null,
+      accountType: input.accountType ?? null,
+    }).onConflictDoUpdate({
+      target: [schema.githubInstallations.workspaceId, schema.githubInstallations.installationId],
+      set: {
+        accountId: input.accountId,
+        accountLogin: input.accountLogin ?? null,
+        accountType: input.accountType ?? null,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to upsert GitHub installation");
+    }
+    return mapGitHubInstallation(row);
+  });
+}
+
+export async function listGitHubInstallationsForWorkspace(db: Database, workspaceId: string): Promise<GitHubInstallation[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.githubInstallations)
+      .where(eq(schema.githubInstallations.workspaceId, workspaceId))
+      .orderBy(desc(schema.githubInstallations.updatedAt));
+    return rows.map(mapGitHubInstallation);
+  });
+}
+
+export async function listGitHubInstallationIdsForWorkspace(db: Database, workspaceId: string): Promise<number[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select({ installationId: schema.githubInstallations.installationId })
+      .from(schema.githubInstallations)
+      .where(eq(schema.githubInstallations.workspaceId, workspaceId))
+      .orderBy(desc(schema.githubInstallations.updatedAt));
+    return rows.map((row) => row.installationId);
+  });
+}
+
+export async function recordUsageEvent(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  subjectId?: string | null;
+  eventType: string;
+  quantity: number;
+  unit: string;
+  sourceResourceType?: string | null;
+  sourceResourceId?: string | null;
+  idempotencyKey: string;
+  occurredAt?: Date;
+}): Promise<UsageEvent> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.usageEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId ?? null,
+      eventType: input.eventType,
+      quantity: input.quantity,
+      unit: input.unit,
+      sourceResourceType: input.sourceResourceType ?? null,
+      sourceResourceId: input.sourceResourceId ?? null,
+      idempotencyKey: input.idempotencyKey,
+      occurredAt: input.occurredAt ?? new Date(),
+    }).onConflictDoNothing({ target: schema.usageEvents.idempotencyKey }).returning();
+    if (row) {
+      return mapUsageEvent(row);
+    }
+    const [existing] = await scopedDb.select().from(schema.usageEvents).where(eq(schema.usageEvents.idempotencyKey, input.idempotencyKey)).limit(1);
+    if (!existing) {
+      throw new Error("Failed to record usage event");
+    }
+    return mapUsageEvent(existing);
+  });
+}
+
+export async function listUsageEvents(db: Database, input: {
+  accountId: string;
+  workspaceId?: string;
+  limit?: number;
+}): Promise<UsageEvent[]> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.usageEvents)
+      .where(input.workspaceId
+        ? and(eq(schema.usageEvents.accountId, input.accountId), eq(schema.usageEvents.workspaceId, input.workspaceId))
+        : eq(schema.usageEvents.accountId, input.accountId))
+      .orderBy(desc(schema.usageEvents.occurredAt), desc(schema.usageEvents.recordedAt))
+      .limit(input.limit ?? 100);
+    return rows.map(mapUsageEvent);
+  });
+}
+
+export async function sumUsageQuantity(db: Database, input: {
+  accountId?: string;
+  workspaceId?: string;
+  eventType: string;
+  since?: Date;
+}): Promise<number> {
+  const context = input.workspaceId
+    ? await rlsContextForWorkspace(db, input.workspaceId)
+    : input.accountId
+      ? { accountId: input.accountId, workspaceId: null }
+      : null;
+  if (!context) {
+    throw new Error("Usage quantity queries require accountId or workspaceId");
+  }
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const clauses = [
+      eq(schema.usageEvents.eventType, input.eventType),
+      ...(input.accountId ? [eq(schema.usageEvents.accountId, input.accountId)] : []),
+      ...(input.workspaceId ? [eq(schema.usageEvents.workspaceId, input.workspaceId)] : []),
+      ...(input.since ? [gt(schema.usageEvents.occurredAt, input.since)] : []),
+    ];
+    const [{ total } = { total: 0 }] = await scopedDb.select({
+      total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+    }).from(schema.usageEvents).where(and(...clauses));
+    return Number(total);
+  });
+}
+
+export async function applyCreditLedgerEntry(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  amountMicros: number;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+}): Promise<BillingBalance> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.insert(schema.creditLedgerEntries).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      type: input.type,
+      amountMicros: input.amountMicros,
+      sourceType: input.sourceType ?? null,
+      sourceId: input.sourceId ?? null,
+      idempotencyKey: input.idempotencyKey,
+      metadata: input.metadata ?? {},
+      occurredAt: input.occurredAt ?? new Date(),
+    }).onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+    return await getBillingBalance(scopedDb, input.accountId);
+  });
+}
+
+export async function getBillingCustomer(db: Database, accountId: string, provider = "stripe"): Promise<{
+  accountId: string;
+  provider: string;
+  providerCustomerId: string;
+  email: string | null;
+} | null> {
+  return await withAccountRls(db, accountId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.billingCustomers)
+      .where(and(eq(schema.billingCustomers.accountId, accountId), eq(schema.billingCustomers.provider, provider)))
+      .limit(1);
+    return row ? {
+      accountId: row.accountId,
+      provider: row.provider,
+      providerCustomerId: row.providerCustomerId,
+      email: row.email,
+    } : null;
+  });
+}
+
+export async function upsertBillingCustomer(db: Database, input: {
+  accountId: string;
+  provider?: string;
+  providerCustomerId: string;
+  email?: string | null;
+}): Promise<void> {
+  await withAccountRls(db, input.accountId, async (scopedDb) => {
+    await scopedDb.insert(schema.billingCustomers).values({
+      accountId: input.accountId,
+      provider: input.provider ?? "stripe",
+      providerCustomerId: input.providerCustomerId,
+      email: input.email ?? null,
+    }).onConflictDoUpdate({
+      target: [schema.billingCustomers.accountId, schema.billingCustomers.provider],
+      set: {
+        providerCustomerId: input.providerCustomerId,
+        email: input.email ?? null,
+        updatedAt: new Date(),
+      },
+    });
+  });
+}
+
+export async function recordStripeWebhookEvent(db: Database, input: {
+  id: string;
+  type: string;
+  livemode: boolean;
+  payload: unknown;
+}): Promise<boolean> {
+  const [row] = await db.insert(schema.stripeWebhookEvents).values({
+    id: input.id,
+    type: input.type,
+    livemode: String(input.livemode),
+    payload: input.payload,
+  }).onConflictDoNothing({ target: schema.stripeWebhookEvents.id }).returning({ id: schema.stripeWebhookEvents.id });
+  return Boolean(row);
+}
+
+export async function markStripeWebhookProcessed(db: Database, id: string): Promise<void> {
+  await db.update(schema.stripeWebhookEvents).set({ processedAt: new Date() }).where(eq(schema.stripeWebhookEvents.id, id));
+}
+
+export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
+  return await withAccountRls(db, accountId, async (scopedDb) => {
+    const [{ balance } = { balance: 0 }] = await scopedDb.select({
+      balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
+    }).from(schema.creditLedgerEntries).where(eq(schema.creditLedgerEntries.accountId, accountId));
+    return {
+      accountId,
+      balanceMicros: Number(balance),
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+    };
+  });
+}
+
+export async function countScheduledTasksForWorkspace(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.scheduledTasks).where(eq(schema.scheduledTasks.workspaceId, workspaceId));
+    return Number(count);
+  });
 }
 
 export type AppendEventInput = {
@@ -57,6 +748,8 @@ export type AppendEventInput = {
 
 export type CreateScheduledTaskInput = {
   id?: string;
+  accountId: string;
+  workspaceId: string;
   name: string;
   status: ScheduledTaskStatus;
   schedule: ScheduledTaskScheduleSpec;
@@ -79,6 +772,8 @@ export type UpdateScheduledTaskInput = Partial<{
 }>;
 
 export type EnqueueSessionTurnInput = {
+  accountId: string;
+  workspaceId: string;
   sessionId: string;
   triggerEventId: string;
   temporalWorkflowId: string;
@@ -103,6 +798,8 @@ export type UpdateQueuedSessionTurnInput = Partial<{
 }>;
 
 export async function createFileUpload(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
   fileId: string;
   filename: string;
   safeFilename: string;
@@ -113,9 +810,11 @@ export async function createFileUpload(db: Database, input: {
   objectKey: string;
   expiresAt: Date;
 }): Promise<{ file: FileAsset; uploadId: string; expiresAt: string }> {
-  return await db.transaction(async (tx) => {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => await scopedDb.transaction(async (tx) => {
     const [fileRow] = await tx.insert(schema.files).values({
       id: input.fileId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
       filename: input.filename,
       safeFilename: input.safeFilename,
       contentType: input.contentType,
@@ -129,6 +828,8 @@ export async function createFileUpload(db: Database, input: {
       throw new Error("Failed to create file");
     }
     const [uploadRow] = await tx.insert(schema.fileUploads).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
       fileId: fileRow.id,
       status: "pending",
       expiresAt: input.expiresAt,
@@ -141,47 +842,51 @@ export async function createFileUpload(db: Database, input: {
       uploadId: uploadRow.id,
       expiresAt: uploadRow.expiresAt.toISOString(),
     };
+  }));
+}
+
+export async function getFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.files).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId))).limit(1);
+    return row ? mapFile(row) : null;
   });
 }
 
-export async function getFile(db: Database, fileId: string): Promise<FileAsset | null> {
-  const [row] = await db.select().from(schema.files).where(eq(schema.files.id, fileId)).limit(1);
-  return row ? mapFile(row) : null;
-}
-
-export async function requireFile(db: Database, fileId: string): Promise<FileAsset> {
-  const file = await getFile(db, fileId);
+export async function requireFile(db: Database, workspaceId: string, fileId: string): Promise<FileAsset> {
+  const file = await getFile(db, workspaceId, fileId);
   if (!file) {
     throw new Error(`File not found: ${fileId}`);
   }
   return file;
 }
 
-export async function getFileUpload(db: Database, uploadId: string): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
-  const [row] = await db.select({
-    id: schema.fileUploads.id,
-    status: schema.fileUploads.status,
-    expiresAt: schema.fileUploads.expiresAt,
-    file: schema.files,
-  }).from(schema.fileUploads)
-    .innerJoin(schema.files, eq(schema.fileUploads.fileId, schema.files.id))
-    .where(eq(schema.fileUploads.id, uploadId))
-    .limit(1);
-  return row ? {
-    id: row.id,
-    status: row.status as FileUploadStatus,
-    expiresAt: row.expiresAt,
-    file: mapFile(row.file),
-  } : null;
+export async function getFileUpload(db: Database, workspaceId: string, uploadId: string): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      id: schema.fileUploads.id,
+      status: schema.fileUploads.status,
+      expiresAt: schema.fileUploads.expiresAt,
+      file: schema.files,
+    }).from(schema.fileUploads)
+      .innerJoin(schema.files, eq(schema.fileUploads.fileId, schema.files.id))
+      .where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)))
+      .limit(1);
+    return row ? {
+      id: row.id,
+      status: row.status as FileUploadStatus,
+      expiresAt: row.expiresAt,
+      file: mapFile(row.file),
+    } : null;
+  });
 }
 
-export async function completeFileUpload(db: Database, uploadId: string): Promise<FileAsset> {
-  return await db.transaction(async (tx) => {
-    const [uploadRow] = await tx.select().from(schema.fileUploads).where(eq(schema.fileUploads.id, uploadId)).for("update").limit(1);
+export async function completeFileUpload(db: Database, workspaceId: string, uploadId: string): Promise<FileAsset> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [uploadRow] = await tx.select().from(schema.fileUploads).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId))).for("update").limit(1);
     if (!uploadRow) {
       throw new Error(`File upload not found: ${uploadId}`);
     }
-    const [fileRow] = await tx.select().from(schema.files).where(eq(schema.files.id, uploadRow.fileId)).for("update").limit(1);
+    const [fileRow] = await tx.select().from(schema.files).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, uploadRow.fileId))).for("update").limit(1);
     if (!fileRow) {
       throw new Error(`File not found for upload: ${uploadId}`);
     }
@@ -189,122 +894,152 @@ export async function completeFileUpload(db: Database, uploadId: string): Promis
     const [updatedFile] = await tx.update(schema.files).set({
       status: "ready",
       updatedAt: now,
-    }).where(eq(schema.files.id, fileRow.id)).returning();
+    }).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileRow.id))).returning();
     await tx.update(schema.fileUploads).set({
       status: "completed",
       completedAt: now,
       updatedAt: now,
-    }).where(eq(schema.fileUploads.id, uploadId));
+    }).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)));
     if (!updatedFile) {
       throw new Error("Failed to complete file upload");
     }
     return mapFile(updatedFile);
-  });
+  }));
 }
 
-export async function markFileUploadFailed(db: Database, uploadId: string, fileId: string): Promise<void> {
+export async function markFileUploadFailed(db: Database, workspaceId: string, uploadId: string, fileId: string): Promise<void> {
   const now = new Date();
-  await db.transaction(async (tx) => {
-    await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(eq(schema.fileUploads.id, uploadId));
-    await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(eq(schema.files.id, fileId));
-  });
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(and(eq(schema.fileUploads.workspaceId, workspaceId), eq(schema.fileUploads.id, uploadId)));
+    await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId)));
+  }));
 }
 
 export async function createScheduledTask(db: Database, input: CreateScheduledTaskInput): Promise<ScheduledTask> {
-  const [row] = await db.insert(schema.scheduledTasks).values(input).returning();
-  if (!row) {
-    throw new Error("Failed to create scheduled task");
-  }
-  return mapScheduledTask(row);
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.scheduledTasks).values(input).returning();
+    if (!row) {
+      throw new Error("Failed to create scheduled task");
+    }
+    return mapScheduledTask(row);
+  });
 }
 
-export async function updateScheduledTask(db: Database, taskId: string, input: UpdateScheduledTaskInput): Promise<ScheduledTask> {
-  const [row] = await db.update(schema.scheduledTasks).set({
-    ...(input.name !== undefined ? { name: input.name } : {}),
-    ...(input.status !== undefined ? { status: input.status } : {}),
-    ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
-    ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
-    ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
-    ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-    ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
-    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-    updatedAt: new Date(),
-  }).where(eq(schema.scheduledTasks.id, taskId)).returning();
-  if (!row) {
-    throw new Error(`Scheduled task not found: ${taskId}`);
-  }
-  return mapScheduledTask(row);
+export async function updateScheduledTask(db: Database, workspaceId: string, taskId: string, input: UpdateScheduledTaskInput): Promise<ScheduledTask> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.scheduledTasks).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.schedule !== undefined ? { schedule: input.schedule } : {}),
+      ...(input.runMode !== undefined ? { runMode: input.runMode } : {}),
+      ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
+      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+      ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).returning();
+    if (!row) {
+      throw new Error(`Scheduled task not found: ${taskId}`);
+    }
+    return mapScheduledTask(row);
+  });
 }
 
-export async function getScheduledTask(db: Database, taskId: string): Promise<ScheduledTask | null> {
-  const [row] = await db.select().from(schema.scheduledTasks).where(eq(schema.scheduledTasks.id, taskId)).limit(1);
-  return row ? mapScheduledTask(row) : null;
+export async function getScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.scheduledTasks).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).limit(1);
+    return row ? mapScheduledTask(row) : null;
+  });
 }
 
-export async function requireScheduledTask(db: Database, taskId: string): Promise<ScheduledTask> {
-  const task = await getScheduledTask(db, taskId);
+export async function requireScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<ScheduledTask> {
+  const task = await getScheduledTask(db, workspaceId, taskId);
   if (!task) {
     throw new Error(`Scheduled task not found: ${taskId}`);
   }
   return task;
 }
 
-export async function listScheduledTasks(db: Database, limit = 100): Promise<ScheduledTask[]> {
-  const rows = await db.select().from(schema.scheduledTasks).orderBy(desc(schema.scheduledTasks.createdAt)).limit(limit);
-  return rows.map(mapScheduledTask);
+export async function listScheduledTasks(db: Database, workspaceId: string, limit = 100): Promise<ScheduledTask[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.scheduledTasks)
+      .where(eq(schema.scheduledTasks.workspaceId, workspaceId))
+      .orderBy(desc(schema.scheduledTasks.createdAt))
+      .limit(limit);
+    return rows.map(mapScheduledTask);
+  });
 }
 
-export async function deleteScheduledTask(db: Database, taskId: string): Promise<void> {
-  await db.delete(schema.scheduledTasks).where(eq(schema.scheduledTasks.id, taskId));
+export async function deleteScheduledTask(db: Database, workspaceId: string, taskId: string): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.delete(schema.scheduledTasks).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId)));
+  });
 }
 
 export async function createScheduledTaskRun(db: Database, input: {
+  workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
   scheduledAt?: Date | null;
   firedAt?: Date;
 }): Promise<ScheduledTaskRun> {
-  const [row] = await db.insert(schema.scheduledTaskRuns).values({
-    taskId: input.taskId,
-    triggerType: input.triggerType,
-    scheduledAt: input.scheduledAt ?? null,
-    firedAt: input.firedAt ?? new Date(),
-    status: "queued",
-  }).returning();
-  if (!row) {
-    throw new Error("Failed to create scheduled task run");
-  }
-  return mapScheduledTaskRun(row);
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [taskRow] = await scopedDb.select().from(schema.scheduledTasks)
+      .where(and(eq(schema.scheduledTasks.workspaceId, input.workspaceId), eq(schema.scheduledTasks.id, input.taskId)))
+      .limit(1);
+    if (!taskRow) {
+      throw new Error(`Scheduled task not found: ${input.taskId}`);
+    }
+    const [row] = await scopedDb.insert(schema.scheduledTaskRuns).values({
+      accountId: taskRow.accountId,
+      workspaceId: taskRow.workspaceId,
+      taskId: input.taskId,
+      triggerType: input.triggerType,
+      scheduledAt: input.scheduledAt ?? null,
+      firedAt: input.firedAt ?? new Date(),
+      status: "queued",
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create scheduled task run");
+    }
+    return mapScheduledTaskRun(row);
+  });
 }
 
-export async function updateScheduledTaskRun(db: Database, runId: string, input: Partial<{
+export async function updateScheduledTaskRun(db: Database, workspaceId: string, runId: string, input: Partial<{
   status: ScheduledTaskRunStatus;
   sessionId: string | null;
   triggerEventId: string | null;
   error: string | null;
 }>): Promise<ScheduledTaskRun> {
-  const [row] = await db.update(schema.scheduledTaskRuns).set({
-    ...(input.status !== undefined ? { status: input.status } : {}),
-    ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
-    ...(input.triggerEventId !== undefined ? { triggerEventId: input.triggerEventId } : {}),
-    ...(input.error !== undefined ? { error: input.error } : {}),
-    updatedAt: new Date(),
-  }).where(eq(schema.scheduledTaskRuns.id, runId)).returning();
-  if (!row) {
-    throw new Error(`Scheduled task run not found: ${runId}`);
-  }
-  return mapScheduledTaskRun(row);
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.scheduledTaskRuns).set({
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+      ...(input.triggerEventId !== undefined ? { triggerEventId: input.triggerEventId } : {}),
+      ...(input.error !== undefined ? { error: input.error } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.scheduledTaskRuns.workspaceId, workspaceId), eq(schema.scheduledTaskRuns.id, runId))).returning();
+    if (!row) {
+      throw new Error(`Scheduled task run not found: ${runId}`);
+    }
+    return mapScheduledTaskRun(row);
+  });
 }
 
-export async function listScheduledTaskRuns(db: Database, taskId: string, limit = 100): Promise<ScheduledTaskRun[]> {
-  const rows = await db.select().from(schema.scheduledTaskRuns)
-    .where(eq(schema.scheduledTaskRuns.taskId, taskId))
-    .orderBy(desc(schema.scheduledTaskRuns.createdAt))
-    .limit(limit);
-  return rows.map(mapScheduledTaskRun);
+export async function listScheduledTaskRuns(db: Database, workspaceId: string, taskId: string, limit = 100): Promise<ScheduledTaskRun[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.scheduledTaskRuns)
+      .where(and(eq(schema.scheduledTaskRuns.workspaceId, workspaceId), eq(schema.scheduledTaskRuns.taskId, taskId)))
+      .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+      .limit(limit);
+    return rows.map(mapScheduledTaskRun);
+  });
 }
 
 export async function createSession(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
   initialMessage: string;
   resources: ResourceRef[];
   tools?: ToolRef[];
@@ -312,120 +1047,145 @@ export async function createSession(db: Database, input: {
   model: string;
   sandboxBackend: SandboxBackend;
 }): Promise<Session> {
-  const [row] = await db.insert(schema.sessions).values({
-    initialMessage: input.initialMessage,
-    resources: input.resources,
-    tools: input.tools ?? [],
-    metadata: input.metadata,
-    model: input.model,
-    sandboxBackend: input.sandboxBackend,
-    status: "queued",
-  }).returning();
-  if (!row) {
-    throw new Error("Failed to create session");
-  }
-  return mapSession(row);
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessions).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      resources: input.resources,
+      tools: input.tools ?? [],
+      metadata: input.metadata,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      status: "queued",
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create session");
+    }
+    return mapSession(row);
+  });
 }
 
-export async function getSession(db: Database, sessionId: string): Promise<Session | null> {
-  const [row] = await db.select().from(schema.sessions).where(eq(schema.sessions.id, sessionId)).limit(1);
-  return row ? mapSession(row) : null;
+export async function getSession(db: Database, workspaceId: string, sessionId: string): Promise<Session | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).limit(1);
+    return row ? mapSession(row) : null;
+  });
 }
 
-export async function requireSession(db: Database, sessionId: string): Promise<Session> {
-  const session = await getSession(db, sessionId);
+export async function requireSession(db: Database, workspaceId: string, sessionId: string): Promise<Session> {
+  const session = await getSession(db, workspaceId, sessionId);
   if (!session) {
     throw new Error(`Session not found: ${sessionId}`);
   }
   return session;
 }
 
-export async function listSessionEvents(db: Database, sessionId: string, after = 0, limit = 500): Promise<SessionEvent[]> {
-  const rows = await db.select().from(schema.sessionEvents)
-    .where(and(eq(schema.sessionEvents.sessionId, sessionId), gt(schema.sessionEvents.sequence, after)))
-    .orderBy(asc(schema.sessionEvents.sequence))
-    .limit(limit);
-  return rows.map(mapEvent);
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, after = 0, limit = 500): Promise<SessionEvent[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sessionEvents)
+      .where(and(eq(schema.sessionEvents.workspaceId, workspaceId), eq(schema.sessionEvents.sessionId, sessionId), gt(schema.sessionEvents.sequence, after)))
+      .orderBy(asc(schema.sessionEvents.sequence))
+      .limit(limit);
+    return rows.map(mapEvent);
+  });
 }
 
-export async function getSessionEvent(db: Database, eventId: string): Promise<SessionEvent | null> {
-  const [row] = await db.select().from(schema.sessionEvents).where(eq(schema.sessionEvents.id, eventId)).limit(1);
-  return row ? mapEvent(row) : null;
+export async function getSessionEvent(db: Database, workspaceId: string, eventId: string): Promise<SessionEvent | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessionEvents).where(and(eq(schema.sessionEvents.workspaceId, workspaceId), eq(schema.sessionEvents.id, eventId))).limit(1);
+    return row ? mapEvent(row) : null;
+  });
 }
 
-export async function getLatestRunState(db: Database, sessionId: string): Promise<{
+export async function getLatestRunState(db: Database, workspaceId: string, sessionId: string): Promise<{
   id: string;
   serializedRunState: string;
   pendingApprovals: unknown[];
 } | null> {
-  const [row] = await db.select().from(schema.agentRunStates)
-    .where(eq(schema.agentRunStates.sessionId, sessionId))
-    .orderBy(desc(schema.agentRunStates.createdAt))
-    .limit(1);
-  return row ? {
-    id: row.id,
-    serializedRunState: row.serializedRunState,
-    pendingApprovals: row.pendingApprovals,
-  } : null;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.agentRunStates)
+      .where(and(eq(schema.agentRunStates.workspaceId, workspaceId), eq(schema.agentRunStates.sessionId, sessionId)))
+      .orderBy(desc(schema.agentRunStates.createdAt))
+      .limit(1);
+    return row ? {
+      id: row.id,
+      serializedRunState: row.serializedRunState,
+      pendingApprovals: row.pendingApprovals,
+    } : null;
+  });
 }
 
 export async function saveRunState(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
   sessionId: string;
   turnId?: string | null;
   serializedRunState: string;
   pendingApprovals: unknown[];
 }): Promise<void> {
-  const [{ maxVersion } = { maxVersion: 0 }] = await db.select({
-    maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
-  }).from(schema.agentRunStates).where(eq(schema.agentRunStates.sessionId, input.sessionId));
-  await db.insert(schema.agentRunStates).values({
-    sessionId: input.sessionId,
-    turnId: input.turnId ?? null,
-    stateVersion: Number(maxVersion) + 1,
-    serializedRunState: input.serializedRunState,
-    pendingApprovals: input.pendingApprovals,
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [{ maxVersion } = { maxVersion: 0 }] = await scopedDb.select({
+      maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+    }).from(schema.agentRunStates).where(and(eq(schema.agentRunStates.workspaceId, input.workspaceId), eq(schema.agentRunStates.sessionId, input.sessionId)));
+    await scopedDb.insert(schema.agentRunStates).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      stateVersion: Number(maxVersion) + 1,
+      serializedRunState: input.serializedRunState,
+      pendingApprovals: input.pendingApprovals,
+    });
   });
 }
 
 export async function createTurn(db: Database, input: {
+  workspaceId: string;
   sessionId: string;
   triggerEventId: string;
   temporalWorkflowId: string;
 }): Promise<string> {
-  const session = await requireSession(db, input.sessionId);
-  const trigger = await getSessionEvent(db, input.triggerEventId);
-  const position = await nextTurnPosition(db, input.sessionId);
-  const [row] = await db.insert(schema.sessionTurns).values({
-    sessionId: input.sessionId,
-    triggerEventId: input.triggerEventId,
-    temporalWorkflowId: input.temporalWorkflowId,
-    status: "running",
-    source: "user",
-    position,
-    prompt: promptFromTrigger(trigger?.payload) ?? session.initialMessage,
-    resources: resourcesFromTrigger(trigger?.payload) ?? session.resources,
-    tools: toolsFromTrigger(trigger?.payload) ?? session.tools,
-    model: session.model,
-    reasoningEffort: reasoningEffortFromSession(session),
-    sandboxBackend: session.sandboxBackend,
-    metadata: {},
-    startedAt: new Date(),
-  }).returning({ id: schema.sessionTurns.id });
-  if (!row) {
-    throw new Error("Failed to create turn");
-  }
-  await db.update(schema.sessions).set({
-    activeTurnId: row.id,
-    status: "running",
-    updatedAt: new Date(),
-  }).where(eq(schema.sessions.id, input.sessionId));
-  return row.id;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const session = await requireSession(scopedDb, input.workspaceId, input.sessionId);
+    const trigger = await getSessionEvent(scopedDb, input.workspaceId, input.triggerEventId);
+    const position = await nextTurnPosition(scopedDb, input.workspaceId, input.sessionId);
+    const [row] = await scopedDb.insert(schema.sessionTurns).values({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: input.sessionId,
+      triggerEventId: input.triggerEventId,
+      temporalWorkflowId: input.temporalWorkflowId,
+      status: "running",
+      source: "user",
+      position,
+      prompt: promptFromTrigger(trigger?.payload) ?? session.initialMessage,
+      resources: resourcesFromTrigger(trigger?.payload) ?? session.resources,
+      tools: toolsFromTrigger(trigger?.payload) ?? session.tools,
+      model: session.model,
+      reasoningEffort: reasoningEffortFromSession(session),
+      sandboxBackend: session.sandboxBackend,
+      metadata: {},
+      startedAt: new Date(),
+    }).returning({ id: schema.sessionTurns.id });
+    if (!row) {
+      throw new Error("Failed to create turn");
+    }
+    await scopedDb.update(schema.sessions).set({
+      activeTurnId: row.id,
+      status: "running",
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.sessionId)));
+    return row.id;
+  });
 }
 
 export async function enqueueSessionTurn(db: Database, input: EnqueueSessionTurnInput): Promise<SessionTurn> {
-  return await db.transaction(async (tx) => {
-    const position = await nextTurnPosition(tx, input.sessionId);
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const position = await nextTurnPosition(tx as unknown as Database, input.workspaceId, input.sessionId);
     const [row] = await tx.insert(schema.sessionTurns).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       triggerEventId: input.triggerEventId,
       temporalWorkflowId: input.temporalWorkflowId,
@@ -444,14 +1204,14 @@ export async function enqueueSessionTurn(db: Database, input: EnqueueSessionTurn
       throw new Error("Failed to enqueue session turn");
     }
     return mapSessionTurn(row);
-  });
+  }));
 }
 
-export async function claimNextQueuedTurn(db: Database, sessionId: string, workflowId: string): Promise<SessionTurn | null> {
-  return await db.transaction(async (tx) => {
+export async function claimNextQueuedTurn(db: Database, workspaceId: string, sessionId: string, workflowId: string): Promise<SessionTurn | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
     const rows = await tx.execute(sql<{ id: string }>`
       select id from session_turns
-      where session_id = ${sessionId} and status = 'queued'
+      where workspace_id = ${workspaceId} and session_id = ${sessionId} and status = 'queued'
       order by position asc, created_at asc, id asc
       for update skip locked
       limit 1
@@ -465,7 +1225,7 @@ export async function claimNextQueuedTurn(db: Database, sessionId: string, workf
       temporalWorkflowId: workflowId,
       startedAt: new Date(),
       updatedAt: new Date(),
-    }).where(eq(schema.sessionTurns.id, id)).returning();
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, id))).returning();
     if (!row) {
       throw new Error(`Session turn not found: ${id}`);
     }
@@ -473,80 +1233,94 @@ export async function claimNextQueuedTurn(db: Database, sessionId: string, workf
       status: "running",
       activeTurnId: row.id,
       updatedAt: new Date(),
-    }).where(eq(schema.sessions.id, sessionId));
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+    return mapSessionTurn(row);
+  }));
+}
+
+export async function setSessionStatus(db: Database, workspaceId: string, sessionId: string, status: SessionStatus, activeTurnId?: string | null): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessions).set({
+      status,
+      activeTurnId: activeTurnId === undefined ? undefined : activeTurnId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
+export async function setTemporalWorkflowId(db: Database, workspaceId: string, sessionId: string, workflowId: string): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessions).set({
+      temporalWorkflowId: workflowId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
+export async function finishTurn(db: Database, workspaceId: string, turnId: string, status: SessionStatus | SessionTurnStatus): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessionTurns).set({
+      status: turnStatusForFinish(status),
+      finishedAt: status === "requires_action" ? undefined : new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)));
+  });
+}
+
+export async function getSessionTurn(db: Database, workspaceId: string, turnId: string): Promise<SessionTurn | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessionTurns).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId))).limit(1);
+    return row ? mapSessionTurn(row) : null;
+  });
+}
+
+export async function listSessionTurns(db: Database, workspaceId: string, sessionId: string, limit = 100): Promise<SessionTurn[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sessionTurns)
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId)))
+      .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
+      .limit(limit);
+    return rows.map(mapSessionTurn);
+  });
+}
+
+export async function updateQueuedSessionTurn(db: Database, workspaceId: string, turnId: string, input: UpdateQueuedSessionTurnInput): Promise<SessionTurn> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sessionTurns).set({
+      ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+      ...(input.resources !== undefined ? { resources: input.resources } : {}),
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
+      ...(input.sandboxBackend !== undefined ? { sandboxBackend: input.sandboxBackend } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
+    if (!row) {
+      throw new Error(`Queued session turn not found: ${turnId}`);
+    }
     return mapSessionTurn(row);
   });
 }
 
-export async function setSessionStatus(db: Database, sessionId: string, status: SessionStatus, activeTurnId?: string | null): Promise<void> {
-  await db.update(schema.sessions).set({
-    status,
-    activeTurnId: activeTurnId === undefined ? undefined : activeTurnId,
-    updatedAt: new Date(),
-  }).where(eq(schema.sessions.id, sessionId));
+export async function cancelQueuedSessionTurn(db: Database, workspaceId: string, turnId: string): Promise<SessionTurn> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sessionTurns).set({
+      status: "cancelled",
+      finishedAt: new Date(),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
+    if (!row) {
+      throw new Error(`Queued session turn not found: ${turnId}`);
+    }
+    return mapSessionTurn(row);
+  });
 }
 
-export async function setTemporalWorkflowId(db: Database, sessionId: string, workflowId: string): Promise<void> {
-  await db.update(schema.sessions).set({
-    temporalWorkflowId: workflowId,
-    updatedAt: new Date(),
-  }).where(eq(schema.sessions.id, sessionId));
-}
-
-export async function finishTurn(db: Database, turnId: string, status: SessionStatus | SessionTurnStatus): Promise<void> {
-  await db.update(schema.sessionTurns).set({
-    status: turnStatusForFinish(status),
-    finishedAt: status === "requires_action" ? undefined : new Date(),
-    updatedAt: new Date(),
-  }).where(eq(schema.sessionTurns.id, turnId));
-}
-
-export async function getSessionTurn(db: Database, turnId: string): Promise<SessionTurn | null> {
-  const [row] = await db.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)).limit(1);
-  return row ? mapSessionTurn(row) : null;
-}
-
-export async function listSessionTurns(db: Database, sessionId: string, limit = 100): Promise<SessionTurn[]> {
-  const rows = await db.select().from(schema.sessionTurns)
-    .where(eq(schema.sessionTurns.sessionId, sessionId))
-    .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
-    .limit(limit);
-  return rows.map(mapSessionTurn);
-}
-
-export async function updateQueuedSessionTurn(db: Database, turnId: string, input: UpdateQueuedSessionTurnInput): Promise<SessionTurn> {
-  const [row] = await db.update(schema.sessionTurns).set({
-    ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
-    ...(input.resources !== undefined ? { resources: input.resources } : {}),
-    ...(input.tools !== undefined ? { tools: input.tools } : {}),
-    ...(input.model !== undefined ? { model: input.model } : {}),
-    ...(input.reasoningEffort !== undefined ? { reasoningEffort: input.reasoningEffort } : {}),
-    ...(input.sandboxBackend !== undefined ? { sandboxBackend: input.sandboxBackend } : {}),
-    ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-    updatedAt: new Date(),
-  }).where(and(eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
-  if (!row) {
-    throw new Error(`Queued session turn not found: ${turnId}`);
-  }
-  return mapSessionTurn(row);
-}
-
-export async function cancelQueuedSessionTurn(db: Database, turnId: string): Promise<SessionTurn> {
-  const [row] = await db.update(schema.sessionTurns).set({
-    status: "cancelled",
-    finishedAt: new Date(),
-    updatedAt: new Date(),
-  }).where(and(eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "queued"))).returning();
-  if (!row) {
-    throw new Error(`Queued session turn not found: ${turnId}`);
-  }
-  return mapSessionTurn(row);
-}
-
-export async function reorderQueuedSessionTurns(db: Database, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
-  return await db.transaction(async (tx) => {
+export async function reorderQueuedSessionTurns(db: Database, workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
     const rows = await tx.select().from(schema.sessionTurns)
-      .where(and(eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued"), inArray(schema.sessionTurns.id, turnIds)));
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued"), inArray(schema.sessionTurns.id, turnIds)));
     if (rows.length !== turnIds.length) {
       throw new Error("All reordered turns must be queued turns in the session");
     }
@@ -556,27 +1330,31 @@ export async function reorderQueuedSessionTurns(db: Database, sessionId: string,
       await tx.update(schema.sessionTurns).set({
         position: index,
         updatedAt: new Date(),
-      }).where(eq(schema.sessionTurns.id, turnId));
+      }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId)));
     }
     const updated = await tx.select().from(schema.sessionTurns)
-      .where(and(eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued")))
+      .where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId), eq(schema.sessionTurns.status, "queued")))
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
     return updated.map(mapSessionTurn);
-  });
+  }));
 }
 
-export async function appendSessionEvents(db: Database, sessionId: string, inputs: AppendEventInput[]): Promise<SessionEvent[]> {
+export async function appendSessionEvents(db: Database, workspaceId: string, sessionId: string, inputs: AppendEventInput[]): Promise<SessionEvent[]> {
   if (inputs.length === 0) {
     return [];
   }
-  return await db.transaction(async (tx) => {
-    const locked = await tx.execute(sql<{ last_sequence: number }>`select last_sequence from sessions where id = ${sessionId} for update`);
-    const row = locked[0];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
     if (!row) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    let sequence = Number(row.last_sequence);
+    let sequence = row.lastSequence;
     const values = inputs.map((input) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
       sessionId,
       sequence: ++sequence,
       type: input.type,
@@ -588,12 +1366,12 @@ export async function appendSessionEvents(db: Database, sessionId: string, input
       occurredAt: input.occurredAt ?? new Date(),
     }));
     const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() }).where(eq(schema.sessions.id, sessionId));
+    await tx.update(schema.sessions).set({ lastSequence: sequence, updatedAt: new Date() }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
     return inserted.map(mapEvent);
-  });
+  }));
 }
 
-export async function appendSessionEventsAndUpdateSession(db: Database, sessionId: string, inputs: AppendEventInput[], update: {
+export async function appendSessionEventsAndUpdateSession(db: Database, workspaceId: string, sessionId: string, inputs: AppendEventInput[], update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
   model?: string;
@@ -604,15 +1382,19 @@ export async function appendSessionEventsAndUpdateSession(db: Database, sessionI
   if (inputs.length === 0) {
     return [];
   }
-  return await db.transaction(async (tx) => {
-    const locked = await tx.execute(sql<{ last_sequence: number }>`select last_sequence from sessions where id = ${sessionId} for update`);
-    const row = locked[0];
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .for("update")
+      .limit(1);
     if (!row) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    let sequence = Number(row.last_sequence);
+    let sequence = row.lastSequence;
     const now = new Date();
     const values = inputs.map((input) => ({
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
       sessionId,
       sequence: ++sequence,
       type: input.type,
@@ -633,12 +1415,12 @@ export async function appendSessionEventsAndUpdateSession(db: Database, sessionI
       ...(update.status !== undefined ? { status: update.status } : {}),
       ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
       updatedAt: now,
-    }).where(eq(schema.sessions.id, sessionId));
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
     return inserted.map(mapEvent);
-  });
+  }));
 }
 
-export async function appendSessionEventsWithLockedSessionUpdate(db: Database, sessionId: string, build: (session: Session) => {
+export async function appendSessionEventsWithLockedSessionUpdate(db: Database, workspaceId: string, sessionId: string, build: (session: Session) => {
   events: AppendEventInput[];
   update?: {
     resources?: ResourceRef[];
@@ -649,8 +1431,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, s
     activeTurnId?: string | null;
   };
 }): Promise<SessionEvent[]> {
-  return await db.transaction(async (tx) => {
-    const [sessionRow] = await tx.select().from(schema.sessions).where(eq(schema.sessions.id, sessionId)).for("update").limit(1);
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [sessionRow] = await tx.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).for("update").limit(1);
     if (!sessionRow) {
       throw new Error(`Session not found: ${sessionId}`);
     }
@@ -661,6 +1443,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, s
     let sequence = sessionRow.lastSequence;
     const now = new Date();
     const values = built.events.map((input) => ({
+      accountId: sessionRow.accountId,
+      workspaceId: sessionRow.workspaceId,
       sessionId,
       sequence: ++sequence,
       type: input.type,
@@ -682,18 +1466,20 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, s
       ...(update.status !== undefined ? { status: update.status } : {}),
       ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
       updatedAt: now,
-    }).where(eq(schema.sessions.id, sessionId));
+    }).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
     return inserted.map(mapEvent);
-  });
+  }));
 }
 
-export function sessionSubject(sessionId: string): string {
-  return `sessions.${sessionId}.events`;
+export function sessionSubject(workspaceId: string, sessionId: string): string {
+  return `workspaces.${workspaceId}.sessions.${sessionId}.events`;
 }
 
 function mapSession(row: typeof schema.sessions.$inferSelect): Session {
   return {
     id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
     initialMessage: row.initialMessage,
     resources: row.resources as ResourceRef[],
@@ -712,6 +1498,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
 function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
   return {
     id: row.id,
+    workspaceId: row.workspaceId,
     sessionId: row.sessionId,
     sequence: row.sequence,
     type: row.type as SessionEventType,
@@ -725,6 +1512,7 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
 function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {
   return {
     id: row.id,
+    workspaceId: row.workspaceId,
     sessionId: row.sessionId,
     triggerEventId: row.triggerEventId,
     temporalWorkflowId: row.temporalWorkflowId,
@@ -745,10 +1533,10 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
   };
 }
 
-async function nextTurnPosition(db: Database, sessionId: string): Promise<number> {
+async function nextTurnPosition(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   const [{ maxPosition } = { maxPosition: 0 }] = await db.select({
     maxPosition: sql<number>`coalesce(max(${schema.sessionTurns.position}), 0)`,
-  }).from(schema.sessionTurns).where(eq(schema.sessionTurns.sessionId, sessionId));
+  }).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.sessionId, sessionId)));
   return Number(maxPosition) + 1;
 }
 
@@ -796,6 +1584,7 @@ function reasoningEffortFromSession(session: Session): ReasoningEffort {
 function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
   return {
     id: row.id,
+    workspaceId: row.workspaceId,
     status: row.status as FileStatus,
     filename: row.filename,
     safeFilename: row.safeFilename,
@@ -812,6 +1601,8 @@ function mapFile(row: typeof schema.files.$inferSelect): FileAsset {
 function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): ScheduledTask {
   return {
     id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
     name: row.name,
     status: row.status as ScheduledTaskStatus,
     schedule: row.schedule as ScheduledTaskScheduleSpec,
@@ -829,6 +1620,8 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
 function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect): ScheduledTaskRun {
   return {
     id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
     taskId: row.taskId,
     status: row.status as ScheduledTaskRunStatus,
     triggerType: row.triggerType as ScheduledTaskTriggerType,
@@ -839,5 +1632,77 @@ function mapScheduledTaskRun(row: typeof schema.scheduledTaskRuns.$inferSelect):
     error: row.error,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapAccount(row: typeof schema.managedAccounts.$inferSelect): ManagedAccount {
+  return {
+    id: row.id,
+    name: row.name,
+    externalSource: row.externalSource,
+    externalId: row.externalId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    name: row.name,
+    slug: row.slug,
+    externalSource: row.externalSource,
+    externalId: row.externalId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    prefix: row.prefix,
+    permissions: row.permissions as Permission[],
+    expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
+    revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
+    lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapGitHubInstallation(row: typeof schema.githubInstallations.$inferSelect): GitHubInstallation {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    installationId: row.installationId,
+    accountLogin: row.accountLogin,
+    accountType: row.accountType,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapUsageEvent(row: typeof schema.usageEvents.$inferSelect): UsageEvent {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    accountId: row.accountId,
+    subjectId: row.subjectId,
+    eventType: row.eventType as UsageEvent["eventType"],
+    quantity: row.quantity,
+    unit: row.unit,
+    sourceResourceType: row.sourceResourceType,
+    sourceResourceId: row.sourceResourceId,
+    idempotencyKey: row.idempotencyKey,
+    occurredAt: row.occurredAt.toISOString(),
+    recordedAt: row.recordedAt.toISOString(),
+    exportedToBillingAt: row.exportedToBillingAt ? row.exportedToBillingAt.toISOString() : null,
+    billingProviderEventId: row.billingProviderEventId,
   };
 }

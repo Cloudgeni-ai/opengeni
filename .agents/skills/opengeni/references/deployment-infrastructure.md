@@ -73,10 +73,11 @@ When planning a deployment, make these choices explicitly from current source:
 - Files: provider-native object storage where possible, with browser-upload CORS for the deployed origin.
 - Execution: real model provider credentials and a real sandbox backend unless the goal is smoke only.
 - Edge: ingress, TLS, auth boundary, metrics exposure, tracing/logging, and secret delivery.
+- Product posture: `access.mode` (`local`, `configured`, `managed`), `billing.mode`, `entitlements.mode`, and `usageLimits.mode`. Keep this orthogonal to cloud profile names such as `azure-managed`.
 
 ## Verification Meaning
 
-Passing typecheck, unit tests, Helm rendering, and Terraform validation only proves static correctness. A deployment is operational only after conformance verifies health, auth boundary, session creation/run, event replay, SSE reconnect, scheduled-task dispatch, object storage upload/download, and the selected sandbox/model path for the intended configuration.
+Passing typecheck, unit tests, Helm rendering, and Terraform validation only proves static correctness. A deployment is operational only after conformance verifies health, access boundary, workspace discovery, workspace-scoped session creation/run, event replay, SSE reconnect, scheduled-task dispatch, object storage upload/download, managed auth/API key behavior when applicable, billing/credit behavior when applicable, and the selected sandbox/model path for the intended configuration.
 
 Deterministic test workers and fixed responses are infrastructure smoke tools, not proof that real model-provider credentials, real sandbox backends, or production tool execution are configured.
 
@@ -92,9 +93,12 @@ cleanup, or docs contradict current source.
 
 ## Security Boundaries
 
-- Ingress-enabled deployments require either shared-key auth or an external gateway.
-- The shared-key boundary is deliberately simple: browser clients keep the key client-side, API requests use bearer or `x-opengeni-access-key`, public client config stays secret-free, health can stay public, and metrics are protected by default.
-- First-party MCP access follows the same boundary when auth is enabled.
+- Ingress-enabled deployments require an explicit product access mode and, when selected, a deployment edge boundary.
+- The deployment shared-key boundary is deliberately simple and uses `x-opengeni-access-key`. It is not Better Auth, not an API key, and not the tenant model.
+- Product API keys and delegated product tokens use `Authorization: Bearer`.
+- First-party MCP access is workspace-scoped at `/v1/workspaces/:workspaceId/mcp` and follows the same access grant model as the REST routes.
+- Managed billing uses local Stripe mirrors, prepaid credit ledger entries, usage events, and local limit checks. Core operational routes should not import Stripe.
+- RLS confidence requires testing policies through a non-owner database role with transaction-local workspace/account settings. Do not claim RLS from app-level checks alone.
 - Prefer workload identity, IRSA/EKS Pod Identity, managed identity, or secret-manager delivery over static cloud keys.
 - Object-storage CORS must allow the deployed browser origin for signed direct uploads; use exact HTTPS origins for long-lived deployments.
 - Keep cloud account identifiers, generated credentials, kubeconfigs, Terraform state/plans, filled tfvars, and private endpoints outside the public repository.
