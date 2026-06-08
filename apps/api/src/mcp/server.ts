@@ -188,8 +188,7 @@ function repositoryWithScheduledTaskResource(repository: GitHubRepository): GitH
       uri,
       ref: repository.defaultBranch,
       mountPath: repositoryMountPath(uri),
-      githubInstallationId: repository.installationId,
-      githubRepositoryId: repository.id,
+      ...(repository.private ? { githubInstallationId: repository.installationId, githubRepositoryId: repository.id } : {}),
     },
   };
 }

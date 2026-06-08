@@ -3281,12 +3281,14 @@ function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], sel
       ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
       repositoryId: repo.id,
       installationId: repo.installationId,
+      private: repo.private,
     })),
     ...manualRepos.map((repo) => ({
       url: repo.url.trim(),
       ref: repo.ref.trim(),
       repositoryId: null,
       installationId: null,
+      private: false,
     })),
   ].filter((repo) => repo.url.length > 0);
   const mountPaths = new Set<string>();
@@ -3305,26 +3307,28 @@ function buildResources(manualRepos: RepoDraft[], repos: GitHubRepository[], sel
       uri: `https://${parsed.host}/${parsed.repo}.git`,
       ref: repo.ref,
       mountPath,
-      ...(repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
-      ...(repo.installationId ? { githubInstallationId: repo.installationId } : {}),
+      ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
+      ...(repo.private && repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
   });
 }
 
-function gitHubRepositoryResource(repo: GitHubRepository, ref: string): Extract<ResourceRef, { kind: "repository" }> {
+export function gitHubRepositoryResource(repo: GitHubRepository, ref: string): Extract<ResourceRef, { kind: "repository" }> {
   const parsed = normalizeRepositoryUrl(repo.cloneUrl);
   return {
     kind: "repository",
     uri: `https://${parsed.host}/${parsed.repo}.git`,
     ref: ref.trim() || repo.defaultBranch,
     mountPath: `repos/${parsed.repo}`,
-    githubRepositoryId: repo.id,
-    githubInstallationId: repo.installationId,
+    ...(repo.private ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId } : {}),
   };
 }
 
 function isRepositoryResourceForGitHubRepo(resource: Extract<ResourceRef, { kind: "repository" }>, repo: GitHubRepository): boolean {
-  return resource.githubRepositoryId === repo.id && resource.githubInstallationId === repo.installationId;
+  if (repo.private) {
+    return resource.githubRepositoryId === repo.id && resource.githubInstallationId === repo.installationId;
+  }
+  return sameRepositoryUri(resource, gitHubRepositoryResource(repo, repo.defaultBranch).uri);
 }
 
 function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {

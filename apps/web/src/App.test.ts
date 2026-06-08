@@ -4,10 +4,11 @@ import {
   applySessionStatusEvents,
   buildTools,
   formStateFromScheduledTask,
+  gitHubRepositoryResource,
   projectConversation,
   scheduleFromFormState,
 } from "./App";
-import type { ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
+import type { GitHubRepository, ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
 
 describe("projectConversation", () => {
   test("keeps assistant messages and activity groups in event order", () => {
@@ -213,6 +214,28 @@ describe("scheduled task form helpers", () => {
   });
 });
 
+describe("GitHub repository resources", () => {
+  test("uses normal git resources for public GitHub App repositories", () => {
+    expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
+      kind: "repository",
+      uri: "https://github.com/example/public.git",
+      ref: "main",
+      mountPath: "repos/example/public",
+    });
+  });
+
+  test("keeps installation metadata for private GitHub App repositories", () => {
+    expect(gitHubRepositoryResource(githubRepository({ private: true }), "main")).toEqual({
+      kind: "repository",
+      uri: "https://github.com/example/public.git",
+      ref: "main",
+      mountPath: "repos/example/public",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    });
+  });
+});
+
 describe("applySessionStatusEvents", () => {
   test("trusts terminal status events without requiring a session refetch", () => {
     const next = applySessionStatusEvents(session(), [
@@ -278,6 +301,22 @@ function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<Sched
     metadata: {},
     createdAt: "2026-05-12T00:00:00.000Z",
     updatedAt: "2026-05-12T00:00:00.000Z",
+    ...patch,
+  };
+}
+
+function githubRepository(patch: Partial<GitHubRepository> = {}): GitHubRepository {
+  return {
+    id: 456,
+    installationId: 123,
+    fullName: "example/public",
+    name: "public",
+    private: false,
+    htmlUrl: "https://github.com/example/public",
+    cloneUrl: "https://github.com/example/public.git",
+    defaultBranch: "main",
+    accountLogin: "example",
+    accountType: "Organization",
     ...patch,
   };
 }
