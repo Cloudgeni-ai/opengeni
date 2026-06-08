@@ -263,9 +263,8 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       if (!publish || !turnId || !turnStartedPublished) {
         throw error;
       }
-      const message = error instanceof Error ? error.message : String(error);
       await publish([
-        { type: "turn.failed", payload: { error: message } },
+        { type: "turn.failed", payload: agentRunFailurePayload(error) },
         { type: "session.status.changed", payload: { status: "failed" } },
       ], true);
       await finishTurn(db, input.workspaceId, turnId, "failed");
@@ -292,6 +291,25 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       }
     }
   };
+}
+
+export function agentRunFailurePayload(error: unknown): { error: string; code?: string; retryable?: boolean; detail?: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = typeof error === "object" && error !== null && "status" in error
+    ? Number((error as { status?: unknown }).status)
+    : undefined;
+  const code = typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+  if (status === 429 || code === "rate_limit_exceeded" || /(?:too many requests|rate.?limit|\b429\b)/i.test(message)) {
+    return {
+      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+      code: "provider_rate_limited",
+      retryable: true,
+      ...(message && message !== "Too Many Requests" ? { detail: message } : {}),
+    };
+  }
+  return { error: message };
 }
 
 async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], accountId: string, workspaceId: string): Promise<void> {

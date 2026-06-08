@@ -95,7 +95,7 @@ const SettingsSchema = z.object({
   openaiModel: z.string().default("gpt-5.5"),
   openaiAllowedModels: z.string().default("gpt-5.5,gpt-5.4,gpt-5.4-mini"),
   modelPricingJson: z.string().default("{}"),
-  openaiReasoningEffort: ReasoningEffort.default("high"),
+  openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   azureOpenaiBaseUrl: z.string().optional(),

@@ -190,7 +190,7 @@ export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.5");
-  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("high");
+  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
@@ -533,7 +533,7 @@ export function App() {
             <div className="hidden min-w-0 sm:block">
               <div className="truncate text-sm font-medium">{session.initialMessage}</div>
               <div className="truncate text-xs text-[color:var(--color-fg-subtle)]">
-                {session.model} · {String(session.metadata.reasoningEffort ?? "high")} · {session.sandboxBackend}
+                {session.model} · {String(session.metadata.reasoningEffort ?? "low")} · {session.sandboxBackend}
               </div>
             </div>
           </div>
@@ -2471,7 +2471,7 @@ function SessionInspector(props: {
 
               <InspectorSection title="Runtime">
                 <InfoRow label="Model" value={props.session.model} />
-                <InfoRow label="Effort" value={String(props.session.metadata.reasoningEffort ?? "high")} />
+                <InfoRow label="Effort" value={String(props.session.metadata.reasoningEffort ?? "low")} />
                 <InfoRow label="Sandbox" value={props.session.sandboxBackend} />
                 <InfoRow label="Stream" value={<ConnectionPill state={props.connectionState} />} />
               </InspectorSection>
