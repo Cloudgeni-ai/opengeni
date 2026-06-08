@@ -4,6 +4,7 @@ import {
   ClientConfig,
   ClientSessionEvent,
   CreateDocumentBaseRequest,
+  CreateCheckoutRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
@@ -82,6 +83,12 @@ describe("contracts", () => {
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
+  });
+
+  test("accepts checkout requests that use the caller default account", () => {
+    const payload = CreateCheckoutRequest.parse({ packageId: "topup_25" });
+    expect(payload.packageId).toBe("topup_25");
+    expect(payload.accountId).toBeUndefined();
   });
 
   test("accepts structured scheduled task definitions", () => {

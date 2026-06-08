@@ -303,7 +303,7 @@ export const BillingBalance = z.object({
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
 export const CreateCheckoutRequest = z.object({
-  accountId: z.string().uuid(),
+  accountId: z.string().uuid().optional(),
   packageId: z.enum(["topup_25", "topup_100", "topup_500", "topup_1000"]),
   successUrl: z.string().url().optional(),
   cancelUrl: z.string().url().optional(),
