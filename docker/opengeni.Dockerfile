@@ -27,7 +27,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
-RUN chown -R bun:bun /app
 USER bun
 
 FROM base AS api
