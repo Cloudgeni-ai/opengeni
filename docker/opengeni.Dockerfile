@@ -20,7 +20,7 @@ COPY packages/testing/package.json packages/testing/package.json
 
 RUN bun install --frozen-lockfile
 
-COPY . .
+COPY --chown=bun:bun . .
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git openssh-client \
