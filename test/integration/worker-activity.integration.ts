@@ -534,7 +534,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("runs Modal repository clone hook for repository-backed sessions before SDK sandbox use", async () => {
+  test("runs repository clone hook for Modal repository-backed sessions before SDK sandbox use", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "read repo",

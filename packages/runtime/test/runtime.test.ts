@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, modalRepositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runModalRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -455,7 +455,7 @@ describe("runtime event normalization", () => {
     });
   });
 
-  test("keeps GitHub App repository resources as git repo manifest entries", () => {
+  test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
     const manifest = buildManifest(testSettings(), [{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
@@ -463,13 +463,9 @@ describe("runtime event normalization", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     }]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
-      type: "git_repo",
-      host: "github.com",
-      repo: "acme/private",
-      ref: "main",
-    });
+    expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
     const serialized = JSON.stringify(manifest);
+    expect(serialized).not.toContain("git_repo");
     expect(serialized).not.toContain("githubInstallationId");
     expect(serialized).not.toContain("githubRepositoryId");
     expect(serialized).not.toContain("x-access-token");
@@ -492,8 +488,8 @@ describe("runtime event normalization", () => {
     expect(serialized).not.toContain("x-access-token");
   });
 
-  test("clones Modal repository resources inside the sandbox without embedding credentials", () => {
-    const command = modalRepositoryCloneCommand([{
+  test("clones repository resources inside the sandbox without embedding credentials", () => {
+    const command = repositoryCloneCommand([{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
       ref: "main",
@@ -512,10 +508,10 @@ describe("runtime event normalization", () => {
     expect(command).not.toContain("GH_TOKEN=");
   });
 
-  test("runs Modal repository clone hook as a sandbox lifecycle hook", async () => {
+  test("runs repository clone hook as a sandbox lifecycle hook", async () => {
     const calls: Array<Record<string, unknown>> = [];
     const events: string[] = [];
-    await runModalRepositoryCloneHook({
+    await runRepositoryCloneHook({
       execCommand: async (args: Record<string, unknown>) => {
         calls.push(args);
         return { status: 0, output: "" };

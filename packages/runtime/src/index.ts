@@ -947,7 +947,7 @@ export function buildManifest(
       const host = url.hostname.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
       const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
-      if (settings.sandboxBackend === "modal") {
+      if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
       }
@@ -1267,23 +1267,26 @@ function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLif
 }
 
 function sandboxRepositoryCloneHooks(settings: Settings, resources: ResourceRef[]): SandboxLifecycleHook[] {
-  if (settings.sandboxBackend !== "modal") {
-    return [];
-  }
-  const repositories = resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
+  const repositories = resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => (
+    resource.kind === "repository" && repositoryUsesSandboxClone(settings, resource)
+  ));
   if (repositories.length === 0) {
     return [];
   }
   return [{
-    id: "modal-repository-clone",
+    id: "repository-clone",
     phase: "beforeAgentStart",
     run: async (session, context) => {
-      await runModalRepositoryCloneHook(session, repositories, context);
+      await runRepositoryCloneHook(session, repositories, context);
     },
   }];
 }
 
-export function modalRepositoryCloneCommand(resources: Extract<ResourceRef, { kind: "repository" }>[]): string {
+function repositoryUsesSandboxClone(settings: Settings, resource: Extract<ResourceRef, { kind: "repository" }>): boolean {
+  return settings.sandboxBackend === "modal" || Boolean(resource.githubInstallationId && resource.githubRepositoryId);
+}
+
+export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "repository" }>[]): string {
   const commands = [
     "set -eu",
     "export HOME=\"${HOME:-/workspace}\"",
@@ -1354,15 +1357,15 @@ export function modalRepositoryCloneCommand(resources: Extract<ResourceRef, { ki
   return commands.join("\n");
 }
 
-export async function runModalRepositoryCloneHook(
+export async function runRepositoryCloneHook(
   session: SandboxSessionLike,
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
 ): Promise<void> {
-  const payload = { name: "modal-repository-clone", repositoryCount: resources.length };
+  const payload = { name: "repository-clone", repositoryCount: resources.length };
   await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
   try {
-    const command = modalRepositoryCloneCommand(resources);
+    const command = repositoryCloneCommand(resources);
     if (session.exec) {
       const result = await session.exec({
         cmd: command,
@@ -1371,7 +1374,7 @@ export async function runModalRepositoryCloneHook(
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });
-      assertSandboxCommandSucceeded(result, "Modal repository clone hook");
+      assertSandboxCommandSucceeded(result, "Repository clone hook");
     } else if (session.execCommand) {
       const result = await session.execCommand({
         cmd: command,
@@ -1380,7 +1383,7 @@ export async function runModalRepositoryCloneHook(
         yieldTimeMs: 1_000,
         maxOutputTokens: 20_000,
       });
-      assertSandboxCommandSucceeded(result, "Modal repository clone hook");
+      assertSandboxCommandSucceeded(result, "Repository clone hook");
     } else {
       throw new Error("Sandbox session does not support command execution");
     }
