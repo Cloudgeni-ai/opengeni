@@ -292,6 +292,9 @@ export function App() {
         }
         setSession(nextSession);
         setEvents(nextEvents);
+        if (isTerminalSessionStatus(nextSession.status)) {
+          forgetSession(workspaceId, nextSession.id);
+        }
       } catch (error) {
         if (cancelled) {
           return;
@@ -799,6 +802,7 @@ export function App() {
             onReasoningEffortChange={setReasoningEffort}
             onSubmit={submitFollowUp}
             onInterrupt={interruptSession}
+            onNewSession={goHome}
             onApprove={(approvalId) => workspaceId ? void sendApproval(workspaceId, session.id, approvalId, "approve") : undefined}
             onReject={(approvalId) => workspaceId ? void sendApproval(workspaceId, session.id, approvalId, "reject") : undefined}
           />
@@ -1191,6 +1195,10 @@ function isSessionStatus(value: unknown): value is SessionStatus {
     value === "requires_action" ||
     value === "failed" ||
     value === "cancelled";
+}
+
+function isTerminalSessionStatus(value: SessionStatus): boolean {
+  return value === "failed" || value === "cancelled";
 }
 
 function RepositoryContextPicker(props: {
@@ -1979,6 +1987,7 @@ function SessionChatPane(props: {
   onReasoningEffortChange: (effort: IntelligenceEffort) => void;
   onSubmit: (submission: TurnSubmission) => void;
   onInterrupt: () => void;
+  onNewSession: () => void;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }) {
@@ -2092,6 +2101,17 @@ function SessionChatPane(props: {
                 >
                   {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SquareIcon className="size-3.5" />}
                   <span className="text-xs font-medium">Stop</span>
+                </Button>
+              ) : isTerminalSessionStatus(props.session.status) ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={props.onNewSession}
+                  className="h-8 gap-1.5 px-3"
+                >
+                  <PlusIcon className="size-3.5" />
+                  <span className="text-xs font-medium">New</span>
                 </Button>
               ) : undefined
             }
