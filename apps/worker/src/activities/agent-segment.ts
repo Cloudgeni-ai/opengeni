@@ -28,6 +28,7 @@ import {
   mergeToolRefs,
 } from "./common";
 import { sandboxEnvironmentForRun } from "./environment";
+import { withHostGitHubAppRepositoryAuth } from "./github-host-git";
 import { segmentInput } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -135,12 +136,14 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       });
       const runInput = await segmentInput(db, runtime, agent, trigger);
       await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
-      const stream = await runtime.runStream(agent, runInput, runSettings, {
-        sandboxEnvironment,
-        onRuntimeEvent: async (event) => {
-          await publish!([{ type: event.type, payload: event.payload }], true);
-        },
-      });
+      const stream = await withHostGitHubAppRepositoryAuth(sandboxEnvironment, async () =>
+        await runtime.runStream(agent, runInput, runSettings, {
+          sandboxEnvironment,
+          onRuntimeEvent: async (event) => {
+            await publish!([{ type: event.type, payload: event.payload }], true);
+          },
+        }),
+      );
       batcher = createRuntimeBatcher(async (events) => {
         await publish!(events);
       });
