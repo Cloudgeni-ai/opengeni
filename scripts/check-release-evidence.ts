@@ -28,6 +28,7 @@ const mandatoryGateIdsByScope: Record<GateScope, string[]> = {
     "local-check-workspace-billing",
   ],
   preview: [
+    "preview-deployment",
     "preview-managed-smoke",
     "preview-stripe-checkout",
     "preview-conformance",
@@ -281,6 +282,82 @@ function failedJsonEvidence(path: string, gate: EvidenceManifest["gates"][number
   if (gate.id === "production-canary") {
     return productionCanaryEvidenceFailure(parsed, manifest);
   }
+  if (gate.id === "preview-deployment") {
+    return previewDeploymentEvidenceFailure(parsed, manifest);
+  }
+  return null;
+}
+
+function previewDeploymentEvidenceFailure(parsed: unknown, manifest: EvidenceManifest): string | null {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return "preview deployment evidence must be a JSON object";
+  }
+  const record = parsed as Record<string, unknown>;
+  const environment = stringValue(record.environment);
+  if (environment !== "preview-pr" && environment !== "preview-branch") {
+    return `preview deployment environment is ${environment ?? "<missing>"}, expected preview-pr or preview-branch`;
+  }
+  const baseUrl = stringValue(record.baseUrl);
+  if (!baseUrl) {
+    return "preview deployment baseUrl is missing";
+  }
+  try {
+    const parsedUrl = new URL(baseUrl);
+    if (parsedUrl.protocol !== "https:") {
+      return `preview deployment baseUrl must be https, got ${parsedUrl.protocol}`;
+    }
+  } catch (error) {
+    return `preview deployment baseUrl is invalid: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  const gitSha = stringValue(record.gitSha);
+  if (gitSha !== manifest.gitSha) {
+    return `preview deployment gitSha ${gitSha ?? "<missing>"} does not match manifest ${manifest.gitSha}`;
+  }
+  const imageFailure = productionCanaryImageFailure(record.images, manifest.images);
+  if (imageFailure) {
+    return imageFailure.replace("production canary", "preview deployment");
+  }
+  const helm = objectValue(record.helm);
+  if (stringValue(helm.status) !== "deployed") {
+    return `preview deployment helm.status is ${stringValue(helm.status) ?? "<missing>"}, expected deployed`;
+  }
+  const valuesFiles = Array.isArray(helm.valuesFiles) ? helm.valuesFiles.filter((value): value is string => typeof value === "string") : [];
+  if (!valuesFiles.includes("deploy/helm/opengeni/values.preview-managed.example.yaml")) {
+    return "preview deployment did not prove values.preview-managed.example.yaml was applied";
+  }
+  if (!valuesFiles.some((path) => path.endsWith("/helm-values.generated.yaml") || path === "helm-values.generated.yaml")) {
+    return "preview deployment did not prove generated runtime Helm values were applied";
+  }
+  const fixtures = objectValue(record.fixtures);
+  for (const fixture of ["postgres", "temporal", "nats", "minio"]) {
+    if (fixtures[fixture] !== true) {
+      return `preview deployment fixture ${fixture} is not enabled`;
+    }
+  }
+  const deployments = objectValue(record.deployments);
+  for (const component of ["api", "worker", "web"]) {
+    const deployment = objectValue(deployments[component]);
+    const ready = numberValue(deployment.readyReplicas);
+    const replicas = numberValue(deployment.replicas);
+    const image = stringValue(deployment.image);
+    if (!replicas || replicas < 1) {
+      return `preview deployment ${component} replicas is ${replicas ?? "<missing>"}`;
+    }
+    if (!ready || ready < replicas) {
+      return `preview deployment ${component} readyReplicas is ${ready ?? "<missing>"}, expected ${replicas}`;
+    }
+    if (!image || !image.includes("@sha256:")) {
+      return `preview deployment ${component} image is not digest-pinned`;
+    }
+  }
+  const migration = objectValue(record.migration);
+  if (migration.completed !== true) {
+    return "preview deployment migration.completed is not true";
+  }
+  const migrationImage = stringValue(migration.image);
+  if (!migrationImage || !migrationImage.includes("@sha256:")) {
+    return "preview deployment migration image is not digest-pinned";
+  }
   return null;
 }
 
@@ -484,6 +561,14 @@ function isGateScope(value: unknown): value is GateScope {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function requiredNext(values: string[], index: number, flag: string): string {

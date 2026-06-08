@@ -133,6 +133,51 @@ describe("release evidence checker", () => {
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout).gatesChecked).toEqual(["production-canary"]);
   });
+
+  it("fails preview scope when deployment evidence is missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const evidence = join(dir, "conformance.json");
+    writeFileSync(evidence, JSON.stringify({ ok: true, results: [{ id: "health", status: "passed" }] }));
+    const manifest = writeManifest(dir, [{
+      id: "preview-conformance",
+      status: "passed",
+      requiredFor: ["preview"],
+      evidence: [evidence],
+    }]);
+
+    const result = runChecker("--manifest", manifest, "--require", "preview", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("missing mandatory gate preview-deployment");
+  });
+
+  it("passes preview scope with strict deployment evidence and all mandatory preview gates", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-evidence-"));
+    const marker = join(dir, "marker.json");
+    writeFileSync(marker, JSON.stringify({ ok: true }));
+    const previewDeployment = join(dir, "preview-deployment.json");
+    writeFileSync(previewDeployment, JSON.stringify(previewDeploymentEvidence()));
+    const manifest = writeManifest(dir, [
+      gate("preview-deployment", previewDeployment),
+      gate("preview-managed-smoke", marker),
+      gate("preview-stripe-checkout", marker),
+      gate("preview-conformance", marker),
+      gate("preview-usage-ledger", marker),
+      gate("preview-web-console-smoke", marker),
+    ]);
+
+    const result = runChecker("--manifest", manifest, "--require", "preview", "--allow-dirty", "--allow-different-git-sha");
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).gatesChecked).toEqual([
+      "preview-deployment",
+      "preview-managed-smoke",
+      "preview-stripe-checkout",
+      "preview-conformance",
+      "preview-usage-ledger",
+      "preview-web-console-smoke",
+    ]);
+  });
 });
 
 function runChecker(...args: string[]): ReturnType<typeof spawnSync<string>> {
@@ -193,5 +238,53 @@ function productionCanaryEvidence(marker: string) {
       "observability-canary",
       "rollback-readiness",
     ].map((id) => ({ id, status: "passed", evidence: [marker] })),
+  };
+}
+
+function gate(id: string, evidence: string) {
+  return {
+    id,
+    status: "passed",
+    requiredFor: ["preview"],
+    evidence: [evidence],
+  };
+}
+
+function previewDeploymentEvidence() {
+  return {
+    ok: true,
+    environment: "preview-pr",
+    baseUrl: "https://preview-8c27.app.opengeni.ai",
+    gitSha: "4ecb7a7",
+    generatedAt: "2026-06-08T00:00:00.000Z",
+    images: {
+      api: { image: `registry.example/opengeni-api:test@${digest}`, digest },
+      worker: { image: `registry.example/opengeni-worker:test@${digest}`, digest },
+      web: { image: `registry.example/opengeni-web:test@${digest}`, digest },
+    },
+    helm: {
+      releaseName: "opengeni-preview",
+      namespace: "opengeni-preview-pr",
+      status: "deployed",
+      valuesFiles: [
+        "deploy/helm/opengeni/values.preview-managed.example.yaml",
+        ".agent/generated/preview-pr/helm-values.generated.yaml",
+      ],
+    },
+    fixtures: {
+      postgres: true,
+      temporal: true,
+      nats: true,
+      minio: true,
+    },
+    deployments: {
+      api: { replicas: 1, readyReplicas: 1, image: `registry.example/opengeni-api:test@${digest}` },
+      worker: { replicas: 1, readyReplicas: 1, image: `registry.example/opengeni-worker:test@${digest}` },
+      web: { replicas: 1, readyReplicas: 1, image: `registry.example/opengeni-web:test@${digest}` },
+    },
+    migration: {
+      completed: true,
+      image: `registry.example/opengeni-api:test@${digest}`,
+    },
   };
 }
