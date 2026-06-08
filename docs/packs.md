@@ -1,0 +1,124 @@
+# Capability Packs
+
+Capability packs are role-oriented bundles that expand into existing OpenGeni runtime primitives:
+
+- MCP tool selections
+- bundled skills
+- connector requirements
+- optional document-base knowledge
+- scheduled-task templates
+- task metadata
+
+The first pack is `marketing-social-daily-analysis`. It enables a workspace to connect social accounts, attach marketing knowledge bases, and schedule a daily agent run that analyzes recent media performance.
+
+## Architecture
+
+OpenGeni keeps pack execution on the normal session and scheduled-task path. A pack does not create a second runtime. Instead, enabling a pack stores a `pack_installations` row and pack-specific flows create ordinary scheduled tasks with:
+
+- `agentConfig.tools`: first-party MCP servers such as `opengeni` and `docs`
+- `agentConfig.resources`: files or repositories when needed
+- `agentConfig.metadata`: pack ID, template ID, connector IDs, and knowledge IDs
+- `agentConfig.prompt`: role-specific instructions compiled from the pack template
+
+Connectors are durable account records, not secret records. `social_connections.credential_ref` points at an external credential broker or secret store. Raw OAuth tokens should not be stored in Postgres. Provider-specific OAuth brokers and sync workers can populate the same connector and post tables later.
+
+CloudGeni used a similar split: a general integration record, provider-specific detail, and credential services that fetch/refresh secrets behind a provider abstraction. OpenGeni keeps the MVP simpler but preserves the same boundary through `credentialRef`.
+
+## Marketing Social Pack
+
+The pack exposes:
+
+- Pack catalog and installation routes under `/v1/workspaces/:workspaceId/packs`
+- Social connector routes under `/v1/workspaces/:workspaceId/social`
+- OpenGeni MCP tools:
+  - `social_connections_list`
+  - `social_posts_recent`
+  - `social_daily_analysis_context`
+- Bundled skill: `social-media-marketing`
+- Optional document knowledge through existing document-base routes and the `docs` MCP server
+
+Provider OAuth and API access vary by platform. The pack manifest records official reference URLs for X OAuth 2.0 with PKCE, LinkedIn Community Management APIs, Instagram Graph API, TikTok APIs, and YouTube APIs. Use provider docs as the source of truth for scopes, approval, rate limits, and app review.
+
+## Setup Flow
+
+Enable the pack:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-social-daily-analysis/enable" \
+  -H 'content-type: application/json' \
+  -d '{"metadata":{"enabledBy":"operator"}}'
+```
+
+Register a connected social account. `credentialRef` should reference a secret-manager entry or OAuth broker record:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/social/connections" \
+  -H 'content-type: application/json' \
+  -d '{
+    "provider": "linkedin",
+    "accountHandle": "example-company",
+    "accountName": "Example Company",
+    "externalAccountId": "urn:li:organization:123",
+    "scopes": ["r_organization_social"],
+    "credentialRef": "secret://marketing/linkedin/example-company"
+  }'
+```
+
+Import or sync posts into OpenGeni:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/social/posts" \
+  -H 'content-type: application/json' \
+  -d '{
+    "connectionId": "00000000-0000-0000-0000-000000000000",
+    "externalPostId": "post-123",
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+    "authorHandle": "example-company",
+    "text": "Launch announcement",
+    "publishedAt": "2026-06-06T09:00:00Z",
+    "metrics": { "impressions": 1200, "likes": 48, "comments": 6 }
+  }'
+```
+
+Create the daily scheduled analysis task:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/packs/marketing-social-daily-analysis/scheduled-tasks" \
+  -H 'content-type: application/json' \
+  -d '{
+    "connectionIds": ["00000000-0000-0000-0000-000000000000"],
+    "documentBaseIds": [],
+    "timeZone": "Europe/Oslo",
+    "hour": 9,
+    "minute": 0,
+    "promptInstructions": "Prioritize launch campaign learnings and concrete next actions."
+  }'
+```
+
+The scheduled task runs through Temporal like any other OpenGeni scheduled task. During execution, the agent calls `opengeni__social_daily_analysis_context`, optionally searches document bases through the docs MCP server, and writes a daily report in the session timeline.
+
+## Extension Points
+
+Add new packs by adding a pack manifest with:
+
+- stable `id`, `role`, `category`, and `version`
+- required MCP tools
+- bundled skill name
+- connector definitions and scope metadata
+- knowledge requirements
+- scheduled task templates
+
+Add new connector providers by writing an OAuth/API broker that:
+
+- completes provider auth and stores raw tokens in a secret store
+- creates or updates `social_connections` with a `credentialRef`
+- syncs provider data into `social_posts`
+- exposes richer MCP tools only when the provider needs live calls
+
+Official references used for the first pack:
+
+- X API OAuth 2.0 with PKCE: https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code
+- LinkedIn Community Management APIs: https://learn.microsoft.com/en-us/linkedin/marketing/community-management/community-management-overview
+- Instagram Graph API: https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/
+- TikTok API v2: https://developers.tiktok.com/doc/tiktok-api-v2-introduction/
+- Model Context Protocol transports: https://modelcontextprotocol.io/specification/draft/basic/transports

@@ -278,3 +278,68 @@ export type AuthSession = {
     image?: string | null;
   };
 };
+
+export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
+
+export type CapabilitySource = "built_in" | "configured" | "public_registry" | "manual";
+
+export type CapabilityCatalogItem = {
+  id: string;
+  accountId?: string;
+  workspaceId?: string;
+  kind: CapabilityKind;
+  source: CapabilitySource;
+  name: string;
+  description: string | null;
+  category: string;
+  tags: string[];
+  homepageUrl: string | null;
+  endpointUrl: string | null;
+  installUrl: string | null;
+  authModel: string | null;
+  tools: ToolRef[];
+  runtime: {
+    available: boolean;
+    mcpServerId?: string;
+    transport?: string;
+    notes: string | null;
+  };
+  enabled: boolean;
+  enabledReason: string | null;
+  metadata: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type CapabilityInstallation = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  capabilityId: string;
+  kind: CapabilityKind;
+  status: "active" | "disabled";
+  config: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  enabledAt: string;
+  updatedAt: string;
+};
+
+export type CapabilityCatalogResponse = {
+  items: CapabilityCatalogItem[];
+  installations: CapabilityInstallation[];
+};
+
+export type CreateCapabilityInput = {
+  id?: string;
+  kind: Exclude<CapabilityKind, "pack">;
+  source?: CapabilitySource;
+  name: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  homepageUrl?: string;
+  endpointUrl?: string;
+  installUrl?: string;
+  authModel?: string;
+  metadata?: Record<string, unknown>;
+};

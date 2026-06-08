@@ -16,13 +16,16 @@ import { createManagedAuth } from "./auth/managed-auth";
 import { requireLimit } from "./billing/limits";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
+import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
+import { registerPackRoutes } from "./routes/packs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
+import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
 
 export type {
@@ -40,6 +43,7 @@ export {
   validateGitHubRepositorySelection,
   validateGitHubRepositorySelectionShape,
   validateToolRefs,
+  withDefaultEnabledCapabilityMcpTools,
 } from "./domain/resources";
 export { workflowIdForSession } from "./domain/sessions";
 export { replaySessionEvents, sseSessionStream } from "./http/sse";
@@ -187,6 +191,9 @@ export function createApp(deps: AppDependencies): Hono {
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
+  registerSocialRoutes(app, routeDeps);
+  registerCapabilityRoutes(app, routeDeps);
+  registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
 
@@ -256,6 +263,17 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories$/, label: "/v1/workspaces/:workspaceId/github/repositories" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories\/sync$/, label: "/v1/workspaces/:workspaceId/github/repositories/sync" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/github\/app-manifest$/, label: "/v1/workspaces/:workspaceId/github/app-manifest" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities$/, label: "/v1/workspaces/:workspaceId/capabilities" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/discovery\/mcp-registry$/, label: "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/enable$/, label: "/v1/workspaces/:workspaceId/capabilities/:id/enable" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/disable$/, label: "/v1/workspaces/:workspaceId/capabilities/:id/disable" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/packs$/, label: "/v1/workspaces/:workspaceId/packs" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/, label: "/v1/workspaces/:workspaceId/packs/installations" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/marketing-social-daily-analysis\/scheduled-tasks$/, label: "/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+\/enable$/, label: "/v1/workspaces/:workspaceId/packs/:id/enable" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/, label: "/v1/workspaces/:workspaceId/packs/:id" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/, label: "/v1/workspaces/:workspaceId/social/connections" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/social\/posts$/, label: "/v1/workspaces/:workspaceId/social/posts" },
   { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
   { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
   { pattern: /^\/v1\/github\/install\/callback$/, label: "/v1/github/install/callback" },

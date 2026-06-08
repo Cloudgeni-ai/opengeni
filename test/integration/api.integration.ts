@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionStatus, sumUsageQuantity } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, enableCapabilityInstallation, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionStatus, sumUsageQuantity, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -1023,6 +1023,102 @@ describe("API component integration", () => {
     expect(payload.fileUploads).toEqual({ enabled: false, maxSizeBytes: 5_000_000_000 });
   });
 
+  test("catalog exposes workspace-template API paths and default MCP capability tools", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const context = await defaultAccessContext(app);
+    const capabilityId = `mcp:test-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Route MCP",
+      endpointUrl: "https://example.com/mcp",
+      metadata: { mcpServerId: "cap-route-mcp" },
+    });
+    await enableCapabilityInstallation(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
+    });
+
+    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
+    expect(catalogResponse.status).toBe(200);
+    const catalog = await catalogResponse.json() as { items: Array<{ id: string; metadata: Record<string, unknown>; runtime: { mcpServerId?: string }; enabled: boolean }> };
+    const apiPaths = Object.fromEntries(catalog.items
+      .filter((item) => item.id.startsWith("api:"))
+      .map((item) => [item.id, item.metadata.endpointPath]));
+    expect(apiPaths).toMatchObject({
+      "api:github-app": "/v1/workspaces/{workspaceId}/github/app",
+      "api:documents": "/v1/workspaces/{workspaceId}/document-bases",
+      "api:social": "/v1/workspaces/{workspaceId}/social/connections",
+      "api:scheduled-tasks": "/v1/workspaces/{workspaceId}/scheduled-tasks",
+    });
+    expect(catalog.items.find((item) => item.id === capabilityId)).toMatchObject({
+      enabled: true,
+      runtime: { mcpServerId: "cap-route-mcp" },
+    });
+
+    const omittedTools = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "default tools" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(omittedTools.status).toBe(202);
+    const omittedSession = await omittedTools.json() as { id: string };
+    expect((await requireSession(dbClient.db, workspaceId, omittedSession.id)).tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+
+    const explicitEmptyTools = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "no tools", tools: [] }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(explicitEmptyTools.status).toBe(202);
+    const explicitEmptySession = await explicitEmptyTools.json() as { id: string };
+    expect((await requireSession(dbClient.db, workspaceId, explicitEmptySession.id)).tools).toEqual([]);
+    await dbClient.db.execute(dbSql`
+      update capability_installations
+      set status = 'disabled', updated_at = now()
+      where workspace_id = ${workspaceId} and capability_id = ${capabilityId}
+    `);
+  });
+
+  test("returns 409 when disabling a never-enabled capability", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const capabilityId = `skill:test-${crypto.randomUUID()}`;
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/capabilities"), {
+      method: "POST",
+      body: JSON.stringify({
+        id: capabilityId,
+        kind: "skill",
+        source: "manual",
+        name: "Test Skill",
+        category: "test",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(201);
+
+    const disabled = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/disable`), { method: "POST" });
+    expect(disabled.status).toBe(409);
+    expect(await disabled.text()).toContain("capability is not currently enabled");
+  });
+
   test("enforces shared-key auth on user-facing routes when enabled", async () => {
     const app = createApp({
       settings: testSettings({
@@ -1178,6 +1274,69 @@ describe("API component integration", () => {
       since: startOfUtcMonth(),
     });
     expect(after).toBe(before);
+  });
+
+  test("creates marketing social scheduled tasks from connected accounts only", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: firstPartyMcpSettings(services.databaseUrl),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const suffix = crypto.randomUUID();
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const enabled = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabled.status).toBeLessThan(300);
+
+    const activeResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "linkedin",
+        accountHandle: `active-${suffix}`,
+        accountName: "Active Company",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(activeResponse.status).toBe(201);
+    const activeConnection = await activeResponse.json() as { id: string };
+
+    const disabledResponse = await app.request(workspacePath(workspaceId, "/social/connections"), {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "linkedin",
+        accountHandle: `disabled-${suffix}`,
+        accountName: "Disabled Company",
+        status: "disabled",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disabledResponse.status).toBe(201);
+    const disabledConnection = await disabledResponse.json() as { id: string };
+
+    const created = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/scheduled-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        connectionIds: [],
+        documentBaseIds: [],
+        timeZone: "UTC",
+        hour: 9,
+        minute: 0,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const createdBody = await created.text();
+    expect(created.status, createdBody).toBe(201);
+    const task = JSON.parse(createdBody) as { metadata: Record<string, unknown>; agentConfig: { metadata: Record<string, unknown> } };
+    expect(task.metadata.socialConnectionIds).toEqual([activeConnection.id]);
+    expect(task.agentConfig.metadata.socialConnectionIds).toEqual([activeConnection.id]);
+    expect(task.metadata.socialConnectionIds).not.toContain(disabledConnection.id);
+    expect(workflow.synced).toHaveLength(1);
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
@@ -2237,4 +2396,20 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
 
 function startOfUtcMonth(date = new Date()): Date {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function firstPartyMcpSettings(databaseUrl: string) {
+  return testSettings({
+    databaseUrl,
+    mcpServers: [
+      { id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:8000/v1/mcp", cacheToolsList: true },
+      {
+        id: "docs",
+        name: "Document Search",
+        url: "http://127.0.0.1:8000/v1/mcp/docs",
+        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+        cacheToolsList: false,
+      },
+    ],
+  });
 }

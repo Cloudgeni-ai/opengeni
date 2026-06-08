@@ -688,6 +688,258 @@ export const UpdateScheduledTaskRequest = z.object({
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
+export const CapabilityPackConnectorAuthModel = z.enum([
+  "oauth2_authorization_code_pkce",
+  "oauth2_authorization_code",
+  "api_key",
+  "credential_ref",
+]);
+export type CapabilityPackConnectorAuthModel = z.infer<typeof CapabilityPackConnectorAuthModel>;
+
+export const CapabilityPackConnector = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  category: z.string().min(1),
+  authModel: CapabilityPackConnectorAuthModel,
+  providers: z.array(z.string().min(1)).default([]),
+  scopes: z.array(z.string().min(1)).default([]),
+  required: z.boolean().default(false),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CapabilityPackConnector = z.infer<typeof CapabilityPackConnector>;
+
+export const CapabilityPackKnowledge = z.object({
+  type: z.literal("document_base"),
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().nullable().default(null),
+  required: z.boolean().default(false),
+});
+export type CapabilityPackKnowledge = z.infer<typeof CapabilityPackKnowledge>;
+
+export const CapabilityPackScheduledTaskTemplate = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  defaultSchedule: ScheduledTaskScheduleSpec,
+  defaultRunMode: ScheduledTaskRunMode.default("new_session_per_run"),
+  defaultOverlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
+});
+export type CapabilityPackScheduledTaskTemplate = z.infer<typeof CapabilityPackScheduledTaskTemplate>;
+
+export const CapabilityPack = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string().min(1),
+  role: z.string().min(1),
+  category: z.string().min(1),
+  version: z.string().min(1),
+  tools: z.array(ToolRef).default([]),
+  connectors: z.array(CapabilityPackConnector).default([]),
+  knowledge: z.array(CapabilityPackKnowledge).default([]),
+  scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CapabilityPack = z.infer<typeof CapabilityPack>;
+
+export const PackInstallationStatus = z.enum(["active", "disabled"]);
+export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
+
+export const PackInstallation = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  packId: z.string().min(1),
+  status: PackInstallationStatus,
+  metadata: z.record(z.string(), z.unknown()),
+  enabledAt: z.string(),
+  updatedAt: z.string(),
+});
+export type PackInstallation = z.infer<typeof PackInstallation>;
+
+export const EnablePackRequest = z.object({
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
+
+export const SocialProvider = z.enum([
+  "x",
+  "linkedin",
+  "instagram",
+  "facebook",
+  "tiktok",
+  "youtube",
+  "custom",
+]);
+export type SocialProvider = z.infer<typeof SocialProvider>;
+
+export const SocialConnectionStatus = z.enum(["connected", "needs_reauth", "disabled"]);
+export type SocialConnectionStatus = z.infer<typeof SocialConnectionStatus>;
+
+export const SocialConnection = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  provider: SocialProvider,
+  accountHandle: z.string().min(1),
+  accountName: z.string().nullable(),
+  externalAccountId: z.string().nullable(),
+  status: SocialConnectionStatus,
+  scopes: z.array(z.string()),
+  credentialRef: z.string().nullable(),
+  tokenMetadata: z.record(z.string(), z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SocialConnection = z.infer<typeof SocialConnection>;
+
+export const CreateSocialConnectionRequest = z.object({
+  provider: SocialProvider,
+  accountHandle: z.string().min(1),
+  accountName: z.string().min(1).optional(),
+  externalAccountId: z.string().min(1).optional(),
+  status: SocialConnectionStatus.default("connected"),
+  scopes: z.array(z.string().min(1)).default([]),
+  credentialRef: z.string().min(1).optional(),
+  tokenMetadata: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CreateSocialConnectionRequest = z.infer<typeof CreateSocialConnectionRequest>;
+
+export const SocialPost = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  connectionId: z.string().uuid(),
+  provider: SocialProvider,
+  externalPostId: z.string().nullable(),
+  url: z.string().url().nullable(),
+  authorHandle: z.string().nullable(),
+  text: z.string(),
+  publishedAt: z.string(),
+  metrics: z.record(z.string(), z.number()),
+  raw: z.record(z.string(), z.unknown()),
+  createdAt: z.string(),
+});
+export type SocialPost = z.infer<typeof SocialPost>;
+
+export const CreateSocialPostRequest = z.object({
+  connectionId: z.string().uuid(),
+  externalPostId: z.string().min(1).optional(),
+  url: z.string().url().optional(),
+  authorHandle: z.string().min(1).optional(),
+  text: z.string().min(1),
+  publishedAt: z.string().datetime({ offset: true }),
+  metrics: z.record(z.string(), z.number()).default({}),
+  raw: z.record(z.string(), z.unknown()).default({}),
+});
+export type CreateSocialPostRequest = z.infer<typeof CreateSocialPostRequest>;
+
+export const MarketingDailyAnalysisTaskRequest = z.object({
+  name: z.string().min(1).optional(),
+  connectionIds: z.array(z.string().uuid()).default([]),
+  documentBaseIds: z.array(z.string().uuid()).default([]),
+  timeZone: z.string().min(1).default("UTC"),
+  hour: z.number().int().min(0).max(23).default(9),
+  minute: z.number().int().min(0).max(59).default(0),
+  promptInstructions: z.string().min(1).optional(),
+  status: ScheduledTaskStatus.default("active"),
+  runMode: ScheduledTaskRunMode.default("new_session_per_run"),
+  overlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
+});
+export type MarketingDailyAnalysisTaskRequest = z.infer<typeof MarketingDailyAnalysisTaskRequest>;
+
+export const CapabilityKind = z.enum(["pack", "mcp", "api", "skill", "plugin"]);
+export type CapabilityKind = z.infer<typeof CapabilityKind>;
+
+export const CapabilitySource = z.enum(["built_in", "configured", "public_registry", "manual"]);
+export type CapabilitySource = z.infer<typeof CapabilitySource>;
+
+export const CapabilityInstallationStatus = z.enum(["active", "disabled"]);
+export type CapabilityInstallationStatus = z.infer<typeof CapabilityInstallationStatus>;
+
+export const CapabilityRuntime = z.object({
+  available: z.boolean().default(false),
+  mcpServerId: z.string().min(1).optional(),
+  transport: z.string().min(1).optional(),
+  notes: z.string().nullable().default(null),
+});
+export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
+
+export const CapabilityCatalogItem = z.object({
+  id: z.string().min(1),
+  accountId: z.string().uuid().optional(),
+  workspaceId: z.string().uuid().optional(),
+  kind: CapabilityKind,
+  source: CapabilitySource,
+  name: z.string().min(1),
+  description: z.string().nullable().default(null),
+  category: z.string().min(1).default("custom"),
+  tags: z.array(z.string().min(1)).default([]),
+  homepageUrl: z.string().url().nullable().default(null),
+  endpointUrl: z.string().url().nullable().default(null),
+  installUrl: z.string().url().nullable().default(null),
+  authModel: z.string().min(1).nullable().default(null),
+  tools: z.array(ToolRef).default([]),
+  runtime: CapabilityRuntime.default({ available: false, notes: null }),
+  enabled: z.boolean().default(false),
+  enabledReason: z.string().nullable().default(null),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  createdAt: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
+
+export const CapabilityInstallation = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  capabilityId: z.string().min(1),
+  kind: CapabilityKind,
+  status: CapabilityInstallationStatus,
+  config: z.record(z.string(), z.unknown()),
+  metadata: z.record(z.string(), z.unknown()),
+  enabledAt: z.string(),
+  updatedAt: z.string(),
+});
+export type CapabilityInstallation = z.infer<typeof CapabilityInstallation>;
+
+export const CreateCapabilityCatalogItemRequest = z.object({
+  id: z.string().min(1).optional(),
+  kind: CapabilityKind.exclude(["pack"]),
+  source: CapabilitySource.default("manual"),
+  name: z.string().min(1),
+  description: z.string().min(1).optional(),
+  category: z.string().min(1).default("custom"),
+  tags: z.array(z.string().min(1)).default([]),
+  homepageUrl: z.string().url().optional(),
+  endpointUrl: z.string().url().optional(),
+  installUrl: z.string().url().optional(),
+  authModel: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
+
+export const EnableCapabilityRequest = z.object({
+  config: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
+
+export const CapabilityCatalogResponse = z.object({
+  items: z.array(CapabilityCatalogItem),
+  installations: z.array(CapabilityInstallation),
+});
+export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;
+
+export const DiscoverMcpCapabilitiesResponse = z.object({
+  items: z.array(CapabilityCatalogItem),
+  source: z.literal("official_mcp_registry"),
+  sourceUrl: z.string().url(),
+});
+export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabilitiesResponse>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),

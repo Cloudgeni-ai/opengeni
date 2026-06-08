@@ -1,9 +1,12 @@
 import type {
+  CapabilityCatalogItem,
+  CapabilityCatalogResponse,
   ClientConfig,
   AccessContext,
   AuthSession,
   ApiKey,
   BillingBalance,
+  CreateCapabilityInput,
   CreateFileUploadResponse,
   DocumentBase,
   DocumentSearchResult,
@@ -165,7 +168,7 @@ export function createSession(input: {
     body: JSON.stringify({
       initialMessage: input.initialMessage,
       resources: input.resources,
-      tools: input.tools ?? [],
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       clientEventId: crypto.randomUUID(),
@@ -207,6 +210,46 @@ function reloadIfStaleDeployment(config: ClientConfig): void {
 
 export function fetchAccessContext(): Promise<AccessContext> {
   return request<AccessContext>("/v1/access/me");
+}
+
+export function fetchCapabilities(workspaceId: string): Promise<CapabilityCatalogResponse> {
+  return request<CapabilityCatalogResponse>(workspacePath(workspaceId, "/capabilities"));
+}
+
+export function createCapability(workspaceId: string, input: CreateCapabilityInput): Promise<CapabilityCatalogItem> {
+  return request<CapabilityCatalogItem>(workspacePath(workspaceId, "/capabilities"), {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function enableCapability(workspaceId: string, capabilityId: string, input: { config?: Record<string, unknown>; metadata?: Record<string, unknown> } = {}): Promise<unknown> {
+  return request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+    method: "POST",
+    body: JSON.stringify({
+      config: input.config ?? {},
+      metadata: input.metadata ?? {},
+    }),
+  });
+}
+
+export function disableCapability(workspaceId: string, capabilityId: string): Promise<unknown> {
+  return request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/disable`), {
+    method: "POST",
+  });
+}
+
+export async function discoverMcpRegistryCapabilities(workspaceId: string, input: { query?: string; limit?: number } = {}): Promise<CapabilityCatalogItem[]> {
+  const params = new URLSearchParams();
+  if (input.query?.trim()) {
+    params.set("query", input.query.trim());
+  }
+  if (input.limit) {
+    params.set("limit", String(input.limit));
+  }
+  const suffix = params.toString() ? `?${params}` : "";
+  const response = await request<{ items: CapabilityCatalogItem[] }>(workspacePath(workspaceId, `/capabilities/discovery/mcp-registry${suffix}`));
+  return response.items;
 }
 
 export function fetchWorkspaces(): Promise<import("./types").Workspace[]> {

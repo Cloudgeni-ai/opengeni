@@ -9,10 +9,12 @@ import {
   createSession,
   createTurn,
   dbSql,
+  enableCapabilityInstallation,
   finishTurn,
   findActiveApiKeyByHash,
   getLatestRunState,
   getSession,
+  listEnabledMcpCapabilityServers,
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEvents,
@@ -21,6 +23,7 @@ import {
   updateScheduledTask,
   updateScheduledTaskRun,
   withRlsContext,
+  upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
 import { expectContiguousSequences, startTestServices, type TestServices } from "@opengeni/testing";
@@ -245,7 +248,131 @@ describe("DB integration", () => {
       await appDbClient.close();
     }
   });
+
+  test("RLS policies isolate capability, pack, and social rows for a non-owner app role", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grantA = await testGrant(dbClient.db);
+      const grantB = await testGrant(dbClient.db);
+      await seedCapabilityPackAndSocialRows(dbClient.db, grantB);
+
+      for (const table of newCapabilityTables) {
+        const hidden = await appDbClient.db.execute(dbSql<{ count: string }>`select count(*)::text as count from ${dbSql.raw(table)}`);
+        expect(Number(hidden[0]?.count ?? 0)).toBe(0);
+      }
+
+      await withRlsContext(appDbClient.db, grantA, async (db) => {
+        await seedCapabilityPackAndSocialRows(db, grantA);
+      });
+
+      for (const table of newCapabilityTables) {
+        const visible = await withRlsContext(appDbClient.db, grantA, async (db) =>
+          await db.execute(dbSql<{ workspace_id: string }>`select workspace_id::text from ${dbSql.raw(table)} order by workspace_id asc`)
+        );
+        expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
+      }
+
+      await expect(withRlsContext(appDbClient.db, grantA, async (db) => {
+        await db.execute(dbSql`
+          insert into pack_installations (account_id, workspace_id, pack_id)
+          values (${grantA.accountId}, ${grantB.workspaceId}, ${`mismatched-${crypto.randomUUID()}`})
+        `);
+      })).rejects.toThrow();
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("exports only runtime-ready enabled MCP capability servers", async () => {
+    const grant = await testGrant(dbClient.db);
+    const otherGrant = await testGrant(dbClient.db);
+    const capabilityId = `mcp:test-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Test MCP",
+      endpointUrl: "https://example.com/mcp",
+      metadata: { mcpServerId: "cap-test-ready" },
+    });
+    await enableCapabilityInstallation(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: {},
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db, grant.workspaceId)).some((server) => server.capabilityId === capabilityId)).toBe(false);
+
+    await enableCapabilityInstallation(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db, grant.workspaceId)).some((server) => server.capabilityId === capabilityId)).toBe(true);
+    expect((await listEnabledMcpCapabilityServers(dbClient.db, otherGrant.workspaceId)).some((server) => server.capabilityId === capabilityId)).toBe(false);
+
+    const gatedCapabilityId = `mcp:gated-${crypto.randomUUID()}`;
+    await upsertCapabilityCatalogItem(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: gatedCapabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Gated MCP",
+      endpointUrl: "https://secure.example/mcp",
+      authModel: "credential_ref",
+      metadata: { mcpServerId: "cap-test-gated" },
+    });
+    await enableCapabilityInstallation(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      capabilityId: gatedCapabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
+    });
+    expect((await listEnabledMcpCapabilityServers(dbClient.db, grant.workspaceId)).some((server) => server.capabilityId === gatedCapabilityId)).toBe(false);
+  });
 });
+
+const newCapabilityTables = [
+  "pack_installations",
+  "capability_catalog_items",
+  "capability_installations",
+  "social_connections",
+  "social_posts",
+];
+
+async function seedCapabilityPackAndSocialRows(db: ReturnType<typeof createDb>["db"], grant: AccessGrant): Promise<void> {
+  const suffix = crypto.randomUUID();
+  const capabilityId = `mcp:rls-${suffix}`;
+  const connectionId = crypto.randomUUID();
+  await db.execute(dbSql`
+    insert into pack_installations (account_id, workspace_id, pack_id)
+    values (${grant.accountId}, ${grant.workspaceId}, ${`pack-${suffix}`})
+  `);
+  await db.execute(dbSql`
+    insert into capability_catalog_items (id, account_id, workspace_id, kind, source, name, endpoint_url)
+    values (${capabilityId}, ${grant.accountId}, ${grant.workspaceId}, 'mcp', 'manual', ${`RLS MCP ${suffix}`}, 'https://example.com/mcp')
+  `);
+  await db.execute(dbSql`
+    insert into capability_installations (account_id, workspace_id, capability_id, kind)
+    values (${grant.accountId}, ${grant.workspaceId}, ${capabilityId}, 'mcp')
+  `);
+  await db.execute(dbSql`
+    insert into social_connections (id, account_id, workspace_id, provider, account_handle)
+    values (${connectionId}, ${grant.accountId}, ${grant.workspaceId}, 'linkedin', ${`handle-${suffix}`})
+  `);
+  await db.execute(dbSql`
+    insert into social_posts (account_id, workspace_id, connection_id, provider, external_post_id, text, published_at)
+    values (${grant.accountId}, ${grant.workspaceId}, ${connectionId}, 'linkedin', ${`post-${suffix}`}, 'RLS post', now())
+  `);
+}
 
 async function testGrant(db: ReturnType<typeof createDb>["db"]): Promise<AccessGrant> {
   const id = crypto.randomUUID();

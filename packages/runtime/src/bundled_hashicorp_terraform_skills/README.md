@@ -10,6 +10,7 @@ plus repo-local infrastructure skills, so the OpenAI Agents SDK `Skills` capabil
 Repo-local skills:
 
 - `checkov` — guidance for running Checkov in the sandbox shell, summarizing findings, fixing selected issues, rerunning validation, and preparing a PR.
+- `social-media-marketing` — guidance for scheduled social media analysis using OpenGeni social connector MCP tools and optional document-base knowledge.
 
 - `UPSTREAM_GIT_SHA` — commit the tree was copied from
 - `LICENSE` — upstream MPL-2.0

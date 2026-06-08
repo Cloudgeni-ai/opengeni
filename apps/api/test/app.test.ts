@@ -1,10 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
-import { allowedCorsOrigin, httpStatusForError, normalizeResources, replaySessionEvents, routeLabel, validateGitHubRepositorySelectionShape, workflowIdForSession } from "../src/app";
+import {
+  allowedCorsOrigin,
+  httpStatusForError,
+  normalizeResources,
+  replaySessionEvents,
+  routeLabel,
+  validateGitHubRepositorySelectionShape,
+  withDefaultEnabledCapabilityMcpTools,
+  workflowIdForSession,
+} from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import { stripeCheckoutSessionCreateParams } from "../src/routes/billing";
-import type { SessionEvent } from "@opengeni/contracts";
+import { discoverMcpRegistryCapabilities, validateMcpCapabilityConnection } from "../src/domain/capabilities";
+import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/contracts";
 
 describe("API helpers", () => {
   test("normalizes repository resources into sandbox mount paths", () => {
@@ -35,6 +45,23 @@ describe("API helpers", () => {
 
   test("uses stable workflow ids for sessions", () => {
     expect(workflowIdForSession("abc")).toBe("session-abc");
+  });
+
+  test("adds enabled capability MCPs to default session tools", () => {
+    expect(withDefaultEnabledCapabilityMcpTools(
+      [{ kind: "mcp", id: "opengeni" }],
+      { mcpServers: [{ id: "opengeni", url: "https://example.com/mcp", cacheToolsList: false }] },
+      {
+        mcpServers: [
+          { id: "opengeni", url: "https://example.com/mcp", cacheToolsList: false },
+          { id: "cap-4fetch", url: "https://example.com/4fetch", cacheToolsList: false },
+          { id: "cap-4fetch", url: "https://example.com/4fetch", cacheToolsList: false },
+        ],
+      },
+    )).toEqual([
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "cap-4fetch" },
+    ]);
   });
 
   test("maps scheduled task schedules into Temporal specs", () => {
@@ -111,6 +138,14 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents/document-1/reindex`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId/reindex");
     expect(routeLabel(`/v1/workspaces/${workspace}/scheduled-tasks/task-1/runs`)).toBe("/v1/workspaces/:workspaceId/scheduled-tasks/:id/runs");
+    expect(routeLabel(`/v1/workspaces/${workspace}/capabilities`)).toBe("/v1/workspaces/:workspaceId/capabilities");
+    expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/discovery/mcp-registry`)).toBe("/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry");
+    expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/mcp%3Aexample/enable`)).toBe("/v1/workspaces/:workspaceId/capabilities/:id/enable");
+    expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/mcp%3Aexample/disable`)).toBe("/v1/workspaces/:workspaceId/capabilities/:id/disable");
+    expect(routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/enable`)).toBe("/v1/workspaces/:workspaceId/packs/:id/enable");
+    expect(routeLabel(`/v1/workspaces/${workspace}/packs/marketing-social-daily-analysis/scheduled-tasks`)).toBe("/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks");
+    expect(routeLabel(`/v1/workspaces/${workspace}/social/connections`)).toBe("/v1/workspaces/:workspaceId/social/connections");
+    expect(routeLabel(`/v1/workspaces/${workspace}/social/posts`)).toBe("/v1/workspaces/:workspaceId/social/posts");
     expect(routeLabel(legacyRoute("sessions", "session-1", "events", "stream"))).toBe("/v1/unknown");
     expect(routeLabel("/v1/unregistered/resource-1")).toBe("/v1/unknown");
   });
@@ -167,6 +202,123 @@ describe("API helpers", () => {
     })).toThrow("successUrl must use the OpenGeni public origin");
   });
 
+  test("discovers public MCP registry servers with bounded latest-version search", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: URL) => {
+      requests.push(url.toString());
+      return new Response(JSON.stringify({
+        servers: [{
+          server: {
+            name: "io.github.example/github-mcp",
+            title: "GitHub MCP",
+            description: "GitHub repository automation",
+            version: "1.2.3",
+            remotes: [{ type: "streamable-http", url: "https://example.com/mcp" }],
+            repository: { url: "https://github.com/example/github-mcp" },
+          },
+          _meta: {
+            "io.modelcontextprotocol.registry/official": {
+              status: "active",
+              isLatest: true,
+              updatedAt: "2026-06-07T00:00:00.000Z",
+            },
+          },
+        }],
+        metadata: { count: 1 },
+      }), { status: 200 });
+    };
+
+    const items = await discoverMcpRegistryCapabilities({ query: "github", limit: 5, fetchImpl });
+    const requestedUrl = new URL(requests[0]!);
+
+    expect(requests).toHaveLength(1);
+    expect(requestedUrl.pathname).toBe("/v0.1/servers");
+    expect(requestedUrl.searchParams.get("search")).toBe("github");
+    expect(requestedUrl.searchParams.get("version")).toBe("latest");
+    expect(requestedUrl.searchParams.get("limit")).toBe("5");
+    expect(items[0]).toMatchObject({
+      kind: "mcp",
+      source: "public_registry",
+      name: "GitHub MCP",
+      endpointUrl: "https://example.com/mcp",
+      runtime: {
+        available: true,
+        transport: "streamable-http",
+      },
+    });
+  });
+
+  test("marks registry MCPs with required headers as credential-gated", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({
+      servers: [{
+        server: {
+          name: "ai.example/secure-mcp",
+          title: "Secure MCP",
+          description: "Requires a bearer token",
+          version: "1.0.0",
+          remotes: [{
+            type: "streamable-http",
+            url: "https://secure.example/mcp",
+            headers: [{ name: "Authorization", isRequired: true, isSecret: true }],
+          }],
+        },
+      }],
+      metadata: { count: 1 },
+    }), { status: 200 });
+
+    const [item] = await discoverMcpRegistryCapabilities({ query: "secure", limit: 5, fetchImpl });
+
+    expect(item).toMatchObject({
+      name: "Secure MCP",
+      authModel: "credential_ref",
+      runtime: {
+        available: false,
+        notes: "This MCP declares required remote headers. Capability credential injection is not implemented yet.",
+      },
+      metadata: {
+        requiredHeaders: ["Authorization"],
+      },
+    });
+    expect(item?.tools).toEqual([]);
+  });
+
+  test("records MCP connectivity metadata after a successful enable probe", async () => {
+    const metadata = await validateMcpCapabilityConnection(capabilityItem({
+      id: "mcp:test",
+      kind: "mcp",
+      name: "Test MCP",
+      endpointUrl: "https://example.com/mcp",
+      runtime: { available: true, mcpServerId: "cap-test", transport: "streamable-http", notes: null },
+    }), async (input) => {
+      expect(input).toMatchObject({
+        id: "cap-test",
+        name: "Test MCP",
+        url: "https://example.com/mcp",
+        timeoutMs: 15000,
+      });
+      return { toolCount: 3 };
+    });
+
+    expect(metadata.mcpConnectivity).toMatchObject({
+      status: "ok",
+      toolCount: 3,
+    });
+  });
+
+  test("rejects MCP enablement when the server cannot initialize", async () => {
+    const item = capabilityItem({
+      id: "mcp:broken",
+      kind: "mcp",
+      name: "Broken MCP",
+      endpointUrl: "https://broken.example/mcp",
+      runtime: { available: true, mcpServerId: "cap-broken", transport: "streamable-http", notes: null },
+    });
+
+    await expect(validateMcpCapabilityConnection(item, async () => {
+      throw new Error("TLS handshake failure");
+    })).rejects.toThrow("could not be enabled");
+  });
+
   test("replays SSE history across all pages", async () => {
     const events = Array.from({ length: 1005 }, (_, index) => ({
       id: `event-${index + 1}`,
@@ -203,4 +355,23 @@ describe("API helpers", () => {
 
 function legacyRoute(...segments: string[]): string {
   return ["", "v1", ...segments].join("/");
+}
+
+function capabilityItem(patch: Partial<CapabilityCatalogItem> & Pick<CapabilityCatalogItem, "id" | "kind" | "name">): CapabilityCatalogItem {
+  return {
+    source: "manual",
+    description: null,
+    category: "custom",
+    tags: [],
+    homepageUrl: null,
+    endpointUrl: null,
+    installUrl: null,
+    authModel: null,
+    tools: [],
+    runtime: { available: false, notes: null },
+    enabled: false,
+    enabledReason: null,
+    metadata: {},
+    ...patch,
+  };
 }

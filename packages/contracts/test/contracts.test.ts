@@ -1,13 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
+  CapabilityCatalogResponse,
   ClientConfig,
   ClientSessionEvent,
+  CreateCapabilityCatalogItemRequest,
+  CreateSocialConnectionRequest,
+  CreateSocialPostRequest,
   CreateDocumentBaseRequest,
   CreateCheckoutRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
+  EnablePackRequest,
+  MarketingDailyAnalysisTaskRequest,
   ResourceRef,
   SessionBusMessage,
 } from "../src";
@@ -107,6 +113,61 @@ describe("contracts", () => {
     });
     expect(payload.schedule.type).toBe("calendar");
     expect(payload.agentConfig.tools[0]?.id).toBe("opengeni");
+  });
+
+  test("accepts pack enable and marketing daily analysis defaults", () => {
+    expect(EnablePackRequest.parse({})).toEqual({ metadata: {} });
+    const payload = MarketingDailyAnalysisTaskRequest.parse({
+      connectionIds: ["00000000-0000-4000-8000-000000000020"],
+      timeZone: "Europe/Oslo",
+    });
+    expect(payload.hour).toBe(9);
+    expect(payload.minute).toBe(0);
+    expect(payload.runMode).toBe("new_session_per_run");
+    expect(payload.overlapPolicy).toBe("skip");
+  });
+
+  test("accepts social connector and post payloads", () => {
+    const connection = CreateSocialConnectionRequest.parse({
+      provider: "linkedin",
+      accountHandle: "example-company",
+      credentialRef: "secret://marketing/linkedin/example-company",
+    });
+    expect(connection.status).toBe("connected");
+    expect(connection.scopes).toEqual([]);
+
+    const post = CreateSocialPostRequest.parse({
+      connectionId: "00000000-0000-4000-8000-000000000020",
+      text: "Launch post",
+      publishedAt: "2026-06-06T09:00:00Z",
+      metrics: { impressions: 1200, likes: 42 },
+    });
+    expect(post.metrics.likes).toBe(42);
+  });
+
+  test("accepts capability catalog entries and enable defaults", () => {
+    const create = CreateCapabilityCatalogItemRequest.parse({
+      kind: "mcp",
+      source: "public_registry",
+      name: "Example MCP",
+      endpointUrl: "https://example.com/mcp",
+    });
+    expect(create.category).toBe("custom");
+    expect(create.tags).toEqual([]);
+
+    const catalog = CapabilityCatalogResponse.parse({
+      items: [{
+        id: "mcp:example",
+        kind: "mcp",
+        source: "public_registry",
+        name: "Example MCP",
+        endpointUrl: "https://example.com/mcp",
+        runtime: { available: true, mcpServerId: "example", transport: "streamable-http" },
+      }],
+      installations: [],
+    });
+    expect(catalog.items[0]?.runtime.mcpServerId).toBe("example");
+    expect(catalog.items[0]?.enabled).toBe(false);
   });
 
   test("rejects empty user message command", () => {

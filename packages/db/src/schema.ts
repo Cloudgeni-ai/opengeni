@@ -363,3 +363,98 @@ export const auditEvents = pgTable("audit_events", {
   accountCreated: index("audit_events_account_created_idx").on(table.accountId, table.occurredAt),
   workspaceCreated: index("audit_events_workspace_created_idx").on(table.workspaceId, table.occurredAt),
 }));
+
+export const packInstallations = pgTable("pack_installations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  packId: text("pack_id").notNull(),
+  status: text("status").notNull().default("active"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspacePack: uniqueIndex("pack_installations_workspace_pack_idx").on(table.workspaceId, table.packId),
+  status: index("pack_installations_workspace_status_idx").on(table.workspaceId, table.status),
+}));
+
+export const capabilityCatalogItems = pgTable("capability_catalog_items", {
+  id: text("id").notNull(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  source: text("source").notNull().default("manual"),
+  name: text("name").notNull(),
+  description: text("description"),
+  category: text("category").notNull().default("custom"),
+  tags: jsonb("tags").$type<string[]>().notNull().default([]),
+  homepageUrl: text("homepage_url"),
+  endpointUrl: text("endpoint_url"),
+  installUrl: text("install_url"),
+  authModel: text("auth_model"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceCapability: uniqueIndex("capability_catalog_items_workspace_capability_idx").on(table.workspaceId, table.id),
+  kind: index("capability_catalog_items_workspace_kind_idx").on(table.workspaceId, table.kind),
+  category: index("capability_catalog_items_workspace_category_idx").on(table.workspaceId, table.category),
+  source: index("capability_catalog_items_workspace_source_idx").on(table.workspaceId, table.source),
+}));
+
+export const capabilityInstallations = pgTable("capability_installations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  capabilityId: text("capability_id").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull().default("active"),
+  config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  enabledAt: timestamp("enabled_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceCapability: uniqueIndex("capability_installations_workspace_capability_idx").on(table.workspaceId, table.capabilityId),
+  kind: index("capability_installations_workspace_kind_idx").on(table.workspaceId, table.kind),
+  status: index("capability_installations_workspace_status_idx").on(table.workspaceId, table.status),
+}));
+
+export const socialConnections = pgTable("social_connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  accountHandle: text("account_handle").notNull(),
+  accountName: text("account_name"),
+  externalAccountId: text("external_account_id"),
+  status: text("status").notNull().default("connected"),
+  scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+  credentialRef: text("credential_ref"),
+  tokenMetadata: jsonb("token_metadata").$type<Record<string, unknown>>().notNull().default({}),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceProviderHandle: uniqueIndex("social_connections_workspace_provider_handle_idx").on(table.workspaceId, table.provider, table.accountHandle),
+  providerStatus: index("social_connections_workspace_provider_status_idx").on(table.workspaceId, table.provider, table.status),
+}));
+
+export const socialPosts = pgTable("social_posts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  connectionId: uuid("connection_id").notNull().references(() => socialConnections.id, { onDelete: "cascade" }),
+  provider: text("provider").notNull(),
+  externalPostId: text("external_post_id"),
+  url: text("url"),
+  authorHandle: text("author_handle"),
+  text: text("text").notNull(),
+  publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
+  metrics: jsonb("metrics").$type<Record<string, number>>().notNull().default({}),
+  raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  connectionExternalPost: uniqueIndex("social_posts_workspace_connection_external_post_idx").on(table.workspaceId, table.connectionId, table.externalPostId),
+  connectionPublished: index("social_posts_workspace_connection_published_idx").on(table.workspaceId, table.connectionId, table.publishedAt),
+  providerPublished: index("social_posts_workspace_provider_published_idx").on(table.workspaceId, table.provider, table.publishedAt),
+}));

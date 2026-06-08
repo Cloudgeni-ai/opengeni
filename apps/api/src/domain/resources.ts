@@ -35,6 +35,19 @@ export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[
   return out;
 }
 
+type McpSettings = Pick<Settings, "mcpServers">;
+
+export function enabledCapabilityMcpToolRefs(settings: McpSettings, runtimeSettings: McpSettings): ToolRef[] {
+  const configuredIds = new Set(settings.mcpServers.map((server) => server.id));
+  return runtimeSettings.mcpServers
+    .filter((server) => !configuredIds.has(server.id))
+    .map((server) => ({ kind: "mcp", id: server.id }));
+}
+
+export function withDefaultEnabledCapabilityMcpTools(tools: ToolRef[], settings: McpSettings, runtimeSettings: McpSettings): ToolRef[] {
+  return mergeToolRefs(tools, enabledCapabilityMcpToolRefs(settings, runtimeSettings));
+}
+
 export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   const mountPaths = new Map<string, string>();
   const identities = new Map<string, string>();

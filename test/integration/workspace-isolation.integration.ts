@@ -97,6 +97,20 @@ describe("workspace isolation matrix", () => {
     await expectStatus(app, authB, workspacePath(b.workspaceId, `/scheduled-tasks/${task.id}`), 404);
     await expectStatus(app, authA, legacyRoute("scheduled-tasks", task.id), 404);
 
+    await expectStatus(app, authA, workspacePath(b.workspaceId, "/packs"), 403);
+    await expectStatus(app, authA, workspacePath(b.workspaceId, "/capabilities"), 403);
+    const connectionResponse = await app.request(workspacePath(a.workspaceId, "/social/connections"), {
+      method: "POST",
+      body: JSON.stringify({ provider: "linkedin", accountHandle: "isolation-a" }),
+      headers: { ...authA, "content-type": "application/json" },
+    });
+    expect(connectionResponse.status).toBe(201);
+    const connection = await connectionResponse.json() as { id: string };
+    await expectStatus(app, authA, workspacePath(b.workspaceId, "/social/connections"), 403);
+    const otherWorkspaceConnections = await app.request(workspacePath(b.workspaceId, "/social/connections"), { headers: authB });
+    expect(otherWorkspaceConnections.status).toBe(200);
+    expect((await otherWorkspaceConnections.json() as Array<{ id: string }>).some((item) => item.id === connection.id)).toBe(false);
+
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/mcp"), 403, "POST");
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/github/app"), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, "/github/app"), 200);

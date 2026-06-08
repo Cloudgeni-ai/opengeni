@@ -23,6 +23,7 @@ import {
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
+import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -61,7 +62,8 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
     try {
-      runtime.configure(settings);
+      const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
+      runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
       const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
       if (!trigger) {
@@ -113,7 +115,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       turnStartedPublished = true;
 
       const runSettings = {
-        ...settings,
+        ...capabilitySettings,
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,

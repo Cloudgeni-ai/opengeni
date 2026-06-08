@@ -3,13 +3,19 @@ import {
   agentConfigFromFormState,
   applySessionStatusEvents,
   buildTools,
+  capabilityErrorToast,
+  enabledWorkspaceCapabilityMcpServers,
+  filterCapabilityCatalogItems,
   formStateFromScheduledTask,
   gitHubRepositoryResource,
+  mergeMcpServerOptions,
   projectConversation,
   sanitizeEventForDisplay,
   scheduleFromFormState,
+  selectedAvailableCapabilityToolIds,
+  summarizePackContents,
 } from "./App";
-import type { GitHubRepository, ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
+import type { CapabilityCatalogItem, GitHubRepository, ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
 
 describe("projectConversation", () => {
   test("keeps assistant messages and activity groups in event order", () => {
@@ -153,6 +159,123 @@ describe("buildTools", () => {
       { kind: "mcp", id: "docs" },
       { kind: "mcp", id: "files" },
     ]);
+  });
+
+  test("adds enabled custom MCP tools once", () => {
+    expect(buildTools([{ kind: "mcp", id: "custom" }], false, false, ["custom", "search"])).toEqual([
+      { kind: "mcp", id: "custom" },
+      { kind: "mcp", id: "search" },
+    ]);
+  });
+
+  test("selects enabled custom MCPs by default for future agent turns", () => {
+    expect([...selectedAvailableCapabilityToolIds(new Set(["old"]), ["cap-4fetch", "cap-search"])]).toEqual(["cap-4fetch", "cap-search"]);
+  });
+
+  test("preserves explicit custom MCP deselection across config refreshes", () => {
+    expect([...selectedAvailableCapabilityToolIds(new Set(["cap-search"]), ["cap-4fetch", "cap-search"], new Set(["cap-4fetch", "cap-search"]))]).toEqual(["cap-search"]);
+    expect([...selectedAvailableCapabilityToolIds(new Set(["cap-search"]), ["cap-4fetch", "cap-search", "cap-new"], new Set(["cap-4fetch", "cap-search"]))]).toEqual(["cap-search", "cap-new"]);
+  });
+
+  test("derives enabled runtime-ready MCPs from workspace capabilities", () => {
+    expect(enabledWorkspaceCapabilityMcpServers([
+      capabilityItem({
+        id: "mcp:ready",
+        kind: "mcp",
+        name: "Ready MCP",
+        enabled: true,
+        runtime: { available: true, mcpServerId: "cap-ready", transport: "streamable-http", notes: null },
+      }),
+      capabilityItem({
+        id: "mcp:disabled",
+        kind: "mcp",
+        name: "Disabled MCP",
+        enabled: false,
+        runtime: { available: true, mcpServerId: "cap-disabled", transport: "streamable-http", notes: null },
+      }),
+      capabilityItem({
+        id: "mcp:gated",
+        kind: "mcp",
+        name: "Gated MCP",
+        enabled: true,
+        runtime: { available: false, mcpServerId: "cap-gated", transport: "streamable-http", notes: null },
+      }),
+      capabilityItem({ id: "api:social", kind: "api", name: "Social API", enabled: true }),
+    ])).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
+  });
+
+  test("merges configured and workspace MCP options without duplicates", () => {
+    expect(mergeMcpServerOptions(
+      [{ id: "configured", name: "Configured" }, { id: "shared", name: "Configured Shared" }],
+      [{ id: "shared", name: "Workspace Shared" }, { id: "workspace", name: "Workspace" }],
+    )).toEqual([
+      { id: "configured", name: "Configured" },
+      { id: "shared", name: "Configured Shared" },
+      { id: "workspace", name: "Workspace" },
+    ]);
+  });
+});
+
+describe("capability catalog helpers", () => {
+  test("filters by kind and search text", () => {
+    const items = [
+      capabilityItem({ id: "mcp:docs", kind: "mcp", name: "Document Search", category: "knowledge", tags: ["docs"] }),
+      capabilityItem({ id: "api:social", kind: "api", name: "Social Accounts", category: "marketing", tags: ["social"] }),
+    ];
+
+    expect(filterCapabilityCatalogItems(items, "mcp", "document").map((item) => item.id)).toEqual(["mcp:docs"]);
+    expect(filterCapabilityCatalogItems(items, "all", "marketing").map((item) => item.id)).toEqual(["api:social"]);
+  });
+
+  test("labels MCP probe failures as connection failures", () => {
+    expect(capabilityErrorToast(
+      new Error('API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.'),
+      "Capability update failed",
+    )).toEqual({
+      title: "MCP connection failed",
+      description: 'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+    });
+  });
+
+  test("summarizes pack contents from tools and metadata", () => {
+    const summary = summarizePackContents(capabilityItem({
+      id: "pack:marketing-social-daily-analysis",
+      kind: "pack",
+      name: "Marketing social daily analysis",
+      tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "opengeni" }],
+      metadata: {
+        skill: "social-media-marketing",
+        firstPartyMcpTools: ["social_posts_recent"],
+        connectors: [{
+          id: "x",
+          name: "X",
+          authModel: "oauth2_authorization_code_pkce",
+          providers: ["x"],
+          scopes: ["tweet.read"],
+          required: false,
+        }],
+        knowledge: [{
+          id: "marketing-playbook",
+          name: "Marketing playbook",
+          description: "Brand voice and campaign context.",
+        }],
+        scheduledTaskTemplates: [{
+          id: "daily-social-analysis",
+          name: "Daily social analysis",
+          defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
+        }],
+      },
+    }));
+
+    expect(summary).toMatchObject({
+      hasContents: true,
+      mcpServerIds: ["docs", "opengeni"],
+      firstPartyMcpTools: ["social_posts_recent"],
+      skills: ["social-media-marketing"],
+      connectors: [{ id: "x", name: "X", scopes: ["tweet.read"] }],
+      knowledge: [{ id: "marketing-playbook", name: "Marketing playbook" }],
+      scheduledTaskTemplates: [{ id: "daily-social-analysis", name: "Daily social analysis", scheduleSummary: "Calendar at 09:00 UTC" }],
+    });
   });
 });
 
@@ -393,6 +516,25 @@ function githubRepository(patch: Partial<GitHubRepository> = {}): GitHubReposito
     defaultBranch: "main",
     accountLogin: "example",
     accountType: "Organization",
+    ...patch,
+  };
+}
+
+function capabilityItem(patch: Partial<CapabilityCatalogItem> & Pick<CapabilityCatalogItem, "id" | "kind" | "name">): CapabilityCatalogItem {
+  return {
+    source: "built_in",
+    description: null,
+    category: "general",
+    tags: [],
+    homepageUrl: null,
+    endpointUrl: null,
+    installUrl: null,
+    authModel: null,
+    tools: [],
+    runtime: { available: false, notes: null },
+    enabled: false,
+    enabledReason: null,
+    metadata: {},
     ...patch,
   };
 }

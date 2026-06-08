@@ -22,6 +22,7 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
+import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -29,6 +30,7 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
+  withDefaultEnabledCapabilityMcpTools,
 } from "../domain/resources";
 import {
   createAndStartSession,
@@ -45,9 +47,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const payload = CreateSessionRequest.parse(await c.req.json());
+    const rawPayload = await c.req.json();
+    const payload = CreateSessionRequest.parse(rawPayload);
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
     const resources = normalizeResources(payload.resources);
-    const tools = validateToolRefs(payload.tools, settings);
+    const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
+    const tools = hasOwnProperty(rawPayload, "tools")
+      ? requestedTools
+      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
     await validateGitHubRepositorySelection(db, workspaceId, resources);
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
@@ -130,8 +137,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const existing = await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
     const payload = UpdateSessionTurnRequest.parse(await c.req.json());
+    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
     const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
-    const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, settings) : existing.tools;
+    const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, runtimeSettings) : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
@@ -190,10 +198,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
-    const event = ClientSessionEvent.parse(await c.req.json());
+    const rawEvent = await c.req.json();
+    const event = ClientSessionEvent.parse(rawEvent);
     if (event.type === "user.message") {
+      const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
       const requestedResources = normalizeResources(event.payload.resources ?? []);
-      const requestedTools = validateToolRefs(event.payload.tools ?? [], settings);
+      const validatedTools = validateToolRefs(event.payload.tools ?? [], runtimeSettings);
+      const requestedTools = userMessagePayloadHasOwnProperty(rawEvent, "tools")
+        ? validatedTools
+        : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, runtimeSettings);
       const requestedModel = event.payload.model ?? null;
       const requestedReasoningEffort = event.payload.reasoningEffort ?? null;
       await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
@@ -298,4 +311,16 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(accepted, 202);
   });
+}
+
+function hasOwnProperty(value: unknown, key: string): boolean {
+  return Boolean(value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = (value as { payload?: unknown }).payload;
+  return hasOwnProperty(payload, key);
 }

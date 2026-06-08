@@ -15,6 +15,20 @@
       "when": 1781136000000,
       "tag": "0001_workspace_auth_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781200000000,
+      "tag": "0002_packs_and_social",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781200600000,
+      "tag": "0003_capability_catalog",
+      "breakpoints": true
     }
   ]
 }
