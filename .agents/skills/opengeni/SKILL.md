@@ -37,7 +37,7 @@ Then open the smallest source files that answer the question:
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts`.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
-- Documents/retrieval: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`.
+- Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
 - GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 
@@ -180,6 +180,7 @@ Use careful wording:
 - "Agents SDK runs in worker activities" if runtime calls remain in worker activity code.
 - "Sandbox backend is pluggable" if backend selection and SDK client wiring remain configurable.
 - "MCP tools are pluggable" if MCP server config and tool refs remain.
+- The first-party docs MCP may expose source retrieval plus reviewed memory tools. Verify the configured `docs` allowed tool list in `packages/config/src/index.ts` before claiming exact tool names.
 
 Avoid absolute claims until verified in current code:
 

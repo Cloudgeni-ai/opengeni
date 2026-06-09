@@ -59,6 +59,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   addDocumentToBase,
   createCapability,
+  createKnowledgeMemory,
   createSession,
   createDocumentBase,
   createScheduledTask,
@@ -75,6 +76,7 @@ import {
   fetchFileDownloadUrl,
   fetchGitHubRepositories,
   fetchGitHubStatus,
+  fetchKnowledgeMemories,
   fetchScheduledTaskRuns,
   fetchScheduledTasks,
   getStoredAccessKey,
@@ -91,6 +93,7 @@ import {
   streamSessionEvents,
   triggerScheduledTask,
   updateScheduledTask,
+  updateKnowledgeMemory,
   uploadFileAsset,
   clearStoredAccessKey,
 } from "./api";
@@ -100,10 +103,15 @@ import type {
   ClientConfig,
   CreateCapabilityInput,
   DocumentBase,
+  DocumentSearchMode,
   DocumentSearchResult,
   FileAsset,
   GitHubRepository,
   IndexedDocument,
+  KnowledgeMemory,
+  KnowledgeMemoryKind,
+  KnowledgeMemoryStatus,
+  KnowledgeSourceKind,
   ReasoningEffort,
   ResourceRef,
   ScheduledTask,
@@ -129,6 +137,10 @@ type RepoDraft = { id: number; url: string; ref: string };
 type IntelligenceEffort = Extract<ReasoningEffort, "low" | "medium" | "high" | "xhigh">;
 type ConnectionState = "connecting" | "live" | "closed" | "error";
 const uiReasoningEffortOrder: IntelligenceEffort[] = ["low", "medium", "high", "xhigh"];
+const knowledgeSourceKinds: KnowledgeSourceKind[] = ["manual_upload", "meeting_transcript", "repository", "email", "chat", "document", "web", "other"];
+const documentSearchModes: DocumentSearchMode[] = ["hybrid", "vector", "keyword"];
+const knowledgeMemoryKinds: KnowledgeMemoryKind[] = ["semantic", "episodic", "procedural", "decision", "preference"];
+const knowledgeMemoryStatuses: KnowledgeMemoryStatus[] = ["proposed", "approved", "rejected"];
 
 type ConversationTraceKind = "reasoning" | "tool" | "sandbox" | "approval" | "error" | "status";
 type ConversationTraceStatus = "running" | "complete" | "failed" | "waiting";
@@ -1499,9 +1511,23 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
   const [results, setResults] = useState<DocumentSearchResult[]>([]);
   const [name, setName] = useState("");
   const [query, setQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<DocumentSearchMode>("hybrid");
+  const [sourceKind, setSourceKind] = useState<KnowledgeSourceKind>("manual_upload");
+  const [sourceUri, setSourceUri] = useState("");
+  const [sourceAuthor, setSourceAuthor] = useState("");
+  const [sourceAclTags, setSourceAclTags] = useState("");
+  const [memories, setMemories] = useState<KnowledgeMemory[]>([]);
+  const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryStatusFilter, setMemoryStatusFilter] = useState<KnowledgeMemoryStatus | "all">("proposed");
+  const [memoryText, setMemoryText] = useState("");
+  const [memoryKind, setMemoryKind] = useState<KnowledgeMemoryKind>("semantic");
+  const [memoryScope, setMemoryScope] = useState("workspace");
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [loadingMemories, setLoadingMemories] = useState(false);
+  const [creatingMemory, setCreatingMemory] = useState(false);
+  const [memoryBusyIds, setMemoryBusyIds] = useState<Set<string>>(() => new Set());
   const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
   const [retryingAll, setRetryingAll] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1510,6 +1536,7 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
 
   useEffect(() => {
     void refreshBases();
+    void refreshMemories();
   }, []);
 
   useEffect(() => {
@@ -1543,6 +1570,21 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
     }
   }
 
+  async function refreshMemories() {
+    setLoadingMemories(true);
+    try {
+      setMemories(await fetchKnowledgeMemories({
+        query: memoryQuery.trim() || undefined,
+        status: memoryStatusFilter === "all" ? undefined : memoryStatusFilter,
+        limit: 50,
+      }));
+    } catch (error) {
+      toast.error("Failed to load memories", { description: String(error) });
+    } finally {
+      setLoadingMemories(false);
+    }
+  }
+
   async function handleCreateBase() {
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -1565,7 +1607,12 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
     try {
       for (const file of Array.from(files)) {
         const asset = await uploadFileAsset(file);
-        const indexed = await addDocumentToBase(selectedBaseId, asset.id);
+        const indexed = await addDocumentToBase(selectedBaseId, asset.id, {
+          sourceKind,
+          sourceUri: sourceUri.trim() || undefined,
+          sourceAuthor: sourceAuthor.trim() || undefined,
+          aclTags: parseCommaSeparated(sourceAclTags),
+        });
         setDocuments((current) => [indexed, ...current.filter((item) => item.id !== indexed.id)]);
       }
       toast.success("Document indexed");
@@ -1581,11 +1628,51 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
     if (!selectedBaseId || !query.trim()) return;
     setSearching(true);
     try {
-      setResults(await searchDocumentBase(selectedBaseId, query.trim()));
+      setResults(await searchDocumentBase(selectedBaseId, {
+        query: query.trim(),
+        mode: searchMode,
+      }));
     } catch (error) {
       toast.error("Document search failed", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function handleCreateMemory() {
+    const text = memoryText.trim();
+    if (!text) return;
+    setCreatingMemory(true);
+    try {
+      const memory = await createKnowledgeMemory({
+        text,
+        kind: memoryKind,
+        scope: memoryScope.trim() || "workspace",
+        status: "proposed",
+      });
+      setMemories((current) => [memory, ...current.filter((item) => item.id !== memory.id)]);
+      setMemoryText("");
+      toast.success("Memory proposed");
+    } catch (error) {
+      toast.error("Failed to propose memory", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setCreatingMemory(false);
+    }
+  }
+
+  async function handleReviewMemory(memory: KnowledgeMemory, status: KnowledgeMemoryStatus) {
+    setMemoryBusyIds((current) => new Set(current).add(memory.id));
+    try {
+      const updated = await updateKnowledgeMemory(memory.id, { status, reviewedBy: "web" });
+      setMemories((current) => current.map((item) => item.id === updated.id ? updated : item));
+    } catch (error) {
+      toast.error("Failed to update memory", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setMemoryBusyIds((current) => {
+        const next = new Set(current);
+        next.delete(memory.id);
+        return next;
+      });
     }
   }
 
@@ -1729,6 +1816,39 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
                 </div>
               </div>
 
+              <div className="mt-4 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/30 p-3">
+                <div className="text-xs font-medium uppercase text-[color:var(--color-fg-subtle)]">Source metadata</div>
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                  <select
+                    className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                    value={sourceKind}
+                    onChange={(event) => setSourceKind(event.target.value as KnowledgeSourceKind)}
+                  >
+                    {knowledgeSourceKinds.map((kind) => (
+                      <option key={kind} value={kind}>{kind.replace(/_/g, " ")}</option>
+                    ))}
+                  </select>
+                  <Input
+                    value={sourceUri}
+                    onChange={(event) => setSourceUri(event.target.value)}
+                    placeholder="Source URI"
+                    className="h-8 text-xs"
+                  />
+                  <Input
+                    value={sourceAuthor}
+                    onChange={(event) => setSourceAuthor(event.target.value)}
+                    placeholder="Author"
+                    className="h-8 text-xs"
+                  />
+                  <Input
+                    value={sourceAclTags}
+                    onChange={(event) => setSourceAclTags(event.target.value)}
+                    placeholder="ACL tags"
+                    className="h-8 text-xs"
+                  />
+                </div>
+              </div>
+
               <div className="mt-4 space-y-2">
                 {documents.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-xs text-[color:var(--color-fg-muted)]">
@@ -1741,6 +1861,12 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
                         <div className="truncate text-sm font-medium">{document.title}</div>
                         <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                           {document.status} · {document.chunkCount} chunks · {document.parser}
+                        </div>
+                        <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+                          <span>{document.sourceKind.replace(/_/g, " ")}</span>
+                          {document.sourceAuthor ? <span>by {document.sourceAuthor}</span> : null}
+                          {document.sourceUri ? <span className="max-w-xs truncate">{document.sourceUri}</span> : null}
+                          {document.aclTags.length > 0 ? <span>{document.aclTags.join(", ")}</span> : null}
                         </div>
                         {document.status === "failed" && document.error ? (
                           <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-[color:var(--color-danger)]">
@@ -1792,6 +1918,16 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
                 if (event.key === "Enter") void handleSearch();
               }}
             />
+            <select
+              className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
+              value={searchMode}
+              onChange={(event) => setSearchMode(event.target.value as DocumentSearchMode)}
+              disabled={!selectedBaseId}
+            >
+              {documentSearchModes.map((mode) => (
+                <option key={mode} value={mode}>{mode}</option>
+              ))}
+            </select>
             <Button type="button" size="sm" onClick={handleSearch} disabled={searching || !selectedBaseId || !query.trim()} className="h-9">
               {searching ? <Loader2Icon className="size-3.5 animate-spin" /> : <FileSearchIcon className="size-3.5" />}
               Search
@@ -1806,6 +1942,11 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
                     <span className="truncate font-medium text-[color:var(--color-fg)]">{result.title}</span>
                     <span className="shrink-0 text-[color:var(--color-fg-subtle)]">{Math.round(result.score * 100)}%</span>
                   </div>
+                  <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[10px] uppercase text-[color:var(--color-fg-subtle)]">
+                    <span>{result.matchType}</span>
+                    <span>{result.sourceKind.replace(/_/g, " ")}</span>
+                    {result.sourceAuthor ? <span>{result.sourceAuthor}</span> : null}
+                  </div>
                   <p className="mt-2 line-clamp-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">{result.text}</p>
                 </div>
               ))
@@ -1814,6 +1955,116 @@ function DocumentsWorkspace({ fileUploadsEnabled }: { fileUploadsEnabled: boolea
                 Search results appear here for the selected base.
               </div>
             )}
+          </div>
+
+          <div className="mt-6 border-t border-[color:var(--color-border)] pt-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <SparkleIcon className="size-4 text-[color:var(--color-brand)]" />
+                Memory
+              </div>
+              <Button type="button" variant="ghost" size="icon-sm" onClick={() => void refreshMemories()} disabled={loadingMemories} aria-label="Refresh memories" title="Refresh memories">
+                {loadingMemories ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+              </Button>
+            </div>
+
+            <div className="mt-3 grid gap-2">
+              <textarea
+                value={memoryText}
+                onChange={(event) => setMemoryText(event.target.value)}
+                className="min-h-20 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-xs leading-5"
+                placeholder="Propose a durable fact, decision, or preference"
+              />
+              <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2">
+                <select
+                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                  value={memoryKind}
+                  onChange={(event) => setMemoryKind(event.target.value as KnowledgeMemoryKind)}
+                >
+                  {knowledgeMemoryKinds.map((kind) => (
+                    <option key={kind} value={kind}>{kind}</option>
+                  ))}
+                </select>
+                <Input
+                  value={memoryScope}
+                  onChange={(event) => setMemoryScope(event.target.value)}
+                  placeholder="Scope"
+                  className="h-8 text-xs"
+                />
+              </div>
+              <Button type="button" size="sm" onClick={() => void handleCreateMemory()} disabled={creatingMemory || !memoryText.trim()} className="h-8">
+                {creatingMemory ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+                Propose
+              </Button>
+            </div>
+
+            <div className="mt-4 grid gap-2">
+              <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-2">
+                <Input
+                  value={memoryQuery}
+                  onChange={(event) => setMemoryQuery(event.target.value)}
+                  placeholder="Search memories"
+                  className="h-8 text-xs"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void refreshMemories();
+                  }}
+                />
+                <select
+                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                  value={memoryStatusFilter}
+                  onChange={(event) => setMemoryStatusFilter(event.target.value as KnowledgeMemoryStatus | "all")}
+                >
+                  <option value="all">all</option>
+                  {knowledgeMemoryStatuses.map((status) => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+              </div>
+              <Button type="button" variant="secondary" size="sm" onClick={() => void refreshMemories()} disabled={loadingMemories} className="h-8">
+                {loadingMemories ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
+                Load
+              </Button>
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {memories.length > 0 ? memories.map((memory) => (
+                <div key={memory.id} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3">
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="truncate font-medium text-[color:var(--color-fg)]">{memory.kind} · {memory.scope}</span>
+                    <span className="shrink-0 rounded-full border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{memory.status}</span>
+                  </div>
+                  <p className="mt-2 line-clamp-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">{memory.text}</p>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={memoryBusyIds.has(memory.id) || memory.status === "approved"}
+                      onClick={() => void handleReviewMemory(memory, "approved")}
+                      className="h-7 text-[11px]"
+                    >
+                      <CheckIcon className="size-3" />
+                      Approve
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={memoryBusyIds.has(memory.id) || memory.status === "rejected"}
+                      onClick={() => void handleReviewMemory(memory, "rejected")}
+                      className="h-7 text-[11px]"
+                    >
+                      <XIcon className="size-3" />
+                      Reject
+                    </Button>
+                  </div>
+                </div>
+              )) : (
+                <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  Reviewed memories appear here.
+                </div>
+              )}
+            </div>
           </div>
         </aside>
       </div>
@@ -3539,6 +3790,10 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(stringValue).filter((entry): entry is string => Boolean(entry)) : [];
+}
+
+function parseCommaSeparated(value: string): string[] {
+  return [...new Set(value.split(",").map((item) => item.trim()).filter(Boolean))];
 }
 
 function stringValue(value: unknown): string | null {

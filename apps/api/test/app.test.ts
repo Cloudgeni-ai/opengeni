@@ -135,6 +135,8 @@ describe("API helpers", () => {
     expect(routeLabel("/v1/files/uploads/upload-1/complete")).toBe("/v1/files/uploads/:id/complete");
     expect(routeLabel("/v1/document-bases/base-1/documents")).toBe("/v1/document-bases/:id/documents");
     expect(routeLabel("/v1/documents/document-1/reindex")).toBe("/v1/documents/:id/reindex");
+    expect(routeLabel("/v1/knowledge/search")).toBe("/v1/knowledge/search");
+    expect(routeLabel("/v1/knowledge/memories/memory-1")).toBe("/v1/knowledge/memories/:id");
     expect(routeLabel("/v1/scheduled-tasks/task-1/runs")).toBe("/v1/scheduled-tasks/:id/runs");
     expect(routeLabel("/v1/capabilities")).toBe("/v1/capabilities");
     expect(routeLabel("/v1/capabilities/discovery/mcp-registry")).toBe("/v1/capabilities/discovery/mcp-registry");

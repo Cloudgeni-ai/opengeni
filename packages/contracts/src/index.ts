@@ -90,6 +90,21 @@ export type FileDownloadUrlResponse = z.infer<typeof FileDownloadUrlResponse>;
 export const DocumentStatus = z.enum(["queued", "indexing", "ready", "failed"]);
 export type DocumentStatus = z.infer<typeof DocumentStatus>;
 
+export const KnowledgeSourceKind = z.enum([
+  "manual_upload",
+  "meeting_transcript",
+  "repository",
+  "email",
+  "chat",
+  "document",
+  "web",
+  "other",
+]);
+export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
+
+export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
+export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
+
 export const DocumentBase = z.object({
   id: z.string().uuid(),
   name: z.string(),
@@ -108,6 +123,15 @@ export const Document = z.object({
   parser: z.string(),
   chunkCount: z.number().int().nonnegative(),
   error: z.string().nullable(),
+  sourceKind: KnowledgeSourceKind,
+  sourceUri: z.string().nullable(),
+  sourceExternalId: z.string().nullable(),
+  sourceTitle: z.string().nullable(),
+  sourceAuthor: z.string().nullable(),
+  sourceCreatedAt: z.string().nullable(),
+  sourceUpdatedAt: z.string().nullable(),
+  sourceVersion: z.string().nullable(),
+  aclTags: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -121,8 +145,20 @@ export const DocumentSearchResult = z.object({
   title: z.string(),
   text: z.string(),
   score: z.number(),
+  matchType: DocumentSearchMode,
+  vectorScore: z.number().nullable(),
+  keywordScore: z.number().nullable(),
   chunkIndex: z.number().int().nonnegative(),
   metadata: z.record(z.string(), z.unknown()),
+  sourceKind: KnowledgeSourceKind,
+  sourceUri: z.string().nullable(),
+  sourceExternalId: z.string().nullable(),
+  sourceTitle: z.string().nullable(),
+  sourceAuthor: z.string().nullable(),
+  sourceCreatedAt: z.string().nullable(),
+  sourceUpdatedAt: z.string().nullable(),
+  sourceVersion: z.string().nullable(),
+  aclTags: z.array(z.string()),
 });
 export type DocumentSearchResult = z.infer<typeof DocumentSearchResult>;
 
@@ -134,14 +170,93 @@ export type CreateDocumentBaseRequest = z.infer<typeof CreateDocumentBaseRequest
 
 export const AddDocumentRequest = z.object({
   fileId: z.string().uuid(),
+  title: z.string().min(1).optional(),
+  sourceKind: KnowledgeSourceKind.optional(),
+  sourceUri: z.string().min(1).optional(),
+  sourceExternalId: z.string().min(1).optional(),
+  sourceTitle: z.string().min(1).optional(),
+  sourceAuthor: z.string().min(1).optional(),
+  sourceCreatedAt: z.string().datetime().optional(),
+  sourceUpdatedAt: z.string().datetime().optional(),
+  sourceVersion: z.string().min(1).optional(),
+  aclTags: z.array(z.string().min(1)).optional(),
 });
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
-  limit: z.number().int().positive().max(20).default(5),
+  baseIds: z.array(z.string().uuid()).optional(),
+  mode: DocumentSearchMode.optional(),
+  sourceKinds: z.array(KnowledgeSourceKind).optional(),
+  aclTags: z.array(z.string().min(1)).optional(),
+  limit: z.number().int().positive().max(50).default(5),
 });
 export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
+
+export const KnowledgeMemoryStatus = z.enum(["proposed", "approved", "rejected"]);
+export type KnowledgeMemoryStatus = z.infer<typeof KnowledgeMemoryStatus>;
+
+export const KnowledgeMemoryKind = z.enum(["semantic", "episodic", "procedural", "decision", "preference"]);
+export type KnowledgeMemoryKind = z.infer<typeof KnowledgeMemoryKind>;
+
+export const KnowledgeSourceRef = z.object({
+  kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
+  id: z.string().min(1),
+  uri: z.string().min(1).optional(),
+  title: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type KnowledgeSourceRef = z.infer<typeof KnowledgeSourceRef>;
+
+export const KnowledgeMemory = z.object({
+  id: z.string().uuid(),
+  status: KnowledgeMemoryStatus,
+  kind: KnowledgeMemoryKind,
+  scope: z.string(),
+  text: z.string(),
+  sourceRefs: z.array(KnowledgeSourceRef),
+  confidence: z.number().min(0).max(1),
+  metadata: z.record(z.string(), z.unknown()),
+  createdBySessionId: z.string().uuid().nullable(),
+  reviewedBy: z.string().nullable(),
+  reviewedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
+
+export const CreateKnowledgeMemoryRequest = z.object({
+  status: KnowledgeMemoryStatus.default("proposed"),
+  kind: KnowledgeMemoryKind.default("semantic"),
+  scope: z.string().min(1).default("workspace"),
+  text: z.string().min(1),
+  sourceRefs: z.array(KnowledgeSourceRef).default([]),
+  confidence: z.number().min(0).max(1).default(0.5),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  createdBySessionId: z.string().uuid().optional(),
+});
+export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
+
+export const UpdateKnowledgeMemoryRequest = z.object({
+  status: KnowledgeMemoryStatus.optional(),
+  kind: KnowledgeMemoryKind.optional(),
+  scope: z.string().min(1).optional(),
+  text: z.string().min(1).optional(),
+  sourceRefs: z.array(KnowledgeSourceRef).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+  reviewedBy: z.string().min(1).optional(),
+});
+export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
+
+export const KnowledgeMemorySearchRequest = z.object({
+  query: z.string().min(1).optional(),
+  status: KnowledgeMemoryStatus.optional(),
+  kind: KnowledgeMemoryKind.optional(),
+  scope: z.string().min(1).optional(),
+  limit: z.number().int().positive().max(100).default(20),
+});
+export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
 
 export const ToolRef = z.object({
   kind: z.literal("mcp"),

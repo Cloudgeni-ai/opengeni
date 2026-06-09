@@ -1,10 +1,20 @@
 import {
   AddDocumentRequest,
+  CreateKnowledgeMemoryRequest,
   CreateDocumentBaseRequest,
   Document,
   DocumentBase,
   DocumentSearchRequest,
+  KnowledgeMemory,
+  KnowledgeMemorySearchRequest,
+  UpdateKnowledgeMemoryRequest,
 } from "@opengeni/contracts";
+import {
+  createKnowledgeMemory,
+  getKnowledgeMemory,
+  listKnowledgeMemories,
+  updateKnowledgeMemory,
+} from "@opengeni/db";
 import {
   addDocumentToBase,
   createDocumentBase,
@@ -46,7 +56,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const payload = AddDocumentRequest.parse(await c.req.json());
     try {
-      const document = await addDocumentToBase(db, { baseId: c.req.param("baseId"), fileId: payload.fileId });
+      const document = await addDocumentToBase(db, { ...payload, baseId: c.req.param("baseId") });
       const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
       const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ documentId: document.id }) ?? document);
       return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
@@ -91,8 +101,62 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         baseIds: [base.id],
         query: payload.query,
         limit: payload.limit,
+        mode: payload.mode,
+        sourceKinds: payload.sourceKinds,
+        aclTags: payload.aclTags,
       }, getDocumentServices()),
     });
+  });
+
+  app.post("/v1/knowledge/search", async (c) => {
+    const payload = DocumentSearchRequest.parse(await c.req.json());
+    return c.json({
+      results: await searchDocuments(db, {
+        query: payload.query,
+        baseIds: payload.baseIds,
+        limit: payload.limit,
+        mode: payload.mode,
+        sourceKinds: payload.sourceKinds,
+        aclTags: payload.aclTags,
+      }, getDocumentServices()),
+    });
+  });
+
+  app.get("/v1/knowledge/memories", async (c) => {
+    const payload = KnowledgeMemorySearchRequest.parse({
+      query: c.req.query("query") || undefined,
+      status: c.req.query("status") || undefined,
+      kind: c.req.query("kind") || undefined,
+      scope: c.req.query("scope") || undefined,
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    });
+    return c.json((await listKnowledgeMemories(db, payload)).map((memory) => KnowledgeMemory.parse(memory)));
+  });
+
+  app.get("/v1/knowledge/memories/:memoryId", async (c) => {
+    const memory = await getKnowledgeMemory(db, c.req.param("memoryId"));
+    if (!memory) {
+      throw new HTTPException(404, { message: "knowledge memory not found" });
+    }
+    return c.json(KnowledgeMemory.parse(memory));
+  });
+
+  app.post("/v1/knowledge/memories", async (c) => {
+    const payload = CreateKnowledgeMemoryRequest.parse(await c.req.json());
+    return c.json(KnowledgeMemory.parse(await createKnowledgeMemory(db, payload)), 201);
+  });
+
+  app.patch("/v1/knowledge/memories/:memoryId", async (c) => {
+    const payload = UpdateKnowledgeMemoryRequest.parse(await c.req.json());
+    const reviewedBy = payload.reviewedBy ?? (payload.status === "approved" || payload.status === "rejected" ? "api" : undefined);
+    try {
+      return c.json(KnowledgeMemory.parse(await updateKnowledgeMemory(db, c.req.param("memoryId"), {
+        ...payload,
+        ...(reviewedBy ? { reviewedBy } : {}),
+      })));
+    } catch (error) {
+      throw documentHttpException(error);
+    }
   });
 
   app.all("/v1/mcp/docs", async (c) => {
