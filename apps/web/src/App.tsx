@@ -2036,6 +2036,10 @@ function SessionChatPane(props: {
         data-testid="session-chat-scroll"
       >
         <div className="mx-auto w-full max-w-3xl px-4 pt-8 pb-56 sm:px-6">
+          {isTerminalSessionStatus(props.session.status) ? (
+            <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
+          ) : null}
+
           {props.conversation.length === 0 ? (
             <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
               Waiting for session activity
@@ -2142,6 +2146,36 @@ function SessionChatPane(props: {
         </div>
       </div>
     </section>
+  );
+}
+
+function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
+  const failed = props.session.status === "failed";
+  return (
+    <div
+      className={cn(
+        "mb-4 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between",
+        failed
+          ? "border-red-500/30 bg-red-500/10 text-red-100"
+          : "border-zinc-500/30 bg-zinc-500/10 text-zinc-100",
+      )}
+    >
+      <div className="flex min-w-0 gap-2.5">
+        <AlertTriangleIcon className={cn("mt-0.5 size-4 shrink-0", failed ? "text-red-300" : "text-zinc-300")} />
+        <div className="min-w-0">
+          <div className="text-sm font-medium">
+            This session {failed ? "failed" : "was cancelled"} and cannot be continued.
+          </div>
+          <div className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+            Historical session from {formatTimestamp(props.session.createdAt)}.
+          </div>
+        </div>
+      </div>
+      <Button type="button" size="sm" variant="secondary" onClick={props.onNewSession} className="shrink-0">
+        <PlusIcon className="size-3.5" />
+        New session
+      </Button>
+    </div>
   );
 }
 
