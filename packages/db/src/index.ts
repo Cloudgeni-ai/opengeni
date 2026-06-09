@@ -691,6 +691,16 @@ export async function applyCreditDebitUpToBalance(db: Database, input: {
   });
 }
 
+export async function hasCreditLedgerEntry(db: Database, accountId: string, idempotencyKey: string): Promise<boolean> {
+  return await withAccountRls(db, accountId, async (scopedDb) => {
+    const [row] = await scopedDb.select({ id: schema.creditLedgerEntries.id })
+      .from(schema.creditLedgerEntries)
+      .where(and(eq(schema.creditLedgerEntries.accountId, accountId), eq(schema.creditLedgerEntries.idempotencyKey, idempotencyKey)))
+      .limit(1);
+    return Boolean(row);
+  });
+}
+
 export async function getBillingCustomer(db: Database, accountId: string, provider = "stripe"): Promise<{
   accountId: string;
   provider: string;

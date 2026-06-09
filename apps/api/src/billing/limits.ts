@@ -50,6 +50,16 @@ async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput): P
 
 async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
+  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action)) {
+    const used = await sumUsageQuantity(deps.db, {
+      accountId: input.accountId,
+      eventType: "model.cost",
+      since: startOfUtcMonth(),
+    });
+    if (used >= limits.maxMonthlyCostMicrosPerAccount) {
+      return blocked("max_monthly_cost_micros_per_account", `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`);
+    }
+  }
   switch (input.action) {
     case "workspace:create": {
       if (!limits.maxWorkspacesPerAccount) {
@@ -123,7 +133,7 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput): Prom
         eventType: "document.indexed",
         since: startOfUtcMonth(),
       });
-      const requested = input.quantity ?? 1;
+      const requested = input.quantity ?? 0;
       return used + requested <= limits.maxDocumentIndexedChunksPerWorkspace
         ? { allowed: true }
         : blocked("max_document_indexed_chunks_per_workspace", `monthly document indexing limit reached (${limits.maxDocumentIndexedChunksPerWorkspace} chunks)`);

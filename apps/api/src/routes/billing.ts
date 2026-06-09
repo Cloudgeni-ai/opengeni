@@ -9,6 +9,7 @@ import {
   applyCreditLedgerEntry,
   getBillingBalance,
   getBillingCustomer,
+  hasCreditLedgerEntry,
   isStripeWebhookProcessed,
   listUsageEvents,
   getManagedAccount,
@@ -333,6 +334,10 @@ async function releaseDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event:
   const metadata = await metadataForDispute(stripe, dispute);
   const accountId = metadata?.opengeni_account_id;
   if (!accountId) {
+    return;
+  }
+  const holdIdempotencyKey = `stripe:dispute_hold:${dispute.id}`;
+  if (!await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey)) {
     return;
   }
   await applyCreditLedgerEntry(deps.db, {

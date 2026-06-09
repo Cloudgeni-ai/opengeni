@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, requireSession, setSessionStatus, sumUsageQuantity } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionStatus, sumUsageQuantity } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -338,6 +338,60 @@ describe("API component integration", () => {
     expect(runTwo.status).toBe(429);
   });
 
+  test("static monthly cost cap blocks costly actions once reached", async () => {
+    const delegationSecret = "test-static-cost-limit-secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100 }),
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const access = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:static-cost-limit",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Static cost limit test",
+      workspaceExternalSource: "test:static-cost-limit",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Static cost limit workspace",
+      subjectId: `test:static-cost-limit:${crypto.randomUUID()}`,
+      accountPermissions: allAccountPermissions,
+      workspacePermissions: allWorkspacePermissions,
+    });
+    const workspaceId = access.defaultWorkspaceId!;
+    const accountId = access.defaultAccountId!;
+    await recordUsageEvent(dbClient.db, {
+      accountId,
+      workspaceId,
+      eventType: "model.cost",
+      quantity: 100,
+      unit: "usd_micros",
+      sourceResourceType: "test",
+      sourceResourceId: "static-cost-limit",
+      idempotencyKey: `test:model.cost:${accountId}:static-cost-limit`,
+    });
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId,
+      workspaceId,
+      subjectId: access.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+
+    const blocked = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ initialMessage: "blocked by cost cap" }),
+    });
+    expect(blocked.status).toBe(429);
+    expect(await blocked.text()).toContain("monthly model cost limit reached");
+  });
+
   test("Stripe webhooks apply checkout, refund, and dispute ledger entries idempotently", async () => {
     const webhookSecret = "whsec_test_webhook_secret";
     const app = createApp({
@@ -440,6 +494,30 @@ describe("API component integration", () => {
     });
     if (refund.status !== 200) {
       throw new Error(`refund webhook failed: ${refund.status} ${await refund.text()}`);
+    }
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(20_000_000);
+
+    const releaseWithoutHold = await postStripeEvent(app, webhookSecret, {
+      id: `evt_dispute_release_without_hold_${crypto.randomUUID()}`,
+      object: "event",
+      type: "charge.dispute.funds_reinstated",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: "dp_without_hold",
+          object: "dispute",
+          amount: 1000,
+          currency: "usd",
+          status: "won",
+          charge: "ch_test_without_hold",
+          payment_intent: "pi_test_123",
+          metadata,
+        },
+      },
+    });
+    if (releaseWithoutHold.status !== 200) {
+      throw new Error(`dispute release without hold webhook failed: ${releaseWithoutHold.status} ${await releaseWithoutHold.text()}`);
     }
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(20_000_000);
 
