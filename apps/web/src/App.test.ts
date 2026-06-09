@@ -91,6 +91,30 @@ describe("projectConversation", () => {
       tools: [{ kind: "mcp", id: "docs" }],
     });
   });
+
+  test("hides archived terminal failure payloads in the main timeline projection", () => {
+    const turns = projectConversation(session({ status: "failed" }), [
+      event(1, "user.message", { text: "Inspect" }),
+      event(2, "turn.failed", {
+        error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
+      }),
+      event(3, "sandbox.operation.failed", {
+        error: "/modal.client.ModalClient/SandboxTerminate RESOURCE_EXHAUSTED",
+      }),
+    ]);
+
+    expect(JSON.stringify(turns)).not.toContain("RESOURCE_EXHAUSTED");
+    expect(JSON.stringify(turns)).toContain("Historical failure payload hidden in the web console.");
+  });
+
+  test("keeps active failure payloads visible in the main timeline projection", () => {
+    const turns = projectConversation(session({ status: "running" }), [
+      event(1, "user.message", { text: "Inspect" }),
+      event(2, "turn.failed", { error: "Current run failed" }),
+    ]);
+
+    expect(JSON.stringify(turns)).toContain("Current run failed");
+  });
 });
 
 describe("buildTools", () => {
@@ -278,7 +302,7 @@ describe("sanitizeEventForDisplay", () => {
   });
 });
 
-function session(): Session {
+function session(patch: Partial<Session> = {}): Session {
   return {
     id: "session-1",
     accountId: "account-1",
@@ -295,6 +319,7 @@ function session(): Session {
     lastSequence: 0,
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
+    ...patch,
   };
 }
 

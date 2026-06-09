@@ -5,6 +5,7 @@ const syntheticSessionLabels = [
   "Synthetic historical Modal failure for UI verification",
   "Synthetic archived failed session for web verification",
   "Synthetic terminal-session banner smoke failure",
+  "Synthetic failed session for terminal banner verification",
 ] as const;
 
 const modalFailurePatterns = [
@@ -45,6 +46,7 @@ try {
     where initial_message = ${syntheticSessionLabels[0]}
       or initial_message = ${syntheticSessionLabels[1]}
       or initial_message = ${syntheticSessionLabels[2]}
+      or initial_message = ${syntheticSessionLabels[3]}
     order by created_at desc
   `);
   const modalRows = args.modalFailureSince

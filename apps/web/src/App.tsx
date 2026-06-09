@@ -3525,6 +3525,7 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
   const out: ConversationTurn[] = [];
   let currentMessage: ConversationAssistantTurn | null = null;
   let currentActivity: ConversationActivityTurn | null = null;
+  const displayEvents = events.map((event) => sanitizeEventForDisplay(event, session.status));
 
   const lastMessage = (): ConversationAssistantTurn | null => {
     const item = out[out.length - 1];
@@ -3583,7 +3584,7 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
     return currentActivity;
   };
 
-  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+  for (const event of [...displayEvents].sort((a, b) => a.sequence - b.sequence)) {
     const payload = event.payload as Record<string, unknown>;
     if (event.type === "user.message") {
       currentMessage = null;
@@ -3667,10 +3668,11 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
       const key = `sandbox:${String(payload.name ?? event.id)}`;
       const existing = findTrace(activity, key, "sandbox");
       const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
+      const errorMessage = failurePayloadMessage(payload);
       if (existing) {
         existing.status = status;
-        if (payload.error) {
-          existing.output = String(payload.error);
+        if (errorMessage) {
+          existing.output = errorMessage;
         }
       } else {
         activity.trace.push({
@@ -3680,7 +3682,7 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
           status,
           title: sandboxTitle(payload),
           detail: typeof payload.command === "string" ? payload.command : undefined,
-          output: payload.error ? String(payload.error) : undefined,
+          output: errorMessage,
           occurredAt: event.occurredAt,
         });
       }
@@ -3707,7 +3709,7 @@ export function projectConversation(session: Session, events: SessionEvent[]): C
         kind: "error",
         status: "failed",
         title: "Turn failed",
-        output: String(payload.error ?? "Unknown error"),
+        output: failurePayloadMessage(payload) ?? "Unknown error",
         occurredAt: event.occurredAt,
       });
     } else if (event.type === "turn.cancelled") {
@@ -3794,6 +3796,16 @@ function reasoningSummaryText(payload: unknown): string {
 function traceKey(event: SessionEvent): string {
   const payload = event.payload as Record<string, unknown>;
   return String(payload.id ?? payload.callId ?? event.turnId ?? event.id);
+}
+
+function failurePayloadMessage(payload: Record<string, unknown>): string | undefined {
+  if (typeof payload.error === "string" && payload.error.trim().length > 0) {
+    return payload.error;
+  }
+  if (typeof payload.message === "string" && payload.message.trim().length > 0) {
+    return payload.message;
+  }
+  return undefined;
 }
 
 function toolTitle(payload: Record<string, unknown>): string {
