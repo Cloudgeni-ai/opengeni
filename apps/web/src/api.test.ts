@@ -3,11 +3,12 @@ import { authHeadersForAccessKey, resolveApiBaseUrl, sendVerificationEmail, stre
 import type { SessionEvent } from "./types";
 
 describe("web API auth helpers", () => {
-  test("builds bearer authorization headers from a client-side access key", () => {
+  test("builds access key headers only for configured key modes", () => {
     expect(authHeadersForAccessKey(null)).toEqual({});
-    expect(authHeadersForAccessKey("secret")).toEqual({ authorization: "Bearer secret" });
+    expect(authHeadersForAccessKey("secret")).toEqual({});
     expect(authHeadersForAccessKey("secret", { mode: "configuredToken", headerName: "authorization", scheme: "bearer" })).toEqual({ authorization: "Bearer secret" });
     expect(authHeadersForAccessKey("secret", { mode: "deploymentKey", headerName: "x-opengeni-access-key" })).toEqual({ "x-opengeni-access-key": "secret" });
+    expect(authHeadersForAccessKey("secret", { mode: "managedSession", session: "cookie" })).toEqual({});
   });
 
   test("defaults to same-origin API paths for deployed web builds", () => {

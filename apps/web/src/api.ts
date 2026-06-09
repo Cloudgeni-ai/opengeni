@@ -81,7 +81,7 @@ export function authHeadersForAccessKey(value: string | null, auth: ClientConfig
   if (auth?.mode === "configuredToken") {
     return { authorization: `Bearer ${value}` };
   }
-  return { authorization: `Bearer ${value}` };
+  return {};
 }
 
 function authHeaders(): Record<string, string> {
