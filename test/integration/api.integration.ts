@@ -923,6 +923,54 @@ describe("API component integration", () => {
     expect(search.results[0]?.title).toBe("network-runbook.txt");
   });
 
+  test("creates, reviews, and searches knowledge memories", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+
+    const createdResponse = await app.request("/v1/knowledge/memories", {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Production object storage should use provider-native buckets.",
+        kind: "decision",
+        scope: "workspace",
+        confidence: 0.9,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = await createdResponse.json() as { id: string; status: string; confidence: number };
+    expect(created.status).toBe("proposed");
+    expect(created.confidence).toBe(0.9);
+
+    const proposedResponse = await app.request("/v1/knowledge/memories?status=proposed&query=provider-native");
+    expect(proposedResponse.status).toBe(200);
+    const proposed = await proposedResponse.json() as Array<{ id: string }>;
+    expect(proposed.map((memory) => memory.id)).toContain(created.id);
+
+    const reviewedResponse = await app.request(`/v1/knowledge/memories/${created.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "approved", reviewedBy: "integration-test" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(reviewedResponse.status).toBe(200);
+    const reviewed = await reviewedResponse.json() as { id: string; status: string; reviewedBy: string | null; reviewedAt: string | null };
+    expect(reviewed.status).toBe("approved");
+    expect(reviewed.reviewedBy).toBe("integration-test");
+    expect(reviewed.reviewedAt).toBeTruthy();
+
+    const approvedResponse = await app.request("/v1/knowledge/memories?status=approved&query=provider-native");
+    expect(approvedResponse.status).toBe(200);
+    const approved = await approvedResponse.json() as Array<{ id: string; text: string }>;
+    expect(approved).toContainEqual(expect.objectContaining({
+      id: created.id,
+      text: "Production object storage should use provider-native buckets.",
+    }));
+  });
+
   test("serves indexed documents through the built-in MCP endpoint", async () => {
     const port = 19_000 + Math.floor(Math.random() * 1_000);
     const settings = {

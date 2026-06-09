@@ -4,12 +4,18 @@ import type {
   ClientConfig,
   CreateCapabilityInput,
   CreateFileUploadResponse,
+  AddDocumentMetadata,
   DocumentBase,
+  DocumentSearchMode,
   DocumentSearchResult,
   FileAsset,
   FileDownloadUrlResponse,
   GitHubRepository,
   IndexedDocument,
+  KnowledgeMemory,
+  KnowledgeMemoryKind,
+  KnowledgeMemoryStatus,
+  KnowledgeSourceKind,
   ReasoningEffort,
   ResourceRef,
   ScheduledTask,
@@ -222,10 +228,13 @@ export function fetchDocuments(baseId: string): Promise<IndexedDocument[]> {
   return request<IndexedDocument[]>(`/v1/document-bases/${baseId}/documents`);
 }
 
-export function addDocumentToBase(baseId: string, fileId: string): Promise<IndexedDocument> {
+export function addDocumentToBase(baseId: string, fileId: string, metadata: AddDocumentMetadata = {}): Promise<IndexedDocument> {
   return request<IndexedDocument>(`/v1/document-bases/${baseId}/documents`, {
     method: "POST",
-    body: JSON.stringify({ fileId }),
+    body: JSON.stringify({
+      fileId,
+      ...metadata,
+    }),
   });
 }
 
@@ -235,12 +244,70 @@ export function reindexDocument(documentId: string): Promise<IndexedDocument> {
   });
 }
 
-export async function searchDocumentBase(baseId: string, query: string): Promise<DocumentSearchResult[]> {
+export async function searchDocumentBase(baseId: string, input: {
+  query: string;
+  mode?: DocumentSearchMode;
+  sourceKinds?: KnowledgeSourceKind[];
+  aclTags?: string[];
+  limit?: number;
+}): Promise<DocumentSearchResult[]> {
   const response = await request<{ results: DocumentSearchResult[] }>(`/v1/document-bases/${baseId}/search`, {
     method: "POST",
-    body: JSON.stringify({ query, limit: 8 }),
+    body: JSON.stringify({
+      query: input.query,
+      mode: input.mode,
+      sourceKinds: input.sourceKinds,
+      aclTags: input.aclTags,
+      limit: input.limit ?? 8,
+    }),
   });
   return response.results;
+}
+
+export function fetchKnowledgeMemories(input: {
+  query?: string;
+  status?: KnowledgeMemoryStatus;
+  kind?: KnowledgeMemoryKind;
+  scope?: string;
+  limit?: number;
+} = {}): Promise<KnowledgeMemory[]> {
+  const params = new URLSearchParams();
+  if (input.query?.trim()) params.set("query", input.query.trim());
+  if (input.status) params.set("status", input.status);
+  if (input.kind) params.set("kind", input.kind);
+  if (input.scope?.trim()) params.set("scope", input.scope.trim());
+  if (input.limit) params.set("limit", String(input.limit));
+  const suffix = params.toString() ? `?${params}` : "";
+  return request<KnowledgeMemory[]>(`/v1/knowledge/memories${suffix}`);
+}
+
+export function createKnowledgeMemory(input: {
+  text: string;
+  kind?: KnowledgeMemoryKind;
+  scope?: string;
+  confidence?: number;
+  status?: KnowledgeMemoryStatus;
+  metadata?: Record<string, unknown>;
+}): Promise<KnowledgeMemory> {
+  return request<KnowledgeMemory>("/v1/knowledge/memories", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateKnowledgeMemory(memoryId: string, input: Partial<{
+  status: KnowledgeMemoryStatus;
+  kind: KnowledgeMemoryKind;
+  scope: string;
+  text: string;
+  confidence: number;
+  metadata: Record<string, unknown>;
+  reviewedBy: string;
+}>): Promise<KnowledgeMemory> {
+  return request<KnowledgeMemory>(`/v1/knowledge/memories/${encodeURIComponent(memoryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
 }
 
 export function sendInterrupt(sessionId: string, reason?: string): Promise<SessionEvent> {

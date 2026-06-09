@@ -57,6 +57,18 @@ export type DocumentBase = {
   updatedAt: string;
 };
 
+export type KnowledgeSourceKind =
+  | "manual_upload"
+  | "meeting_transcript"
+  | "repository"
+  | "email"
+  | "chat"
+  | "document"
+  | "web"
+  | "other";
+
+export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
+
 export type IndexedDocument = {
   id: string;
   baseId: string;
@@ -66,6 +78,15 @@ export type IndexedDocument = {
   parser: string;
   chunkCount: number;
   error: string | null;
+  sourceKind: KnowledgeSourceKind;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: string | null;
+  sourceUpdatedAt: string | null;
+  sourceVersion: string | null;
+  aclTags: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -78,8 +99,60 @@ export type DocumentSearchResult = {
   title: string;
   text: string;
   score: number;
+  matchType: DocumentSearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
   chunkIndex: number;
   metadata: Record<string, unknown>;
+  sourceKind: KnowledgeSourceKind;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: string | null;
+  sourceUpdatedAt: string | null;
+  sourceVersion: string | null;
+  aclTags: string[];
+};
+
+export type AddDocumentMetadata = Partial<{
+  title: string;
+  sourceKind: KnowledgeSourceKind;
+  sourceUri: string;
+  sourceExternalId: string;
+  sourceTitle: string;
+  sourceAuthor: string;
+  sourceCreatedAt: string;
+  sourceUpdatedAt: string;
+  sourceVersion: string;
+  aclTags: string[];
+}>;
+
+export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected";
+export type KnowledgeMemoryKind = "semantic" | "episodic" | "procedural" | "decision" | "preference";
+
+export type KnowledgeSourceRef = {
+  kind: "document_chunk" | "document" | "session_event" | "memory" | "external";
+  id: string;
+  uri?: string;
+  title?: string;
+  metadata: Record<string, unknown>;
+};
+
+export type KnowledgeMemory = {
+  id: string;
+  status: KnowledgeMemoryStatus;
+  kind: KnowledgeMemoryKind;
+  scope: string;
+  text: string;
+  sourceRefs: KnowledgeSourceRef[];
+  confidence: number;
+  metadata: Record<string, unknown>;
+  createdBySessionId: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TurnSubmission = {

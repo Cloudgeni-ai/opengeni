@@ -5,6 +5,7 @@ import {
   ClientConfig,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
+  CreateKnowledgeMemoryRequest,
   CreateSocialConnectionRequest,
   CreateSocialPostRequest,
   CreateDocumentBaseRequest,
@@ -12,9 +13,11 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   ResourceRef,
   SessionBusMessage,
+  UpdateKnowledgeMemoryRequest,
 } from "../src";
 
 describe("contracts", () => {
@@ -224,11 +227,42 @@ describe("contracts", () => {
       query: "network policy",
       limit: 20,
     });
+    expect(DocumentSearchRequest.parse({ query: "ADR-42", mode: "hybrid", sourceKinds: ["repository"] })).toEqual({
+      query: "ADR-42",
+      mode: "hybrid",
+      sourceKinds: ["repository"],
+      limit: 5,
+    });
+  });
+
+  test("accepts knowledge memory contracts", () => {
+    expect(CreateKnowledgeMemoryRequest.parse({
+      text: "Prefer Azure Blob for production object storage.",
+      kind: "decision",
+      confidence: 0.9,
+    })).toEqual({
+      text: "Prefer Azure Blob for production object storage.",
+      status: "proposed",
+      kind: "decision",
+      scope: "workspace",
+      sourceRefs: [],
+      confidence: 0.9,
+      metadata: {},
+    });
+    expect(UpdateKnowledgeMemoryRequest.parse({ status: "approved", reviewedBy: "operator" })).toEqual({
+      status: "approved",
+      reviewedBy: "operator",
+    });
+    expect(KnowledgeMemorySearchRequest.parse({ status: "approved" })).toEqual({
+      status: "approved",
+      limit: 20,
+    });
   });
 
   test("rejects invalid document service requests", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+    expect(() => CreateKnowledgeMemoryRequest.parse({ text: "", confidence: 1.1 })).toThrow();
   });
 });

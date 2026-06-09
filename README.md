@@ -230,9 +230,13 @@ When the manifest base URL is public HTTPS, the generated app also includes webh
 
 The generated GitHub URL is only the manifest form target. Opening or copying that URL by itself only sends `state`, so GitHub shows an empty app form instead of the prefilled manifest.
 
-## Documents
+## Knowledge And Documents
 
-The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and semantic search. Failed rows show parser errors and can be retried individually or in bulk after fixing the parser/runtime issue.
+The Documents workspace supports document bases, file upload, source metadata, indexing status, failed-document retry, hybrid document search, and a reviewed memory queue. Failed rows show parser errors and can be retried individually or in bulk after fixing the parser/runtime issue.
+
+Indexed documents are the raw source layer. Uploads can be tagged with source kind, URI, author, and ACL tags. Search is available through `POST /v1/document-bases/:baseId/search` for one base and `POST /v1/knowledge/search` across selected bases, with `hybrid`, `vector`, and `keyword` modes.
+
+Reviewed memories are the distilled knowledge layer for durable facts, decisions, preferences, and procedures. The API exposes `GET/POST /v1/knowledge/memories` and `PATCH /v1/knowledge/memories/:id`. The built-in `docs` MCP server exposes `knowledge_search`, `knowledge_fetch`, `memory_search`, and `memory_propose` alongside the existing document tools, so agents can retrieve approved memory and propose new memories without bypassing review.
 
 Document indexing depends on:
 
