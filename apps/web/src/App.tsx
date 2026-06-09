@@ -2174,8 +2174,8 @@ function TerminalSessionBanner(props: { session: Session; onNewSession: () => vo
         </div>
       </div>
       <Button type="button" size="sm" variant="secondary" onClick={props.onNewSession} className="shrink-0">
-        <PlusIcon className="size-3.5" />
-        New session
+        <ArrowLeftIcon className="size-3.5" />
+        Back to agent
       </Button>
     </div>
   );
@@ -2190,10 +2190,10 @@ function TerminalSessionArchive(props: { session: Session; eventCount: number })
           <TerminalIcon className="size-4" />
         </div>
         <div className="text-sm font-medium">
-          {failed ? "Failed session archived" : "Cancelled session archived"}
+          {failed ? "Historical failed session" : "Historical cancelled session"}
         </div>
         <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-          The main chat is locked for this historical session. Debug events are still available in the inspector.
+          This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Debug events are still available in the inspector.
         </p>
         <div className="mt-3 text-[11px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
           {props.eventCount} timeline item{props.eventCount === 1 ? "" : "s"}
