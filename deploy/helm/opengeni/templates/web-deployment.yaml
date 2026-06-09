@@ -51,6 +51,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
+          env: []
           {{- if .Values.web.probes.startup.enabled }}
           startupProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.web.probes.startup) | nindent 12 }}

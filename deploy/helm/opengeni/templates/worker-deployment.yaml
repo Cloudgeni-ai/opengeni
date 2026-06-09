@@ -60,6 +60,8 @@ spec:
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+          {{- else }}
+          env: []
           {{- end }}
           {{- if .Values.worker.probes.liveness.enabled }}
           livenessProbe:
