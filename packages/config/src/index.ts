@@ -696,6 +696,14 @@ function validateSettings(settings: Settings): void {
       throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
     }
   }
+  if (
+    settings.productAccessMode === "configured"
+    && !["local", "test"].includes(settings.environment)
+    && !settings.delegationSecret
+    && !settings.authRequired
+  ) {
+    throw new Error("OPENGENI_PRODUCT_ACCESS_MODE=configured requires OPENGENI_DELEGATION_SECRET or OPENGENI_AUTH_REQUIRED=true outside local/test");
+  }
   if (settings.billingMode === "stripe") {
     if (!settings.stripeSecretKey || !settings.stripeWebhookSecret) {
       throw new Error("OPENGENI_STRIPE_SECRET_KEY and OPENGENI_STRIPE_WEBHOOK_SECRET are required when OPENGENI_BILLING_MODE=stripe");

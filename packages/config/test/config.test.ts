@@ -129,6 +129,29 @@ describe("sandbox preparation profiles", () => {
     }, () => getSettings())).toThrow("OPENGENI_ACCESS_KEY is required");
   });
 
+  test("requires configured mode to have an auth boundary outside local and test", () => {
+    expect(() => withEnv({
+      OPENGENI_ENVIRONMENT: "production",
+      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+      OPENGENI_DELEGATION_SECRET: "",
+      OPENGENI_AUTH_REQUIRED: "false",
+    }, () => getSettings())).toThrow("OPENGENI_PRODUCT_ACCESS_MODE=configured requires OPENGENI_DELEGATION_SECRET or OPENGENI_AUTH_REQUIRED=true outside local/test");
+
+    expect(withEnv({
+      OPENGENI_ENVIRONMENT: "production",
+      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+      OPENGENI_DELEGATION_SECRET: "configured-delegation-secret",
+    }, () => getSettings()).productAccessMode).toBe("configured");
+
+    expect(withEnv({
+      OPENGENI_ENVIRONMENT: "production",
+      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+      OPENGENI_DELEGATION_SECRET: "",
+      OPENGENI_AUTH_REQUIRED: "true",
+      OPENGENI_ACCESS_KEY: "configured-shared-key",
+    }, () => getSettings()).productAccessMode).toBe("configured");
+  });
+
   test("retries startup dependency operations with bounded backoff", async () => {
     const retries: string[] = [];
     let calls = 0;

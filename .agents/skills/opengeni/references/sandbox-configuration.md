@@ -154,7 +154,7 @@ Current guidance:
 There are two GitHub credential paths:
 
 1. The `github` sandbox preparation profile may copy existing local `GH_TOKEN`/`GITHUB_TOKEN` and raw host git identity vars.
-2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. The worker preclones selected repositories into temporary local materializations before building the sandbox manifest so clone credentials are not persisted in manifest state. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub.
+2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, OpenGeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub.
 
 Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity independently of ambient host env. Raw host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` values should only enter through the `github` preparation profile or `OPENGENI_SANDBOX_ENV_ALLOWLIST`.
 
@@ -162,7 +162,7 @@ When documenting GitHub access, distinguish:
 
 - GitHub App setup/listing/token minting in the API/packages.
 - Repository resource selection by session/turn/scheduled task.
-- Worker-side preclone/materialization and Git config/askpass env injected into the sandbox.
+- Sandbox-side repository clone lifecycle hooks and Git config/askpass env injected into the sandbox.
 - Actual commits/branches/PRs performed by agent tools inside the sandbox, not by a first-class OpenGeni PR API unless current code adds one.
 
 ## Azure And Cloud Credentials
