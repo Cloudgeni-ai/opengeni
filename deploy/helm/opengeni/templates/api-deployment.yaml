@@ -52,10 +52,10 @@ spec:
             - name: http
               containerPort: {{ .Values.api.containerPort }}
           envFrom:
-            - configMapRef:
-                name: {{ include "opengeni.fullname" . }}-config
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}

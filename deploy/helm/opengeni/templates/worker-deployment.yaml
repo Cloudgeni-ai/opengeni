@@ -53,10 +53,10 @@ spec:
             {{- toYaml .Values.worker.command | nindent 12 }}
           {{- end }}
           envFrom:
-            - configMapRef:
-                name: {{ include "opengeni.fullname" . }}-config
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
