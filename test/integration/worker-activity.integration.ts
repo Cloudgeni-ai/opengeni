@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import {
+  addDocumentToBase,
+  createDocumentBase,
+  type DocumentServices,
+} from "../../packages/documents/src/index";
+import type { ObjectStorage } from "../../packages/storage/src/index";
+import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
   bootstrapWorkspace,
@@ -740,6 +746,85 @@ describe("worker activities integration", () => {
     }
   });
 
+  test("blocks async document embeddings when managed credits are empty", async () => {
+    const grant = await testGrant(dbClient.db);
+    const upload = await createOwnedFileUpload(dbClient.db, grant, {
+      fileId: crypto.randomUUID(),
+      filename: "no-credit-doc.txt",
+      safeFilename: "no-credit-doc.txt",
+      contentType: "text/plain",
+      sizeBytes: 24,
+      bucket: "test",
+      objectKey: `workspaces/${grant.workspaceId}/files/no-credit-doc.txt`,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const file = await completeFileUpload(dbClient.db, grant.workspaceId, upload.uploadId);
+    const base = await createDocumentBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "No credit worker docs",
+    });
+    const document = await addDocumentToBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: base.id,
+      fileId: file.id,
+    });
+    let embedderCalled = false;
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        billingMode: "stripe",
+        modelPricingJson: JSON.stringify({
+          "scripted-model": {
+            inputMicrosPerMillionTokens: 1_000_000,
+            outputMicrosPerMillionTokens: 1_000_000,
+          },
+        }),
+      }),
+      db: dbClient.db,
+      bus,
+      objectStorage: fakeObjectStorage("OpenGeni managed document credit test."),
+      documentServices: {
+        parser: {
+          name: "test-text",
+          parse: async (bytes, inputFile) => ({
+            text: new TextDecoder().decode(bytes),
+            metadata: { filename: inputFile.filename, contentType: inputFile.contentType },
+          }),
+        },
+        chunker: {
+          chunk: (parsed, inputFile) => [{
+            text: parsed.text,
+            metadata: { filename: inputFile.filename, chunkIndex: 0 },
+          }],
+        },
+        embedder: {
+          model: "test-embedder",
+          dimensions: 3,
+          embedMany: async () => {
+            embedderCalled = true;
+            throw new Error("embedder should not run without credits");
+          },
+          embedQuery: async () => [0, 0, 0],
+        },
+      } satisfies DocumentServices,
+    });
+
+    const indexed = await activities.indexDocument({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      documentId: document.id,
+    });
+
+    expect(indexed.status).toBe("failed");
+    expect(indexed.error).toContain("insufficient OpenGeni credits");
+    expect(embedderCalled).toBe(false);
+    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
+    expect(usage.some((event) => event.eventType === "document.indexed")).toBe(false);
+  });
+
   test("allows the worker to run an already accepted turn at the exact monthly run cap", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -1005,4 +1090,16 @@ async function createOwnedScheduledTask(
     workspaceId: grant.workspaceId,
     ...input,
   });
+}
+
+function fakeObjectStorage(body: string): ObjectStorage {
+  return {
+    bucket: "test",
+    backend: "s3-compatible",
+    maxSinglePutSizeBytes: 5_000_000_000,
+    createPutUrl: async () => ({ url: "https://storage.example.test/put", requiredHeaders: {}, expiresAt: new Date(Date.now() + 60_000) }),
+    createGetUrl: async () => ({ url: "https://storage.example.test/get", expiresAt: new Date(Date.now() + 60_000) }),
+    headFile: async () => ({ ContentLength: new TextEncoder().encode(body).byteLength, ContentType: "text/plain" }),
+    getFileBytes: async () => new TextEncoder().encode(body),
+  };
 }

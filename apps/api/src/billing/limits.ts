@@ -95,7 +95,7 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput): Prom
         eventType: "agent_run.created",
         since: startOfUtcMonth(),
       });
-      const requested = input.quantity ?? 1;
+      const requested = input.quantity ?? 0;
       return used + requested <= limits.maxMonthlyAgentRunsPerWorkspace
         ? { allowed: true }
         : blocked("max_monthly_agent_runs_per_workspace", `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);

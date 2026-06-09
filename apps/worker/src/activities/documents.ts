@@ -1,6 +1,7 @@
 import { indexDocumentNow } from "@opengeni/documents";
 import { configuredStaticUsageLimits } from "@opengeni/config";
 import {
+  getBillingBalance,
   recordUsageEvent,
   sumUsageQuantity,
 } from "@opengeni/db";
@@ -18,6 +19,12 @@ export function createDocumentActivities(services: () => Promise<ActivityService
       }
       const document = await indexDocumentNow(db, objectStorage, input.workspaceId, input.documentId, documentServices, {
         beforeEmbed: async ({ chunkCount }) => {
+          if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+            const balance = await getBillingBalance(db, input.accountId);
+            if (balance.balanceMicros <= 0) {
+              throw new Error("insufficient OpenGeni credits");
+            }
+          }
           if (settings.usageLimitsMode !== "static" && settings.usageLimitsMode !== "managed") {
             return;
           }
