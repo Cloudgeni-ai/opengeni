@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, requireSession, setSessionStatus } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, dbSql, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, requireSession, setSessionStatus, sumUsageQuantity } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -102,6 +102,41 @@ describe("API component integration", () => {
     const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
+  });
+
+  test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
+    const userId = `managed-user-${crypto.randomUUID()}`;
+    const email = `managed-cookie-${crypto.randomUUID()}@example.com`;
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      managedAuth: {
+        api: {
+          getSession: async () => ({
+            user: { id: userId, email, name: "Managed Cookie User" },
+          }),
+        },
+      } as any,
+    });
+
+    const access = await app.request("/v1/access/me", {
+      headers: {
+        authorization: "Bearer not-a-valid-opengeni-token",
+        cookie: "better-auth.session_token=test",
+      },
+    });
+    expect(access.status).toBe(200);
+    const context = await access.json() as AccessContext;
+    expect(context.mode).toBe("managed");
+    expect(context.subjectId).toBe(`user:${userId}`);
+    expect(context.defaultWorkspaceId).toBeTruthy();
   });
 
   test("managed credit gate blocks costly writes and exposes recorded usage", async () => {
@@ -397,6 +432,77 @@ describe("API component integration", () => {
       throw new Error(`dispute release webhook failed: ${disputeRelease.status} ${await disputeRelease.text()}`);
     }
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(20_000_000);
+  });
+
+  test("Stripe webhook retry processes stored events that were not marked processed", async () => {
+    const webhookSecret = "whsec_test_webhook_retry_secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+        stripeWebhookSecret: webhookSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const context = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:stripe-webhook-retry",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Stripe webhook retry test",
+      workspaceExternalSource: "test:stripe-webhook-retry",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Stripe webhook retry workspace",
+      subjectId: "test:stripe-webhook-retry",
+    });
+    const accountId = context.defaultAccountId!;
+    const event = {
+      id: `evt_checkout_retry_${crypto.randomUUID()}`,
+      object: "event",
+      type: "checkout.session.completed",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `cs_test_retry_${crypto.randomUUID()}`,
+          object: "checkout.session",
+          mode: "payment",
+          payment_status: "paid",
+          customer: "cus_test_retry",
+          customer_email: "retry@example.com",
+          customer_details: { email: "retry@example.com" },
+          payment_intent: "pi_test_retry",
+          metadata: {
+            opengeni_account_id: accountId,
+            opengeni_package_id: "topup_25",
+            opengeni_credit_micros: "25000000",
+            opengeni_credit_idempotency_key: `stripe:test:checkout-retry:${accountId}`,
+          },
+        },
+      },
+    };
+    await recordStripeWebhookEvent(dbClient.db, {
+      id: event.id,
+      type: event.type,
+      livemode: event.livemode,
+      payload: event,
+    });
+
+    const retry = await postStripeEvent(app, webhookSecret, event);
+    if (retry.status !== 200) {
+      throw new Error(`retry checkout webhook failed: ${retry.status} ${await retry.text()}`);
+    }
+    expect(await retry.json()).toEqual({ received: true });
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+
+    const duplicate = await postStripeEvent(app, webhookSecret, event);
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toEqual({ received: true, duplicate: true });
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
   });
 
   test("rejects unknown MCP tool refs during session create", async () => {
@@ -721,6 +827,11 @@ describe("API component integration", () => {
     expect(paused.status).toBe(200);
     expect(workflow.synced).toHaveLength(2);
 
+    const firedBefore = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "scheduled_task.fired",
+      since: startOfUtcMonth(),
+    });
     const triggered = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
     expect(triggered.status).toBe(202);
     expect(workflow.triggers).toHaveLength(1);
@@ -728,6 +839,12 @@ describe("API component integration", () => {
       id: task.id,
       workspaceId,
     });
+    const firedAfter = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "scheduled_task.fired",
+      since: startOfUtcMonth(),
+    });
+    expect(firedAfter).toBe(firedBefore);
 
     const listed = await app.request(workspacePath(workspaceId, "/scheduled-tasks"));
     expect(listed.status).toBe(200);
@@ -1177,7 +1294,13 @@ describe("API component integration", () => {
       workspaceId: context.defaultWorkspaceId,
     });
 
-    const response = await app.request(`/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`);
+    const rejected = await app.request(`/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`);
+    expect(rejected.status).toBe(400);
+    expect(await rejected.text()).toContain("invalid or expired GitHub installation browser state");
+
+    const response = await app.request(`/v1/github/install/callback?installation_id=138826628&setup_action=install&state=${encodeURIComponent(state)}`, {
+      headers: { cookie: `opengeni_github_state=${state}` },
+    });
     expect(response.status).toBe(302);
     const location = response.headers.get("location");
     expect(location).toBeTruthy();
@@ -1187,6 +1310,7 @@ describe("API component integration", () => {
     expect(redirect.searchParams.get("redirect_uri")).toBe("https://staging.app.opengeni.ai/v1/github/oauth/callback");
     const oauthState = redirect.searchParams.get("state");
     expect(oauthState).toBeTruthy();
+    expect(response.headers.get("set-cookie")).toContain(`opengeni_github_state=${oauthState}`);
     const payload = readSignedState(oauthState!, stateSecret);
     expect(payload).toMatchObject({
       accountId: context.defaultAccountId,
@@ -1253,6 +1377,87 @@ describe("API component integration", () => {
     const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
     expect(search.results[0]?.text).toContain("network policy");
     expect(search.results[0]?.title).toBe("network-runbook.txt");
+  });
+
+  test("document indexing enforces exact chunk limits before embedding", async () => {
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxDocumentIndexedChunksPerWorkspace: 2 }),
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentServices: {
+        parser: {
+          name: "test-text",
+          parse: async (bytes, file) => ({
+            text: new TextDecoder().decode(bytes),
+            metadata: { filename: file.filename, contentType: file.contentType },
+          }),
+        },
+        chunker: {
+          chunk: (parsed, file) => parsed.text.match(/.{1,8}/g)!.map((text, index) => ({
+            text,
+            metadata: { filename: file.filename, chunkIndex: index },
+          })),
+        },
+        embedder: {
+          model: "test-embedder",
+          dimensions: 3,
+          embedMany: async () => {
+            throw new Error("embedder should not run after document chunk cap fails");
+          },
+          embedQuery: async () => [0, 0, 0],
+        },
+      },
+    });
+    const context = await defaultAccessContext(app);
+    const workspaceId = context.defaultWorkspaceId!;
+    const accountId = context.defaultAccountId!;
+    const oversizedBody = "This document is intentionally long enough to become many chunks.";
+    const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
+      method: "POST",
+      body: JSON.stringify({ filename: "oversized-doc.txt", contentType: "text/plain", sizeBytes: new TextEncoder().encode(oversizedBody).byteLength }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(uploadResponse.status).toBe(201);
+    const upload = await uploadResponse.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    await fetch(upload.putUrl, { method: "PUT", body: oversizedBody, headers: upload.requiredHeaders });
+    expect((await app.request(workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`), { method: "POST" })).status).toBe(200);
+
+    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
+      method: "POST",
+      body: JSON.stringify({ name: "Limited docs" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(baseResponse.status).toBe(201);
+    const base = await baseResponse.json() as { id: string };
+    const usageBefore = await sumUsageQuantity(dbClient.db, {
+      accountId,
+      workspaceId,
+      eventType: "document.indexed",
+      since: startOfUtcMonth(),
+    });
+
+    const addResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
+      method: "POST",
+      body: JSON.stringify({ fileId: upload.fileId }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(addResponse.status).toBe(201);
+    const document = await addResponse.json() as { status: string; chunkCount: number; error: string | null };
+    expect(document.status).toBe("failed");
+    expect(document.chunkCount).toBe(0);
+    expect(document.error).toContain("monthly document indexing limit reached (2 chunks)");
+    const usageAfter = await sumUsageQuantity(dbClient.db, {
+      accountId,
+      workspaceId,
+      eventType: "document.indexed",
+      since: startOfUtcMonth(),
+    });
+    expect(usageAfter).toBe(usageBefore);
   });
 
   test("serves indexed documents through the built-in MCP endpoint", async () => {
@@ -1555,4 +1760,8 @@ function objectStorageSettings(databaseUrl: string, endpoint: string) {
     objectStorageAccessKeyId: "minioadmin",
     objectStorageSecretAccessKey: "minioadmin",
   });
+}
+
+function startOfUtcMonth(date = new Date()): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }

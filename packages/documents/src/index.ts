@@ -45,6 +45,15 @@ export type DocumentServices = {
   embedder: DocumentEmbedder;
 };
 
+export type DocumentIndexHooks = {
+  beforeEmbed?: (input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+    chunkCount: number;
+  }) => Promise<void>;
+};
+
 export class LiteParseDocumentParser implements DocumentParser {
   readonly name = DEFAULT_DOCUMENT_PARSER;
   private parseQueue: Promise<void> = Promise.resolve();
@@ -342,6 +351,7 @@ export async function indexDocumentNow(
   workspaceId: string,
   documentId: string,
   services: DocumentServices = createDocumentServices(),
+  hooks: DocumentIndexHooks = {},
 ): Promise<Document> {
   const [document] = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     await scopedDb.select().from(schema.documents).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).limit(1)
@@ -360,6 +370,12 @@ export async function indexDocumentNow(
     const bytes = await objectStorage.getFileBytes(file);
     const parsed = await services.parser.parse(bytes, file);
     const chunks = services.chunker.chunk(parsed, file);
+    await hooks.beforeEmbed?.({
+      accountId: document.accountId,
+      workspaceId: document.workspaceId,
+      documentId,
+      chunkCount: chunks.length,
+    });
     const embeddings = await services.embedder.embedMany(chunks.map((chunk) => chunk.text));
     if (embeddings.length !== chunks.length) {
       throw new Error(`Embedding provider returned ${embeddings.length} embeddings for ${chunks.length} chunks`);

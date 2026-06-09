@@ -709,6 +709,14 @@ export async function recordStripeWebhookEvent(db: Database, input: {
   return Boolean(row);
 }
 
+export async function isStripeWebhookProcessed(db: Database, id: string): Promise<boolean> {
+  const [row] = await db.select({ processedAt: schema.stripeWebhookEvents.processedAt })
+    .from(schema.stripeWebhookEvents)
+    .where(eq(schema.stripeWebhookEvents.id, id))
+    .limit(1);
+  return Boolean(row?.processedAt);
+}
+
 export async function markStripeWebhookProcessed(db: Database, id: string): Promise<void> {
   await db.update(schema.stripeWebhookEvents).set({ processedAt: new Date() }).where(eq(schema.stripeWebhookEvents.id, id));
 }

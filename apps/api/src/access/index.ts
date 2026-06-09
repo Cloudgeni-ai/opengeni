@@ -93,29 +93,28 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       return delegated;
     }
     const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
-    if (!apiKey) {
-      return null;
+    if (apiKey) {
+      return {
+        mode: "managed",
+        subjectId: `api_key:${apiKey.id}`,
+        subjectLabel: apiKey.name,
+        accountGrants: [{
+          accountId: apiKey.accountId,
+          subjectId: `api_key:${apiKey.id}`,
+          subjectLabel: apiKey.name,
+          permissions: apiKey.workspaceId ? [] : apiKey.permissions,
+        }],
+        workspaceGrants: apiKey.workspaceId ? [{
+          workspaceId: apiKey.workspaceId,
+          accountId: apiKey.accountId,
+          subjectId: `api_key:${apiKey.id}`,
+          subjectLabel: apiKey.name,
+          permissions: apiKey.permissions,
+        }] : [],
+        defaultAccountId: apiKey.accountId,
+        defaultWorkspaceId: apiKey.workspaceId,
+      } satisfies AccessContext;
     }
-    return {
-      mode: "managed",
-      subjectId: `api_key:${apiKey.id}`,
-      subjectLabel: apiKey.name,
-      accountGrants: [{
-        accountId: apiKey.accountId,
-        subjectId: `api_key:${apiKey.id}`,
-        subjectLabel: apiKey.name,
-        permissions: apiKey.workspaceId ? [] : apiKey.permissions,
-      }],
-      workspaceGrants: apiKey.workspaceId ? [{
-        workspaceId: apiKey.workspaceId,
-        accountId: apiKey.accountId,
-        subjectId: `api_key:${apiKey.id}`,
-        subjectLabel: apiKey.name,
-        permissions: apiKey.permissions,
-      }] : [],
-      defaultAccountId: apiKey.accountId,
-      defaultWorkspaceId: apiKey.workspaceId,
-    } satisfies AccessContext;
   }
 
   if (deps.managedAuth) {

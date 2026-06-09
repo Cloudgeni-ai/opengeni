@@ -1,4 +1,9 @@
 import { indexDocumentNow } from "@opengeni/documents";
+import { configuredStaticUsageLimits } from "@opengeni/config";
+import {
+  recordUsageEvent,
+  sumUsageQuantity,
+} from "@opengeni/db";
 import type {
   ActivityServices,
   IndexDocumentInput,
@@ -7,11 +12,46 @@ import type {
 export function createDocumentActivities(services: () => Promise<ActivityServices>) {
   return {
     indexDocument: async (input: IndexDocumentInput) => {
-      const { db, objectStorage, documentServices } = await services();
+      const { settings, db, objectStorage, documentServices } = await services();
       if (!objectStorage) {
         throw new Error("object storage is not configured");
       }
-      return await indexDocumentNow(db, objectStorage, input.workspaceId, input.documentId, documentServices);
+      const document = await indexDocumentNow(db, objectStorage, input.workspaceId, input.documentId, documentServices, {
+        beforeEmbed: async ({ chunkCount }) => {
+          if (settings.usageLimitsMode !== "static" && settings.usageLimitsMode !== "managed") {
+            return;
+          }
+          const limit = configuredStaticUsageLimits(settings).maxDocumentIndexedChunksPerWorkspace;
+          if (!limit) {
+            return;
+          }
+          const used = await sumUsageQuantity(db, {
+            workspaceId: input.workspaceId,
+            eventType: "document.indexed",
+            since: startOfUtcMonth(),
+          });
+          if (used + chunkCount > limit) {
+            throw new Error(`monthly document indexing limit reached (${limit} chunks)`);
+          }
+        },
+      });
+      if (document.status === "ready") {
+        await recordUsageEvent(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          eventType: "document.indexed",
+          quantity: document.chunkCount,
+          unit: "chunk",
+          sourceResourceType: "document",
+          sourceResourceId: document.id,
+          idempotencyKey: `document.indexed:${input.workspaceId}:${document.id}:${document.updatedAt}`,
+        });
+      }
+      return document;
     },
   };
+}
+
+function startOfUtcMonth(date = new Date()): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }

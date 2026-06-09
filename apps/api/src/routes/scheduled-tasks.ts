@@ -7,7 +7,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
+import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
@@ -79,17 +79,6 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
     await workflowClient.triggerScheduledTask({ task });
-    await recordWorkspaceUsage(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      eventType: "scheduled_task.fired",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "scheduled_task",
-      sourceResourceId: task.id,
-      idempotencyKey: `scheduled_task.fired:${workspaceId}:${task.id}:manual:${crypto.randomUUID()}`,
-    });
     return c.json(task, 202);
   });
 

@@ -18,7 +18,7 @@ export type SessionWorkflowClient = {
 };
 
 export type DocumentIndexClient = {
-  indexDocument: (input: { workspaceId: string; documentId: string }) => Promise<Document | void>;
+  indexDocument: (input: { accountId: string; workspaceId: string; documentId: string }) => Promise<Document | void>;
 };
 
 export type AppDependencies = {

@@ -20,9 +20,12 @@ import {
   verifySignedState,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
+
+const githubStateCookie = "opengeni_github_state";
 
 export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, githubStateSecret } = deps;
@@ -36,6 +39,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
     });
+    setGitHubStateCookie(c, deps, state);
     return c.json({
       configured: missing.length === 0,
       appId: settings.githubAppId ?? null,
@@ -81,6 +85,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
     });
+    setGitHubStateCookie(c, deps, state);
     const appName = payload.appName?.trim() || "OpenGeni";
     const manifest = buildGitHubAppManifest({
       appName,
@@ -111,6 +116,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       const envLines = envLinesFromGitHubManifestConversion(conversion);
       const slug = String(conversion.slug ?? "");
       const installUrl = slug ? `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}` : "";
+      setGitHubStateCookie(c, deps, state);
       return c.html(githubSuccessHtml(envLines, installUrl));
     } catch (error) {
       const message = error instanceof GitHubAppApiError ? error.message : String(error);
@@ -130,6 +136,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string") {
       throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
     }
+    requireGitHubStateCookie(c, state);
     const grant = await requireAccessGrant(c, deps, statePayload.workspaceId, "github:manage");
     if (grant.accountId !== statePayload.accountId) {
       throw new HTTPException(403, { message: "GitHub installation state does not match this workspace" });
@@ -152,6 +159,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         installationId,
       });
       const baseUrl = (settings.githubAppManifestBaseUrl ?? settings.publicBaseUrl ?? new URL(c.req.url).origin).replace(/\/+$/, "");
+      setGitHubStateCookie(c, deps, oauthState);
       return c.redirect(githubOAuthAuthorizeUrl({
         clientId,
         state: oauthState,
@@ -182,6 +190,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!statePayload || typeof statePayload.accountId !== "string" || typeof statePayload.workspaceId !== "string" || installationId === null) {
       throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
     }
+    requireGitHubStateCookie(c, state);
     return await completeGitHubInstallationBinding(deps, c, {
       code,
       statePayload,
@@ -223,6 +232,7 @@ async function completeGitHubInstallationBinding(
       accountType: installation.accountType,
     });
     const returnUrl = openGeniReturnUrl(settings, c, input.statePayload.workspaceId);
+    deleteCookie(c, githubStateCookie, { path: "/v1/github" });
     return c.html(githubSetupSuccessHtml(installation.accountLogin ?? `installation ${input.installationId}`, returnUrl));
     } catch (error) {
       if (error instanceof HTTPException) {
@@ -233,6 +243,28 @@ async function completeGitHubInstallationBinding(
       }
       throw new HTTPException(502, { message: error instanceof Error ? error.message : String(error) });
     }
+}
+
+function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): void {
+  setCookie(c, githubStateCookie, state, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: isSecureRequest(c, deps),
+    path: "/v1/github",
+    maxAge: 10 * 60,
+  });
+}
+
+function requireGitHubStateCookie(c: Context, state: string): void {
+  if (getCookie(c, githubStateCookie) !== state) {
+    throw new HTTPException(400, { message: "invalid or expired GitHub installation browser state" });
+  }
+}
+
+function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
+  return deps.settings.publicBaseUrl?.startsWith("https://")
+    || c.req.header("x-forwarded-proto") === "https"
+    || new URL(c.req.url).protocol === "https:";
 }
 
 export async function listWorkspaceGitHubRepositories(deps: ApiRouteDeps, workspaceId: string) {

@@ -59,18 +59,20 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       const document = await addDocumentToBase(db, { accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId"), fileId: payload.fileId });
       const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
-      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ workspaceId, documentId: document.id }) ?? document);
-      await recordWorkspaceUsage(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        eventType: "document.indexed",
-        quantity: indexed.chunkCount,
-        unit: "chunk",
-        sourceResourceType: "document",
-        sourceResourceId: indexed.id,
-        idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
-      });
+      const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? document);
+      if (indexed.status === "ready") {
+        await recordWorkspaceUsage(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          eventType: "document.indexed",
+          quantity: indexed.chunkCount,
+          unit: "chunk",
+          sourceResourceType: "document",
+          sourceResourceId: indexed.id,
+          idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+        });
+      }
       return c.json(Document.parse(indexed), wasCreated ? 201 : 200);
     } catch (error) {
       throw documentHttpException(error);
@@ -101,18 +103,20 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (document.baseId !== c.req.param("baseId")) {
         throw new HTTPException(404, { message: "document not found" });
       }
-      const indexed = await documentIndexer.indexDocument({ workspaceId, documentId: document.id }) ?? document;
-      await recordWorkspaceUsage(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        eventType: "document.indexed",
-        quantity: indexed.chunkCount,
-        unit: "chunk",
-        sourceResourceType: "document",
-        sourceResourceId: indexed.id,
-        idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
-      });
+      const indexed = await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? document;
+      if (indexed.status === "ready") {
+        await recordWorkspaceUsage(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          eventType: "document.indexed",
+          quantity: indexed.chunkCount,
+          unit: "chunk",
+          sourceResourceType: "document",
+          sourceResourceId: indexed.id,
+          idempotencyKey: `document.indexed:${workspaceId}:${indexed.id}:${indexed.updatedAt}`,
+        });
+      }
       return c.json(Document.parse(indexed));
     } catch (error) {
       if (error instanceof HTTPException) {

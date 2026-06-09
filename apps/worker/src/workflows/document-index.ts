@@ -1,6 +1,7 @@
 import { documentActivity } from "./activities";
 
 export type DocumentIndexWorkflowInput = {
+  accountId: string;
   workspaceId: string;
   documentId: string;
 };

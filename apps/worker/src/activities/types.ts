@@ -55,6 +55,7 @@ export type DispatchScheduledTaskRunResult = {
 };
 
 export type IndexDocumentInput = {
+  accountId: string;
   workspaceId: string;
   documentId: string;
 };

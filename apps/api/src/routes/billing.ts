@@ -9,6 +9,7 @@ import {
   applyCreditLedgerEntry,
   getBillingBalance,
   getBillingCustomer,
+  isStripeWebhookProcessed,
   listUsageEvents,
   getManagedAccount,
   markStripeWebhookProcessed,
@@ -111,7 +112,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       payload: event,
     });
     if (!firstSeen) {
-      return c.json({ received: true, duplicate: true });
+      if (await isStripeWebhookProcessed(deps.db, event.id)) {
+        return c.json({ received: true, duplicate: true });
+      }
     }
     try {
       await handleStripeWebhookEvent(deps, stripeClient(deps), event);

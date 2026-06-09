@@ -13,6 +13,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "./dependencies";
 import { requireAccessGrant } from "./access";
 import { createManagedAuth } from "./auth/managed-auth";
+import { requireLimit } from "./billing/limits";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerDocumentRoutes } from "./routes/documents";
@@ -52,11 +53,15 @@ export function createApp(deps: AppDependencies): Hono {
     return documentServices;
   };
   const documentIndexer = deps.documentIndexer ?? {
-    indexDocument: async ({ workspaceId, documentId }: { workspaceId: string; documentId: string }) => {
+    indexDocument: async ({ accountId, workspaceId, documentId }: { accountId: string; workspaceId: string; documentId: string }) => {
       if (!objectStorage) {
         throw new HTTPException(503, { message: "object storage is not configured" });
       }
-      return await indexDocumentNow(deps.db, objectStorage, workspaceId, documentId, getDocumentServices());
+      return await indexDocumentNow(deps.db, objectStorage, workspaceId, documentId, getDocumentServices(), {
+        beforeEmbed: async ({ chunkCount }) => {
+          await requireLimit(routeDeps, { accountId, workspaceId, action: "document:index", quantity: chunkCount });
+        },
+      });
     },
   };
   const routeDeps: ApiRouteDeps = {

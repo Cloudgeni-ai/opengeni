@@ -283,10 +283,10 @@ describe("Temporal workflow integration", () => {
       const handle = await client.workflow.start("documentIndexWorkflow", {
         taskQueue,
         workflowId: `wf-${crypto.randomUUID()}`,
-        args: [{ workspaceId: scope.workspaceId, documentId: "document-1" }],
+        args: [{ accountId: scope.accountId, workspaceId: scope.workspaceId, documentId: "document-1" }],
       });
       const result = await handle.result();
-      expect(calls).toEqual([{ workspaceId: scope.workspaceId, documentId: "document-1" }]);
+      expect(calls).toEqual([{ accountId: scope.accountId, workspaceId: scope.workspaceId, documentId: "document-1" }]);
       expect(result).toMatchObject({ id: "document-1", status: "ready" });
     } finally {
       worker.shutdown();
