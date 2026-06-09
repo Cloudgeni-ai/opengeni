@@ -42,7 +42,9 @@ try {
   const syntheticRows = await client.db.execute(dbSql`
     select id, workspace_id, initial_message, created_at
     from sessions
-    where initial_message = any(${syntheticSessionLabels})
+    where initial_message = ${syntheticSessionLabels[0]}
+      or initial_message = ${syntheticSessionLabels[1]}
+      or initial_message = ${syntheticSessionLabels[2]}
     order by created_at desc
   `);
   const modalRows = args.modalFailureSince
