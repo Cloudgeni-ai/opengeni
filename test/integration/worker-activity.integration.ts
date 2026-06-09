@@ -746,6 +746,62 @@ describe("worker activities integration", () => {
     }
   });
 
+  test("caps model usage debits at the prepaid balance", async () => {
+    const grant = await testGrant(dbClient.db);
+    await applyCreditLedgerEntry(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      type: "manual_adjustment",
+      amountMicros: 1,
+      sourceType: "test",
+      sourceId: "capped-model-debit",
+      idempotencyKey: `test-credit:${grant.workspaceId}:capped-model-debit`,
+    });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "expensive run",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "expensive run" } },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        billingMode: "stripe",
+        modelPricingJson: JSON.stringify({
+          "scripted-model": {
+            inputMicrosPerMillionTokens: 1_000_000_000,
+            outputMicrosPerMillionTokens: 1_000_000_000,
+          },
+        }),
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ id: "expensive-response", outputText: "expensive response", chunks: ["expensive response"] }]),
+      }),
+    });
+
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-capped-model-debit",
+    });
+
+    expect(result.status).toBe("failed");
+    const balance = await getBillingBalance(dbClient.db, grant.accountId);
+    expect(balance.balanceMicros).toBe(0);
+    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
+    const cost = usage.find((event) => event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"));
+    expect(cost?.quantity).toBeGreaterThan(1);
+  });
+
   test("blocks async document embeddings when managed credits are empty", async () => {
     const grant = await testGrant(dbClient.db);
     const upload = await createOwnedFileUpload(dbClient.db, grant, {

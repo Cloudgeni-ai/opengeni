@@ -137,6 +137,8 @@ export function stripeCheckoutSessionCreateParams(input: {
   cancelUrl?: string | undefined;
   idempotencyKey: string;
 }): Stripe.Checkout.SessionCreateParams {
+  const successUrl = checkoutReturnUrl(input.publicBaseUrl, input.successUrl, "/billing?checkout=success", "successUrl");
+  const cancelUrl = checkoutReturnUrl(input.publicBaseUrl, input.cancelUrl, "/billing?checkout=cancelled", "cancelUrl");
   return {
     mode: "payment",
     customer: input.customerId,
@@ -144,8 +146,8 @@ export function stripeCheckoutSessionCreateParams(input: {
       address: "auto",
       name: "auto",
     },
-    success_url: input.successUrl ?? `${input.publicBaseUrl}/billing?checkout=success`,
-    cancel_url: input.cancelUrl ?? `${input.publicBaseUrl}/billing?checkout=cancelled`,
+    success_url: successUrl,
+    cancel_url: cancelUrl,
     automatic_tax: { enabled: true },
     billing_address_collection: "auto",
     line_items: [{
@@ -176,6 +178,22 @@ export function stripeCheckoutSessionCreateParams(input: {
       },
     },
   };
+}
+
+function checkoutReturnUrl(publicBaseUrl: string | undefined, candidate: string | undefined, fallbackPath: string, field: string): string {
+  if (!publicBaseUrl) {
+    throw new HTTPException(500, { message: "OPENGENI_PUBLIC_BASE_URL is required for Stripe checkout" });
+  }
+  const base = new URL(publicBaseUrl);
+  const fallback = new URL(fallbackPath, base).toString();
+  if (!candidate) {
+    return fallback;
+  }
+  const parsed = new URL(candidate);
+  if (parsed.origin !== base.origin) {
+    throw new HTTPException(400, { message: `${field} must use the OpenGeni public origin` });
+  }
+  return parsed.toString();
 }
 
 async function handleStripeWebhookEvent(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {

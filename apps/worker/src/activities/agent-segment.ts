@@ -1,7 +1,7 @@
 import {
   claimNextQueuedTurn as claimNextQueuedTurnDb,
   createTurn,
-  applyCreditLedgerEntry,
+  applyCreditDebitUpToBalance,
   finishTurn,
   getBillingBalance,
   requireFile,
@@ -387,11 +387,11 @@ async function recordModelUsageAndDebitCredits(settings: Settings, db: ActivityS
     idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
   });
   if (costMicros > 0) {
-    await applyCreditLedgerEntry(db, {
+    await applyCreditDebitUpToBalance(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
-      amountMicros: -costMicros,
+      requestedAmountMicros: costMicros,
       sourceType: "model_response",
       sourceId: `${input.turnId}:${input.sourceKey}`,
       idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,

@@ -140,6 +140,33 @@ describe("API helpers", () => {
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe("00000000-0000-4000-8000-000000000001");
   });
 
+  test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
+    const params = stripeCheckoutSessionCreateParams({
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      packageId: "topup_25",
+      packageLabel: "$25 OpenGeni credits",
+      amountMicros: 25_000_000,
+      publicBaseUrl: "https://app.opengeni.ai",
+      successUrl: "https://app.opengeni.ai/billing?checkout=success&source=test",
+      cancelUrl: "https://app.opengeni.ai/billing?checkout=cancelled&source=test",
+      idempotencyKey: "checkout:test-return-url",
+    });
+
+    expect(params.success_url).toBe("https://app.opengeni.ai/billing?checkout=success&source=test");
+    expect(params.cancel_url).toBe("https://app.opengeni.ai/billing?checkout=cancelled&source=test");
+    expect(() => stripeCheckoutSessionCreateParams({
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      packageId: "topup_25",
+      packageLabel: "$25 OpenGeni credits",
+      amountMicros: 25_000_000,
+      publicBaseUrl: "https://app.opengeni.ai",
+      successUrl: "https://evil.example/checkout",
+      idempotencyKey: "checkout:test-open-redirect",
+    })).toThrow("successUrl must use the OpenGeni public origin");
+  });
+
   test("replays SSE history across all pages", async () => {
     const events = Array.from({ length: 1005 }, (_, index) => ({
       id: `event-${index + 1}`,

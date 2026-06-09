@@ -652,6 +652,45 @@ export async function applyCreditLedgerEntry(db: Database, input: {
   });
 }
 
+export async function applyCreditDebitUpToBalance(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  requestedAmountMicros: number;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+}): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+  if (input.requestedAmountMicros <= 0) {
+    return { balance: await getBillingBalance(db, input.accountId), debitedMicros: 0 };
+  }
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+    const before = await getBillingBalance(scopedDb, input.accountId);
+    const debitedMicros = Math.min(input.requestedAmountMicros, Math.max(0, before.balanceMicros));
+    if (debitedMicros > 0) {
+      await scopedDb.insert(schema.creditLedgerEntries).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId ?? null,
+        type: input.type,
+        amountMicros: -debitedMicros,
+        sourceType: input.sourceType ?? null,
+        sourceId: input.sourceId ?? null,
+        idempotencyKey: input.idempotencyKey,
+        metadata: {
+          ...input.metadata,
+          requestedAmountMicros: input.requestedAmountMicros,
+          debitedMicros,
+        },
+        occurredAt: input.occurredAt ?? new Date(),
+      }).onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+    }
+    return { balance: await getBillingBalance(scopedDb, input.accountId), debitedMicros };
+  });
+}
+
 export async function getBillingCustomer(db: Database, accountId: string, provider = "stripe"): Promise<{
   accountId: string;
   provider: string;
