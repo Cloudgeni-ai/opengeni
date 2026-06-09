@@ -4,6 +4,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
     serviceName: "opengeni",
     environment: "test",
+    deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
     natsUrl: "nats://127.0.0.1:4222",
     temporalHost: "127.0.0.1:7233",

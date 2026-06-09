@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { authHeadersForAccessKey, resolveApiBaseUrl, sendVerificationEmail, streamSessionEvents } from "./api";
+import { authHeadersForAccessKey, resolveApiBaseUrl, sendVerificationEmail, shouldReloadForDeploymentRevision, streamSessionEvents } from "./api";
 import type { SessionEvent } from "./types";
 
 describe("web API auth helpers", () => {
@@ -14,6 +14,20 @@ describe("web API auth helpers", () => {
   test("defaults to same-origin API paths for deployed web builds", () => {
     expect(resolveApiBaseUrl(undefined)).toBe("");
     expect(resolveApiBaseUrl("https://opengeni.example.com/")).toBe("https://opengeni.example.com");
+  });
+
+  test("reloads once when the API revision differs from the web bundle revision", () => {
+    const storage = new Map<string, string>();
+    const fakeStorage = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+    };
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage)).toBe(true);
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "web-sha", fakeStorage)).toBe(false);
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "api-sha", fakeStorage)).toBe(false);
+    expect(shouldReloadForDeploymentRevision({ deploymentRevision: "api-sha" }, "", fakeStorage)).toBe(false);
   });
 
   test("sends managed verification resend requests through Better Auth", async () => {

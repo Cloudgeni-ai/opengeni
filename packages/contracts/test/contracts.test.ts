@@ -70,6 +70,7 @@ describe("contracts", () => {
 
   test("accepts client config payloads", () => {
     const payload = ClientConfig.parse({
+      deploymentRevision: "test-sha",
       defaultModel: "gpt-5.5",
       allowedModels: ["gpt-5.5"],
       defaultReasoningEffort: "high",
@@ -80,6 +81,7 @@ describe("contracts", () => {
       auth: { mode: "managedSession", session: "cookie" },
     });
     expect(payload.defaultReasoningEffort).toBe("high");
+    expect(payload.deploymentRevision).toBe("test-sha");
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");

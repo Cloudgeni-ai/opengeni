@@ -93,6 +93,7 @@ export type TurnSubmission = {
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export type ClientConfig = {
+  deploymentRevision: string;
   defaultModel: string;
   allowedModels: string[];
   defaultReasoningEffort: ReasoningEffort;

@@ -208,6 +208,7 @@ describe("deployment contract", () => {
     expect(plan.deployCommands.some((command) => command.includes("helm repo add temporal"))).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("terraform -chdir=deploy/terraform/gcp apply"))).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("docker build") && command.includes("--target api"))).toBe(true);
+    expect(plan.deployCommands.some((command) => command.includes("--target web") && command.includes("--build-arg OPENGENI_DEPLOYMENT_REVISION"))).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("docker push"))).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("deployment:runtime-artifacts"))).toBe(true);
     expect(plan.deployCommands.some((command) => command.includes("opengeni-runtime"))).toBe(true);
@@ -273,10 +274,12 @@ describe("deployment contract", () => {
     expect(artifacts.missingEnvVars).toEqual([]);
     expect(artifacts.helmValuesYaml).toContain("imageRegistry: \"us-central1-docker.pkg.dev/opengeni-example/opengeni\"");
     expect(artifacts.helmValuesYaml).toContain("tag: \"test-sha\"");
+    expect(artifacts.helmValuesYaml).toContain("OPENGENI_DEPLOYMENT_REVISION: \"test-sha\"");
     expect(artifacts.helmValuesYaml).toContain("digest: \"\"");
     expect(artifacts.helmValuesYaml).toContain("iam.gke.io/gcp-service-account: \"opengeni-runtime@opengeni-example.iam.gserviceaccount.com\"");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID=opengeni-example");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_NATS_URL=nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222");
     expect(artifacts.summary.secretNames).toContain("opengeni-runtime");

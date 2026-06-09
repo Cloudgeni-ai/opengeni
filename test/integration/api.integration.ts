@@ -630,7 +630,8 @@ describe("API component integration", () => {
     });
     const response = await app.request("/v1/config/client");
     expect(response.status).toBe(200);
-    const payload = await response.json() as { defaultModel: string; allowedReasoningEfforts: string[]; fileUploads: { enabled: boolean; maxSizeBytes: number } };
+    const payload = await response.json() as { deploymentRevision: string; defaultModel: string; allowedReasoningEfforts: string[]; fileUploads: { enabled: boolean; maxSizeBytes: number } };
+    expect(payload.deploymentRevision).toBe("dev");
     expect(payload.defaultModel).toBe("scripted-model");
     expect(payload.allowedReasoningEfforts).toContain("high");
     expect(payload.fileUploads).toEqual({ enabled: false, maxSizeBytes: 5_000_000_000 });

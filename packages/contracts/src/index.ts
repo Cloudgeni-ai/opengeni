@@ -838,6 +838,7 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 
 export const ClientConfig = z.object({
+  deploymentRevision: z.string(),
   defaultModel: z.string(),
   allowedModels: z.array(z.string()).min(1),
   defaultReasoningEffort: ReasoningEffort,

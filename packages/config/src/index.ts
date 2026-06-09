@@ -61,6 +61,7 @@ export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
+  deploymentRevision: z.string().default("dev"),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
   natsUrl: z.string().default("nats://127.0.0.1:4222"),
   temporalHost: z.string().default("127.0.0.1:7233"),
@@ -271,6 +272,7 @@ export function getSettings(): Settings {
   const raw = {
     serviceName: optional("OPENGENI_SERVICE_NAME"),
     environment: optional("OPENGENI_ENVIRONMENT"),
+    deploymentRevision: optional("OPENGENI_DEPLOYMENT_REVISION") ?? optional("SOURCE_VERSION") ?? optional("GITHUB_SHA"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     natsUrl: optional("OPENGENI_NATS_URL"),
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),

@@ -28,7 +28,9 @@ export function resolveApiBaseUrl(value: string | undefined): string {
 }
 
 export const apiBaseUrl = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+export const bundleDeploymentRevision = String(import.meta.env.VITE_OPENGENI_DEPLOYMENT_REVISION ?? "");
 const accessKeyStorageKey = "opengeni.accessKey";
+const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 
 export class ApiError extends Error {
@@ -173,8 +175,34 @@ export function createSession(input: {
 
 export async function fetchClientConfig(): Promise<ClientConfig> {
   const config = await request<ClientConfig>("/v1/config/client");
+  reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
   return config;
+}
+
+export function shouldReloadForDeploymentRevision(
+  config: Pick<ClientConfig, "deploymentRevision">,
+  bundleRevision = bundleDeploymentRevision,
+  storage: Pick<Storage, "getItem" | "setItem"> | null = typeof sessionStorage === "undefined" ? null : sessionStorage,
+): boolean {
+  if (!bundleRevision || !config.deploymentRevision || bundleRevision === config.deploymentRevision || !storage) {
+    return false;
+  }
+  const key = `${deploymentReloadStoragePrefix}${config.deploymentRevision}`;
+  if (storage.getItem(key) === bundleRevision) {
+    return false;
+  }
+  storage.setItem(key, bundleRevision);
+  return true;
+}
+
+function reloadIfStaleDeployment(config: ClientConfig): void {
+  if (!shouldReloadForDeploymentRevision(config)) {
+    return;
+  }
+  if (typeof window !== "undefined") {
+    window.location.reload();
+  }
 }
 
 export function fetchAccessContext(): Promise<AccessContext> {

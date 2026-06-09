@@ -1013,7 +1013,7 @@ function deployCommands(
     return [
       "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
       "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local-k8s .",
-      "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web -t opengeni-web:local-k8s .",
+      "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
       "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
       `kubectl create namespace ${contract.runtime.namespace ?? "opengeni-local"} --dry-run=client -o yaml | kubectl apply -f -`,
       `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
@@ -1064,7 +1064,7 @@ function imageBuildPushCommands(contract: DeploymentContract, terraformRoot: str
       `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" && ACR_ACCESS_TOKEN="$(az acr login --name "\${ACR_LOGIN_SERVER%%.*}" --expose-token --query accessToken -o tsv)" && printf '%s' "$ACR_ACCESS_TOKEN" | docker login "$ACR_LOGIN_SERVER" --username 00000000-0000-0000-0000-000000000000 --password-stdin`,
       `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t "$ACR_LOGIN_SERVER/opengeni-api:$OPENGENI_IMAGE_TAG" . && docker push "$ACR_LOGIN_SERVER/opengeni-api:$OPENGENI_IMAGE_TAG"`,
       `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t "$ACR_LOGIN_SERVER/opengeni-worker:$OPENGENI_IMAGE_TAG" . && docker push "$ACR_LOGIN_SERVER/opengeni-worker:$OPENGENI_IMAGE_TAG"`,
-      `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t "$ACR_LOGIN_SERVER/opengeni-web:$OPENGENI_IMAGE_TAG" . && docker push "$ACR_LOGIN_SERVER/opengeni-web:$OPENGENI_IMAGE_TAG"`,
+      `ACR_LOGIN_SERVER="$(terraform -chdir=${terraformRoot} output -raw acr_login_server)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" OPENGENI_DEPLOYMENT_REVISION="\${OPENGENI_DEPLOYMENT_REVISION:-$OPENGENI_IMAGE_TAG}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t "$ACR_LOGIN_SERVER/opengeni-web:$OPENGENI_IMAGE_TAG" . && docker push "$ACR_LOGIN_SERVER/opengeni-web:$OPENGENI_IMAGE_TAG"`,
     ];
   }
   if (contract.runtime.cloud === "aws") {
@@ -1072,7 +1072,7 @@ function imageBuildPushCommands(contract: DeploymentContract, terraformRoot: str
       `AWS_REGION="$(terraform -chdir=${terraformRoot} output -raw region)" && AWS_ACCOUNT_ID="$(terraform -chdir=${terraformRoot} output -raw account_id)" && aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"`,
       `API_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .api)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t "$API_IMAGE:$OPENGENI_IMAGE_TAG" . && docker push "$API_IMAGE:$OPENGENI_IMAGE_TAG"`,
       `WORKER_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .worker)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t "$WORKER_IMAGE:$OPENGENI_IMAGE_TAG" . && docker push "$WORKER_IMAGE:$OPENGENI_IMAGE_TAG"`,
-      `WEB_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .web)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t "$WEB_IMAGE:$OPENGENI_IMAGE_TAG" . && docker push "$WEB_IMAGE:$OPENGENI_IMAGE_TAG"`,
+      `WEB_IMAGE="$(terraform -chdir=${terraformRoot} output -json ecr_repository_urls | jq -r .web)" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" OPENGENI_DEPLOYMENT_REVISION="\${OPENGENI_DEPLOYMENT_REVISION:-$OPENGENI_IMAGE_TAG}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t "$WEB_IMAGE:$OPENGENI_IMAGE_TAG" . && docker push "$WEB_IMAGE:$OPENGENI_IMAGE_TAG"`,
     ];
   }
   if (contract.runtime.cloud === "gcp") {
@@ -1080,7 +1080,7 @@ function imageBuildPushCommands(contract: DeploymentContract, terraformRoot: str
       `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" && gcloud auth configure-docker "\${GCP_IMAGE_REGISTRY%%/*}" --quiet`,
       `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t "$GCP_IMAGE_REGISTRY/opengeni-api:$OPENGENI_IMAGE_TAG" . && docker push "$GCP_IMAGE_REGISTRY/opengeni-api:$OPENGENI_IMAGE_TAG"`,
       `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t "$GCP_IMAGE_REGISTRY/opengeni-worker:$OPENGENI_IMAGE_TAG" . && docker push "$GCP_IMAGE_REGISTRY/opengeni-worker:$OPENGENI_IMAGE_TAG"`,
-      `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t "$GCP_IMAGE_REGISTRY/opengeni-web:$OPENGENI_IMAGE_TAG" . && docker push "$GCP_IMAGE_REGISTRY/opengeni-web:$OPENGENI_IMAGE_TAG"`,
+      `GCP_IMAGE_REGISTRY="$(terraform -chdir=${terraformRoot} output -json helm_set_values | jq -r '."global.imageRegistry"')" OPENGENI_IMAGE_TAG="\${OPENGENI_IMAGE_TAG:-$(git rev-parse --short HEAD)}" OPENGENI_DEPLOYMENT_REVISION="\${OPENGENI_DEPLOYMENT_REVISION:-$OPENGENI_IMAGE_TAG}" docker build --platform \${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t "$GCP_IMAGE_REGISTRY/opengeni-web:$OPENGENI_IMAGE_TAG" . && docker push "$GCP_IMAGE_REGISTRY/opengeni-web:$OPENGENI_IMAGE_TAG"`,
     ];
   }
   return [];
@@ -1289,6 +1289,7 @@ function runtimeEnvValues(
     ...(contract.access.mode === "sharedKey" ? [requiredEnv("OPENGENI_ACCESS_KEY", env.OPENGENI_ACCESS_KEY)] : []),
     valueEnv("OPENGENI_AUTH_ALLOW_HEALTH", String(contract.access.allowUnauthenticatedHealth)),
     valueEnv("OPENGENI_AUTH_ALLOW_METRICS", String(contract.access.allowUnauthenticatedMetrics)),
+    valueEnv("OPENGENI_DEPLOYMENT_REVISION", env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest"),
     valueEnv("OPENGENI_PRODUCT_ACCESS_MODE", contract.product.accessMode),
     valueEnv("OPENGENI_BILLING_MODE", contract.product.billingMode),
     valueEnv("OPENGENI_ENTITLEMENTS_MODE", contract.product.entitlementsMode),
@@ -1530,6 +1531,7 @@ function addRuntimeConfigHelmValues(
   values["config.OPENGENI_AUTH_ALLOW_HEALTH"] = String(contract.access.allowUnauthenticatedHealth);
   values["config.OPENGENI_AUTH_ALLOW_METRICS"] = String(contract.access.allowUnauthenticatedMetrics);
   values["config.OPENGENI_ENVIRONMENT"] = env.OPENGENI_ENVIRONMENT ?? contract.profile;
+  values["config.OPENGENI_DEPLOYMENT_REVISION"] = env.OPENGENI_DEPLOYMENT_REVISION ?? env.OPENGENI_IMAGE_TAG ?? "latest";
   values["config.OPENGENI_PRODUCT_ACCESS_MODE"] = contract.product.accessMode;
   values["config.OPENGENI_BILLING_MODE"] = contract.product.billingMode;
   values["config.OPENGENI_ENTITLEMENTS_MODE"] = contract.product.entitlementsMode;

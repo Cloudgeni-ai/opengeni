@@ -37,6 +37,8 @@ FROM base AS worker
 CMD ["bun", "run", "--cwd", "apps/worker", "start"]
 
 FROM base AS web-build
+ARG OPENGENI_DEPLOYMENT_REVISION=dev
+ENV VITE_OPENGENI_DEPLOYMENT_REVISION=$OPENGENI_DEPLOYMENT_REVISION
 RUN bun run --cwd apps/web build
 
 FROM web-build AS web
