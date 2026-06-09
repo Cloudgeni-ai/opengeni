@@ -46,6 +46,8 @@ import { fileURLToPath } from "node:url";
 
 ensureReadableStreamFrom();
 
+const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
+
 export type NormalizedRuntimeEvent = {
   type: SessionEventType;
   payload: unknown;
@@ -761,14 +763,14 @@ export async function materializeSandboxFileDownloads(
           cmd: sandboxFileDownloadCommand(download, targetPath),
           workdir: "/workspace",
           ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: 1_000,
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
           maxOutputTokens: 20_000,
         })
         : await session.execCommand!({
           cmd: sandboxFileDownloadCommand(download, targetPath),
           workdir: "/workspace",
           ...(context.runAs ? { runAs: context.runAs } : {}),
-          yieldTimeMs: 1_000,
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
           maxOutputTokens: 20_000,
         });
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
@@ -1339,7 +1341,13 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "  else",
     "    rmdir \"$target\" 2>/dev/null || true",
     "    mv \"$tmp\" \"$target\"",
+    "    git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null",
     "  fi",
+    "  if [ ! -e \"$target\" ]; then",
+    "    echo \"Repository resource was not materialized at $target\" >&2",
+    "    exit 1",
+    "  fi",
+    "  echo \"Repository resource ready at $target\"",
     "}",
   ];
   for (const resource of resources) {
@@ -1371,7 +1379,7 @@ export async function runRepositoryCloneHook(
         cmd: command,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: 1_000,
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
       });
       assertSandboxCommandSucceeded(result, "Repository clone hook");
@@ -1380,7 +1388,7 @@ export async function runRepositoryCloneHook(
         cmd: command,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: 1_000,
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
       });
       assertSandboxCommandSucceeded(result, "Repository clone hook");
@@ -1453,10 +1461,28 @@ function sandboxCommandOutput(result: unknown): string {
 }
 
 function assertSandboxCommandSucceeded(result: unknown, operation: string): void {
+  const output = sandboxCommandOutput(result);
+  if (sandboxCommandStillRunning(result)) {
+    throw new Error(`${operation} did not finish before the lifecycle command timeout${output ? `:\n${output}` : ""}`);
+  }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(sandboxCommandOutput(result) || `${operation} failed with exit code ${exitCode}`);
+    throw new Error(output || `${operation} failed with exit code ${exitCode}`);
   }
+  if (exitCode === null) {
+    throw new Error(output || `${operation} did not return a command exit code`);
+  }
+}
+
+function sandboxCommandStillRunning(result: unknown): boolean {
+  if (typeof result === "string") {
+    return /Process running with session ID \d+/u.test(result);
+  }
+  if (!result || typeof result !== "object") {
+    return false;
+  }
+  const candidate = result as { sessionId?: unknown; session_id?: unknown };
+  return typeof candidate.sessionId === "number" || typeof candidate.session_id === "number";
 }
 
 function hasAzureServicePrincipal(environment: Record<string, string>): boolean {
@@ -1478,7 +1504,7 @@ export async function runAzureCliLoginHook(
         cmd: azureCliLoginCommand(),
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: 1_000,
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
       });
       assertSandboxCommandSucceeded(result, "Azure CLI login hook");
@@ -1487,7 +1513,7 @@ export async function runAzureCliLoginHook(
         cmd: azureCliLoginCommand(),
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: 1_000,
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
       });
       assertSandboxCommandSucceeded(result, "Azure CLI login hook");

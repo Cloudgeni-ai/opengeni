@@ -499,6 +499,8 @@ describe("runtime event normalization", () => {
     }]);
 
     expect(command).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
+    expect(command).toContain("git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null");
+    expect(command).toContain("Repository resource ready at $target");
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain("clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'");
@@ -536,6 +538,32 @@ describe("runtime event normalization", () => {
     expect(String(calls[0]?.cmd)).toContain("git init");
     expect(String(calls[0]?.cmd)).not.toContain("secret-token");
     expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
+  });
+
+  test("fails repository clone hook when sandbox command is still running", async () => {
+    const events: string[] = [];
+    await expect(runRepositoryCloneHook({
+      execCommand: async () => [
+        "Chunk ID: abc123",
+        "Wall time: 1.0000 seconds",
+        "Process running with session ID 1",
+        "Output:",
+        "",
+      ].join("\n"),
+    } as any, [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }], {
+      environment: { GH_TOKEN: "secret-token" },
+      onRuntimeEvent: (event) => {
+        events.push(event.type);
+      },
+    })).rejects.toThrow("did not finish before the lifecycle command timeout");
+
+    expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.failed"]);
   });
 
   test("keeps repository subpaths as git repo manifest subpaths", () => {
