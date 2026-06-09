@@ -2040,7 +2040,9 @@ function SessionChatPane(props: {
             <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
           ) : null}
 
-          {props.conversation.length === 0 ? (
+          {isTerminalSessionStatus(props.session.status) ? (
+            <TerminalSessionArchive session={props.session} eventCount={props.conversation.length} />
+          ) : props.conversation.length === 0 ? (
             <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
               Waiting for session activity
             </div>
@@ -2175,6 +2177,28 @@ function TerminalSessionBanner(props: { session: Session; onNewSession: () => vo
         <PlusIcon className="size-3.5" />
         New session
       </Button>
+    </div>
+  );
+}
+
+function TerminalSessionArchive(props: { session: Session; eventCount: number }) {
+  const failed = props.session.status === "failed";
+  return (
+    <div className="grid min-h-[18rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] px-4 py-10 text-center">
+      <div className="max-w-md">
+        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-md bg-[color:var(--color-surface-2)] text-[color:var(--color-fg-muted)]">
+          <TerminalIcon className="size-4" />
+        </div>
+        <div className="text-sm font-medium">
+          {failed ? "Failed session archived" : "Cancelled session archived"}
+        </div>
+        <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+          The main chat is locked for this historical session. Debug events are still available in the inspector.
+        </p>
+        <div className="mt-3 text-[11px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+          {props.eventCount} timeline item{props.eventCount === 1 ? "" : "s"}
+        </div>
+      </div>
     </div>
   );
 }
