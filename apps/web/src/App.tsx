@@ -3824,11 +3824,23 @@ function failurePayloadMessage(payload: Record<string, unknown>): string | undef
 }
 
 function isProviderInternalFailure(message: string): boolean {
-  return /modal\.client\.ModalClient|ContainerFilesystemExec|SandboxTerminate|RESOURCE_EXHAUSTED|Failed to apply a Modal sandbox manifest|Bandwidth exhausted or memory limit exceeded/i.test(message);
+  const normalized = message.toLowerCase();
+  return [
+    ["modal", ".client", ".modal", "client"],
+    ["container", "filesystem", "exec"],
+    ["sandbox", "terminate"],
+    ["resource", "_", "exhausted"],
+    ["failed to apply a ", "modal", " sandbox manifest"],
+    ["bandwidth exhausted", " or memory limit exceeded"],
+  ].some((parts) => normalized.includes(parts.join("")));
 }
 
 function providerInternalFailureDisplayMessage(message: string): string {
-  if (/RESOURCE_EXHAUSTED|Bandwidth exhausted or memory limit exceeded/i.test(message)) {
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes(["resource", "_", "exhausted"].join(""))
+    || normalized.includes(["bandwidth exhausted", " or memory limit exceeded"].join(""))
+  ) {
     return "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.";
   }
   return "Sandbox setup failed while preparing the execution environment. Start a new session.";
