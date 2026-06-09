@@ -44,18 +44,42 @@ if (findings.length > 0) {
 console.log("Workspace/billing static guard passed.");
 
 async function listFiles(roots: string[]): Promise<string[]> {
-  const proc = Bun.spawn(["rg", "--files", ...roots], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const ripgrep = await runFileListCommand(["rg", "--files", ...roots]);
+  if (ripgrep !== null) {
+    return normalizeFileList(ripgrep);
+  }
+  const git = await runFileListCommand(["git", "ls-files", "--", ...roots]);
+  if (git !== null) {
+    return normalizeFileList(git);
+  }
+  throw new Error("Unable to list source files: neither rg nor git ls-files is available");
+}
+
+async function runFileListCommand(command: string[]): Promise<string | null> {
+  let proc: ReturnType<typeof Bun.spawn>;
+  try {
+    proc = Bun.spawn(command, {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
   if (exitCode !== 0) {
-    throw new Error(`rg --files failed: ${stderr.trim()}`);
+    throw new Error(`${command.join(" ")} failed: ${stderr.trim()}`);
   }
+  return stdout;
+}
+
+function normalizeFileList(stdout: string): string[] {
   return stdout.split("\n").map((line) => line.trim()).filter((line) => line && !line.includes("/node_modules/"));
 }
 
