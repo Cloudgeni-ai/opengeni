@@ -471,6 +471,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=https://preview-123.app.opengeni.ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_BACKEND=modal");
+    expect(artifacts.helmValuesYaml).toContain("publicEndpoint: \"https://preview-123.app.opengeni.ai\"");
     expect(artifacts.helmValuesYaml).toContain("OPENGENI_WEB_ALLOWED_HOSTS: \"preview-123.app.opengeni.ai\"");
     expect(artifacts.helmValuesYaml).toContain("tag: \"preview-123\"");
     expect(artifacts.helmValuesYaml).toContain("digest: \"sha256:worker\"");

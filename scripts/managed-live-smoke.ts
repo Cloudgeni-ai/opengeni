@@ -56,14 +56,15 @@ async function signUp(): Promise<void> {
 async function waitForVerificationEmail(): Promise<{ emailId: string; url: string }> {
   const deadline = Date.now() + args.timeoutSeconds * 1000;
   let lastDetail = "no emails listed";
+  const expectedEmail = args.email.toLowerCase();
   while (Date.now() < deadline) {
     const list = await resendJson(new URL("https://api.resend.com/emails"));
     const emails = Array.isArray(list.data) ? list.data : [];
     const match = emails.find((email) => {
       const createdAt = typeof email.created_at === "string" ? new Date(email.created_at) : null;
-      const to = Array.isArray(email.to) ? email.to.map(String) : [];
+      const to = Array.isArray(email.to) ? email.to.map((value) => String(value).toLowerCase()) : [];
       return typeof email.id === "string"
-        && to.includes(args.email)
+        && to.includes(expectedEmail)
         && String(email.subject ?? "").toLowerCase().includes("verify")
         && (!createdAt || createdAt >= startedAt);
     });

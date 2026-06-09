@@ -1550,6 +1550,9 @@ function addRuntimeConfigHelmValues(
     values["config.OPENGENI_PUBLIC_BASE_URL"] = publicBaseUrl;
     values["config.OPENGENI_WEB_ALLOWED_HOSTS"] = env.OPENGENI_WEB_ALLOWED_HOSTS ?? hostnameForUrl(publicBaseUrl) ?? "";
   }
+  if (contract.profile.startsWith("preview") && contract.objectStorage.mode === "inCluster" && publicBaseUrl) {
+    values["minio.publicEndpoint"] = publicBaseUrl;
+  }
   if (contract.database.mode !== "inCluster") {
     values["migrations.secret.existingSecret"] = env.OPENGENI_MIGRATIONS_SECRET_NAME ?? "opengeni-migrations";
   }

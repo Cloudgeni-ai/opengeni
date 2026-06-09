@@ -59,6 +59,8 @@ nats:
 minio:
   enabled: true
   corsAllowOrigin: "*"
+  # Maintainer previews should set publicEndpoint to their HTTPS preview origin
+  # and route /<bucket> to the MinIO api service port in generated ingress values.
   persistence:
     size: 2Gi
 

@@ -413,6 +413,8 @@ ingress:
         - path: /
           pathType: Prefix
           service: web
+          # Optional. Defaults to the http service port. Set to api for MinIO/S3-compatible preview bucket paths.
+          portName: http
         - path: /v1
           pathType: Prefix
           service: api

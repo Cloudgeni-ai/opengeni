@@ -29,7 +29,7 @@ spec:
               service:
                 name: {{ include "opengeni.fullname" $ }}-{{ .service }}
                 port:
-                  name: http
+                  name: {{ .portName | default "http" }}
           {{- end }}
     {{- end }}
 {{- end }}
