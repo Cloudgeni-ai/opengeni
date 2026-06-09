@@ -145,13 +145,25 @@ async function getJson(url: URL, auth = false): Promise<JsonRecord> {
 }
 
 async function resendJson(url: URL): Promise<JsonRecord> {
-  const response = await fetch(url, {
-    headers: { authorization: `Bearer ${args.resendApiKey}` },
-  });
-  if (!response.ok) {
-    throw new Error(`Resend ${url.pathname} returned HTTP ${response.status}: ${await response.text()}`);
+  let lastError = "";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const response = await fetch(url, {
+      headers: { authorization: `Bearer ${args.resendApiKey}` },
+    });
+    if (response.ok) {
+      return await response.json() as JsonRecord;
+    }
+    lastError = `HTTP ${response.status}: ${await response.text()}`;
+    if (response.status !== 429 && response.status < 500) {
+      break;
+    }
+    const retryAfterSeconds = Number(response.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+      ? retryAfterSeconds * 1000
+      : 1_000 * (attempt + 1);
+    await sleep(delayMs);
   }
-  return await response.json() as JsonRecord;
+  throw new Error(`Resend ${url.pathname} returned ${lastError}`);
 }
 
 async function writeOutput(input: {
