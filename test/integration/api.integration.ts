@@ -206,6 +206,64 @@ describe("API component integration", () => {
     }));
   });
 
+  test("managed credit gate blocks document indexing before enqueueing work", async () => {
+    const delegationSecret = "test-managed-document-credit-secret";
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        delegationSecret,
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentIndexer: {
+        indexDocument: async () => {
+          throw new Error("document indexer should not run without credits");
+        },
+      },
+    });
+    const access = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:managed-document-credit",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Managed document credit test",
+      workspaceExternalSource: "test:managed-document-credit",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Managed document credit workspace",
+      subjectId: `test:managed-document-credit:${crypto.randomUUID()}`,
+      accountPermissions: allAccountPermissions,
+      workspacePermissions: allWorkspacePermissions,
+    });
+    const workspaceId = access.defaultWorkspaceId!;
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: access.defaultAccountId!,
+      workspaceId,
+      subjectId: access.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    const headers = { authorization: `Bearer ${token}` };
+    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ name: "No credit docs" }),
+    });
+    expect(baseResponse.status).toBe(201);
+    const base = await baseResponse.json() as { id: string };
+
+    const blocked = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({ fileId: crypto.randomUUID() }),
+    });
+    expect(blocked.status).toBe(402);
+    expect(await blocked.text()).toContain("insufficient OpenGeni credits");
+  });
+
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
     const delegationSecret = "test-static-usage-limits-secret";
     const app = createApp({

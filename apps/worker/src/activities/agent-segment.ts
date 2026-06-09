@@ -81,6 +81,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
       const activityContext = currentActivityContext();
       heartbeatTimer = startActivityHeartbeat(activityContext, {
         phase: "running",
@@ -134,7 +135,6 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         mcpServers: preparedTools.mcpServers,
       });
       const runInput = await segmentInput(db, runtime, agent, trigger);
-      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
       let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>>;
       let responseUsageCount = 0;
       stream = await runtime.runStream(agent, runInput, runSettings, {
@@ -315,15 +315,18 @@ async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], 
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "agent_run.created",
-        since: startOfUtcMonth(),
-      });
-      if (used > limits.maxMonthlyAgentRunsPerWorkspace) {
-        throw new Error(`monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
-      }
+      if (limits.maxMonthlyAgentRunsPerWorkspace) {
+        const used = await sumUsageQuantity(db, {
+          workspaceId,
+          eventType: "agent_run.created",
+          since: startOfUtcMonth(),
+        });
+        // Agent turns are admitted and recorded before this worker activity starts.
+        // Equality means this accepted turn is exactly at the cap; greater-than is
+        // the race/backstop case where another admission already exceeded the cap.
+        if (used > limits.maxMonthlyAgentRunsPerWorkspace) {
+          throw new Error(`monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
+        }
     }
     if (limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {

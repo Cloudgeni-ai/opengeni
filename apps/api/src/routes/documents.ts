@@ -18,7 +18,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage } from "../billing/limits";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 
@@ -54,6 +54,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 0 });
     const payload = AddDocumentRequest.parse(await c.req.json());
     try {
       const document = await addDocumentToBase(db, { accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId"), fileId: payload.fileId });
@@ -90,6 +91,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 0 });
     try {
       const document = await getDocument(db, workspaceId, c.req.param("documentId"));
       if (!document) {
