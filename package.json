@@ -49,6 +49,7 @@
     "operational:readiness": "bun scripts/check-operational-readiness.ts",
     "operational:rollback": "bun scripts/kubernetes-rollback-evidence.ts",
     "operational:runtime-config": "bun scripts/check-runtime-config-evidence.ts",
+    "operational:staging-data-hygiene": "bun scripts/check-staging-data-hygiene.ts",
     "preview:deployment": "bun scripts/check-preview-deployment-evidence.ts",
     "production:canary": "bun scripts/check-production-canary-evidence.ts",
     "release:evidence-check": "bun scripts/check-release-evidence.ts",

@@ -2193,7 +2193,7 @@ function TerminalSessionArchive(props: { session: Session; eventCount: number })
           {failed ? "Historical failed session" : "Historical cancelled session"}
         </div>
         <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-          This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Debug events are still available in the inspector.
+          This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Sanitized debug metadata is available in the inspector.
         </p>
         <div className="mt-3 text-[11px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
           {props.eventCount} timeline item{props.eventCount === 1 ? "" : "s"}
@@ -2539,7 +2539,8 @@ function SessionInspector(props: {
   events: SessionEvent[];
   connectionState: ConnectionState;
 }) {
-  const displayEvents = props.events.map(sanitizeEventForDisplay);
+  const terminalSession = isTerminalSessionStatus(props.session.status);
+  const displayEvents = props.events.map((event) => sanitizeEventForDisplay(event, props.session.status));
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
     .filter((event) => !event.type.endsWith(".delta"))
@@ -2552,8 +2553,8 @@ function SessionInspector(props: {
         <div className="flex min-w-0 items-center gap-2">
           <FileJsonIcon className="size-4 shrink-0 text-[color:var(--color-brand)]" />
           <div className="min-w-0">
-            <div className="text-sm font-medium">Debug</div>
-            <div className="truncate text-xs text-[color:var(--color-fg-subtle)]">{props.events.length} events</div>
+            <div className="text-sm font-medium">{terminalSession ? "Archived debug" : "Debug"}</div>
+            <div className="truncate text-xs text-[color:var(--color-fg-subtle)]">{props.events.length} events{terminalSession ? " · sanitized" : ""}</div>
           </div>
         </div>
         <ConnectionPill state={props.connectionState} />
@@ -2708,7 +2709,17 @@ function EventDebugRow({ event }: { event: SessionEvent }) {
   );
 }
 
-function sanitizeEventForDisplay(event: SessionEvent): SessionEvent {
+export function sanitizeEventForDisplay(event: SessionEvent, sessionStatus?: SessionStatus): SessionEvent {
+  if (isTerminalSessionStatus(sessionStatus ?? "idle") && (event.type === "turn.failed" || event.type === "sandbox.operation.failed")) {
+    return {
+      ...event,
+      payload: {
+        archived: true,
+        status: sessionStatus,
+        message: "Historical failure payload hidden in the web console.",
+      },
+    };
+  }
   if (event.type !== "agent.reasoning.delta") {
     return event;
   }

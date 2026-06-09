@@ -6,6 +6,7 @@ import {
   formStateFromScheduledTask,
   gitHubRepositoryResource,
   projectConversation,
+  sanitizeEventForDisplay,
   scheduleFromFormState,
 } from "./App";
 import type { GitHubRepository, ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
@@ -251,6 +252,29 @@ describe("applySessionStatusEvents", () => {
     expect(applySessionStatusEvents(current, [
       event(1, "session.status.changed", { status: "done" }),
     ])).toBe(current);
+  });
+});
+
+describe("sanitizeEventForDisplay", () => {
+  test("hides historical terminal failure payloads in the web console", () => {
+    const sanitized = sanitizeEventForDisplay(event(7, "turn.failed", {
+      error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
+    }), "failed");
+
+    expect(JSON.stringify(sanitized.payload)).not.toContain("RESOURCE_EXHAUSTED");
+    expect(sanitized.payload).toEqual({
+      archived: true,
+      status: "failed",
+      message: "Historical failure payload hidden in the web console.",
+    });
+  });
+
+  test("keeps active failure payloads available for current-run debugging", () => {
+    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
+      error: "Current run failed",
+    }), "running");
+
+    expect(active.payload).toEqual({ error: "Current run failed" });
   });
 });
 

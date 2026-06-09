@@ -212,6 +212,7 @@ describe("release evidence checker", () => {
       gate("staging-github-private-resource", marker, "staging"),
       gate("staging-breaking-unscoped-routes", marker, "staging"),
       gate("staging-web-console-smoke", marker, "staging"),
+      gate("staging-data-hygiene", marker, "staging"),
     ]);
 
     const result = runChecker("--manifest", manifest, "--require", "staging", "--allow-dirty", "--allow-different-git-sha");
@@ -226,6 +227,7 @@ describe("release evidence checker", () => {
       "staging-github-private-resource",
       "staging-breaking-unscoped-routes",
       "staging-web-console-smoke",
+      "staging-data-hygiene",
     ]);
   });
 });

@@ -44,6 +44,7 @@ const mandatoryGateIdsByScope: Record<GateScope, string[]> = {
     "staging-github-private-resource",
     "staging-breaking-unscoped-routes",
     "staging-web-console-smoke",
+    "staging-data-hygiene",
   ],
   "production-canary": [
     "production-canary",
