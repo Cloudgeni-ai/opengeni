@@ -115,6 +115,20 @@ describe("projectConversation", () => {
 
     expect(JSON.stringify(turns)).toContain("Current run failed");
   });
+
+  test("redacts active provider-internal sandbox failures in the main timeline projection", () => {
+    const turns = projectConversation(session({ status: "running" }), [
+      event(1, "user.message", { text: "Inspect" }),
+      event(2, "turn.failed", {
+        error: "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
+      }),
+    ]);
+
+    const json = JSON.stringify(turns);
+    expect(json).not.toContain("RESOURCE_EXHAUSTED");
+    expect(json).not.toContain("ModalClient");
+    expect(json).toContain("temporary capacity limit");
+  });
 });
 
 describe("buildTools", () => {
@@ -299,6 +313,19 @@ describe("sanitizeEventForDisplay", () => {
     }), "running");
 
     expect(active.payload).toEqual({ error: "Current run failed" });
+  });
+
+  test("redacts active provider-internal sandbox failures in debug payloads", () => {
+    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
+      error: "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
+    }), "running");
+
+    expect(JSON.stringify(active.payload)).not.toContain("RESOURCE_EXHAUSTED");
+    expect(JSON.stringify(active.payload)).not.toContain("ModalClient");
+    expect(active.payload).toEqual({
+      error: "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.",
+      redacted: true,
+    });
   });
 });
 

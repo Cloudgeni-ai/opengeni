@@ -2720,6 +2720,21 @@ export function sanitizeEventForDisplay(event: SessionEvent, sessionStatus?: Ses
       },
     };
   }
+  if (event.type === "turn.failed" || event.type === "sandbox.operation.failed") {
+    const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? event.payload as Record<string, unknown>
+      : {};
+    const message = failurePayloadMessage(payload);
+    if (message && isProviderInternalFailure(message)) {
+      return {
+        ...event,
+        payload: {
+          error: providerInternalFailureDisplayMessage(message),
+          redacted: true,
+        },
+      };
+    }
+  }
   if (event.type !== "agent.reasoning.delta") {
     return event;
   }
@@ -3806,6 +3821,17 @@ function failurePayloadMessage(payload: Record<string, unknown>): string | undef
     return payload.message;
   }
   return undefined;
+}
+
+function isProviderInternalFailure(message: string): boolean {
+  return /modal\.client\.ModalClient|ContainerFilesystemExec|SandboxTerminate|RESOURCE_EXHAUSTED|Failed to apply a Modal sandbox manifest|Bandwidth exhausted or memory limit exceeded/i.test(message);
+}
+
+function providerInternalFailureDisplayMessage(message: string): string {
+  if (/RESOURCE_EXHAUSTED|Bandwidth exhausted or memory limit exceeded/i.test(message)) {
+    return "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.";
+  }
+  return "Sandbox setup failed while preparing the execution environment. Start a new session.";
 }
 
 function toolTitle(payload: Record<string, unknown>): string {
