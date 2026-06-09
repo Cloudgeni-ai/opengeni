@@ -55,7 +55,7 @@ spec:
             - -ec
             - |
               for i in $(seq 1 30); do
-                mc alias set local {{ include "opengeni.minioEndpoint" . | quote }} "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
+                mc alias set local {{ include "opengeni.minioInternalEndpoint" . | quote }} "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" &&
                 mc mb --ignore-existing local/{{ .Values.minio.bucket | quote }} &&
                 exit 0
                 sleep 2

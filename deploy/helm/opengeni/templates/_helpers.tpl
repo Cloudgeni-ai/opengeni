@@ -109,6 +109,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.minioInternalEndpoint" -}}
+{{- printf "http://%s-minio:%d" (include "opengeni.fullname" .) (.Values.minio.service.apiPort | int) -}}
+{{- end -}}
+
 {{- define "opengeni.minioSandboxEndpoint" -}}
 {{- if .Values.minio.sandboxEndpoint -}}
 {{- .Values.minio.sandboxEndpoint -}}
