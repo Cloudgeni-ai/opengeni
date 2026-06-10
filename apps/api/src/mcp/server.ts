@@ -160,6 +160,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
 	  }, async ({ id }) => {
 	    const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
 	    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
+	    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`;
 	    await recordWorkspaceUsage(deps, {
 	      accountId: grant.accountId,
 	      workspaceId: grant.workspaceId,
@@ -169,9 +170,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
 	      unit: "run",
 	      sourceResourceType: "scheduled_task",
 	      sourceResourceId: task.id,
-	      idempotencyKey: `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`,
+	      idempotencyKey: agentRunUsageIdempotencyKey,
 	    });
-	    await deps.workflowClient.triggerScheduledTask({ task });
+	    await deps.workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
 	    return json(task);
 	  });
 

@@ -28,6 +28,7 @@ import {
   requireScheduledTask,
   saveRunState,
   setSessionStatus,
+  sumUsageQuantity,
 } from "@opengeni/db";
 import type { AccessGrant, ResourceRef, SandboxBackend, ScheduledTaskAgentConfig } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
@@ -1085,6 +1086,59 @@ describe("worker activities integration", () => {
 	    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
 	  });
 
+	  test("does not double count a manually reserved scheduled task run", async () => {
+	    const grant = await testGrant(dbClient.db);
+	    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+	      name: "scheduled-manual-reserved",
+	      status: "active",
+	      schedule: { type: "interval", everySeconds: 3600 },
+	      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+	      runMode: "new_session_per_run",
+	      overlapPolicy: "allow_concurrent",
+	      agentConfig: {
+	        prompt: "manual reserved",
+	        resources: [],
+	        tools: [],
+	        metadata: {},
+	      },
+	      metadata: {},
+	    });
+	    const reservationKey = `test:manual-reserved:${task.id}`;
+	    await recordUsageEvent(dbClient.db, {
+	      accountId: grant.accountId,
+	      workspaceId: grant.workspaceId,
+	      eventType: "agent_run.created",
+	      quantity: 1,
+	      unit: "run",
+	      sourceResourceType: "scheduled_task",
+	      sourceResourceId: task.id,
+	      idempotencyKey: reservationKey,
+	    });
+	    const activities = createActivities({
+	      settings: testSettings({
+	        databaseUrl: services.databaseUrl,
+	        natsUrl: services.natsUrl,
+	      }),
+	      db: dbClient.db,
+	      bus,
+	      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+	    });
+
+	    await activities.dispatchScheduledTaskRun({
+	      workspaceId: grant.workspaceId,
+	      taskId: task.id,
+	      triggerType: "manual",
+	      agentRunUsageIdempotencyKey: reservationKey,
+	    });
+	    const used = await sumUsageQuantity(dbClient.db, {
+	      accountId: grant.accountId,
+	      workspaceId: grant.workspaceId,
+	      eventType: "agent_run.created",
+	      since: startOfUtcMonth(),
+	    });
+	    expect(used).toBe(1);
+	  });
+
 	  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
@@ -1205,4 +1259,8 @@ function fakeObjectStorage(body: string): ObjectStorage {
     headFile: async () => ({ ContentLength: new TextEncoder().encode(body).byteLength, ContentType: "text/plain" }),
     getFileBytes: async () => new TextEncoder().encode(body),
   };
+}
+
+function startOfUtcMonth(date = new Date()): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
 }

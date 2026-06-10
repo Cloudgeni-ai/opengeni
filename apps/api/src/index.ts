@@ -66,18 +66,19 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
       await temporal.schedule.getHandle(temporalScheduleId).delete().catch(() => undefined);
     },
-    triggerScheduledTask: async ({ task }) => {
-      await temporal.workflow.start("scheduledTaskFireWorkflow", {
+	    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey }) => {
+	      await temporal.workflow.start("scheduledTaskFireWorkflow", {
         taskQueue: settings.temporalTaskQueue,
         workflowId: `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`,
         args: [{
           accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          taskId: task.id,
-          triggerType: "manual",
-        }],
-      });
-    },
+	          workspaceId: task.workspaceId,
+	          taskId: task.id,
+	          triggerType: "manual",
+	          agentRunUsageIdempotencyKey,
+	        }],
+	      });
+	    },
   };
   const documentIndexer: DocumentIndexClient = {
     indexDocument: async ({ accountId, workspaceId, documentId }) => {

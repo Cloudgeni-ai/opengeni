@@ -7,14 +7,16 @@ export type ScheduledTaskFireWorkflowInput = {
   workspaceId: string;
   taskId: string;
   triggerType: "scheduled" | "manual";
+  agentRunUsageIdempotencyKey?: string;
 };
 
 export async function scheduledTaskFireWorkflow(input: ScheduledTaskFireWorkflowInput): Promise<void> {
-  const dispatched = await activity.dispatchScheduledTaskRun({
-    workspaceId: input.workspaceId,
-    taskId: input.taskId,
-    triggerType: input.triggerType,
-  });
+	  const dispatched = await activity.dispatchScheduledTaskRun({
+	    workspaceId: input.workspaceId,
+	    taskId: input.taskId,
+	    triggerType: input.triggerType,
+	    ...(input.agentRunUsageIdempotencyKey ? { agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey } : {}),
+	  });
   if (dispatched.action === "start") {
     await startSessionChild(dispatched.accountId, dispatched.workspaceId, dispatched.sessionId, dispatched.workflowId);
     return;

@@ -43,6 +43,7 @@ export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
+  agentRunUsageIdempotencyKey?: string;
 };
 
 export type DispatchScheduledTaskRunResult = {

@@ -51,13 +51,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       await recordUsageEvent(db, {
         accountId: task.accountId,
         workspaceId: task.workspaceId,
-        eventType: "agent_run.created",
-        quantity: 1,
-        unit: "run",
-        sourceResourceType: "scheduled_task_run",
-        sourceResourceId: run.id,
-        idempotencyKey: `usage:agent_run.created:scheduled:${run.id}`,
-      });
+	        eventType: "agent_run.created",
+	        quantity: 1,
+	        unit: "run",
+	        sourceResourceType: "scheduled_task_run",
+	        sourceResourceId: run.id,
+	        idempotencyKey: input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
+	      });
       try {
         const model = task.agentConfig.model ?? settings.openaiModel;
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;

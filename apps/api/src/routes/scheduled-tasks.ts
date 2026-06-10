@@ -78,6 +78,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 	    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
 	    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
 	    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+	    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`;
 	    await recordWorkspaceUsage(deps, {
 	      accountId: grant.accountId,
 	      workspaceId,
@@ -87,9 +88,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 	      unit: "run",
 	      sourceResourceType: "scheduled_task",
 	      sourceResourceId: task.id,
-	      idempotencyKey: `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`,
+	      idempotencyKey: agentRunUsageIdempotencyKey,
 	    });
-	    await workflowClient.triggerScheduledTask({ task });
+	    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
 	    return c.json(task, 202);
 	  });
 
