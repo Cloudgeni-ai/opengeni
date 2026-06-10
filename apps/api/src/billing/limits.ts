@@ -177,8 +177,7 @@ function isCostlyAction(action: LimitAction): boolean {
   return action === "agent_run:create"
     || action === "tokens:consume"
     || action === "file:upload"
-    || action === "document:index"
-    || action === "schedule:create";
+    || action === "document:index";
 }
 
 function blocked(code: string, message: string): LimitDecision {

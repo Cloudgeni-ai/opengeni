@@ -302,6 +302,62 @@ describe("API component integration", () => {
     expect(await blocked.text()).toContain("insufficient OpenGeni credits");
   });
 
+  test("managed credit gate allows schedule creation but blocks manual trigger without credits", async () => {
+    const delegationSecret = "test-managed-schedule-credit-secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        usageLimitsMode: "managed",
+        delegationSecret,
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const access = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:managed-schedule-credit",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Managed schedule credit test",
+      workspaceExternalSource: "test:managed-schedule-credit",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Managed schedule credit workspace",
+      subjectId: `test:managed-schedule-credit:${crypto.randomUUID()}`,
+      accountPermissions: allAccountPermissions,
+      workspacePermissions: allWorkspacePermissions,
+    });
+    const workspaceId = access.defaultWorkspaceId!;
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: access.defaultAccountId!,
+      workspaceId,
+      subjectId: access.subjectId,
+      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+      exp: Math.floor(Date.now() / 1000) + 60,
+    });
+    const headers = { authorization: `Bearer ${token}` };
+
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        name: "runs later",
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect", resources: [], tools: [] },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const task = await created.json() as { id: string };
+
+    const triggered = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), {
+      method: "POST",
+      headers,
+    });
+    expect(triggered.status).toBe(402);
+    expect(await triggered.text()).toContain("insufficient OpenGeni credits");
+  });
+
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
     const delegationSecret = "test-static-usage-limits-secret";
     const app = createApp({
