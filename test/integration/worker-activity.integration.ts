@@ -996,7 +996,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("dispatches scheduled tasks into new sessions and run history", async () => {
+	  test("dispatches scheduled tasks into new sessions and run history", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
@@ -1034,11 +1034,58 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
     expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({ text: "inspect nightly", scheduledTaskId: task.id });
-    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
-  });
+	    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+	    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
+	  });
 
-  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
+	  test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
+	    const grant = await testGrant(dbClient.db);
+	    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+	      name: "scheduled-cost-cap",
+	      status: "active",
+	      schedule: { type: "interval", everySeconds: 3600 },
+	      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+	      runMode: "new_session_per_run",
+	      overlapPolicy: "allow_concurrent",
+	      agentConfig: {
+	        prompt: "inspect after cost cap",
+	        resources: [],
+	        tools: [],
+	        metadata: {},
+	      },
+	      metadata: {},
+	    });
+	    await recordUsageEvent(dbClient.db, {
+	      accountId: grant.accountId,
+	      workspaceId: grant.workspaceId,
+	      eventType: "model.cost",
+	      quantity: 100,
+	      unit: "micro_usd",
+	      sourceResourceType: "test",
+	      sourceResourceId: task.id,
+	      idempotencyKey: `test:scheduled-cost-cap:${task.id}`,
+	    });
+	    const activities = createActivities({
+	      settings: testSettings({
+	        databaseUrl: services.databaseUrl,
+	        natsUrl: services.natsUrl,
+	        usageLimitsMode: "static",
+	        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100 }),
+	      }),
+	      db: dbClient.db,
+	      bus,
+	      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "should not run" }]) }),
+	    });
+
+	    await expect(activities.dispatchScheduledTaskRun({
+	      workspaceId: grant.workspaceId,
+	      taskId: task.id,
+	      triggerType: "scheduled",
+	    })).rejects.toThrow("monthly model cost limit reached (100 micros)");
+	    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toHaveLength(0);
+	  });
+
+	  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-reusable",

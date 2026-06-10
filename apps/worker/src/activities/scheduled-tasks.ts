@@ -209,11 +209,21 @@ async function ensureScheduledRunAllowed(
       throw new Error("insufficient OpenGeni credits");
     }
   }
-  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
-    const limits = configuredStaticUsageLimits(settings);
-    if (limits.maxMonthlyAgentRunsPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
+	  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
+	    const limits = configuredStaticUsageLimits(settings);
+	    if (limits.maxMonthlyCostMicrosPerAccount) {
+	      const used = await sumUsageQuantity(db, {
+	        accountId,
+	        eventType: "model.cost",
+	        since: startOfUtcMonth(),
+	      });
+	      if (used >= limits.maxMonthlyCostMicrosPerAccount) {
+	        throw new Error(`monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`);
+	      }
+	    }
+	    if (limits.maxMonthlyAgentRunsPerWorkspace) {
+	      const used = await sumUsageQuantity(db, {
+	        workspaceId,
         eventType: "agent_run.created",
         since: startOfUtcMonth(),
       });
