@@ -1118,6 +1118,8 @@ describe("worker activities integration", () => {
 	      settings: testSettings({
 	        databaseUrl: services.databaseUrl,
 	        natsUrl: services.natsUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
 	      }),
 	      db: dbClient.db,
 	      bus,

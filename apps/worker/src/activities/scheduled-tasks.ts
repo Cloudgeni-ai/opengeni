@@ -31,7 +31,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
-      await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId);
+      await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId, input.agentRunUsageIdempotencyKey ? 0 : 1);
       const run = await createScheduledTaskRun(db, {
         workspaceId: task.workspaceId,
         taskId: task.id,
@@ -204,6 +204,7 @@ async function ensureScheduledRunAllowed(
   db: ActivityServices["db"],
   accountId: string,
   workspaceId: string,
+  requestedAgentRuns: number,
 ): Promise<void> {
   if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
     const balance = await getBillingBalance(db, accountId);
@@ -229,7 +230,7 @@ async function ensureScheduledRunAllowed(
         eventType: "agent_run.created",
         since: startOfUtcMonth(),
       });
-      if (used + 1 > limits.maxMonthlyAgentRunsPerWorkspace) {
+      if (used + requestedAgentRuns > limits.maxMonthlyAgentRunsPerWorkspace) {
         throw new Error(`monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
       }
     }
