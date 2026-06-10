@@ -72,7 +72,7 @@ config:
   OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
   OPENGENI_OBJECT_STORAGE_BACKEND: azure-blob
   OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
-  # Production/customer-ready gates must use a real sandbox backend. Modal is
+  # Production readiness checks should use a real sandbox backend. Modal is
   # supported with Azure Blob by materializing attached file resources into the
   # sandbox before the agent starts.
   OPENGENI_SANDBOX_BACKEND: modal
