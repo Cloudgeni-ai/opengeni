@@ -1139,6 +1139,64 @@ describe("worker activities integration", () => {
 	    expect(used).toBe(1);
 	  });
 
+  test("does not record scheduled agent run usage when dispatch fails", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-failing-dispatch",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "this cannot dispatch",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const failingBus: EventBus = {
+      publish: async () => {
+        throw new Error("bus publish unavailable");
+      },
+      subscribe: async () => async () => undefined,
+      close: async () => undefined,
+    };
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus: failingBus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "should not run" }]) }),
+    });
+
+    await expect(activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    })).rejects.toThrow("bus publish unavailable");
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed" });
+    const agentRuns = await sumUsageQuantity(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+    const fired = await sumUsageQuantity(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      eventType: "scheduled_task.fired",
+      since: startOfUtcMonth(),
+    });
+    expect(agentRuns).toBe(0);
+    expect(fired).toBe(1);
+  });
+
 	  test("dispatches reusable scheduled tasks by signaling the stored session", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {

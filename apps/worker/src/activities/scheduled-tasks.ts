@@ -48,16 +48,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         sourceResourceId: run.id,
         idempotencyKey: `usage:scheduled_task.fired:${run.id}`,
       });
-      await recordUsageEvent(db, {
-        accountId: task.accountId,
-        workspaceId: task.workspaceId,
-	        eventType: "agent_run.created",
-	        quantity: 1,
-	        unit: "run",
-	        sourceResourceType: "scheduled_task_run",
-	        sourceResourceId: run.id,
-	        idempotencyKey: input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
-	      });
+      let result: DispatchScheduledTaskRunResult;
       try {
         const model = task.agentConfig.model ?? settings.openaiModel;
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
@@ -124,7 +115,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             sessionId: session.id,
             triggerEventId: trigger.id,
           });
-          return {
+          result = {
             action: "start",
             accountId: task.accountId,
             workspaceId: task.workspaceId,
@@ -132,60 +123,60 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             triggerEventId: trigger.id,
             workflowId,
           };
+        } else {
+          const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => ({
+            events: [{
+              type: "user.message",
+              payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, task.agentConfig.tools, task.id, run.id),
+            }],
+            update: {
+              resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
+              tools: mergeToolRefs(locked.tools, task.agentConfig.tools),
+            },
+          }));
+          await bus.publish(task.workspaceId, session.id, events);
+          const trigger = events[0];
+          if (!trigger) {
+            throw new Error("failed to append scheduled task trigger event");
+          }
+          const turn = await enqueueSessionTurn(db, {
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            sessionId: session.id,
+            triggerEventId: trigger.id,
+            temporalWorkflowId: workflowIdForSession(session.id),
+            source: "scheduled_task",
+            prompt: task.agentConfig.prompt,
+            resources: task.agentConfig.resources,
+            tools: task.agentConfig.tools,
+            model,
+            reasoningEffort,
+            sandboxBackend,
+            metadata: {
+              scheduledTaskId: task.id,
+              scheduledTaskRunId: run.id,
+            },
+          });
+          await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [{
+            type: "turn.queued",
+            turnId: turn.id,
+            payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
+          }]);
+          await updateScheduledTaskRun(db, task.workspaceId, run.id, {
+            status: "dispatched",
+            sessionId: session.id,
+            triggerEventId: trigger.id,
+          });
+          result = {
+            action: "signal",
+            accountId: task.accountId,
+            workspaceId: task.workspaceId,
+            sessionId: session.id,
+            triggerEventId: trigger.id,
+            workflowId: workflowIdForSession(session.id),
+          };
         }
-
-        const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
-        const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => ({
-          events: [{
-            type: "user.message",
-            payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, task.agentConfig.tools, task.id, run.id),
-          }],
-          update: {
-            resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
-            tools: mergeToolRefs(locked.tools, task.agentConfig.tools),
-          },
-        }));
-        await bus.publish(task.workspaceId, session.id, events);
-        const trigger = events[0];
-        if (!trigger) {
-          throw new Error("failed to append scheduled task trigger event");
-        }
-        const turn = await enqueueSessionTurn(db, {
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          sessionId: session.id,
-          triggerEventId: trigger.id,
-          temporalWorkflowId: workflowIdForSession(session.id),
-          source: "scheduled_task",
-          prompt: task.agentConfig.prompt,
-          resources: task.agentConfig.resources,
-          tools: task.agentConfig.tools,
-          model,
-          reasoningEffort,
-          sandboxBackend,
-          metadata: {
-            scheduledTaskId: task.id,
-            scheduledTaskRunId: run.id,
-          },
-        });
-        await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [{
-          type: "turn.queued",
-          turnId: turn.id,
-          payload: { turnId: turn.id, triggerEventId: trigger.id, source: turn.source },
-        }]);
-        await updateScheduledTaskRun(db, task.workspaceId, run.id, {
-          status: "dispatched",
-          sessionId: session.id,
-          triggerEventId: trigger.id,
-        });
-        return {
-          action: "signal",
-          accountId: task.accountId,
-          workspaceId: task.workspaceId,
-          sessionId: session.id,
-          triggerEventId: trigger.id,
-          workflowId: workflowIdForSession(session.id),
-        };
       } catch (error) {
         await updateScheduledTaskRun(db, task.workspaceId, run.id, {
           status: "failed",
@@ -193,6 +184,17 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         }).catch(() => undefined);
         throw error;
       }
+      await recordUsageEvent(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "scheduled_task_run",
+        sourceResourceId: run.id,
+        idempotencyKey: input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
+      });
+      return result;
     },
   };
 }
