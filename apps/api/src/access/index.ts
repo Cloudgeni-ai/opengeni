@@ -94,6 +94,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     }
     const apiKey = await findActiveApiKeyByHash(deps.db, await sha256Hex(bearer));
     if (apiKey) {
+      const accountPermissions = apiKey.workspaceId
+        ? apiKey.permissions.filter((permission) => permission === "billing:read" || permission === "billing:manage")
+        : apiKey.permissions;
       return {
         mode: "managed",
         subjectId: `api_key:${apiKey.id}`,
@@ -102,7 +105,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
           accountId: apiKey.accountId,
           subjectId: `api_key:${apiKey.id}`,
           subjectLabel: apiKey.name,
-          permissions: apiKey.workspaceId ? [] : apiKey.permissions,
+          permissions: accountPermissions,
         }],
         workspaceGrants: apiKey.workspaceId ? [{
           workspaceId: apiKey.workspaceId,

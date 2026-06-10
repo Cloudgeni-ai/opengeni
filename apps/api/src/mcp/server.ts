@@ -20,6 +20,7 @@ import {
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
+import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
@@ -106,6 +107,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
     },
   }, async (args) => {
     const payload = CreateScheduledTaskRequest.parse(args);
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "schedule:create", quantity: 1 });
     const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, payload });
     await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
     return json(task);
@@ -157,6 +159,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
     inputSchema: { id: z4.string().uuid() },
   }, async ({ id }) => {
     const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
     await deps.workflowClient.triggerScheduledTask({ task });
     return json(task);
   });

@@ -98,10 +98,48 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json", cookie: cookie! },
       body: JSON.stringify({ name: "Managed test key", permissions: ["workspace:read", "sessions:create"] }),
     });
-    expect(createdKey.status).toBe(201);
-    const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
+	    expect(createdKey.status).toBe(201);
+	    const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
+
+    const billingKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookie! },
+      body: JSON.stringify({ name: "Managed billing key", permissions: ["workspace:read", "billing:read"] }),
+    });
+    expect(billingKey.status).toBe(201);
+    const billingKeyBody = await billingKey.json() as { token: string };
+    const billing = await app.request(`/v1/billing?accountId=${context.defaultAccountId}`, {
+      headers: { authorization: `Bearer ${billingKeyBody.token}` },
+    });
+    expect(billing.status).toBe(200);
+
+    const workspaceOnlyKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: cookie! },
+      body: JSON.stringify({ name: "Workspace only key", permissions: ["workspace:read"] }),
+    });
+    expect(workspaceOnlyKey.status).toBe(201);
+    const workspaceOnlyKeyBody = await workspaceOnlyKey.json() as { token: string };
+    const deniedBilling = await app.request(`/v1/billing?accountId=${context.defaultAccountId}`, {
+      headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` },
+    });
+    expect(deniedBilling.status).toBe(403);
+
+    const otherAccount = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:managed-key-other",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Other managed key account",
+      workspaceExternalSource: "test:managed-key-other",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Other managed key workspace",
+      subjectId: `test:managed-key-other:${crypto.randomUUID()}`,
+    });
+    const deniedOtherAccountBilling = await app.request(`/v1/billing?accountId=${otherAccount.defaultAccountId}`, {
+      headers: { authorization: `Bearer ${billingKeyBody.token}` },
+    });
+    expect(deniedOtherAccountBilling.status).toBe(403);
   });
 
   test("managed session cookie still authenticates when an invalid bearer header is present", async () => {
@@ -1065,6 +1103,83 @@ describe("API component integration", () => {
     await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: task.id })).rejects.toThrow("temporal unavailable");
     expect((await getScheduledTask(dbClient.db, grant.workspaceId, task.id))?.status).toBe("active");
     await expect(callMcpTool(mcp, "scheduled_tasks_resume", { id: crypto.randomUUID() })).rejects.toThrow("Scheduled task not found");
+  });
+
+  test("MCP scheduled task tools enforce the same billing limits as REST routes", async () => {
+    workflow = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const allowedMcp = buildOpenGeniMcpServer({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by scheduled task MCP tests");
+      },
+    }, grant);
+    const task = await callMcpTool<{ id: string }>(allowedMcp, "scheduled_tasks_create", {
+      name: `mcp-limit-trigger-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt: "inspect" },
+    });
+    workflow.synced = [];
+
+    const blockedCreateMcp = buildOpenGeniMcpServer({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxSchedulesPerWorkspace: 1 }),
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by scheduled task MCP tests");
+      },
+    }, grant);
+
+    await expect(callMcpTool(blockedCreateMcp, "scheduled_tasks_create", {
+      name: `mcp-limit-create-${crypto.randomUUID()}`,
+      schedule: { type: "interval", everySeconds: 3600 },
+      agentConfig: { prompt: "inspect" },
+    })).rejects.toThrow("scheduled task limit reached");
+    expect(workflow.synced).toHaveLength(0);
+    await recordUsageEvent(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "test",
+      sourceResourceId: task.id,
+      idempotencyKey: `test:mcp-agent-run-cap:${task.id}`,
+    });
+
+    const blockedTriggerMcp = buildOpenGeniMcpServer({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by scheduled task MCP tests");
+      },
+    }, grant);
+    await expect(callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", { id: task.id })).rejects.toThrow("monthly agent run limit reached");
+    expect(workflow.triggers).toHaveLength(0);
   });
 
   test("returns 404 for missing scheduled task actions", async () => {
