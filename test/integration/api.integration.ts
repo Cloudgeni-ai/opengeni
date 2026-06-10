@@ -332,17 +332,20 @@ describe("API component integration", () => {
       workspacePermissions: allWorkspacePermissions,
     });
     const workspaceId = access.defaultWorkspaceId!;
-    const accountId = access.defaultAccountId!;
-    const token = await signDelegatedAccessToken(delegationSecret, {
-      accountId,
-      workspaceId,
-      subjectId: access.subjectId,
-      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
-      exp: Math.floor(Date.now() / 1000) + 60,
-    });
-    const authHeaders = { authorization: `Bearer ${token}` };
+	    const accountId = access.defaultAccountId!;
+	    const token = await signDelegatedAccessToken(delegationSecret, {
+	      accountId,
+	      workspaceId,
+	      subjectId: access.subjectId,
+	      permissions: [...allAccountPermissions, ...allWorkspacePermissions],
+	      exp: Math.floor(Date.now() / 1000) + 60,
+	    });
+	    const authHeaders = { authorization: `Bearer ${token}` };
 
-    const extraWorkspace = await app.request("/v1/workspaces", {
+	    expect((await app.request("/v1/access/me")).status).toBe(401);
+	    expect((await app.request("/v1/access/me", { headers: { authorization: "Bearer invalid-token" } })).status).toBe(401);
+
+	    const extraWorkspace = await app.request("/v1/workspaces", {
       method: "POST",
       headers: { "content-type": "application/json", ...authHeaders },
       body: JSON.stringify({ accountId, name: "extra workspace" }),

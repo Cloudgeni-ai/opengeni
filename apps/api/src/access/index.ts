@@ -69,13 +69,16 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     });
   }
 
-  if (deps.settings.productAccessMode === "configured") {
-    const delegated = await delegatedAccessContext(c, deps, "configured");
-    if (delegated) {
-      return delegated;
-    }
-    return await bootstrapWorkspace(deps.db, {
-      accountExternalSource: "opengeni:configured",
+	  if (deps.settings.productAccessMode === "configured") {
+	    const delegated = await delegatedAccessContext(c, deps, "configured");
+	    if (delegated) {
+	      return delegated;
+	    }
+	    if (deps.settings.delegationSecret) {
+	      return null;
+	    }
+	    return await bootstrapWorkspace(deps.db, {
+	      accountExternalSource: "opengeni:configured",
       accountExternalId: "default",
       accountName: "Configured",
       workspaceExternalSource: "opengeni:configured",
