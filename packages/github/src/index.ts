@@ -5,7 +5,7 @@ import { SignJWT, importPKCS8 } from "jose";
 
 const githubApiBase = "https://api.github.com";
 const githubApiVersion = "2022-11-28";
-const stateMaxAgeSeconds = 60 * 60;
+export const stateMaxAgeSeconds = 60 * 60;
 const pkcs8PrivateKeyHeader = `-----BEGIN ${"PRIVATE KEY"}-----`;
 const rsaPrivateKeyHeader = `-----BEGIN ${"RSA PRIVATE KEY"}-----`;
 

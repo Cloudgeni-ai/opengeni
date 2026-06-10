@@ -12,6 +12,7 @@ import {
   getDocumentBase,
   listDocumentBases,
   listDocuments,
+  queueDocumentForReindex,
   searchDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -103,7 +104,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (document.baseId !== c.req.param("baseId")) {
         throw new HTTPException(404, { message: "document not found" });
       }
-      const indexed = await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? document;
+      const queued = await queueDocumentForReindex(db, workspaceId, document.id);
+      const indexed = await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? queued;
       if (indexed.status === "ready") {
         await recordWorkspaceUsage(deps, {
           accountId: grant.accountId,

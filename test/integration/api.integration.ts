@@ -98,8 +98,8 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json", cookie: cookie! },
       body: JSON.stringify({ name: "Managed test key", permissions: ["workspace:read", "sessions:create"] }),
     });
-	    expect(createdKey.status).toBe(201);
-	    const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
+    expect(createdKey.status).toBe(201);
+    const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
 
@@ -1562,6 +1562,7 @@ describe("API component integration", () => {
     const oauthState = redirect.searchParams.get("state");
     expect(oauthState).toBeTruthy();
     expect(response.headers.get("set-cookie")).toContain(`opengeni_github_state=${oauthState}`);
+    expect(response.headers.get("set-cookie")).toContain("Max-Age=3600");
     const payload = readSignedState(oauthState!, stateSecret);
     expect(payload).toMatchObject({
       accountId: context.defaultAccountId,
@@ -1628,6 +1629,64 @@ describe("API component integration", () => {
     const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
     expect(search.results[0]?.text).toContain("network policy");
     expect(search.results[0]?.title).toBe("network-runbook.txt");
+  });
+
+  test("reindex returns queued document state when production indexer enqueues async work", async () => {
+    let indexCalls = 0;
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      documentIndexer: {
+        indexDocument: async () => {
+          indexCalls += 1;
+        },
+      },
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
+      method: "POST",
+      body: JSON.stringify({
+        filename: "async-reindex.txt",
+        contentType: "text/plain",
+        sizeBytes: 13,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const upload = await uploadResponse.json() as { fileId: string; uploadId: string; putUrl: string; requiredHeaders: Record<string, string> };
+    await fetch(upload.putUrl, { method: "PUT", body: "Async reindex", headers: upload.requiredHeaders });
+    expect((await app.request(workspacePath(workspaceId, `/files/uploads/${upload.uploadId}/complete`), { method: "POST" })).status).toBe(200);
+
+    const baseResponse = await app.request(workspacePath(workspaceId, "/document-bases"), {
+      method: "POST",
+      body: JSON.stringify({ name: "Async reindex docs" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(baseResponse.status).toBe(201);
+    const base = await baseResponse.json() as { id: string };
+    const addResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
+      method: "POST",
+      body: JSON.stringify({ fileId: upload.fileId }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(addResponse.status).toBe(201);
+    const document = await addResponse.json() as { id: string; status: string; error: string | null };
+    expect(document.status).toBe("queued");
+    expect(indexCalls).toBe(1);
+
+    await dbClient.db.execute(dbSql`
+      update documents
+      set status = 'failed', error = 'temporary indexing failure', updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${document.id}
+    `);
+    const reindexResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}/reindex`), { method: "POST" });
+    expect(reindexResponse.status).toBe(200);
+    const reindexed = await reindexResponse.json() as { id: string; status: string; error: string | null };
+    expect(reindexed.id).toBe(document.id);
+    expect(reindexed.status).toBe("queued");
+    expect(reindexed.error).toBeNull();
+    expect(indexCalls).toBe(2);
   });
 
   test("document indexing enforces exact chunk limits before embedding", async () => {

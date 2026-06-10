@@ -345,6 +345,18 @@ export async function getDocument(db: Database, workspaceId: string, documentId:
   });
 }
 
+export async function queueDocumentForReindex(db: Database, workspaceId: string, documentId: string): Promise<Document> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.documents).set({
+      status: "queued",
+      error: null,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId))).returning();
+    if (!row) throw new Error(`Document not found: ${documentId}`);
+    return mapDocument(row);
+  });
+}
+
 export async function indexDocumentNow(
   db: Database,
   objectStorage: ObjectStorage,

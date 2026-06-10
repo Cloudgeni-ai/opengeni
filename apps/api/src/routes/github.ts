@@ -16,6 +16,7 @@ import {
   organizationAppManifestUrl,
   personalAppManifestUrl,
   readSignedState,
+  stateMaxAgeSeconds,
   verifyGitHubInstallationAccessForUser,
   verifySignedState,
 } from "@opengeni/github";
@@ -251,7 +252,7 @@ function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): vo
     sameSite: "Lax",
     secure: isSecureRequest(c, deps),
     path: "/v1/github",
-    maxAge: 10 * 60,
+    maxAge: stateMaxAgeSeconds,
   });
 }
 
