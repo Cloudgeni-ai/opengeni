@@ -157,24 +157,24 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
   server.registerTool("scheduled_tasks_trigger", {
     description: "Trigger a scheduled task immediately.",
     inputSchema: { id: z4.string().uuid() },
-	  }, async ({ id }) => {
-	    const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-	    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
-	    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`;
-	    await recordWorkspaceUsage(deps, {
-	      accountId: grant.accountId,
-	      workspaceId: grant.workspaceId,
-	      subjectId: grant.subjectId,
-	      eventType: "agent_run.created",
-	      quantity: 1,
-	      unit: "run",
-	      sourceResourceType: "scheduled_task",
-	      sourceResourceId: task.id,
-	      idempotencyKey: agentRunUsageIdempotencyKey,
-	    });
-	    await deps.workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
-	    return json(task);
-	  });
+  }, async ({ id }) => {
+    const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
+    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`;
+    await deps.workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      idempotencyKey: agentRunUsageIdempotencyKey,
+    });
+    return json(task);
+  });
 
   server.registerTool("scheduled_tasks_delete", {
     description: "Delete a scheduled task.",

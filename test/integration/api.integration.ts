@@ -1080,6 +1080,44 @@ describe("API component integration", () => {
     expect((await listed.json() as Array<{ id: string }>).some((item) => item.id === task.id)).toBe(true);
   });
 
+  test("does not record manual scheduled trigger usage when workflow start fails", async () => {
+    workflow = new FakeWorkflowClient();
+    workflow.triggerError = new Error("temporal trigger unavailable");
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Manual trigger failure",
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect", resources: [], tools: [] },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(201);
+    const task = await created.json() as { id: string };
+    const before = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+
+    const failed = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
+
+    expect(failed.status).toBe(500);
+    const after = await sumUsageQuantity(dbClient.db, {
+      workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
+    expect(after).toBe(before);
+  });
+
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
@@ -2081,21 +2119,22 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   approvals: unknown[] = [];
   interrupts: unknown[] = [];
   synced: unknown[] = [];
-	  deletedSchedules: unknown[] = [];
-	  triggers: unknown[] = [];
-	  syncError: Error | null = null;
-	  wakeError: Error | null = null;
+  deletedSchedules: unknown[] = [];
+  triggers: unknown[] = [];
+  syncError: Error | null = null;
+  wakeError: Error | null = null;
+  triggerError: Error | null = null;
 
   async signalUserMessage(input: unknown): Promise<void> {
     this.userMessages.push(input);
   }
 
-	  async wakeSessionWorkflow(input: unknown): Promise<void> {
-	    this.wakeups.push(input);
-	    if (this.wakeError) {
-	      throw this.wakeError;
-	    }
-	  }
+  async wakeSessionWorkflow(input: unknown): Promise<void> {
+    this.wakeups.push(input);
+    if (this.wakeError) {
+      throw this.wakeError;
+    }
+  }
 
   async signalApprovalDecision(input: unknown): Promise<void> {
     this.approvals.push(input);
@@ -2118,6 +2157,9 @@ class FakeWorkflowClient implements SessionWorkflowClient {
 
   async triggerScheduledTask(input: unknown): Promise<void> {
     this.triggers.push(input);
+    if (this.triggerError) {
+      throw this.triggerError;
+    }
   }
 }
 

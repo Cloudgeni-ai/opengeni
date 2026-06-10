@@ -75,24 +75,24 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-	    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-	    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
-	    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-	    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`;
-	    await recordWorkspaceUsage(deps, {
-	      accountId: grant.accountId,
-	      workspaceId,
-	      subjectId: grant.subjectId,
-	      eventType: "agent_run.created",
-	      quantity: 1,
-	      unit: "run",
-	      sourceResourceType: "scheduled_task",
-	      sourceResourceId: task.id,
-	      idempotencyKey: agentRunUsageIdempotencyKey,
-	    });
-	    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
-	    return c.json(task, 202);
-	  });
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`;
+    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "scheduled_task",
+      sourceResourceId: task.id,
+      idempotencyKey: agentRunUsageIdempotencyKey,
+    });
+    return c.json(task, 202);
+  });
 
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
