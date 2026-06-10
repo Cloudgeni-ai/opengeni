@@ -1017,6 +1017,19 @@ export async function requireScheduledTask(db: Database, workspaceId: string, ta
   return task;
 }
 
+// Temporal schedules created before workspace scoping fire with only a task id.
+// scheduled_tasks is RLS-scoped, so locate the task by trying each workspace.
+export async function requireScheduledTaskAcrossWorkspaces(db: Database, taskId: string): Promise<ScheduledTask> {
+  const workspaceRows = await db.select({ id: schema.workspaces.id }).from(schema.workspaces);
+  for (const workspace of workspaceRows) {
+    const task = await getScheduledTask(db, workspace.id, taskId);
+    if (task) {
+      return task;
+    }
+  }
+  throw new Error(`Scheduled task not found: ${taskId}`);
+}
+
 export async function listScheduledTasks(db: Database, workspaceId: string, limit = 100): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.scheduledTasks)
