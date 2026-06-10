@@ -20,7 +20,7 @@ import {
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
-import { requireLimit } from "../billing/limits";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
@@ -157,12 +157,23 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
   server.registerTool("scheduled_tasks_trigger", {
     description: "Trigger a scheduled task immediately.",
     inputSchema: { id: z4.string().uuid() },
-  }, async ({ id }) => {
-    const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
-    await deps.workflowClient.triggerScheduledTask({ task });
-    return json(task);
-  });
+	  }, async ({ id }) => {
+	    const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
+	    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
+	    await recordWorkspaceUsage(deps, {
+	      accountId: grant.accountId,
+	      workspaceId: grant.workspaceId,
+	      subjectId: grant.subjectId,
+	      eventType: "agent_run.created",
+	      quantity: 1,
+	      unit: "run",
+	      sourceResourceType: "scheduled_task",
+	      sourceResourceId: task.id,
+	      idempotencyKey: `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`,
+	    });
+	    await deps.workflowClient.triggerScheduledTask({ task });
+	    return json(task);
+	  });
 
   server.registerTool("scheduled_tasks_delete", {
     description: "Delete a scheduled task.",

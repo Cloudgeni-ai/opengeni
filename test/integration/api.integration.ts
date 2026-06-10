@@ -793,7 +793,7 @@ describe("API component integration", () => {
     ).toHaveLength(3);
   });
 
-  test("queues model settings on follow-up user messages", async () => {
+	  test("queues model settings on follow-up user messages", async () => {
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -835,11 +835,52 @@ describe("API component integration", () => {
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
-    expect(turn?.model).toBe("gpt-5.5");
-    expect(turn?.reasoningEffort).toBe("xhigh");
-  });
+	    expect(turn?.model).toBe("gpt-5.5");
+	    expect(turn?.reasoningEffort).toBe("xhigh");
+	  });
 
-  test("queues concurrent follow-up user messages while merging session tools", async () => {
+	  test("does not record follow-up run usage when workflow wake fails", async () => {
+	    const failingWorkflow = new FakeWorkflowClient();
+	    const app = createApp({
+	      settings: testSettings({ databaseUrl: services.databaseUrl }),
+	      db: dbClient.db,
+	      bus: new MemoryEventBus(),
+	      workflowClient: failingWorkflow,
+	    });
+	    const workspaceId = await defaultWorkspaceId(app);
+	    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+	      method: "POST",
+	      body: JSON.stringify({ initialMessage: "hello" }),
+	      headers: { "content-type": "application/json" },
+	    });
+	    const session = await created.json() as { id: string };
+	    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+	    failingWorkflow.wakeError = new Error("temporal wake unavailable");
+	    const before = await sumUsageQuantity(dbClient.db, {
+	      workspaceId,
+	      eventType: "agent_run.created",
+	      since: startOfUtcMonth(),
+	    });
+
+	    const failed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
+	      method: "POST",
+	      body: JSON.stringify({
+	        type: "user.message",
+	        payload: { text: "this wake fails" },
+	      }),
+	      headers: { "content-type": "application/json" },
+	    });
+
+	    expect(failed.status).toBe(500);
+	    const after = await sumUsageQuantity(dbClient.db, {
+	      workspaceId,
+	      eventType: "agent_run.created",
+	      since: startOfUtcMonth(),
+	    });
+	    expect(after).toBe(before);
+	  });
+
+	  test("queues concurrent follow-up user messages while merging session tools", async () => {
     const mcpServers = Array.from({ length: 12 }, (_, index) => ({
       id: `docs-${index}`,
       name: `Docs ${index}`,
@@ -1004,14 +1045,19 @@ describe("API component integration", () => {
     expect(paused.status).toBe(200);
     expect(workflow.synced).toHaveLength(2);
 
-    const firedBefore = await sumUsageQuantity(dbClient.db, {
-      workspaceId,
-      eventType: "scheduled_task.fired",
-      since: startOfUtcMonth(),
-    });
-    const triggered = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
-    expect(triggered.status).toBe(202);
-    expect(workflow.triggers).toHaveLength(1);
+	    const firedBefore = await sumUsageQuantity(dbClient.db, {
+	      workspaceId,
+	      eventType: "scheduled_task.fired",
+	      since: startOfUtcMonth(),
+	    });
+	    const agentRunsBefore = await sumUsageQuantity(dbClient.db, {
+	      workspaceId,
+	      eventType: "agent_run.created",
+	      since: startOfUtcMonth(),
+	    });
+	    const triggered = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
+	    expect(triggered.status).toBe(202);
+	    expect(workflow.triggers).toHaveLength(1);
     expect((workflow.triggers[0] as { task?: { id?: string; workspaceId?: string } }).task).toMatchObject({
       id: task.id,
       workspaceId,
@@ -1019,11 +1065,17 @@ describe("API component integration", () => {
     const firedAfter = await sumUsageQuantity(dbClient.db, {
       workspaceId,
       eventType: "scheduled_task.fired",
-      since: startOfUtcMonth(),
-    });
-    expect(firedAfter).toBe(firedBefore);
+	      since: startOfUtcMonth(),
+	    });
+	    expect(firedAfter).toBe(firedBefore);
+	    const agentRunsAfter = await sumUsageQuantity(dbClient.db, {
+	      workspaceId,
+	      eventType: "agent_run.created",
+	      since: startOfUtcMonth(),
+	    });
+	    expect(agentRunsAfter).toBe(agentRunsBefore + 1);
 
-    const listed = await app.request(workspacePath(workspaceId, "/scheduled-tasks"));
+	    const listed = await app.request(workspacePath(workspaceId, "/scheduled-tasks"));
     expect(listed.status).toBe(200);
     expect((await listed.json() as Array<{ id: string }>).some((item) => item.id === task.id)).toBe(true);
   });
@@ -2029,17 +2081,21 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   approvals: unknown[] = [];
   interrupts: unknown[] = [];
   synced: unknown[] = [];
-  deletedSchedules: unknown[] = [];
-  triggers: unknown[] = [];
-  syncError: Error | null = null;
+	  deletedSchedules: unknown[] = [];
+	  triggers: unknown[] = [];
+	  syncError: Error | null = null;
+	  wakeError: Error | null = null;
 
   async signalUserMessage(input: unknown): Promise<void> {
     this.userMessages.push(input);
   }
 
-  async wakeSessionWorkflow(input: unknown): Promise<void> {
-    this.wakeups.push(input);
-  }
+	  async wakeSessionWorkflow(input: unknown): Promise<void> {
+	    this.wakeups.push(input);
+	    if (this.wakeError) {
+	      throw this.wakeError;
+	    }
+	  }
 
   async signalApprovalDecision(input: unknown): Promise<void> {
     this.approvals.push(input);

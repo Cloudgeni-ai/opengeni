@@ -261,20 +261,20 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         turnId: turn.id,
         payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
       }]);
-      await recordWorkspaceUsage(deps, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        eventType: "agent_run.created",
-        quantity: 1,
-        unit: "run",
-        sourceResourceType: "session_turn",
-        sourceResourceId: turn.id,
-        idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
-      });
-      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId });
-      return c.json(accepted, 202);
-    }
+	      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId });
+	      await recordWorkspaceUsage(deps, {
+	        accountId: grant.accountId,
+	        workspaceId,
+	        subjectId: grant.subjectId,
+	        eventType: "agent_run.created",
+	        quantity: 1,
+	        unit: "run",
+	        sourceResourceType: "session_turn",
+	        sourceResourceId: turn.id,
+	        idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
+	      });
+	      return c.json(accepted, 202);
+	    }
 
     const session = await requireSession(db, workspaceId, sessionId);
     if (event.type === "user.approvalDecision" && session.status !== "requires_action") {

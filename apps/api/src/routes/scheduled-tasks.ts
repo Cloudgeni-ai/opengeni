@@ -7,7 +7,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { requireAccessGrant } from "../access";
-import { requireLimit } from "../billing/limits";
+import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
@@ -75,12 +75,23 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
-    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    await workflowClient.triggerScheduledTask({ task });
-    return c.json(task, 202);
-  });
+	    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
+	    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+	    const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+	    await recordWorkspaceUsage(deps, {
+	      accountId: grant.accountId,
+	      workspaceId,
+	      subjectId: grant.subjectId,
+	      eventType: "agent_run.created",
+	      quantity: 1,
+	      unit: "run",
+	      sourceResourceType: "scheduled_task",
+	      sourceResourceId: task.id,
+	      idempotencyKey: `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`,
+	    });
+	    await workflowClient.triggerScheduledTask({ task });
+	    return c.json(task, 202);
+	  });
 
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
