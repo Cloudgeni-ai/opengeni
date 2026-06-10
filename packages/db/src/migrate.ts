@@ -8,6 +8,9 @@ export async function migrate(databaseUrl = process.env.OPENGENI_MIGRATIONS_DATA
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
   const sql = postgres(databaseUrl, { max: 1 });
   try {
+    // Serialize concurrent migrate() runs; the session-level lock is released
+    // when the connection closes.
+    await sql`SELECT pg_advisory_lock(727458)`;
     await sql.unsafe(`CREATE TABLE IF NOT EXISTS "schema_migrations" ("name" text PRIMARY KEY, "applied_at" timestamptz NOT NULL DEFAULT now())`);
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
