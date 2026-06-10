@@ -49,6 +49,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const finalTurn = await activity.claimNextQueuedTurn({ workspaceId: input.workspaceId, sessionId: input.sessionId, workflowId });
       if (!finalTurn) {
         await activity.markSessionIdle({ workspaceId: input.workspaceId, sessionId: input.sessionId });
+        // A queueChanged/userMessage signal can land between the final claim and
+        // completion; Temporal blocks completion while a signal is buffered, so
+        // re-checking here guarantees the queued turn is picked up instead of
+        // stranding it (the signaler skips its start-child fallback on success).
+        if (interruptedEventId !== null || wakeups !== seenWakeups) {
+          continue;
+        }
         return;
       }
       if (!await runTurn(input.accountId, input.workspaceId, input.sessionId, finalTurn.id, finalTurn.triggerEventId)) {
