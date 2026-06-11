@@ -62,23 +62,20 @@ export function registerEnvironmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (await getWorkspaceEnvironmentByName(db, workspaceId, name)) {
       throw new HTTPException(409, { message: `environment name is already in use: ${name}` });
     }
+    // Values are encrypted up front and the environment plus all initial
+    // variables are written in one transaction: a failure leaves nothing.
     const created = await createWorkspaceEnvironment(db, {
       accountId: grant.accountId,
       workspaceId,
       name,
       description: payload.description ?? null,
-    });
-    for (const variable of payload.variables) {
-      await setWorkspaceEnvironmentVariable(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        environmentId: created.id,
+      variables: payload.variables.map((variable) => ({
         name: variable.name,
         valueEncrypted: encryptEnvironmentValue(key, variable.value),
-      });
-    }
+      })),
+    });
     await recordEnvironmentAuditEvent(db, { grant, action: "environment.created", environmentId: created.id });
-    return c.json(await requireEnvironmentForApi(db, workspaceId, created.id), 201);
+    return c.json(created, 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/environments/:environmentId", async (c) => {

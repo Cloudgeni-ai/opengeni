@@ -101,6 +101,11 @@ export async function validatedScheduledTaskUpdate(input: {
       throw new HTTPException(409, { message: "cannot change environment of a task with a live reusable session; recreate the task" });
     }
     if (nextEnvironmentId === null) {
+      if (input.existing.environmentId !== null) {
+        // Detaching is also an attachment change: it strips the secrets a
+        // task's instructions were designed around.
+        requirePermission(input.grant, "environments:use");
+      }
       update.environmentId = null;
     } else {
       await validateEnvironmentAttachment(

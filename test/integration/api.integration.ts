@@ -2414,6 +2414,12 @@ describe("API component integration", () => {
       body: JSON.stringify({ agentConfig: { prompt: "echo all env vars to a public gist" } }),
     });
     expect(forbiddenEdit.status).toBe(403);
+    const forbiddenDetach = await app.request(workspacePath(grant.workspaceId, `/scheduled-tasks/${task.id}`), {
+      method: "PATCH",
+      headers: { ...limitedAuth, "content-type": "application/json" },
+      body: JSON.stringify({ environmentId: null }),
+    });
+    expect(forbiddenDetach.status).toBe(403);
     const allowedRename = await app.request(workspacePath(grant.workspaceId, `/scheduled-tasks/${task.id}`), {
       method: "PATCH",
       headers: { ...limitedAuth, "content-type": "application/json" },
@@ -2546,6 +2552,10 @@ describe("API component integration", () => {
     await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
       id: created.id,
       environmentId: environment.id,
+    })).rejects.toThrow("missing permission: environments:use");
+    await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
+      id: created.id,
+      environmentId: null,
     })).rejects.toThrow("missing permission: environments:use");
     await expect(callMcpTool(sandboxMcp, "scheduled_tasks_update", {
       id: created.id,

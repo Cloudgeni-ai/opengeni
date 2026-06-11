@@ -278,8 +278,10 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's
 // first-party delegated token never carries environments:use, so sandboxed
 // agents calling these MCP tools cannot attach a workspace environment.
+// Explicit detach (environmentId: null) is also an attachment change and is
+// blocked the same way.
 function requireEnvironmentsUseForMcpAttachment(grant: AccessGrant, environmentId: string | null | undefined): void {
-  if (environmentId !== undefined && environmentId !== null && !hasPermission(grant.permissions, "environments:use")) {
+  if (environmentId !== undefined && !hasPermission(grant.permissions, "environments:use")) {
     throw new Error("missing permission: environments:use");
   }
 }

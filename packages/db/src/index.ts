@@ -1537,7 +1537,10 @@ export async function createWorkspaceEnvironment(db: Database, input: {
   workspaceId: string;
   name: string;
   description?: string | null;
+  variables?: Array<{ name: string; valueEncrypted: string }>;
 }): Promise<WorkspaceEnvironment> {
+  // withRlsContext wraps the callback in one transaction, so the environment
+  // row and all initial variables commit or roll back together.
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.workspaceEnvironments).values({
       accountId: input.accountId,
@@ -1548,7 +1551,25 @@ export async function createWorkspaceEnvironment(db: Database, input: {
     if (!row) {
       throw new Error("Failed to create workspace environment");
     }
-    return mapWorkspaceEnvironment(row, []);
+    const variables = input.variables ?? [];
+    if (variables.length === 0) {
+      return mapWorkspaceEnvironment(row, []);
+    }
+    const inserted = await scopedDb.insert(schema.workspaceEnvironmentVariables).values(variables.map((variable) => ({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      environmentId: row.id,
+      name: variable.name,
+      valueEncrypted: variable.valueEncrypted,
+    }))).returning({
+      name: schema.workspaceEnvironmentVariables.name,
+      version: schema.workspaceEnvironmentVariables.version,
+      createdAt: schema.workspaceEnvironmentVariables.createdAt,
+      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+    });
+    return mapWorkspaceEnvironment(row, inserted
+      .map(mapWorkspaceEnvironmentVariableMetadata)
+      .sort((a, b) => a.name.localeCompare(b.name)));
   });
 }
 

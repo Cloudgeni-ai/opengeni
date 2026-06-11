@@ -6,7 +6,7 @@ A workspace owns named **environments**: sets of environment variables whose val
 
 1. **Write-only values.** No API response, session event, log, span, or audit record ever contains a variable value. Reads return names and metadata (version, timestamps) only; there is no read-back even at create time. Rotation is `PUT` with a new value.
 2. **No attachment, no injection.** A run whose session has `environmentId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more.
-3. **Agents cannot self-attach.** The worker's first-party MCP delegated token never carries `environments:use`, and the MCP scheduled-task tools reject `environmentId` (and instruction edits to environment-attached tasks) for grants without it.
+3. **Agents cannot self-attach.** The worker's first-party MCP delegated token never carries `environments:use`, and the MCP scheduled-task tools reject attachment changes (set **or** detach) and instruction edits to environment-attached tasks for grants without it.
 4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
 
@@ -32,7 +32,7 @@ openssl rand -base64 32   # generate OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY
 | `environments:use` | List/read environments (names + metadata) and attach them to sessions, scheduled tasks, and pack installations. |
 | `environments:manage` | Create/rename/delete environments and set/rotate/delete variable values. |
 
-`workspace:admin` implies both. Reads are deliberately not folded under `workspace:read`: listing the names of secret sets is itself sensitive. A workspace API key holding only `environments:use` can attach but can never read values — consistent with the write-only design. Editing the `agentConfig` of a scheduled task that has an environment attached also requires `environments:use`, because changing the instructions of a secret-bearing task is equivalent to attaching those secrets to new instructions.
+`workspace:admin` implies both. Reads are deliberately not folded under `workspace:read`: listing the names of secret sets is itself sensitive. A workspace API key holding only `environments:use` can attach but can never read values — consistent with the write-only design. Editing the `agentConfig` of a scheduled task that has an environment attached also requires `environments:use`, because changing the instructions of a secret-bearing task is equivalent to attaching those secrets to new instructions. Changing or removing a task's attachment (including `environmentId: null`) requires it for the same reason.
 
 ## API
 
@@ -91,4 +91,4 @@ Values never enter the events pipeline by construction — injection is server-s
 
 ## MCP surface
 
-There are deliberately no environment CRUD tools on the first-party MCP server in v1. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject it unless the calling grant holds `environments:use`, which the sandboxed agent's first-party token never does.
+There are deliberately no environment CRUD tools on the first-party MCP server in v1. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject any attachment change — set or detach — unless the calling grant holds `environments:use`, which the sandboxed agent's first-party token never does.
