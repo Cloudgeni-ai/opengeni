@@ -3,10 +3,8 @@ import { activity } from "./activities";
 import { queueChanged } from "./session";
 
 export type ScheduledTaskFireWorkflowInput = {
-  // Optional so Temporal schedules persisted before workspace scoping keep
-  // firing; the dispatch activity resolves the scope from the task id.
-  accountId?: string;
-  workspaceId?: string;
+  accountId: string;
+  workspaceId: string;
   taskId: string;
   triggerType: "scheduled" | "manual";
   agentRunUsageIdempotencyKey?: string;
@@ -14,9 +12,9 @@ export type ScheduledTaskFireWorkflowInput = {
 
 export async function scheduledTaskFireWorkflow(input: ScheduledTaskFireWorkflowInput): Promise<void> {
 	  const dispatched = await activity.dispatchScheduledTaskRun({
+	    workspaceId: input.workspaceId,
 	    taskId: input.taskId,
 	    triggerType: input.triggerType,
-	    ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
 	    ...(input.agentRunUsageIdempotencyKey ? { agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey } : {}),
 	  });
   if (dispatched.action === "start") {

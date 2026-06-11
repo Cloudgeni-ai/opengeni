@@ -40,8 +40,7 @@ export type MarkSessionIdleInput = {
 };
 
 export type DispatchScheduledTaskRunInput = {
-  // Absent for fires from Temporal schedules that predate workspace scoping.
-  workspaceId?: string;
+  workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
   agentRunUsageIdempotencyKey?: string;

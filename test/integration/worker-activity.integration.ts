@@ -1039,43 +1039,6 @@ describe("worker activities integration", () => {
 	    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId, triggerEventId: result.triggerEventId });
 	  });
 
-	  test("dispatches scheduled tasks fired with legacy pre-workspace schedule args", async () => {
-	    const grant = await testGrant(dbClient.db);
-	    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-	      name: "scheduled-legacy-args",
-	      status: "active",
-	      schedule: { type: "interval", everySeconds: 3600 },
-	      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-	      runMode: "new_session_per_run",
-	      overlapPolicy: "allow_concurrent",
-	      agentConfig: {
-	        prompt: "inspect nightly",
-	        resources: [],
-	        tools: [],
-	        metadata: {},
-	      },
-	      metadata: {},
-	    });
-	    const activities = createActivities({
-	      settings: testSettings({
-	        databaseUrl: services.databaseUrl,
-	        natsUrl: services.natsUrl,
-	      }),
-	      db: dbClient.db,
-	      bus,
-	      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-	    });
-
-	    // Temporal schedules created before workspace scoping omit workspaceId.
-	    const result = await activities.dispatchScheduledTaskRun({ taskId: task.id, triggerType: "scheduled" });
-
-	    expect(result.action).toBe("start");
-	    expect(result.workspaceId).toBe(grant.workspaceId);
-	    expect(result.accountId).toBe(grant.accountId);
-	    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-	    expect(run).toMatchObject({ status: "dispatched", sessionId: result.sessionId });
-	  });
-
 	  test("blocks scheduled task dispatch when the account monthly model cost cap is reached", async () => {
 	    const grant = await testGrant(dbClient.db);
 	    const task = await createOwnedScheduledTask(dbClient.db, grant, {

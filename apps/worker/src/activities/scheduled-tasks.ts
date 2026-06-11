@@ -6,7 +6,6 @@ import {
   getBillingBalance,
   recordUsageEvent,
   requireScheduledTask,
-  requireScheduledTaskAcrossWorkspaces,
   requireSession,
   setTemporalWorkflowId,
   sumUsageQuantity,
@@ -31,9 +30,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
   return {
     dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus } = await services();
-      const task = input.workspaceId
-        ? await requireScheduledTask(db, input.workspaceId, input.taskId)
-        : await requireScheduledTaskAcrossWorkspaces(db, input.taskId);
+      const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
       await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId, input.agentRunUsageIdempotencyKey ? 0 : 1);
       const run = await createScheduledTaskRun(db, {
         workspaceId: task.workspaceId,
