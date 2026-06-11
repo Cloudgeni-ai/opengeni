@@ -62,11 +62,16 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     const pack = requirePack(c.req.param("packId"));
     const existing = await getPackInstallation(db, workspaceId, pack.id);
     const payload = EnablePackRequest.parse(await c.req.json());
-    if (pack.environment?.required && !payload.environmentId) {
+    // Re-enabling without environmentId keeps the stored attachment instead of
+    // silently dropping it; the inherited attachment is re-validated below in
+    // case the environment was deleted or its variables changed since.
+    const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
+    const environmentId = payload.environmentId ?? storedEnvironmentId;
+    if (pack.environment?.required && !environmentId) {
       throw new HTTPException(422, { message: "this pack requires an environment attachment; pass environmentId" });
     }
-    if (payload.environmentId) {
-      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId);
+    if (environmentId) {
+      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, environmentId);
       const missing = (pack.environment?.requiredVariables ?? [])
         .filter((name) => !environment.variables.some((variable) => variable.name === name));
       if (missing.length > 0) {
@@ -80,7 +85,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       metadata: {
         ...payload.metadata,
         packVersion: pack.version,
-        ...(payload.environmentId ? { environmentId: payload.environmentId } : {}),
+        ...(environmentId ? { environmentId } : {}),
       },
     });
     return c.json(installation, existing ? 200 : 201);

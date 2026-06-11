@@ -2571,6 +2571,16 @@ describe("API component integration", () => {
     expect([200, 201]).toContain(enabled.status);
     const installation = await enabled.json() as { metadata: Record<string, unknown> };
     expect(installation.metadata.environmentId).toBe(environment.id);
+
+    // Re-enabling without environmentId keeps the stored attachment.
+    const reenabled = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis/enable"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(reenabled.status).toBe(200);
+    const reenabledInstallation = await reenabled.json() as { metadata: Record<string, unknown> };
+    expect(reenabledInstallation.metadata.environmentId).toBe(environment.id);
   });
 
   test("file download MCP tool reports unconfigured object storage", async () => {
