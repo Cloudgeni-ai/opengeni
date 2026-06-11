@@ -17,6 +17,8 @@ spec:
       labels:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: otel-collector
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/otel-collector-configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       containers:

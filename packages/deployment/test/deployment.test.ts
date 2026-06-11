@@ -47,6 +47,14 @@ describe("deployment contract", () => {
     expect(checks).toContain("conformance-session");
   });
 
+  test("restarts the chart-managed OTEL collector when collector config changes", () => {
+    const deployment = readFileSync("deploy/helm/opengeni/templates/otel-collector-deployment.yaml", "utf8");
+
+    expect(deployment).toContain("annotations:");
+    expect(deployment).toContain("checksum/config:");
+    expect(deployment).toContain("/otel-collector-configmap.yaml");
+  });
+
   test("models local Kubernetes as Helm with in-cluster dependencies and port-forward conformance", () => {
     const contract = deploymentProfiles["local-kubernetes"];
     const plan = stackPlanFor(contract);
