@@ -18,6 +18,7 @@ import {
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getPackInstallation,
+  getWorkspaceEnvironment,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
   listEnabledMcpCapabilityServers,
@@ -144,6 +145,22 @@ export async function enableCapability(input: {
       throw new HTTPException(422, {
         message: `pack ${packId} requires an environment attachment; enable it through /v1/workspaces/{workspaceId}/packs/${packId}/enable with environmentId`,
       });
+    }
+    if (storedEnvironmentId) {
+      // The stored attachment was authorized at pack-enable time, but the
+      // environment may have been deleted or its variables changed since;
+      // re-validate it like the packs enable endpoint does.
+      const environment = await getWorkspaceEnvironment(input.db, input.workspaceId, storedEnvironmentId);
+      if (!environment) {
+        throw new HTTPException(422, {
+          message: `the stored environment attachment for pack ${packId} no longer exists; re-enable it through /v1/workspaces/{workspaceId}/packs/${packId}/enable with environmentId`,
+        });
+      }
+      const missing = (pack.environment?.requiredVariables ?? [])
+        .filter((name) => !environment.variables.some((variable) => variable.name === name));
+      if (missing.length > 0) {
+        throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+      }
     }
     await enablePackInstallation(input.db, {
       accountId: input.accountId,

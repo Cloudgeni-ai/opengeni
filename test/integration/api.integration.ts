@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getPackInstallation, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getPackInstallation, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -1630,12 +1630,28 @@ describe("API component integration", () => {
     const deletedBuiltIn = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis"), { method: "DELETE" });
     expect(deletedBuiltIn.status).toBe(409);
 
+    // Once the required variable disappears, the generic enable path
+    // re-validates the stored attachment and refuses.
+    const removeVariable = await app.request(workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`), { method: "DELETE" });
+    expect(removeVariable.status).toBeLessThan(300);
+    const capabilityEnableMissingVariable = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnableMissingVariable.status).toBe(422);
+    expect(await capabilityEnableMissingVariable.text()).toContain("CLOUD_TOKEN");
+
     const deleted = await app.request(workspacePath(workspaceId, `/packs/${packId}`), { method: "DELETE" });
     expect(deleted.status).toBe(204);
     const missing = await app.request(workspacePath(workspaceId, `/packs/${packId}`));
     expect(missing.status).toBe(404);
     const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
     expect(installationAfterDelete?.status).toBe("disabled");
+    // The capability installation row is disabled too, so a future
+    // re-registration does not inherit stale enablement.
+    const capabilityInstallationAfterDelete = await getCapabilityInstallation(dbClient.db, workspaceId, `pack:${packId}`);
+    expect(capabilityInstallationAfterDelete?.status).toBe("disabled");
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {

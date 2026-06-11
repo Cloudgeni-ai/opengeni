@@ -6,7 +6,9 @@ import {
 } from "@opengeni/contracts";
 import {
   deleteWorkspacePack,
+  disableCapabilityInstallation,
   enablePackInstallation,
+  getCapabilityInstallation,
   getPackInstallation,
   getSocialConnection,
   listPackInstallations,
@@ -74,10 +76,16 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "pack not found" });
     }
     // A registration that disappears must not leave an active installation
-    // pointing at a manifest that no longer exists.
+    // pointing at a manifest that no longer exists; the capability
+    // installation row for pack:{packId} would otherwise keep a future
+    // re-registration looking enabled.
     const installation = await getPackInstallation(db, workspaceId, packId);
     if (installation && installation.status === "active") {
       await updatePackInstallationStatus(db, workspaceId, packId, "disabled");
+    }
+    const capabilityInstallation = await getCapabilityInstallation(db, workspaceId, `pack:${packId}`);
+    if (capabilityInstallation && capabilityInstallation.status === "active") {
+      await disableCapabilityInstallation(db, workspaceId, `pack:${packId}`);
     }
     return c.body(null, 204);
   });
