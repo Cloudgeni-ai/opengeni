@@ -75,7 +75,7 @@ Later wins. Reserved-name validation prevents collisions with the platform-manag
 
 - An environment attached to scheduled tasks cannot be deleted (409 from the API; `ON DELETE RESTRICT` as the database backstop). Detach the tasks first.
 - An environment attached to sessions in a non-terminal state (`queued`, `running`, `requires_action`) cannot be deleted (409). Wait for them to finish or cancel them.
-- Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `environment_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. Be aware of the consequence: sending a new message to a formerly-attached idle session after its environment was deleted runs **without** workspace environment injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
+- Sessions in `idle`, `failed`, or `cancelled` state do **not** block deletion; their `environment_id` is set to NULL (`ON DELETE SET NULL`) so run history is preserved. An idle **reusable** session cannot be silently detached this way: its scheduled task holds its own RESTRICT-backed attachment (and the API refuses to change a live reusable task's attachment), so deletion stays blocked until the task is detached or deleted — and a deleted task never re-dispatches. Be aware of the consequence: sending a new message to a formerly-attached idle session after its environment was deleted runs **without** workspace environment injection, indistinguishable from a never-attached session. If the work depends on the secrets, create a new session with a current attachment.
 
 ## Rotation
 

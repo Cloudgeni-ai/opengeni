@@ -2479,6 +2479,14 @@ describe("API component integration", () => {
     expect(blockedDetach.status).toBe(409);
     expect(await blockedDetach.text()).toContain("reusable session");
 
+    // The reviewer-flagged scenario: an idle reusable session cannot be
+    // silently detached because the task's own RESTRICT-backed attachment
+    // still blocks deletion regardless of session status.
+    await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "idle", null);
+    const blockedWhileTaskAttached = await app.request(workspacePath(workspaceId, `/environments/${environment.id}`), { method: "DELETE" });
+    expect(blockedWhileTaskAttached.status).toBe(409);
+    expect(await blockedWhileTaskAttached.text()).toContain("scheduled task");
+
     await updateScheduledTask(dbClient.db, workspaceId, task.id, { runMode: "new_session_per_run", reusableSessionId: null });
     const detach = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
       method: "PATCH",
@@ -2487,7 +2495,6 @@ describe("API component integration", () => {
     });
     expect(detach.status).toBe(200);
     expect((await detach.json() as { environmentId: string | null }).environmentId).toBeNull();
-    await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "idle", null);
     const deleteResponse = await app.request(workspacePath(workspaceId, `/environments/${environment.id}`), { method: "DELETE" });
     expect(deleteResponse.status).toBe(200);
   });
