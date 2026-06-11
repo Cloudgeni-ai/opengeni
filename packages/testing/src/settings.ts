@@ -71,6 +71,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh",
     openaiResponsesTransport: "http",
+    openaiMaxRetries: 5,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,
     azureOpenaiDeployment: undefined,

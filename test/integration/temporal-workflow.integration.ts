@@ -299,6 +299,53 @@ describe("Temporal workflow integration", () => {
     }
   }, temporalWorkflowTestTimeoutMs);
 
+  test("holds the loop for continueDelayMs before the goal continuation check", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const sessionId = crypto.randomUUID();
+    const delayMs = 1500;
+    let segmentReturnedAt = 0;
+    let goalCheckedAt = 0;
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: (() => {
+        const queuedTurns = [queuedTurn("event-1")];
+        return async () => queuedTurns.shift() ?? null;
+      })(),
+      markSessionIdle: async () => undefined,
+      runAgentSegment: async () => {
+        segmentReturnedAt = Date.now();
+        // Provider backpressure idle: the workflow must hold the loop before
+        // admitting the goal continuation.
+        return { status: "idle", continueDelayMs: delayMs };
+      },
+      failSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
+      maybeContinueGoal: async () => {
+        if (!goalCheckedAt) {
+          goalCheckedAt = Date.now();
+        }
+        return { action: "none" };
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(segmentReturnedAt).toBeGreaterThan(0);
+      expect(goalCheckedAt).toBeGreaterThan(0);
+      // Generous lower bound to absorb timer scheduling slack.
+      expect(goalCheckedAt - segmentReturnedAt).toBeGreaterThanOrEqual(delayMs - 300);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
   test("idle interrupt pauses the goal before marking the session idle", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
     const scope = workflowScope();

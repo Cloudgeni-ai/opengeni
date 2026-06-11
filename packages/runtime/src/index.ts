@@ -3,6 +3,7 @@ import { collectSandboxEnvironment, parseExposedPorts, sandboxLifecycleHookIds }
 import { signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
+  AgentsError,
   connectMcpServers,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
@@ -156,6 +157,7 @@ export function configureOpenAI(settings: Settings): void {
     setDefaultOpenAIClient(new OpenAI({
       apiKey,
       baseURL,
+      maxRetries: settings.openaiMaxRetries,
       defaultQuery: azureOpenAIDefaultQuery(settings, baseURL),
       defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
         ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
@@ -170,6 +172,7 @@ export function configureOpenAI(settings: Settings): void {
     setDefaultOpenAIClient(new OpenAI({
       apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
       baseURL: settings.openaiBaseUrl,
+      maxRetries: settings.openaiMaxRetries,
     }));
   }
 }
@@ -648,6 +651,23 @@ export function maxTurnsExceededRunState(error: unknown): { serializedRunState: 
     return { serializedRunState: error.state ? error.state.toString() : null };
   } catch {
     return { serializedRunState: null };
+  }
+}
+
+/**
+ * Serialized run state attached to any agents SDK error, when present.
+ * Provider failures usually surface as raw API errors without state; callers
+ * must treat a null here as "resume from the previous snapshot" rather than
+ * an error.
+ */
+export function agentsErrorRunState(error: unknown): string | null {
+  if (!(error instanceof AgentsError) || !error.state) {
+    return null;
+  }
+  try {
+    return error.state.toString();
+  } catch {
+    return null;
   }
 }
 

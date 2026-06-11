@@ -110,6 +110,10 @@ const SettingsSchema = z.object({
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
+  // Model-call retry budget for transient provider failures (429s and friends).
+  // The openai client default of 2 retries is too small for sustained TPM
+  // backpressure during long autonomous runs.
+  openaiMaxRetries: z.coerce.number().int().nonnegative().default(5),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -326,6 +330,7 @@ export function getSettings(): Settings {
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
+    openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("OPENGENI_AZURE_OPENAI_DEPLOYMENT"),

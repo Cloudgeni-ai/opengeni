@@ -6,6 +6,7 @@ import {
   getBillingBalance,
   requireFile,
   getSessionEvent,
+  getSessionGoal,
   getSessionTurn,
   requireSession,
   recordUsageEvent,
@@ -16,6 +17,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
+  agentsErrorRunState,
   maxTurnsExceededRunState,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
@@ -45,6 +47,12 @@ import type {
 } from "./types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import type { ResourceRef } from "@opengeni/contracts";
+
+// How long the session workflow holds the loop after a retryable provider
+// failure before the goal continuation re-enters the model. Azure/OpenAI TPM
+// throttling is minute-granular; anything shorter mostly burns continuation
+// budget against the same window.
+export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
 export function createRunAgentSegmentActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentSegment(input: RunAgentSegmentInput): Promise<RunAgentSegmentResult> {
@@ -311,13 +319,52 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         activityStatus = "idle";
         return { status: "idle" };
       }
+      // A retryable provider failure (rate limit) on a goal-bearing session is
+      // transient backpressure, not a session failure: the in-client retry
+      // budget is already exhausted by the time the error reaches here, so
+      // fail the turn truthfully but idle the session and let the goal
+      // continuation loop resume after a pacing delay. Sessions without an
+      // active goal keep the terminal behavior -- there is no continuation
+      // machinery to resume them, and a failed session is the honest signal
+      // for the user to retry.
+      const failure = agentRunFailurePayload(error);
+      if (failure.retryable && publish && turnId && turnStartedPublished) {
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        if (goal && goal.status === "active") {
+          await batcher?.flush().catch(() => undefined);
+          // Provider errors rarely carry SDK run state; a null falls back to
+          // the previous snapshot, same degraded-context contract as the
+          // max-turns path above.
+          const serializedRunState = agentsErrorRunState(error);
+          const runStateSaved = Boolean(serializedRunState);
+          if (serializedRunState) {
+            await saveRunState(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              serializedRunState,
+              pendingApprovals: [],
+            });
+          }
+          await publish([
+            { type: "turn.failed", payload: { ...failure, recovery: "goal_continuation", runStateSaved } },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ], true);
+          await finishTurn(db, input.workspaceId, turnId, "failed");
+          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+          activityStatus = "idle";
+          activityError = error;
+          return { status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS };
+        }
+      }
       activityStatus = "failed";
       activityError = error;
       if (!publish || !turnId || !turnStartedPublished) {
         throw error;
       }
       await publish([
-        { type: "turn.failed", payload: agentRunFailurePayload(error) },
+        { type: "turn.failed", payload: failure },
         { type: "session.status.changed", payload: { status: "failed" } },
       ], true);
       await finishTurn(db, input.workspaceId, turnId, "failed");

@@ -79,4 +79,8 @@ export type IndexDocumentInput = {
 
 export type RunAgentSegmentResult = {
   status: "idle" | "requires_action" | "failed" | "cancelled";
+  // Provider backpressure pacing: when set on an idle result, the session
+  // workflow holds the loop this long before admitting the next turn (an
+  // active goal's continuation would otherwise immediately re-hit the limit).
+  continueDelayMs?: number;
 };

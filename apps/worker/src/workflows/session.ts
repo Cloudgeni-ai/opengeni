@@ -176,6 +176,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         return await runTurn(accountId, workspaceId, sessionId, turnId, approvalEventId);
       }
     }
+
+    if (outcome.result.status === "idle" && outcome.result.continueDelayMs) {
+      // Provider backpressure: hold the loop so an active goal's continuation
+      // does not immediately re-enter the same rate-limit window. An interrupt
+      // or user signal ends the wait early and is handled by the main loop.
+      const seenWakeups = wakeups;
+      await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, outcome.result.continueDelayMs);
+    }
     return true;
   }
 }

@@ -45,6 +45,7 @@ import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
+import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-segment";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
@@ -353,6 +354,61 @@ describe("worker activities integration", () => {
       code: "provider_rate_limited",
       retryable: true,
     });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+  });
+
+  test("idles the session on a retryable provider failure when a goal is active", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "rate limit with goal",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "finish the long-running provisioning",
+      createdBy: "api",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "rate limit with goal" } },
+    ]);
+    const error = new Error("Too Many Requests");
+    Object.assign(error, { status: 429 });
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ error }]),
+      }),
+    });
+
+    await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-rate-limit-goal",
+    })).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(failed?.payload).toEqual({
+      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+      code: "provider_rate_limited",
+      retryable: true,
+      recovery: "goal_continuation",
+      runStateSaved: false,
+    });
+    // The turn is truthfully failed, but the session stays resumable and the
+    // goal remains active for the continuation loop to pick up.
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
+    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe("active");
   });
 
   test("records worker observability when setup fails before a turn starts", async () => {

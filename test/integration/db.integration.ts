@@ -357,6 +357,76 @@ describe("DB integration", () => {
     expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
   });
 
+  test("provider backpressure turns freeze the no-progress streak", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "goal loop",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const guards = { defaultMaxAutoContinuations: 10, noProgressLimit: 2 };
+    const enqueueGoalTurn = async () => {
+      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "goal.continuation", payload: { text: "continue" } }]);
+      return await enqueueSessionTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: goalTrigger!.id,
+        temporalWorkflowId: "wf-goal-backpressure",
+        source: "goal",
+        prompt: "continue",
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "low",
+        sandboxBackend: "none",
+        metadata: {},
+      });
+    };
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "outlast the rate limiter",
+      createdBy: "api",
+    });
+    const first = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(first).toMatchObject({ decision: "continue", autoContinuation: 1 });
+
+    // Three consecutive rate-limited continuations (no tool calls) exceed
+    // noProgressLimit 2, but backpressure failures must not advance the
+    // streak: the goal keeps continuing instead of pausing as no_progress.
+    for (let round = 1; round <= 3; round += 1) {
+      const turn = await enqueueGoalTurn();
+      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
+      await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{
+        type: "turn.failed",
+        turnId: turn.id,
+        payload: { code: "provider_rate_limited", retryable: true, recovery: "goal_continuation", runStateSaved: false },
+      }]);
+      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "failed");
+      const next = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+      expect(next).toMatchObject({ decision: "continue", autoContinuation: 1 + round });
+    }
+
+    // Ordinary empty continuations still count: two of them pause the goal.
+    for (let round = 1; round <= 2; round += 1) {
+      const turn = await enqueueGoalTurn();
+      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
+      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "completed");
+      const next = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+      if (round < 2) {
+        expect(next.decision).toBe("continue");
+      } else {
+        expect(next).toMatchObject({ decision: "paused", reason: "no_progress" });
+      }
+    }
+  });
+
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);

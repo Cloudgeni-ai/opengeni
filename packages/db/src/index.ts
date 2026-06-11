@@ -2255,7 +2255,26 @@ export async function evaluateGoalContinuation(db: Database, input: {
             eq(schema.sessionEvents.type, "agent.toolCall.created"),
           ));
         const goalRevised = row.versionAtLastContinuation !== null && row.version > row.versionAtLastContinuation;
-        noProgressStreak = Number(toolCalls) > 0 || goalRevised ? 0 : noProgressStreak + 1;
+        if (Number(toolCalls) > 0 || goalRevised) {
+          noProgressStreak = 0;
+        } else {
+          // A turn that died on retryable provider backpressure says nothing
+          // about whether the goal can progress; freezing the streak keeps a
+          // sustained rate-limit window from masquerading as a stuck goal.
+          // The auto-continuation cap remains the backstop for a real outage.
+          const [{ backpressureFailures } = { backpressureFailures: 0 }] = await tx.select({
+            backpressureFailures: sql<number>`count(*)::int`,
+          }).from(schema.sessionEvents)
+            .where(and(
+              eq(schema.sessionEvents.workspaceId, input.workspaceId),
+              eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+              eq(schema.sessionEvents.type, "turn.failed"),
+              sql`${schema.sessionEvents.payload} ->> 'recovery' = 'goal_continuation'`,
+            ));
+          if (Number(backpressureFailures) === 0) {
+            noProgressStreak = noProgressStreak + 1;
+          }
+        }
       }
     }
     if (noProgressStreak >= input.noProgressLimit) {
