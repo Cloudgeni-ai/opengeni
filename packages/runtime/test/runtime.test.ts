@@ -513,6 +513,20 @@ describe("runtime event normalization", () => {
     expect(serialized).not.toContain("x-access-token");
   });
 
+  test("emits manifests without extra path grants so remote sandbox clients accept them", () => {
+    // Modal's sandbox client rejects any manifest carrying extraPathGrants at
+    // create/apply time; the bundled-skills source must not reintroduce one.
+    const modalManifest = buildManifest(testSettings({ sandboxBackend: "modal" }), [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }]);
+    expect(modalManifest.extraPathGrants).toEqual([]);
+    expect(buildManifest(testSettings(), []).extraPathGrants).toEqual([]);
+  });
+
   test("clones repository resources inside the sandbox without embedding credentials", () => {
     const command = repositoryCloneCommand([{
       kind: "repository",

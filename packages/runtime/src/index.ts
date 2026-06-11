@@ -42,8 +42,9 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy, ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
+import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
-import { dirname, join, posix as posixPath } from "node:path";
+import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 ensureReadableStreamFrom();
@@ -1066,20 +1067,15 @@ export function buildManifest(
         : objectStorageFileMount(settings, `files/${resource.fileId}/original`);
     }
   }
+  // No extraPathGrants here: remote sandbox clients (Modal) reject manifests
+  // that carry them at create/apply time, which broke every Modal session.
+  // The lazy bundled-skills source no longer needs a grant because
+  // bundledSkillsDir() stages the skills inside the process working directory
+  // whenever the packaged copy lives outside it.
   return new Manifest({
     root: "/workspace",
     entries,
     environment,
-    // Since @openai/agents 0.11.0, local sandbox sources (including the lazy
-    // bundled-skills source) must stay within the SDK process working
-    // directory unless granted here. The bundled skills ship inside the
-    // runtime package, which is outside the worker's cwd in production, so
-    // grant it explicitly to preserve pre-0.11 behavior.
-    extraPathGrants: [{
-      path: bundledSkillsDir(),
-      readOnly: true,
-      description: "OpenGeni bundled skills",
-    }],
   });
 }
 
@@ -1660,8 +1656,47 @@ export function azureOpenAIDefaultQuery(
   return { "api-version": settings.azureOpenaiApiVersion };
 }
 
+// Since @openai/agents 0.11.0 local sandbox sources (including the lazy
+// bundled-skills source) must stay within the SDK process working directory:
+// reads outside it require manifest.extraPathGrants, and remote sandbox
+// clients such as Modal reject manifests that carry extra path grants. The
+// packaged skills live inside the runtime package — outside the worker's cwd
+// in production — so stage a copy under the working directory once per
+// process instead of granting the packaged path.
+let stagedBundledSkillsDir: string | null = null;
+
 function bundledSkillsDir(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "bundled_hashicorp_terraform_skills");
+  const packaged = join(dirname(fileURLToPath(import.meta.url)), "bundled_hashicorp_terraform_skills");
+  if (isPathWithin(process.cwd(), packaged)) {
+    return packaged;
+  }
+  if (!stagedBundledSkillsDir) {
+    stagedBundledSkillsDir = stageBundledSkills(packaged, join(process.cwd(), ".opengeni", "bundled_hashicorp_terraform_skills"));
+  }
+  return stagedBundledSkillsDir;
+}
+
+function stageBundledSkills(packaged: string, target: string): string {
+  const tmp = `${target}.tmp-${process.pid}`;
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(dirname(tmp), { recursive: true });
+  cpSync(packaged, tmp, { recursive: true });
+  rmSync(target, { recursive: true, force: true });
+  try {
+    renameSync(tmp, target);
+  } catch (error) {
+    // Another process staged the same content between our rm and rename.
+    rmSync(tmp, { recursive: true, force: true });
+    if (!existsSync(target)) {
+      throw error;
+    }
+  }
+  return target;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relativePath = relative(root, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
 function stringValue(value: unknown): string | undefined {
