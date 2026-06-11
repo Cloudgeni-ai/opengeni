@@ -12,7 +12,7 @@ import {
   workflowIdForSession,
 } from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
-import { stripeCheckoutSessionCreateParams } from "../src/routes/billing";
+import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
 import { discoverMcpRegistryCapabilities, validateMcpCapabilityConnection } from "../src/domain/capabilities";
 import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/contracts";
 
@@ -200,6 +200,13 @@ describe("API helpers", () => {
       successUrl: "https://evil.example/checkout",
       idempotencyKey: "checkout:test-open-redirect",
     })).toThrow("successUrl must use the OpenGeni public origin");
+  });
+
+  test("namespaces Stripe customer mirrors by live and test mode", () => {
+    expect(stripeCustomerProvider({ livemode: true } as never)).toBe("stripe:live");
+    expect(stripeCustomerProvider({ livemode: false } as never)).toBe("stripe:test");
+    expect(stripeCustomerProvider({ settings: { stripeSecretKey: "rk_live_example" } } as never)).toBe("stripe:live");
+    expect(stripeCustomerProvider({ settings: { stripeSecretKey: "sk_test_example" } } as never)).toBe("stripe:test");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {
