@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+import { isCentPrecisionUsdAmount } from "./money";
+
+export { isCentPrecisionUsdAmount } from "./money";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",
@@ -310,7 +314,7 @@ export type BillingBalance = z.infer<typeof BillingBalance>;
 
 export const CreateCheckoutRequest = z.object({
   accountId: z.string().uuid().optional(),
-  amountUsd: z.number().min(5).max(10_000).refine((value) => Number.isFinite(value) && Math.round(value * 100) === value * 100, {
+  amountUsd: z.number().min(5).max(10_000).refine(isCentPrecisionUsdAmount, {
     message: "amountUsd must use cent precision",
   }),
   successUrl: z.string().url().optional(),

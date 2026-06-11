@@ -98,6 +98,7 @@ describe("contracts", () => {
     expect(payload.amountUsd).toBe(25.50);
     expect(payload.accountId).toBeUndefined();
     expect(CreateCheckoutRequest.parse({ amountUsd: 5 }).amountUsd).toBe(5);
+    expect(CreateCheckoutRequest.parse({ amountUsd: 19.99 }).amountUsd).toBe(19.99);
     expect(() => CreateCheckoutRequest.parse({ amountUsd: 4.99 })).toThrow();
     expect(() => CreateCheckoutRequest.parse({ amountUsd: 5.001 })).toThrow();
   });

@@ -58,6 +58,7 @@
       "dependencies": {
         "@fontsource-variable/inter": "^5.2.8",
         "@fontsource-variable/jetbrains-mono": "^5.2.8",
+        "@opengeni/contracts": "workspace:*",
         "@tailwindcss/vite": "^4.2.4",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
