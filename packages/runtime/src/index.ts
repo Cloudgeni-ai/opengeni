@@ -4,6 +4,7 @@ import { signDelegatedAccessToken, type Permission, type ReasoningEffort, type R
 import {
   Agent,
   connectMcpServers,
+  MaxTurnsExceededError,
   MCPServerStreamableHttp,
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
@@ -618,7 +619,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       : undefined);
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
-    maxTurns: 40,
+    maxTurns: settings.agentMaxTurnsPerSegment,
   };
   void settings.disableOpenaiTracing;
   if (client) {
@@ -628,6 +629,26 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     } as SandboxRunConfig;
   }
   return await run(agent, prepared.input, runOptions);
+}
+
+export { MaxTurnsExceededError } from "@openai/agents";
+
+/**
+ * Detects the agents SDK per-segment turn cap. The cap is a pacing valve, not
+ * a session failure: callers should end the segment gracefully (idle) so an
+ * active goal's continuation loop -- or a follow-up user message -- resumes
+ * the work. When the SDK attached the run state at the moment the cap hit,
+ * the serialized form is returned so the resumed turn keeps full context.
+ */
+export function maxTurnsExceededRunState(error: unknown): { serializedRunState: string | null } | null {
+  if (!(error instanceof MaxTurnsExceededError)) {
+    return null;
+  }
+  try {
+    return { serializedRunState: error.state ? error.state.toString() : null };
+  } catch {
+    return { serializedRunState: null };
+  }
 }
 
 export function withManifestRefreshOnResume(client: SandboxClient, targetManifest: Manifest | undefined): SandboxClient {

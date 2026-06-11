@@ -16,6 +16,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
+  maxTurnsExceededRunState,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   type SandboxFileDownload,
@@ -265,6 +266,42 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
           await finishTurn(db, input.workspaceId, turnId, "cancelled").catch(() => undefined);
         }
         throw error;
+      }
+      // The SDK's per-segment turn cap is a pacing valve, not a failure: end
+      // the turn gracefully and idle the session so an active goal continues
+      // via a synthesized continuation turn (or a user message resumes work).
+      // The run state captured at the cap keeps full conversation context for
+      // that resumption.
+      const maxTurns = maxTurnsExceededRunState(error);
+      if (maxTurns && publish && turnId && turnStartedPublished) {
+        if (maxTurns.serializedRunState) {
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            serializedRunState: maxTurns.serializedRunState,
+            pendingApprovals: [],
+          });
+        }
+        await publish([
+          { type: "turn.completed", payload: { output: "", segmentLimit: "max_turns" } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ], true);
+        await finishTurn(db, input.workspaceId, turnId, "idle");
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+        await recordUsageEvent(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          eventType: "agent_run.completed",
+          quantity: 1,
+          unit: "run",
+          sourceResourceType: "session_turn",
+          sourceResourceId: turnId,
+          idempotencyKey: `usage:agent_run.completed:${turnId}`,
+        });
+        activityStatus = "idle";
+        return { status: "idle" };
       }
       activityStatus = "failed";
       activityError = error;

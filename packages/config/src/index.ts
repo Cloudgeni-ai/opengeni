@@ -88,6 +88,11 @@ const SettingsSchema = z.object({
   // tolerated before the goal auto-pauses.
   goalMaxAutoContinuations: z.coerce.number().int().positive().default(20),
   goalNoProgressLimit: z.coerce.number().int().positive().default(3),
+  // Per-segment ceiling on agent loop turns (model calls) within a single
+  // session turn. Exceeding it ends the segment gracefully (the session goes
+  // idle and an active goal continues via a synthesized continuation turn);
+  // it is a pacing valve, not a session failure.
+  agentMaxTurnsPerSegment: z.coerce.number().int().positive().default(40),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -303,6 +308,7 @@ export function getSettings(): Settings {
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
+    agentMaxTurnsPerSegment: optional("OPENGENI_AGENT_MAX_TURNS_PER_SEGMENT"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),

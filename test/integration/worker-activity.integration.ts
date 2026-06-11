@@ -43,7 +43,7 @@ import {
 import type { AccessGrant, ResourceRef, SandboxBackend, ScheduledTaskAgentConfig } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
+import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
@@ -277,6 +277,43 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+  });
+
+  test("max turns exceeded idles the session instead of failing it", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "long task",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "long task" } },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ error: new MaxTurnsExceededError("Max turns (40) exceeded") }]),
+      }),
+    });
+
+    await expect(activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-max-turns",
+    })).resolves.toEqual({ status: "idle" });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    const completed = events.find((event) => event.type === "turn.completed");
+    expect(completed?.payload).toEqual({ output: "", segmentLimit: "max_turns" });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
+    expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
   });
 
   test("classifies provider rate limits as retryable turn failures", async () => {
