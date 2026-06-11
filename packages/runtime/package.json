@@ -11,8 +11,8 @@
   "dependencies": {
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
-    "@openai/agents": "^0.9.1",
-    "@openai/agents-extensions": "^0.9.1",
+    "@openai/agents": "^0.11.6",
+    "@openai/agents-extensions": "^0.11.6",
     "modal": "^0.7.4",
     "openai": "6.36.0"
   },
