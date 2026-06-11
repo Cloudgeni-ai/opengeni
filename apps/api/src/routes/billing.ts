@@ -232,7 +232,7 @@ async function handleStripeWebhookEvent(deps: ApiRouteDeps, stripe: Stripe, even
       return;
     case "customer.created":
     case "customer.updated":
-      await mirrorCustomer(deps, event.data.object as Stripe.Customer);
+      await mirrorCustomer(deps, event, event.data.object as Stripe.Customer);
       return;
     default:
       return;
@@ -249,6 +249,7 @@ async function handleCheckoutSessionCompleted(deps: ApiRouteDeps, event: Stripe.
   if (customerId) {
     await upsertBillingCustomer(deps.db, {
       accountId: credit.accountId,
+      provider: stripeCustomerProvider(event),
       providerCustomerId: customerId,
       email: session.customer_details?.email ?? session.customer_email ?? null,
     });
@@ -274,7 +275,12 @@ async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Eve
   const accountId = intent.metadata?.opengeni_account_id;
   const customerId = typeof intent.customer === "string" ? intent.customer : intent.customer?.id;
   if (accountId && customerId) {
-    await upsertBillingCustomer(deps.db, { accountId, providerCustomerId: customerId, email: null });
+    await upsertBillingCustomer(deps.db, {
+      accountId,
+      provider: stripeCustomerProvider(event),
+      providerCustomerId: customerId,
+      email: null,
+    });
   }
 }
 
@@ -355,13 +361,14 @@ async function releaseDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event:
   });
 }
 
-async function mirrorCustomer(deps: ApiRouteDeps, customer: Stripe.Customer): Promise<void> {
+async function mirrorCustomer(deps: ApiRouteDeps, event: Stripe.Event, customer: Stripe.Customer): Promise<void> {
   const accountId = customer.metadata?.opengeni_account_id;
   if (!accountId || customer.deleted) {
     return;
   }
   await upsertBillingCustomer(deps.db, {
     accountId,
+    provider: stripeCustomerProvider(event),
     providerCustomerId: customer.id,
     email: typeof customer.email === "string" ? customer.email : null,
   });
@@ -415,7 +422,8 @@ function creditMetadata(metadata: Stripe.Metadata | null | undefined, label: str
 }
 
 async function getOrCreateStripeCustomer(deps: ApiRouteDeps, stripe: Stripe, context: AccessContext, accountId: string): Promise<string> {
-  const existing = await getBillingCustomer(deps.db, accountId);
+  const provider = stripeCustomerProvider(deps);
+  const existing = await getBillingCustomer(deps.db, accountId, provider);
   if (existing) {
     return existing.providerCustomerId;
   }
@@ -432,10 +440,20 @@ async function getOrCreateStripeCustomer(deps: ApiRouteDeps, stripe: Stripe, con
   });
   await upsertBillingCustomer(deps.db, {
     accountId,
+    provider,
     providerCustomerId: customer.id,
     email: customer.email,
   });
   return customer.id;
+}
+
+export function stripeCustomerProvider(input: ApiRouteDeps | Stripe.Event): "stripe:live" | "stripe:test" {
+  if ("livemode" in input) {
+    return input.livemode ? "stripe:live" : "stripe:test";
+  }
+  return input.settings.stripeSecretKey?.startsWith("sk_live_") || input.settings.stripeSecretKey?.startsWith("rk_live_")
+    ? "stripe:live"
+    : "stripe:test";
 }
 
 function requireSelectedAccount(context: AccessContext, requested: string | undefined, permission: Permission): string {
