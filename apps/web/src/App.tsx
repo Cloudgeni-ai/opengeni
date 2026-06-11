@@ -386,6 +386,7 @@ function RootRouteComponent() {
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(() => new Set());
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
+  const githubRefreshId = useRef(0);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -513,17 +514,19 @@ function RootRouteComponent() {
   }, [clientConfig, customMcpServers]);
 
   async function refreshGitHub(workspaceId: string, signal?: AbortSignal) {
+    const refreshId = githubRefreshId.current + 1;
+    githubRefreshId.current = refreshId;
     setRepoBusy(true);
     try {
       const status = await fetchGitHubStatus(workspaceId, signal);
-      if (signal?.aborted) {
+      if (signal?.aborted || githubRefreshId.current !== refreshId) {
         return;
       }
       setGithubStatus(status);
       setGithubAppOpen(!status.configured);
       if (status.configured) {
         const repositories = await fetchGitHubRepositories(workspaceId, signal);
-        if (signal?.aborted) {
+        if (signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
         setGithubRepos(repositories);
@@ -531,14 +534,14 @@ function RootRouteComponent() {
         setGithubRepos([]);
       }
     } catch (error) {
-      if (isAbortError(error)) {
+      if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
         return;
       }
       setGithubStatus({ configured: false, missing: [], installUrl: null });
       setGithubRepos([]);
       toast.error("GitHub status unavailable", { description: String(error) });
     } finally {
-      if (!signal?.aborted) {
+      if (githubRefreshId.current === refreshId) {
         setRepoBusy(false);
       }
     }
