@@ -200,6 +200,7 @@ describe("API component integration", () => {
     expect(completedGoal.status).toBe("completed");
     expect(completedGoal.evidence).toBe("CI green for 3 consecutive runs");
     await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow("completed");
+    await expect(callMcpTool(mcp, "goal_update", { text: "also too late" })).rejects.toThrow("completed");
 
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);

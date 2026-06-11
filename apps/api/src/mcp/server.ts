@@ -341,6 +341,9 @@ function registerGoalTools(
     if (!existing) {
       throw new Error("this session has no goal; use goal_set first");
     }
+    if (existing.status === "completed") {
+      throw new Error("session goal is completed; use goal_set to start a new goal");
+    }
     const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
       ...(text !== undefined ? { text } : {}),
       ...(successCriteria !== undefined ? { successCriteria } : {}),
