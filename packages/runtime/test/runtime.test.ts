@@ -287,6 +287,31 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toContain("Attached files are mounted read-only; copy them before modifying.");
   });
 
+  test("surfaces attached workspace environment metadata in agent instructions", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      workspaceEnvironment: {
+        name: "azure-prod",
+        description: "Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
+        variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
+      },
+    });
+    expect(agent.instructions).toContain('A workspace environment named "azure-prod" is attached to this session');
+    expect(agent.instructions).toContain("Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.");
+    expect(agent.instructions).toContain("Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.");
+  });
+
+  test("omits workspace environment instructions when no environment is attached or metadata is empty", () => {
+    const detached = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect(detached.instructions).not.toContain("A workspace environment named");
+
+    const minimal = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      workspaceEnvironment: { name: "bare", description: "  ", variableNames: [] },
+    });
+    expect(minimal.instructions).toContain('A workspace environment named "bare" is attached to this session');
+    expect(minimal.instructions).not.toContain("Exported environment variables:");
+    expect(minimal.instructions).not.toContain("Environment notes from the operator:");
+  });
+
   test("builds native S3 mount entries for file resources", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     const manifest = buildManifest(testSettings({

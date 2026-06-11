@@ -183,7 +183,37 @@ export type BuildAgentOptions = {
   sandboxEnvironment?: Record<string, string>;
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  workspaceEnvironment?: WorkspaceEnvironmentContext;
 };
+
+/**
+ * Operator-facing metadata for the workspace environment attached to a run.
+ * Surfaced verbatim in the agent instructions: the description is where
+ * operators document how the exported credentials are meant to be used
+ * (e.g. which variable holds a deploy key and how to clone with it), so an
+ * agent must not have to rediscover that by enumerating `env` and guessing.
+ * Only metadata belongs here — never variable values.
+ */
+export type WorkspaceEnvironmentContext = {
+  name: string;
+  description?: string | null;
+  variableNames?: string[];
+};
+
+export function workspaceEnvironmentInstructions(environment: WorkspaceEnvironmentContext): string[] {
+  const lines = [
+    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
+  ];
+  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
+  if (variableNames.length > 0) {
+    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
+  }
+  const description = environment.description?.trim();
+  if (description) {
+    lines.push(`Environment notes from the operator: ${description}`);
+  }
+  return lines;
+}
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
@@ -205,6 +235,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
       "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
       "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+      ...(options.workspaceEnvironment ? workspaceEnvironmentInstructions(options.workspaceEnvironment) : []),
     ].join(" "),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },

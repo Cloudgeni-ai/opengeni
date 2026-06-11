@@ -1807,13 +1807,14 @@ export async function deleteWorkspaceEnvironmentVariable(db: Database, workspace
  * environment attachment. Do not call from API routes: values are write-only.
  */
 export async function getWorkspaceEnvironmentValuesForRun(db: Database, workspaceId: string, environmentId: string): Promise<{
-  environment: { id: string; name: string };
+  environment: { id: string; name: string; description: string | null };
   values: Record<string, string>;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [environment] = await scopedDb.select({
       id: schema.workspaceEnvironments.id,
       name: schema.workspaceEnvironments.name,
+      description: schema.workspaceEnvironments.description,
     }).from(schema.workspaceEnvironments)
       .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
       .limit(1);
@@ -1829,7 +1830,7 @@ export async function getWorkspaceEnvironmentValuesForRun(db: Database, workspac
         eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
       ));
     return {
-      environment: { id: environment.id, name: environment.name },
+      environment: { id: environment.id, name: environment.name, description: environment.description },
       values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
     };
   });

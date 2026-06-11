@@ -156,6 +156,15 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        ...(workspaceEnvironment
+          ? {
+            workspaceEnvironment: {
+              name: workspaceEnvironment.name,
+              description: workspaceEnvironment.description,
+              variableNames: Object.keys(workspaceEnvironment.values),
+            },
+          }
+          : {}),
       });
       const runInput = await segmentInput(db, runtime, agent, trigger);
       let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>>;

@@ -18,6 +18,7 @@ import {
 export type WorkspaceEnvironmentForRun = {
   id: string;
   name: string;
+  description: string | null;
   values: Record<string, string>;
 };
 
@@ -54,7 +55,12 @@ export async function loadWorkspaceEnvironmentForRun(
       throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`);
     }
   }
-  return { id: stored.environment.id, name: stored.environment.name, values };
+  return {
+    id: stored.environment.id,
+    name: stored.environment.name,
+    description: stored.environment.description,
+    values,
+  };
 }
 
 export async function sandboxEnvironmentForRun(

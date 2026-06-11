@@ -1460,11 +1460,15 @@ describe("worker activities integration", () => {
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
       API_TOKEN: "worker-secret-token-1234",
       DB_PASSWORD: "worker-secret-pass-5678",
-    });
+    }, "Operator notes: API_TOKEN authenticates the worker against the test API.");
 
     expect(await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null)).toBeNull();
     const loaded = await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, environment.id);
-    expect(loaded).toMatchObject({ id: environment.id, name: environment.name });
+    expect(loaded).toMatchObject({
+      id: environment.id,
+      name: environment.name,
+      description: "Operator notes: API_TOKEN authenticates the worker against the test API.",
+    });
     expect(loaded?.values).toEqual({
       API_TOKEN: "worker-secret-token-1234",
       DB_PASSWORD: "worker-secret-pass-5678",
@@ -1985,12 +1989,13 @@ type TestDb = ReturnType<typeof createDb>["db"];
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
 
-async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: Record<string, string>): Promise<{ id: string; name: string }> {
+async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: Record<string, string>, description?: string): Promise<{ id: string; name: string }> {
   const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
   const environment = await createWorkspaceEnvironment(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     name: `worker-env-${crypto.randomUUID()}`,
+    ...(description !== undefined ? { description } : {}),
   });
   for (const [name, value] of Object.entries(values)) {
     await setWorkspaceEnvironmentVariable(db, {
