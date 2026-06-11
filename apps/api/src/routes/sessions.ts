@@ -2,17 +2,21 @@ import {
   ClientSessionEvent,
   CreateSessionRequest,
   ReorderSessionTurnsRequest,
+  UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
+  type ToolRef,
 } from "@opengeni/contracts";
 import {
   appendSessionEventsWithLockedSessionUpdate,
   cancelQueuedSessionTurn,
   enqueueSessionTurn,
   getSession,
+  getSessionGoal,
   listSessionEvents,
   listSessionTurns,
   reorderQueuedSessionTurns,
   requireSession,
+  setSessionGoalStatus,
   updateQueuedSessionTurn,
   type AppendEventInput,
 } from "@opengeni/db";
@@ -53,9 +57,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
     const resources = normalizeResources(payload.resources);
     const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
-    const tools = hasOwnProperty(rawPayload, "tools")
+    const defaultedTools = hasOwnProperty(rawPayload, "tools")
       ? requestedTools
       : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
+    // Goal-bearing sessions force the first-party MCP server so the goal
+    // tools the continuation prompt references are reachable.
+    const tools = payload.goal ? withFirstPartyGoalTools(defaultedTools, runtimeSettings) : defaultedTools;
     await validateGitHubRepositorySelection(db, workspaceId, resources);
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
@@ -82,6 +89,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
       metadata: payload.metadata,
       environment: environment ? { id: environment.id, name: environment.name } : null,
+      goal: payload.goal ?? null,
     });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,
@@ -105,6 +113,73 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const goal = await getSessionGoal(db, workspaceId, sessionId);
+    if (!goal) {
+      throw new HTTPException(404, { message: "session goal not found" });
+    }
+    return c.json(goal);
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = UpdateSessionGoalRequest.parse(await c.req.json());
+    const existing = await getSessionGoal(db, workspaceId, sessionId);
+    if (!existing) {
+      throw new HTTPException(404, { message: "session goal not found" });
+    }
+    if (existing.status === "completed") {
+      throw new HTTPException(409, { message: "session goal is completed; set a new goal instead" });
+    }
+    if (payload.status === "paused") {
+      const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
+        status: "paused",
+        ...(payload.rationale ? { rationale: payload.rationale } : {}),
+        pausedReason: "api",
+      });
+      if (changed) {
+        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
+          type: "goal.paused",
+          payload: {
+            goalId: goal.id,
+            actor: "api",
+            reason: "api",
+            ...(payload.rationale ? { rationale: payload.rationale } : {}),
+            autoContinuations: goal.autoContinuations,
+            noProgressStreak: goal.noProgressStreak,
+          },
+        }]);
+      }
+      return c.json(goal);
+    }
+    // Resume: only valid from paused; resets counters and re-arms the loop.
+    if (existing.status !== "paused") {
+      throw new HTTPException(409, { message: `session goal is ${existing.status}; only paused goals can be resumed` });
+    }
+    const { goal } = await setSessionGoalStatus(db, workspaceId, sessionId, { status: "active" });
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
+      type: "goal.resumed",
+      payload: {
+        goalId: goal.id,
+        text: goal.text,
+        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+        version: goal.version,
+        actor: "api",
+      },
+    }]);
+    // signalWithStart restarts a completed workflow whose first claim finds no
+    // queued turn, so maybeContinueGoal fires — resume works on an idle session.
+    await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
+    return c.json(goal);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -316,6 +391,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(accepted, 202);
   });
+}
+
+function withFirstPartyGoalTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
+  if (!runtimeSettings.mcpServers.some((server) => server.id === "opengeni")) {
+    return tools;
+  }
+  return mergeToolRefs(tools, [{ kind: "mcp", id: "opengeni" }]);
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {

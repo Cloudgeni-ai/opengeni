@@ -34,6 +34,20 @@ export async function segmentInput(
       serializedRunState: latestState?.serializedRunState ?? null,
     });
   }
+  if (trigger.type === "goal.continuation") {
+    const payload = trigger.payload as { text?: unknown };
+    if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
+      throw new Error("goal.continuation payload is missing text");
+    }
+    // Threading serializedRunState keeps the agent's full conversation context
+    // across continuations — this is what makes "keep working" coherent.
+    const latestState = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
+    return await runtime.prepareInput(agent, {
+      kind: "message",
+      text: payload.text,
+      serializedRunState: latestState?.serializedRunState ?? null,
+    });
+  }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
       approvalId?: unknown;

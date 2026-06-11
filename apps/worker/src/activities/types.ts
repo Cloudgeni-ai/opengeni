@@ -39,6 +39,22 @@ export type MarkSessionIdleInput = {
   sessionId: string;
 };
 
+export type MaybeContinueGoalInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  workflowId: string;
+};
+
+export type MaybeContinueGoalResult = {
+  action: "none" | "queue" | "continue" | "paused";
+};
+
+export type PauseGoalForInterruptInput = {
+  workspaceId: string;
+  sessionId: string;
+};
+
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;

@@ -7,13 +7,21 @@ import {
   createScheduledTaskRun,
   createApiKey,
   createSession,
+  createSessionGoal,
   createTurn,
   dbSql,
   enableCapabilityInstallation,
+  enqueueSessionTurn,
+  evaluateGoalContinuation,
   finishTurn,
   findActiveApiKeyByHash,
   getLatestRunState,
   getSession,
+  getSessionGoal,
+  setSessionGoalLastContinuationTurn,
+  setSessionGoalStatus,
+  updateSessionGoal,
+  upsertSessionGoal,
   listEnabledMcpCapabilityServers,
   listScheduledTaskRuns,
   listScheduledTasks,
@@ -186,6 +194,225 @@ describe("DB integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.error).toBe("no worker");
+  });
+
+  test("session goal lifecycle: set, revise, complete, replace", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "goal lifecycle",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, session.id)).toBeNull();
+    const created = await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "ship the deploy pipeline",
+      successCriteria: "CI green on main",
+      createdBy: "api",
+    });
+    expect(created.status).toBe("active");
+    expect(created.version).toBe(1);
+
+    const revised = await updateSessionGoal(dbClient.db, grant.workspaceId, session.id, { text: "ship the deploy pipeline v2" });
+    expect(revised.version).toBe(2);
+    expect(revised.status).toBe("active");
+
+    const paused = await setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "paused", rationale: "blocked", pausedReason: "agent" });
+    expect(paused.changed).toBe(true);
+    expect(paused.goal.pausedReason).toBe("agent");
+    const pausedAgain = await setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "paused", pausedReason: "agent" });
+    expect(pausedAgain.changed).toBe(false);
+
+    const resumed = await setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "active" });
+    expect(resumed.goal.pausedReason).toBeNull();
+    expect(resumed.goal.rationale).toBeNull();
+    expect(resumed.goal.autoContinuations).toBe(0);
+
+    const completed = await setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "completed", evidence: "pipeline live, CI green" });
+    expect(completed.goal.evidence).toBe("pipeline live, CI green");
+    await expect(setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "active" })).rejects.toThrow("completed");
+
+    const replaced = await upsertSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "now keep it healthy",
+      createdBy: "agent",
+    });
+    expect(replaced.replaced).toBe(true);
+    expect(replaced.goal.status).toBe("active");
+    expect(replaced.goal.evidence).toBeNull();
+    expect(replaced.goal.autoContinuations).toBe(0);
+    expect(replaced.goal.version).toBeGreaterThan(completed.goal.version);
+  });
+
+  test("evaluateGoalContinuation honors queue, approvals, progress, and caps", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "goal loop",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const guards = { defaultMaxAutoContinuations: 5, noProgressLimit: 2 };
+    const enqueueGoalTurn = async () => {
+      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "goal.continuation", payload: { text: "continue" } }]);
+      return await enqueueSessionTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: goalTrigger!.id,
+        temporalWorkflowId: "wf-goal-db",
+        source: "goal",
+        prompt: "continue",
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "low",
+        sandboxBackend: "none",
+        metadata: {},
+      });
+    };
+
+    // No goal yet.
+    expect(await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards })).toEqual({ decision: "none" });
+
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "keep working",
+      createdBy: "api",
+    });
+
+    // Queued work always wins.
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "user.message", payload: { text: "go" } }]);
+    const queuedUserTurn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: "wf-goal-db",
+      source: "user",
+      prompt: "go",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "low",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    expect((await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards })).decision).toBe("queue");
+
+    // A non-terminal requires_action turn (pending approval) blocks continuation.
+    await finishTurn(dbClient.db, grant.workspaceId, queuedUserTurn.id, "requires_action");
+    expect((await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards })).decision).toBe("none");
+    await finishTurn(dbClient.db, grant.workspaceId, queuedUserTurn.id, "completed");
+
+    // First continuation.
+    const first = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(first).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 5 });
+
+    // A continuation turn that finishes without tool calls or a goal revision
+    // increments the no-progress streak; noProgressLimit 2 pauses the goal.
+    for (let round = 1; round <= 2; round += 1) {
+      const continuationTurn = await enqueueGoalTurn();
+      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, continuationTurn.id);
+      await finishTurn(dbClient.db, grant.workspaceId, continuationTurn.id, "completed");
+      const next = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+      if (round < 2) {
+        expect(next.decision).toBe("continue");
+      } else {
+        expect(next).toMatchObject({ decision: "paused", reason: "no_progress" });
+      }
+    }
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.pausedReason).toBe("no_progress");
+
+    // Replacing the goal re-arms it; the per-goal cap is enforced.
+    await upsertSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "one more push",
+      maxAutoContinuations: 1,
+      createdBy: "agent",
+    });
+    const capped = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(capped).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
+    // Mark progress in that continuation so the cap (not no-progress) triggers.
+    const capTurn = await enqueueGoalTurn();
+    await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, capTurn.id);
+    await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "agent.toolCall.created", turnId: capTurn.id, payload: {} }]);
+    await finishTurn(dbClient.db, grant.workspaceId, capTurn.id, "completed");
+    const atCap = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
+  });
+
+  test("RLS policies isolate session goal rows for a non-owner app role", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grantA = await testGrant(dbClient.db);
+      const grantB = await testGrant(dbClient.db);
+      const sessionB = await createSession(dbClient.db, {
+        accountId: grantB.accountId,
+        workspaceId: grantB.workspaceId,
+        initialMessage: "workspace b goal",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await createSessionGoal(dbClient.db, {
+        accountId: grantB.accountId,
+        workspaceId: grantB.workspaceId,
+        sessionId: sessionB.id,
+        text: "workspace b objective",
+        createdBy: "api",
+      });
+
+      const hidden = await appDbClient.db.execute(dbSql<{ count: string }>`select count(*)::text as count from session_goals`);
+      expect(Number(hidden[0]?.count ?? 0)).toBe(0);
+
+      const sessionA = await createSession(appDbClient.db, {
+        accountId: grantA.accountId,
+        workspaceId: grantA.workspaceId,
+        initialMessage: "workspace a goal",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await createSessionGoal(appDbClient.db, {
+        accountId: grantA.accountId,
+        workspaceId: grantA.workspaceId,
+        sessionId: sessionA.id,
+        text: "workspace a objective",
+        createdBy: "api",
+      });
+      const visible = await withRlsContext(appDbClient.db, grantA, async (db) =>
+        await db.execute(dbSql<{ workspace_id: string }>`select workspace_id::text from session_goals`)
+      );
+      expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
+
+      await expect(withRlsContext(appDbClient.db, grantA, async (db) => {
+        await db.execute(dbSql`
+          insert into session_goals (account_id, workspace_id, session_id, text)
+          values (${grantA.accountId}, ${grantB.workspaceId}, ${sessionB.id}, 'mismatched goal')
+        `);
+      })).rejects.toThrow();
+    } finally {
+      await appDbClient.close();
+    }
   });
 
   test("RLS policies isolate workspace-owned rows for a non-owner app role", async () => {

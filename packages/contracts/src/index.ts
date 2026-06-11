@@ -77,6 +77,7 @@ export const Permission = z.enum([
   "api_keys:manage",
   "environments:manage",
   "environments:use",
+  "goals:manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -154,6 +155,9 @@ export const DelegatedAccessTokenPayload = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission).min(1),
+  // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
+  // agent-controlled); enables session-scoped tools such as goal management.
+  sessionId: z.string().uuid().optional(),
   exp: z.number().int().positive(),
 });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
@@ -543,8 +547,59 @@ function sortJson(value: unknown): unknown {
 export const SessionTurnStatus = z.enum(["queued", "running", "requires_action", "completed", "failed", "cancelled"]);
 export type SessionTurnStatus = z.infer<typeof SessionTurnStatus>;
 
-export const SessionTurnSource = z.enum(["user", "scheduled_task", "api"]);
+export const SessionTurnSource = z.enum(["user", "scheduled_task", "api", "goal"]);
 export type SessionTurnSource = z.infer<typeof SessionTurnSource>;
+
+export const SessionGoalStatus = z.enum(["active", "paused", "completed"]);
+export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
+
+export const SessionGoalCreatedBy = z.enum(["api", "agent", "scheduled_task"]);
+export type SessionGoalCreatedBy = z.infer<typeof SessionGoalCreatedBy>;
+
+export const SessionGoalPausedReason = z.enum([
+  "agent",
+  "user_interrupt",
+  "api",
+  "no_progress",
+  "max_auto_continuations",
+  "limits",
+]);
+export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
+
+export const SessionGoal = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  status: SessionGoalStatus,
+  text: z.string(),
+  successCriteria: z.string().nullable(),
+  evidence: z.string().nullable(),
+  rationale: z.string().nullable(),
+  pausedReason: z.string().nullable(),
+  createdBy: SessionGoalCreatedBy,
+  version: z.number().int().positive(),
+  autoContinuations: z.number().int().nonnegative(),
+  noProgressStreak: z.number().int().nonnegative(),
+  maxAutoContinuations: z.number().int().positive().nullable(),
+  metadata: z.record(z.string(), z.unknown()),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SessionGoal = z.infer<typeof SessionGoal>;
+
+export const GoalSpec = z.object({
+  text: z.string().min(1),
+  successCriteria: z.string().min(1).optional(),
+  maxAutoContinuations: z.number().int().positive().optional(),
+});
+export type GoalSpec = z.infer<typeof GoalSpec>;
+
+export const UpdateSessionGoalRequest = z.object({
+  status: z.enum(["paused", "active"]),
+  rationale: z.string().min(1).optional(),
+});
+export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
 export const SessionTurn = z.object({
   id: z.string().uuid(),
@@ -677,6 +732,7 @@ export const ScheduledTaskAgentConfig = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
+  goal: GoalSpec.optional(),
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
@@ -1042,6 +1098,12 @@ export const SessionEventType = z.enum([
   "sandbox.operation.failed",
   "sandbox.command.output.delta",
   "artifact.created",
+  "goal.set",
+  "goal.updated",
+  "goal.completed",
+  "goal.paused",
+  "goal.resumed",
+  "goal.continuation",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
@@ -1069,6 +1131,7 @@ export const CreateSessionRequest = z.object({
   // Workspace environment attachment is fixed at session creation; follow-up
   // user.message events cannot switch or add one.
   environmentId: z.string().uuid().optional(),
+  goal: GoalSpec.optional(),
   clientEventId: z.string().min(1).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;

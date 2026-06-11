@@ -83,6 +83,11 @@ const SettingsSchema = z.object({
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Session goal guard rails: the hard ceiling on synthesized continuation
+  // turns per goal arming, and the consecutive zero-progress continuations
+  // tolerated before the goal auto-pauses.
+  goalMaxAutoContinuations: z.coerce.number().int().positive().default(20),
+  goalNoProgressLimit: z.coerce.number().int().positive().default(3),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -295,6 +300,8 @@ export function getSettings(): Settings {
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
+    goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),

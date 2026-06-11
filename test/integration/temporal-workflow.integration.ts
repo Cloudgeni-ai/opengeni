@@ -253,6 +253,128 @@ describe("Temporal workflow integration", () => {
     }
   }, temporalWorkflowTestTimeoutMs);
 
+  test("synthesizes goal continuation turns until the goal declines", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const sessionId = crypto.randomUUID();
+    const runs: Array<{ triggerEventId: string }> = [];
+    const goalChecks: unknown[] = [];
+    const queuedTurns = [queuedTurn("event-1")];
+    let continuations = 0;
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentSegment: async (input: { triggerEventId: string }) => {
+        runs.push(input);
+        return { status: "idle" };
+      },
+      failSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
+      maybeContinueGoal: async (input: unknown) => {
+        goalChecks.push(input);
+        if (continuations < 2) {
+          continuations += 1;
+          queuedTurns.push(queuedTurn(`goal-event-${continuations}`));
+          return { action: "continue" };
+        }
+        return { action: "none" };
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(runs.map((input) => input.triggerEventId)).toEqual(["event-1", "goal-event-1", "goal-event-2"]);
+      expect(goalChecks.length).toBeGreaterThanOrEqual(3);
+      expect(goalChecks[0]).toMatchObject({ ...scope, sessionId, workflowId });
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
+  test("idle interrupt pauses the goal before marking the session idle", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const sessionId = crypto.randomUUID();
+    const order: string[] = [];
+    const pauses: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => null,
+      markSessionIdle: async () => {
+        order.push("idle");
+      },
+      runAgentSegment: async () => ({ status: "idle" }),
+      failSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
+      pauseGoalForInterrupt: async (input: unknown) => {
+        order.push("pause");
+        pauses.push(input);
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId }],
+      });
+      await handle.signal("interrupt", "interrupt-event");
+      await handle.result();
+      expect(order).toEqual(["pause", "idle"]);
+      expect(pauses).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
+  test("a failing goal continuation check falls back to idle shutdown", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const sessionId = crypto.randomUUID();
+    const idleMarks: unknown[] = [];
+    const queuedTurns = [queuedTurn("event-1")];
+    const runs: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async (input: unknown) => {
+        idleMarks.push(input);
+      },
+      runAgentSegment: async (input: unknown) => {
+        runs.push(input);
+        return { status: "idle" };
+      },
+      failSession: async () => undefined,
+      interruptActiveTurn: async () => undefined,
+      maybeContinueGoal: async () => {
+        throw new Error("goal store unavailable");
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(runs).toHaveLength(1);
+      expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
   test("dispatches document index workflow activity", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
     const scope = workflowScope();
@@ -421,6 +543,12 @@ async function testWorker(nativeConnection: NativeConnection, taskQueue: string,
     namespace: "default",
     taskQueue,
     workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
-    activities,
+    activities: {
+      // Goal-less defaults; individual tests override these to exercise the
+      // goal continuation loop.
+      maybeContinueGoal: async () => ({ action: "none" }),
+      pauseGoalForInterrupt: async () => undefined,
+      ...activities,
+    },
   });
 }

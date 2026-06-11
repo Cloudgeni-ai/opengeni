@@ -5,6 +5,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createFileUpload,
+  createSessionGoal,
 } from "@opengeni/db";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { MemoryEventBus, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
@@ -54,6 +55,17 @@ describe("workspace isolation matrix", () => {
     await expectStatus(app, authA, workspacePath(b.workspaceId, `/sessions/${session.id}`), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, `/sessions/${session.id}`), 404);
     await expectStatus(app, authA, legacyRoute("sessions", session.id), 404);
+
+    await createSessionGoal(dbClient.db, {
+      accountId: a.accountId,
+      workspaceId: a.workspaceId,
+      sessionId: session.id,
+      text: "workspace A objective",
+      createdBy: "api",
+    });
+    await expectStatus(app, authA, workspacePath(a.workspaceId, `/sessions/${session.id}/goal`), 200);
+    await expectStatus(app, authA, workspacePath(b.workspaceId, `/sessions/${session.id}/goal`), 403);
+    await expectStatus(app, authB, workspacePath(b.workspaceId, `/sessions/${session.id}/goal`), 404);
 
     const fileId = crypto.randomUUID();
     await createFileUpload(dbClient.db, {

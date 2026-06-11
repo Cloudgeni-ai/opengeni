@@ -2,6 +2,7 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   createScheduledTaskRun,
   createSession,
+  createSessionGoal,
   enqueueSessionTurn,
   getBillingBalance,
   getWorkspaceEnvironment,
@@ -12,6 +13,7 @@ import {
   sumUsageQuantity,
   updateScheduledTask,
   updateScheduledTaskRun,
+  upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
@@ -21,6 +23,7 @@ import {
   scheduledUserMessagePayload,
   workflowIdForSession,
 } from "./common";
+import { goalSessionTools } from "./goals";
 import type {
   ActivityServices,
   DispatchScheduledTaskRunInput,
@@ -54,6 +57,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         const model = task.agentConfig.model ?? settings.openaiModel;
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
+        const goalSpec = task.agentConfig.goal ?? null;
+        // Goal-bearing dispatches force the first-party MCP server so the goal
+        // tools the continuation prompt references are reachable.
+        const taskTools = goalSpec ? goalSessionTools(settings, task.agentConfig.tools) : task.agentConfig.tools;
         if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
           // The FK on scheduled_tasks.environment_id is ON DELETE RESTRICT, so
           // an attached environment must still exist here; fail closed if not.
@@ -68,7 +75,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             workspaceId: task.workspaceId,
             initialMessage: task.agentConfig.prompt,
             resources: task.agentConfig.resources,
-            tools: task.agentConfig.tools,
+            tools: taskTools,
             metadata: {
               ...task.agentConfig.metadata,
               model,
@@ -80,6 +87,17 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             sandboxBackend,
             environmentId: task.environmentId ?? null,
           });
+          const goal = goalSpec
+            ? await createSessionGoal(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              sessionId: session.id,
+              text: goalSpec.text,
+              successCriteria: goalSpec.successCriteria ?? null,
+              maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+              createdBy: "scheduled_task",
+            })
+            : null;
           const workflowId = workflowIdForSession(session.id);
           await setTemporalWorkflowId(db, task.workspaceId, session.id, workflowId);
           if (task.runMode === "reusable_session") {
@@ -96,9 +114,20 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 ...(environment ? { environmentId: environment.id, environmentName: environment.name } : {}),
               },
             },
+            ...(goal ? [{
+              type: "goal.set" as const,
+              payload: {
+                goalId: goal.id,
+                text: goal.text,
+                ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+                version: goal.version,
+                actor: "scheduled_task",
+                replaced: false,
+              },
+            }] : []),
             {
               type: "user.message",
-              payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, task.agentConfig.tools, task.id, run.id),
+              payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
             },
             { type: "session.status.changed", payload: { status: "queued" } },
           ]);
@@ -115,7 +144,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             source: "scheduled_task",
             prompt: task.agentConfig.prompt,
             resources: task.agentConfig.resources,
-            tools: task.agentConfig.tools,
+            tools: taskTools,
             model,
             reasoningEffort,
             sandboxBackend,
@@ -150,18 +179,44 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           if ((session.environmentId ?? null) !== (task.environmentId ?? null)) {
             throw new Error("scheduled task environment attachment does not match its reusable session");
           }
+          // A recurring "maintain X" task re-establishes its objective on every
+          // fire: replace the goal text, reactivate it, and reset the counters.
+          const reusableGoal = goalSpec
+            ? await upsertSessionGoal(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              sessionId: session.id,
+              text: goalSpec.text,
+              successCriteria: goalSpec.successCriteria ?? null,
+              maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+              createdBy: "scheduled_task",
+            })
+            : null;
           const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => ({
-            events: [{
-              type: "user.message",
-              payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, task.agentConfig.tools, task.id, run.id),
-            }],
+            events: [
+              ...(reusableGoal ? [{
+                type: "goal.set" as const,
+                payload: {
+                  goalId: reusableGoal.goal.id,
+                  text: reusableGoal.goal.text,
+                  ...(reusableGoal.goal.successCriteria ? { successCriteria: reusableGoal.goal.successCriteria } : {}),
+                  version: reusableGoal.goal.version,
+                  actor: "scheduled_task",
+                  replaced: reusableGoal.replaced,
+                },
+              }] : []),
+              {
+                type: "user.message",
+                payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
+              },
+            ],
             update: {
               resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
-              tools: mergeToolRefs(locked.tools, task.agentConfig.tools),
+              tools: mergeToolRefs(locked.tools, taskTools),
             },
           }));
           await bus.publish(task.workspaceId, session.id, events);
-          const trigger = events[0];
+          const trigger = events.find((event) => event.type === "user.message");
           if (!trigger) {
             throw new Error("failed to append scheduled task trigger event");
           }
@@ -174,7 +229,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             source: "scheduled_task",
             prompt: task.agentConfig.prompt,
             resources: task.agentConfig.resources,
-            tools: task.agentConfig.tools,
+            tools: taskTools,
             model,
             reasoningEffort,
             sandboxBackend,

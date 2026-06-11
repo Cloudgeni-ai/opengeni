@@ -7,6 +7,7 @@ import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentSegmentActivity } from "./activities/agent-segment";
 import { createDocumentActivities } from "./activities/documents";
+import { createGoalActivities } from "./activities/goals";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
@@ -16,6 +17,9 @@ export type {
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
   IndexDocumentInput,
+  MaybeContinueGoalInput,
+  MaybeContinueGoalResult,
+  PauseGoalForInterruptInput,
   RunAgentSegmentInput,
   RunAgentSegmentResult,
 } from "./activities/types";
@@ -45,6 +49,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     ...createDocumentActivities(services),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
+    ...createGoalActivities(services),
   };
 }
 
@@ -57,3 +62,5 @@ export const interruptActiveTurn = defaultActivities.interruptActiveTurn;
 export const claimNextQueuedTurn = defaultActivities.claimNextQueuedTurn;
 export const markSessionIdle = defaultActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
+export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
+export const pauseGoalForInterrupt = defaultActivities.pauseGoalForInterrupt;

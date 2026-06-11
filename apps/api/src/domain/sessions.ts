@@ -1,12 +1,14 @@
 import type { Settings } from "@opengeni/config";
 import {
   reasoningEffortForMetadata,
+  type GoalSpec,
   type ResourceRef,
   type SessionTurn,
   type ToolRef,
 } from "@opengeni/contracts";
 import {
   createSession,
+  createSessionGoal,
   enqueueSessionTurn,
   getSessionTurn,
   requireSession,
@@ -33,6 +35,7 @@ export async function createAndStartSession(input: {
   metadata: Record<string, unknown>;
   // Names/ids only; the session.created payload never carries variable values.
   environment?: { id: string; name: string } | null;
+  goal?: GoalSpec | null;
 }) {
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -49,6 +52,19 @@ export async function createAndStartSession(input: {
     sandboxBackend: input.sandboxBackend,
     environmentId: input.environment?.id ?? null,
   });
+  // The goal row is durable session state; the workflow picks it up from the
+  // database once the first turn completes — no extra workflow plumbing here.
+  const goal = input.goal
+    ? await createSessionGoal(input.db, {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      text: input.goal.text,
+      successCriteria: input.goal.successCriteria ?? null,
+      maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
+      createdBy: "api",
+    })
+    : null;
   const initialPayload = {
     text: input.initialMessage,
     ...(input.resources.length ? { resources: input.resources } : {}),
@@ -62,6 +78,17 @@ export async function createAndStartSession(input: {
         ...(input.environment ? { environmentId: input.environment.id, environmentName: input.environment.name } : {}),
       },
     },
+    ...(goal ? [{
+      type: "goal.set" as const,
+      payload: {
+        goalId: goal.id,
+        text: goal.text,
+        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+        version: goal.version,
+        actor: "api",
+        replaced: false,
+      },
+    }] : []),
     {
       type: "user.message",
       payload: initialPayload,

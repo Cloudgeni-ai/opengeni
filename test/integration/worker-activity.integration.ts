@@ -19,13 +19,17 @@ import {
   createFileUpload,
   createScheduledTask,
   createSession,
+  createSessionGoal,
   createWorkspaceEnvironment,
   encryptEnvironmentValue,
+  enqueueSessionTurn,
   setWorkspaceEnvironmentVariable,
   finishTurn,
   getSession,
+  getSessionGoal,
   getBillingBalance,
   getLatestRunState,
+  listSessionTurns,
   listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
@@ -1562,6 +1566,275 @@ describe("worker activities integration", () => {
     })).rejects.toThrow("scheduled task environment attachment does not match its reusable session");
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs[0]?.status).toBe("failed");
+  });
+
+  test("synthesizes billed goal continuation turns and auto-pauses on no progress", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "pursue the goal",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "service deployed and healthy",
+      successCriteria: "probe returns 200",
+      createdBy: "api",
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        goalNoProgressLimit: 1,
+        mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:65531/v1/workspaces/{workspaceId}/mcp", cacheToolsList: true }],
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    const first = await activities.maybeContinueGoal({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    });
+    expect(first.action).toBe("continue");
+
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    const continuation = turns.find((turn) => turn.source === "goal");
+    expect(continuation).toBeTruthy();
+    expect(continuation!.status).toBe("queued");
+    expect(continuation!.temporalWorkflowId).toBe(`session-${session.id}`);
+    expect(continuation!.prompt).toContain("[GOAL CONTINUATION 1/20]");
+    expect(continuation!.prompt).toContain("service deployed and healthy");
+    expect(continuation!.prompt).toContain("probe returns 200");
+    // The first-party MCP server is forced onto continuation turns so the
+    // goal_complete/goal_pause escape hatches stay reachable.
+    expect(continuation!.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
+    expect(continuation!.metadata.autoContinuation).toBe(1);
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const continuationEvent = events.find((event) => event.type === "goal.continuation");
+    expect(continuationEvent).toBeTruthy();
+    expect(continuation!.triggerEventId).toBe(continuationEvent!.id);
+    expect(events.some((event) => event.type === "turn.queued" && event.turnId === continuation!.id)).toBe(true);
+    const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId });
+    expect(usage.some((event) => event.eventType === "agent_run.created" && event.sourceResourceId === continuation!.id)).toBe(true);
+
+    // While the continuation turn is queued the queue wins.
+    expect((await activities.maybeContinueGoal({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    })).action).toBe("queue");
+
+    // The continuation finishes without tool calls; goalNoProgressLimit 1
+    // pauses the goal on the next pass with a visible event.
+    await finishTurn(dbClient.db, grant.workspaceId, continuation!.id, "completed");
+    const second = await activities.maybeContinueGoal({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    });
+    expect(second.action).toBe("paused");
+    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
+    expect(goal?.status).toBe("paused");
+    expect(goal?.pausedReason).toBe("no_progress");
+    const afterEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const pausedEvent = afterEvents.find((event) => event.type === "goal.paused");
+    expect(pausedEvent).toBeTruthy();
+    expect((pausedEvent!.payload as { reason?: string }).reason).toBe("no_progress");
+  });
+
+  test("user interrupts pause active goals even when no turn is active", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "interrupt me",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "long objective",
+      createdBy: "api",
+    });
+    const [interruptEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.interrupt", payload: {} },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    // The interrupt landed after the turn cleared activeTurnId; the goal must
+    // still pause so the loop does not auto-continue what the user stopped.
+    await activities.interruptActiveTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: interruptEvent!.id,
+      workflowId: `session-${session.id}`,
+    });
+    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
+    expect(goal?.status).toBe("paused");
+    expect(goal?.pausedReason).toBe("user_interrupt");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const pausedEvents = events.filter((event) => event.type === "goal.paused");
+    expect(pausedEvents).toHaveLength(1);
+    expect((pausedEvents[0]!.payload as { actor?: string }).actor).toBe("user");
+
+    // Idempotent: a second interrupt pause emits no duplicate event.
+    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id });
+    const after = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(after.filter((event) => event.type === "goal.paused")).toHaveLength(1);
+
+    // And a paused goal declines continuation.
+    expect((await activities.maybeContinueGoal({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    })).action).toBe("none");
+  });
+
+  test("scheduled tasks with goals arm and re-arm session goals on dispatch", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "maintain staging",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "keep staging healthy",
+        resources: [],
+        tools: [],
+        metadata: {},
+        goal: { text: "staging healthy", successCriteria: "all probes green" },
+      },
+      metadata: {},
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:65532/v1/workspaces/{workspaceId}/mcp", cacheToolsList: true }],
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    const firstDispatch = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    expect(firstDispatch.action).toBe("start");
+    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
+    expect(goal?.status).toBe("active");
+    expect(goal?.createdBy).toBe("scheduled_task");
+    expect(goal?.successCriteria).toBe("all probes green");
+    const session = await getSession(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
+    expect(session?.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, firstDispatch.sessionId, 0, 50);
+    expect(events.map((event) => event.type).slice(0, 3)).toEqual(["session.created", "goal.set", "user.message"]);
+
+    // The goal paused between fires; the next fire re-arms it.
+    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: firstDispatch.sessionId });
+    const secondDispatch = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    expect(secondDispatch.action).toBe("signal");
+    expect(secondDispatch.sessionId).toBe(firstDispatch.sessionId);
+    const rearmed = await getSessionGoal(dbClient.db, grant.workspaceId, firstDispatch.sessionId);
+    expect(rearmed?.status).toBe("active");
+    expect(rearmed?.autoContinuations).toBe(0);
+    const rearmEvents = await listSessionEvents(dbClient.db, grant.workspaceId, firstDispatch.sessionId, 0, 100);
+    const goalSetEvents = rearmEvents.filter((event) => event.type === "goal.set");
+    expect(goalSetEvents).toHaveLength(2);
+    expect((goalSetEvents[1]!.payload as { replaced?: boolean }).replaced).toBe(true);
+  });
+
+  test("runs goal continuation turns through the agent with saved context", async () => {
+    const model = new ScriptedModel([
+      { outputText: "initial work", chunks: ["initial ", "work"] },
+      { outputText: "continued work", chunks: ["continued ", "work"] },
+    ]);
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "start",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const [userTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "start" } },
+    ]);
+    expect((await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: userTrigger!.id,
+      workflowId: "workflow-goal-continuation",
+    })).status).toBe("idle");
+
+    const [goalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "goal.continuation", payload: { text: "[GOAL CONTINUATION 1/20] keep going" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: goalTrigger!.id,
+      temporalWorkflowId: "workflow-goal-continuation",
+      source: "goal",
+      prompt: "[GOAL CONTINUATION 1/20] keep going",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "low",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: goalTrigger!.id,
+      workflowId: "workflow-goal-continuation",
+      turnId: turn.id,
+    });
+    expect(result.status).toBe("idle");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const completions = events.filter((event) => event.type === "turn.completed");
+    expect(completions).toHaveLength(2);
+    expect((completions[1]!.payload as { output?: string }).output).toBe("continued work");
+    // The continuation reused the saved run state from the first turn.
+    expect(JSON.stringify(model.requests[1])).toContain("initial work");
   });
 });
 

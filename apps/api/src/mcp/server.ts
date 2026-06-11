@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   deleteScheduledTask,
+  getSessionGoal,
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
@@ -14,8 +15,13 @@ import {
   listSocialPosts,
   requireFile,
   requireScheduledTask,
+  requireSession,
+  setSessionGoalStatus,
   updateScheduledTask,
+  updateSessionGoal,
+  upsertSessionGoal,
 } from "@opengeni/db";
+import { appendAndPublishEvents } from "@opengeni/events";
 import {
   GitHubAppConfigurationError,
   listGitHubAppRepositories,
@@ -38,6 +44,14 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
     version: "1.0.0",
   });
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+
+  // Goal tools are session-scoped: they are only registered when the grant
+  // carries the worker-asserted sessionId claim (signed into the delegated
+  // token by the worker, never agent-controlled) plus goals:manage.
+  const goalSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  if (goalSessionId !== null && hasPermission(grant.permissions, "goals:manage")) {
+    registerGoalTools(server, deps, grant, goalSessionId, json);
+  }
 
   server.registerTool("files_get_download_url", {
     description: "Create a short-lived download URL for a ready file asset.",
@@ -273,6 +287,129 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
   }, async ({ taskId, limit }) => json({ runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100) }));
 
   return server;
+}
+
+function registerGoalTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
+): void {
+  server.registerTool("goal_set", {
+    description: "Set or replace this session's goal. While a goal is active the session keeps working: idle moments synthesize continuation turns until goal_complete or goal_pause is called. Replacing a goal reactivates it and resets the continuation budget.",
+    inputSchema: {
+      text: z4.string().min(1),
+      successCriteria: z4.string().min(1).optional(),
+      maxAutoContinuations: z4.number().int().positive().optional(),
+    },
+  }, async ({ text, successCriteria, maxAutoContinuations }) => {
+    await requireSession(deps.db, grant.workspaceId, sessionId);
+    const { goal, replaced } = await upsertSessionGoal(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      text,
+      successCriteria: successCriteria ?? null,
+      maxAutoContinuations: maxAutoContinuations ?? null,
+      createdBy: "agent",
+    });
+    await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+      type: "goal.set",
+      payload: {
+        goalId: goal.id,
+        text: goal.text,
+        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+        version: goal.version,
+        actor: "agent",
+        replaced,
+      },
+    }]);
+    return json(goal);
+  });
+
+  server.registerTool("goal_update", {
+    description: "Revise the session goal's text or success criteria, or record a progress note. Counts as progress for the no-progress detector; the goal stays active.",
+    inputSchema: {
+      text: z4.string().min(1).optional(),
+      successCriteria: z4.string().min(1).optional(),
+      progressNote: z4.string().min(1).optional(),
+    },
+  }, async ({ text, successCriteria, progressNote }) => {
+    await requireSession(deps.db, grant.workspaceId, sessionId);
+    const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+    if (!existing) {
+      throw new Error("this session has no goal; use goal_set first");
+    }
+    const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
+      ...(text !== undefined ? { text } : {}),
+      ...(successCriteria !== undefined ? { successCriteria } : {}),
+    });
+    await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+      type: "goal.updated",
+      payload: {
+        goalId: goal.id,
+        text: goal.text,
+        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+        ...(progressNote ? { progressNote } : {}),
+        version: goal.version,
+        actor: "agent",
+      },
+    }]);
+    return json(goal);
+  });
+
+  server.registerTool("goal_complete", {
+    description: "Mark the session goal as completed. Requires concrete evidence (what was done and how it satisfies the success criteria). This is the explicit stop signal: no further continuation turns are synthesized.",
+    inputSchema: { evidence: z4.string().min(1) },
+  }, async ({ evidence }) => {
+    await requireSession(deps.db, grant.workspaceId, sessionId);
+    const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+    if (!existing) {
+      throw new Error("this session has no goal; use goal_set first");
+    }
+    const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
+      status: "completed",
+      evidence,
+    });
+    if (changed) {
+      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+        type: "goal.completed",
+        payload: { goalId: goal.id, evidence, version: goal.version },
+      }]);
+    }
+    return json(goal);
+  });
+
+  server.registerTool("goal_pause", {
+    description: "Pause the session goal with a rationale (blocked, not productive, needs human input). This is the explicit stop signal: no further continuation turns are synthesized until the goal is resumed or replaced.",
+    inputSchema: { rationale: z4.string().min(1) },
+  }, async ({ rationale }) => {
+    await requireSession(deps.db, grant.workspaceId, sessionId);
+    const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+    if (!existing) {
+      throw new Error("this session has no goal; use goal_set first");
+    }
+    const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
+      status: "paused",
+      rationale,
+      pausedReason: "agent",
+    });
+    if (changed) {
+      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+        type: "goal.paused",
+        payload: {
+          goalId: goal.id,
+          actor: "agent",
+          reason: "agent",
+          rationale,
+          autoContinuations: goal.autoContinuations,
+          noProgressStreak: goal.noProgressStreak,
+        },
+      }]);
+    }
+    return json(goal);
+  });
 }
 
 // Defense-in-depth for invariant "agents cannot self-attach": the worker's

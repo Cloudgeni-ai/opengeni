@@ -29,6 +29,9 @@ import type {
   Session,
   SessionEvent,
   SessionEventType,
+  SessionGoal,
+  SessionGoalCreatedBy,
+  SessionGoalStatus,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
@@ -146,6 +149,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "environments:manage",
   "environments:use",
+  "goals:manage",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -1941,6 +1945,305 @@ export async function saveRunState(db: Database, input: {
       pendingApprovals: input.pendingApprovals,
     });
   });
+}
+
+export type CreateSessionGoalInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  text: string;
+  successCriteria?: string | null;
+  maxAutoContinuations?: number | null;
+  createdBy: SessionGoalCreatedBy;
+};
+
+export async function createSessionGoal(db: Database, input: CreateSessionGoalInput): Promise<SessionGoal> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessionGoals).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      text: input.text,
+      successCriteria: input.successCriteria ?? null,
+      maxAutoContinuations: input.maxAutoContinuations ?? null,
+      createdBy: input.createdBy,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create session goal");
+    }
+    return mapSessionGoal(row);
+  });
+}
+
+export async function getSessionGoal(db: Database, workspaceId: string, sessionId: string): Promise<SessionGoal | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .limit(1);
+    return row ? mapSessionGoal(row) : null;
+  });
+}
+
+/**
+ * goal_set semantics: insert, or replace the existing goal in place. A replace
+ * re-activates the goal (even when paused or completed), bumps the version,
+ * and resets the continuation counters — re-stating the objective re-arms the
+ * auto-continuation budget.
+ */
+export async function upsertSessionGoal(db: Database, input: CreateSessionGoalInput): Promise<{ goal: SessionGoal; replaced: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [existing] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, input.workspaceId), eq(schema.sessionGoals.sessionId, input.sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      const [row] = await scopedDb.insert(schema.sessionGoals).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        text: input.text,
+        successCriteria: input.successCriteria ?? null,
+        maxAutoContinuations: input.maxAutoContinuations ?? null,
+        createdBy: input.createdBy,
+      }).returning();
+      if (!row) {
+        throw new Error("Failed to upsert session goal");
+      }
+      return { goal: mapSessionGoal(row), replaced: false };
+    }
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      status: "active",
+      text: input.text,
+      successCriteria: input.successCriteria ?? null,
+      maxAutoContinuations: input.maxAutoContinuations ?? null,
+      evidence: null,
+      rationale: null,
+      pausedReason: null,
+      createdBy: input.createdBy,
+      version: existing.version + 1,
+      autoContinuations: 0,
+      noProgressStreak: 0,
+      updatedAt: new Date(),
+    }).where(eq(schema.sessionGoals.id, existing.id)).returning();
+    if (!row) {
+      throw new Error("Failed to upsert session goal");
+    }
+    return { goal: mapSessionGoal(row), replaced: true };
+  });
+}
+
+/**
+ * goal_update semantics: revise text/criteria without changing status. The
+ * version bump counts as progress for the no-progress detector.
+ */
+export async function updateSessionGoal(db: Database, workspaceId: string, sessionId: string, input: {
+  text?: string;
+  successCriteria?: string | null;
+}): Promise<SessionGoal> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      ...(input.text !== undefined ? { text: input.text } : {}),
+      ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
+      version: sql`${schema.sessionGoals.version} + 1`,
+      noProgressStreak: 0,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId))).returning();
+    if (!row) {
+      throw new Error(`Session goal not found: ${sessionId}`);
+    }
+    return mapSessionGoal(row);
+  });
+}
+
+/**
+ * Status transition helper. Idempotent: requesting the current status returns
+ * `changed: false` so callers can skip emitting a duplicate event. `completed`
+ * is terminal for transitions; only `upsertSessionGoal` can replace a
+ * completed goal. Resuming to `active` clears the pause fields and resets the
+ * continuation counters.
+ */
+export async function setSessionGoalStatus(db: Database, workspaceId: string, sessionId: string, input: {
+  status: SessionGoalStatus;
+  evidence?: string;
+  rationale?: string;
+  pausedReason?: string;
+}): Promise<{ goal: SessionGoal; changed: boolean }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [existing] = await scopedDb.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)))
+      .for("update")
+      .limit(1);
+    if (!existing) {
+      throw new Error(`Session goal not found: ${sessionId}`);
+    }
+    if (existing.status === input.status) {
+      return { goal: mapSessionGoal(existing), changed: false };
+    }
+    if (existing.status === "completed") {
+      throw new Error("session goal is completed; set a new goal to continue");
+    }
+    const [row] = await scopedDb.update(schema.sessionGoals).set({
+      status: input.status,
+      version: existing.version + 1,
+      updatedAt: new Date(),
+      ...(input.status === "completed" ? {
+        evidence: input.evidence ?? null,
+        pausedReason: null,
+      } : {}),
+      ...(input.status === "paused" ? {
+        rationale: input.rationale ?? null,
+        pausedReason: input.pausedReason ?? null,
+      } : {}),
+      ...(input.status === "active" ? {
+        rationale: null,
+        pausedReason: null,
+        autoContinuations: 0,
+        noProgressStreak: 0,
+      } : {}),
+    }).where(eq(schema.sessionGoals.id, existing.id)).returning();
+    if (!row) {
+      throw new Error(`Session goal not found: ${sessionId}`);
+    }
+    return { goal: mapSessionGoal(row), changed: true };
+  });
+}
+
+export async function setSessionGoalLastContinuationTurn(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessionGoals).set({
+      lastContinuationTurnId: turnId,
+      updatedAt: new Date(),
+    }).where(and(eq(schema.sessionGoals.workspaceId, workspaceId), eq(schema.sessionGoals.sessionId, sessionId)));
+  });
+}
+
+export type GoalContinuationDecision =
+  | { decision: "none" }
+  | { decision: "queue" }
+  | { decision: "paused"; reason: "no_progress" | "max_auto_continuations"; goal: SessionGoal }
+  | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number };
+
+/**
+ * Core continuation decision, taken in one transaction with the goal row
+ * locked. Queued work always wins; any non-terminal turn (queued, running, or
+ * requires_action awaiting a human approval) blocks auto-continuation. The
+ * no-progress and max-continuation guards mutate counters here only, so a
+ * replaying workflow re-reads recorded activity results and never recomputes
+ * them.
+ */
+export async function evaluateGoalContinuation(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  defaultMaxAutoContinuations: number;
+  noProgressLimit: number;
+}): Promise<GoalContinuationDecision> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [row] = await tx.select().from(schema.sessionGoals)
+      .where(and(eq(schema.sessionGoals.workspaceId, input.workspaceId), eq(schema.sessionGoals.sessionId, input.sessionId)))
+      .for("update")
+      .limit(1);
+    if (!row || row.status !== "active") {
+      return { decision: "none" } as const;
+    }
+    const [pendingTurn] = await tx.select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
+      .from(schema.sessionTurns)
+      .where(and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+      ))
+      .limit(1);
+    if (pendingTurn) {
+      // "queue" tells the workflow to claim immediately; running/requires_action
+      // turns (e.g. a pending approval on a restarted workflow) must not be
+      // bypassed by a continuation, so they decline instead.
+      return pendingTurn.status === "queued" ? { decision: "queue" } as const : { decision: "none" } as const;
+    }
+    let autoContinuations = row.autoContinuations;
+    let noProgressStreak = row.noProgressStreak;
+    if (row.lastContinuationTurnId) {
+      const [lastFinished] = await tx.select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          sql`${schema.sessionTurns.finishedAt} is not null`,
+        ))
+        .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+        .limit(1);
+      if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
+        // A user/scheduled turn ran since the last continuation: human
+        // re-engagement re-arms the auto-continuation budget.
+        autoContinuations = 0;
+        noProgressStreak = 0;
+      } else if (lastFinished) {
+        const [{ toolCalls } = { toolCalls: 0 }] = await tx.select({
+          toolCalls: sql<number>`count(*)::int`,
+        }).from(schema.sessionEvents)
+          .where(and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+            eq(schema.sessionEvents.type, "agent.toolCall.created"),
+          ));
+        const goalRevised = row.versionAtLastContinuation !== null && row.version > row.versionAtLastContinuation;
+        noProgressStreak = Number(toolCalls) > 0 || goalRevised ? 0 : noProgressStreak + 1;
+      }
+    }
+    if (noProgressStreak >= input.noProgressLimit) {
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "no_progress",
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "no_progress", goal: mapSessionGoal(paused!) } as const;
+    }
+    // The configured default is a hard ceiling; per-goal overrides only lower it.
+    const cap = Math.min(row.maxAutoContinuations ?? input.defaultMaxAutoContinuations, input.defaultMaxAutoContinuations);
+    if (autoContinuations >= cap) {
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "max_auto_continuations",
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "max_auto_continuations", goal: mapSessionGoal(paused!) } as const;
+    }
+    const [updated] = await tx.update(schema.sessionGoals).set({
+      autoContinuations: autoContinuations + 1,
+      noProgressStreak,
+      versionAtLastContinuation: row.version,
+      updatedAt: new Date(),
+    }).where(eq(schema.sessionGoals.id, row.id)).returning();
+    return { decision: "continue", goal: mapSessionGoal(updated!), autoContinuation: autoContinuations + 1, cap } as const;
+  }));
+}
+
+function mapSessionGoal(row: typeof schema.sessionGoals.$inferSelect): SessionGoal {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    status: row.status as SessionGoal["status"],
+    text: row.text,
+    successCriteria: row.successCriteria,
+    evidence: row.evidence,
+    rationale: row.rationale,
+    pausedReason: row.pausedReason,
+    createdBy: row.createdBy as SessionGoal["createdBy"],
+    version: row.version,
+    autoContinuations: row.autoContinuations,
+    noProgressStreak: row.noProgressStreak,
+    maxAutoContinuations: row.maxAutoContinuations,
+    metadata: row.metadata,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
 }
 
 export async function createTurn(db: Database, input: {

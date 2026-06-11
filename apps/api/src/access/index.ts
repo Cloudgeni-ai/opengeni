@@ -161,7 +161,9 @@ async function delegatedAccessContext(c: Context, deps: AccessDeps, mode: "confi
       subjectId: payload.subjectId,
       ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
       permissions: payload.permissions,
-      metadata: { delegated: true },
+      // sessionId is worker-asserted (HMAC-signed token claim), not agent
+      // controlled; it scopes session-bound MCP tools such as goal management.
+      metadata: { delegated: true, ...(payload.sessionId ? { sessionId: payload.sessionId } : {}) },
     }],
     defaultAccountId: payload.accountId,
     defaultWorkspaceId: payload.workspaceId,

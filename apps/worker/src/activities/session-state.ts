@@ -6,6 +6,7 @@ import {
   setSessionStatus,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
+import { pauseActiveGoalOnInterrupt } from "./goals";
 import type {
   ActivityServices,
   ClaimNextQueuedTurnInput,
@@ -44,6 +45,10 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function interruptActiveTurn(input: RunAgentSegmentInput): Promise<void> {
     const { db, bus } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // Pause an active goal before the early return below: an interrupt can
+    // land after the turn already cleared activeTurnId, and skipping the pause
+    // there would let the loop auto-continue the goal the user just stopped.
+    await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
     if (!session.activeTurnId) {
       return;
     }

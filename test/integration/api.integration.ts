@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getScheduledTask, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -52,6 +52,158 @@ describe("API component integration", () => {
     expect(workflow.wakeups).toHaveLength(1);
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+  });
+
+  test("creates sessions with goals and manages the goal lifecycle over the API", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://127.0.0.1:65530/v1/workspaces/{workspaceId}/mcp", cacheToolsList: true }],
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "take repo zero-to-one",
+        model: "scripted-model",
+        goal: { text: "repo deployed to staging", successCriteria: "health probe green", maxAutoContinuations: 7 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(202);
+    const session = await created.json() as { id: string; tools: Array<{ kind: string; id: string }> };
+    // Goal-bearing sessions force the first-party MCP server so goal tools are reachable.
+    expect(session.tools).toContainEqual({ kind: "mcp", id: "opengeni" });
+    const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    expect(events.map((event) => event.type)).toEqual(["session.created", "goal.set", "user.message", "session.status.changed", "turn.queued"]);
+
+    const fetched = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`));
+    expect(fetched.status).toBe(200);
+    const goal = await fetched.json() as { id: string; status: string; text: string; maxAutoContinuations: number };
+    expect(goal.status).toBe("active");
+    expect(goal.text).toBe("repo deployed to staging");
+    expect(goal.maxAutoContinuations).toBe(7);
+
+    const paused = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "paused", rationale: "operator hold" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(paused.status).toBe(200);
+    expect(((await paused.json()) as { status: string }).status).toBe("paused");
+
+    const wakeupsBeforeResume = workflow.wakeups.length;
+    const resumed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(resumed.status).toBe(200);
+    const resumedGoal = await resumed.json() as { status: string; autoContinuations: number; pausedReason: string | null };
+    expect(resumedGoal.status).toBe("active");
+    expect(resumedGoal.autoContinuations).toBe(0);
+    expect(resumedGoal.pausedReason).toBeNull();
+    // Resume wakes the workflow so an idle session re-enters the goal loop.
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume + 1);
+
+    const lifecycleEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    expect(lifecycleEvents.some((event) => event.type === "goal.paused")).toBe(true);
+    expect(lifecycleEvents.some((event) => event.type === "goal.resumed")).toBe(true);
+
+    // Resuming an already-active goal is an invalid transition.
+    const resumeActive = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(resumeActive.status).toBe(409);
+
+    // Completed goals reject operator transitions.
+    await setSessionGoalStatus(dbClient.db, workspaceId, session.id, { status: "completed", evidence: "done" });
+    const resumeCompleted = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(resumeCompleted.status).toBe(409);
+
+    // Sessions without goals 404.
+    const plain = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "no goal here", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    const plainSession = await plain.json() as { id: string };
+    const missing = await app.request(workspacePath(workspaceId, `/sessions/${plainSession.id}/goal`));
+    expect(missing.status).toBe(404);
+  });
+
+  test("registers session-scoped goal MCP tools only for session-bound grants", async () => {
+    const settings = testSettings({ databaseUrl: services.databaseUrl });
+    const baseGrant = await bootstrapMcpGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: baseGrant.accountId,
+      workspaceId: baseGrant.workspaceId,
+      initialMessage: "goal tools",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const mcpDeps = {
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by goal MCP tests");
+      },
+    };
+
+    // Without the worker-asserted sessionId claim, goal tools do not exist.
+    const sessionlessMcp = buildOpenGeniMcpServer(mcpDeps, baseGrant);
+    await expect(callMcpTool(sessionlessMcp, "goal_set", { text: "x" })).rejects.toThrow("MCP tool not registered");
+
+    const grant = { ...baseGrant, metadata: { delegated: true, sessionId: session.id } };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+
+    const setGoal = await callMcpTool<{ id: string; status: string; version: number }>(mcp, "goal_set", {
+      text: "keep CI green",
+      successCriteria: "main pipeline passes",
+    });
+    expect(setGoal.status).toBe("active");
+    expect(setGoal.version).toBe(1);
+
+    const updated = await callMcpTool<{ version: number; text: string }>(mcp, "goal_update", {
+      text: "keep CI green on main",
+      progressNote: "fixed two flaky tests",
+    });
+    expect(updated.version).toBe(2);
+
+    const pausedGoal = await callMcpTool<{ status: string; pausedReason: string }>(mcp, "goal_pause", { rationale: "waiting on upstream fix" });
+    expect(pausedGoal.status).toBe("paused");
+    expect(pausedGoal.pausedReason).toBe("agent");
+
+    const replacedGoal = await callMcpTool<{ status: string }>(mcp, "goal_set", { text: "upstream fixed; finish the job" });
+    expect(replacedGoal.status).toBe("active");
+
+    const completedGoal = await callMcpTool<{ status: string; evidence: string }>(mcp, "goal_complete", { evidence: "CI green for 3 consecutive runs" });
+    expect(completedGoal.status).toBe("completed");
+    expect(completedGoal.evidence).toBe("CI green for 3 consecutive runs");
+    await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow("completed");
+
+    const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
+    expect(events.map((event) => event.type)).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
+    expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe("completed");
   });
 
   test("managed email/password auth bootstraps account access and workspace API keys", async () => {

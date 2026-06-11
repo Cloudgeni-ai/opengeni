@@ -138,6 +138,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       preparedTools = await runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
       });

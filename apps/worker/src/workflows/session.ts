@@ -1,4 +1,4 @@
-import { CancellationScope, condition, defineSignal, setHandler, workflowInfo } from "@temporalio/workflow";
+import { CancellationScope, condition, defineSignal, isCancellation, setHandler, workflowInfo } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import { activity, workflowFailureMessage } from "./activities";
 
@@ -36,10 +36,40 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     const workflowId = workflowInfo().workflowId;
     const turn = await activity.claimNextQueuedTurn({ workspaceId: input.workspaceId, sessionId: input.sessionId, workflowId });
     if (!turn) {
+      if (interruptedEventId === null) {
+        // With an active goal, idling out is replaced by a synthesized
+        // continuation turn; the queue (any non-terminal turn) always wins and
+        // the no-progress/max-continuation guards auto-pause runaway goals.
+        let continuation: activities.MaybeContinueGoalResult = { action: "none" };
+        try {
+          continuation = await activity.maybeContinueGoal({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            workflowId,
+          });
+        } catch (error) {
+          if (isCancellation(error)) {
+            throw error;
+          }
+          // A failing goal check must not kill the session (activity retry is
+          // 1). Fall through to the idle path: the goal stays active in the
+          // database and the next wake retries, which means the workflow CAN
+          // complete normally with an active goal on this error path.
+        }
+        if (continuation.action === "continue" || continuation.action === "queue") {
+          // "continue": a goal continuation turn was just enqueued; "queue":
+          // queued work appeared concurrently. Claim it on the next loop pass.
+          continue;
+        }
+      }
       const seenWakeups = wakeups;
       const woke = await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, "5s");
       if (interruptedEventId) {
         interruptedEventId = null;
+        // An idle interrupt is an explicit stop: pause an active goal before
+        // shutting down so a later wake does not auto-continue it.
+        await activity.pauseGoalForInterrupt({ workspaceId: input.workspaceId, sessionId: input.sessionId });
         await activity.markSessionIdle({ workspaceId: input.workspaceId, sessionId: input.sessionId });
         return;
       }

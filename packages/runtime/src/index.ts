@@ -200,6 +200,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
       "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
       "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
+      "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
     ].join(" "),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
@@ -244,6 +245,9 @@ export type PreparedAgentTools = {
 export type PrepareToolsOptions = {
   accountId?: string;
   workspaceId?: string;
+  // Worker-asserted session scope for first-party MCP calls; enables
+  // session-scoped tools such as goal management on the API side.
+  sessionId?: string;
   subjectId?: string;
   subjectLabel?: string;
 };
@@ -297,6 +301,7 @@ async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mc
       subjectId: options.subjectId ?? "worker:first-party-mcp",
       ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
       permissions: firstPartyMcpPermissions,
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       exp: Math.floor(Date.now() / 1000) + 60 * 60,
     })}`;
   }
@@ -316,6 +321,7 @@ const firstPartyMcpPermissions: Permission[] = [
   "documents:search",
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
+  "goals:manage",
 ];
 
 function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"][number]): boolean {

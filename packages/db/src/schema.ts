@@ -232,6 +232,32 @@ export const sessionTurns = pgTable("session_turns", {
   queue: index("session_turns_workspace_queue_idx").on(table.workspaceId, table.sessionId, table.status, table.position),
 }));
 
+export const sessionGoals = pgTable("session_goals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("active"), // active | paused | completed
+  text: text("text").notNull(),
+  successCriteria: text("success_criteria"),
+  evidence: text("evidence"), // set by goal_complete
+  rationale: text("rationale"), // set by goal_pause
+  pausedReason: text("paused_reason"), // agent | user_interrupt | api | no_progress | max_auto_continuations | limits
+  createdBy: text("created_by").notNull().default("api"), // api | agent | scheduled_task
+  version: integer("version").notNull().default(1), // bumped on every set/update; progress signal
+  autoContinuations: integer("auto_continuations").notNull().default(0),
+  noProgressStreak: integer("no_progress_streak").notNull().default(0),
+  maxAutoContinuations: integer("max_auto_continuations"), // per-goal override, clamped to the settings cap
+  lastContinuationTurnId: uuid("last_continuation_turn_id"),
+  versionAtLastContinuation: integer("version_at_last_continuation"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceSession: uniqueIndex("session_goals_workspace_session_idx").on(table.workspaceId, table.sessionId),
+  status: index("session_goals_workspace_status_idx").on(table.workspaceId, table.status),
+}));
+
 export const sessionEvents = pgTable("session_events", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
