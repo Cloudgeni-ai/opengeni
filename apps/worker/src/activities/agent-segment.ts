@@ -191,7 +191,23 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
               usage: responseUsage.usage,
               sourceKey: responseUsage.responseId ?? `response-${responseUsageCount}`,
             });
-            await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
+            try {
+              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
+            } catch (limitError) {
+              // Capture the run state at the boundary so the budget valve in
+              // the outer catch can end this segment gracefully with full
+              // conversation context preserved for the post-top-up resume.
+              let serializedRunState: string | null = null;
+              try {
+                serializedRunState = stream.state.toString();
+              } catch {
+                serializedRunState = null;
+              }
+              throw new BudgetExhaustedError(
+                limitError instanceof Error ? limitError.message : String(limitError),
+                serializedRunState,
+              );
+            }
           }
           const normalized = normalizeSdkEvent(next.value);
           for (const event of normalized) {
@@ -319,6 +335,43 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         activityStatus = "idle";
         return { status: "idle" };
       }
+      // Budget/limit exhaustion between model calls is account state, not an
+      // agent failure: idle the session for goal-bearing and goal-less runs
+      // alike (a failed session would reject the user's next message after a
+      // top-up). An active goal pauses visibly with reason "limits" at the
+      // next continuation evaluation, without consuming continuation budget.
+      if (error instanceof BudgetExhaustedError && publish && turnId && turnStartedPublished) {
+        await batcher?.flush().catch(() => undefined);
+        const runStateSaved = Boolean(error.serializedRunState);
+        if (error.serializedRunState) {
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            serializedRunState: error.serializedRunState,
+            pendingApprovals: [],
+          });
+        }
+        await publish([
+          { type: "turn.completed", payload: { output: "", segmentLimit: "budget_exhausted", detail: error.message, runStateSaved } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ], true);
+        await finishTurn(db, input.workspaceId, turnId, "idle");
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+        await recordUsageEvent(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          eventType: "agent_run.completed",
+          quantity: 1,
+          unit: "run",
+          sourceResourceType: "session_turn",
+          sourceResourceId: turnId,
+          idempotencyKey: `usage:agent_run.completed:${turnId}`,
+        });
+        activityStatus = "idle";
+        return { status: "idle" };
+      }
       // A retryable provider failure (rate limit) on a goal-bearing session is
       // transient backpressure, not a session failure: the in-client retry
       // budget is already exhausted by the time the error reaches here, so
@@ -411,6 +464,21 @@ export function agentRunFailurePayload(error: unknown): { error: string; code?: 
     };
   }
   return { error: message };
+}
+
+/**
+ * Budget/limit exhaustion detected between model calls. This is account
+ * state, not an agent failure: the segment ends gracefully (session idles,
+ * run state preserved) so a top-up or limit reset lets the same session
+ * continue — a failed session would reject the user's next message. An
+ * active goal pauses visibly (reason "limits") at the next continuation
+ * evaluation without consuming continuation budget.
+ */
+class BudgetExhaustedError extends Error {
+  constructor(message: string, readonly serializedRunState: string | null) {
+    super(message);
+    this.name = "BudgetExhaustedError";
+  }
 }
 
 async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], accountId: string, workspaceId: string): Promise<void> {

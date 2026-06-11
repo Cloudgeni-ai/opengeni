@@ -898,7 +898,14 @@ describe("worker activities integration", () => {
       workflowId: "workflow-capped-model-debit",
     });
 
-    expect(result.status).toBe("failed");
+    // Budget exhaustion is account state, not an agent failure: the segment
+    // ends gracefully so the session accepts new messages after a top-up.
+    expect(result.status).toBe("idle");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    const completed = events.find((event) => event.type === "turn.completed");
+    expect(completed?.payload).toMatchObject({ segmentLimit: "budget_exhausted", detail: "insufficient OpenGeni credits" });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const balance = await getBillingBalance(dbClient.db, grant.accountId);
     expect(balance.balanceMicros).toBe(0);
     const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
