@@ -34,7 +34,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     betterAuthCookieDomain: undefined,
     betterAuthTrustedOrigins: "",
     resendApiKey: undefined,
-    emailFrom: "OpenGeni <noreply@app.opengeni.ai>",
+    emailFrom: "OpenGeni <auth@mail.opengeni.ai>",
     stripeSecretKey: undefined,
     stripePublishableKey: undefined,
     stripeWebhookSecret: undefined,

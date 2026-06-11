@@ -88,6 +88,12 @@ describe("sandbox preparation profiles", () => {
     expect(configuredAllowedReasoningEfforts(settings)).toEqual(["xhigh", "low", "medium", "high"]);
   });
 
+  test("defaults managed transactional email to the verified mail subdomain sender", () => {
+    const settings = withEnv({}, () => getSettings());
+
+    expect(settings.emailFrom).toBe("OpenGeni <auth@mail.opengeni.ai>");
+  });
+
   test("parses startup dependency retry settings", () => {
     const settings = withEnv({
       OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "5",

@@ -160,7 +160,7 @@ const SettingsSchema = z.object({
   betterAuthCookieDomain: z.string().optional(),
   betterAuthTrustedOrigins: z.string().default(""),
   resendApiKey: z.string().optional(),
-  emailFrom: z.string().default("OpenGeni <noreply@app.opengeni.ai>"),
+  emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
