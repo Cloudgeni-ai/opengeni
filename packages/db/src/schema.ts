@@ -291,6 +291,37 @@ export const agentRunStates = pgTable("agent_run_states", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// Conversation truth: ordered, verbatim SDK input items (issue #35). The
+// model-facing memory store — unredacted and replay-ready. session_events
+// remains the redacted human/audit timeline.
+export const sessionHistoryItems = pgTable("session_history_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+  position: integer("position").notNull(),
+  item: jsonb("item").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  positionIdx: uniqueIndex("session_history_items_position_idx").on(table.workspaceId, table.sessionId, table.position),
+}));
+
+// Sandbox recovery descriptor, decoupled from the RunState blob: the small
+// versioned envelope (provider handle / snapshot ref / manifest) needed to
+// reattach, restore, or rebuild the session's sandbox on its next turn.
+export const sandboxSessionEnvelopes = pgTable("sandbox_session_envelopes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  sessionIdx: uniqueIndex("sandbox_session_envelopes_session_idx").on(table.workspaceId, table.sessionId),
+}));
+
 export const scheduledTasks = pgTable("scheduled_tasks", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

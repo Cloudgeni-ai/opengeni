@@ -10,13 +10,17 @@ import {
   getSessionTurn,
   requireSession,
   recordUsageEvent,
+  appendSessionHistoryItems,
+  countSessionHistoryItems,
   saveRunState,
+  upsertSandboxSessionEnvelope,
   setSessionStatus,
   sumUsageQuantity,
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
+  sandboxStateEntryFromRunState,
   agentsErrorRunState,
   maxTurnsExceededRunState,
   modelResponseUsageFromSdkEvent,
@@ -71,6 +75,46 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
+    let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+    // Dual-write of conversation truth (issue #35): completed items are
+    // reconciled into session_history_items after every model response and at
+    // every turn-end path (idempotent on position, watermark-sliced), and the
+    // sandbox recovery envelope is upserted alongside. Best-effort by design:
+    // persistence problems must never fail the run.
+    let persistedHistoryCount = 0;
+    const reconcileConversationTruth = async () => {
+      if (!stream || !turnId) {
+        return;
+      }
+      try {
+        const history = (stream.state as { history?: unknown[] }).history;
+        if (Array.isArray(history) && history.length > persistedHistoryCount) {
+          const rows = history.slice(persistedHistoryCount).map((item, offset) => ({
+            position: persistedHistoryCount + offset,
+            item: item as Record<string, unknown>,
+          }));
+          await appendSessionHistoryItems(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            items: rows,
+          });
+          persistedHistoryCount = history.length;
+        }
+        const envelope = sandboxStateEntryFromRunState(stream.state);
+        if (envelope) {
+          await upsertSandboxSessionEnvelope(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            envelope,
+          });
+        }
+      } catch (persistError) {
+        console.error("session history dual-write failed (run unaffected)", persistError);
+      }
+    };
     // Reassigned after the workspace environment loads; the publish closure is
     // created (and used for turn.started) before the environment is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
@@ -166,8 +210,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           : {}),
       });
-      const runInput = await turnInput(db, runtime, agent, trigger);
-      let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>>;
+      const runInput = await turnInput(db, runtime, agent, trigger, runSettings);
+      persistedHistoryCount = await countSessionHistoryItems(db, input.workspaceId, input.sessionId);
       let responseUsageCount = 0;
       stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
@@ -200,6 +244,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               usage: responseUsage.usage,
               sourceKey: responseUsage.responseId ?? `response-${responseUsageCount}`,
             });
+            await reconcileConversationTruth();
             try {
               await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
             } catch (limitError) {
@@ -243,6 +288,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
 
       if (stream.interruptions.length > 0) {
+        await reconcileConversationTruth();
         const approvals = runtime.serializeApprovals(stream.interruptions);
         await saveRunState(db, {
           accountId: input.accountId,
@@ -263,14 +309,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
 
       const finalOutput = String(stream.finalOutput ?? "");
-      await saveRunState(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId,
-        serializedRunState: stream.state.toString(),
-        pendingApprovals: [],
-      });
+      await reconcileConversationTruth();
+      if (settings.sessionHistorySource !== "items") {
+        // Legacy conversation memory; in items mode the blob is only written
+        // for requires_action pauses (the one RunState-only resume path).
+        await saveRunState(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          serializedRunState: stream.state.toString(),
+          pendingApprovals: [],
+        });
+      }
       await publish([
         { type: "agent.message.completed", payload: { text: finalOutput } },
         { type: "turn.completed", payload: { output: finalOutput } },
@@ -314,8 +365,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // degraded context, flagged on the event, but still strictly better
         // than a terminal failed session: the sandbox filesystem state
         // persists independently and the agent re-derives from it.
-        const runStateSaved = Boolean(maxTurns.serializedRunState);
-        if (maxTurns.serializedRunState) {
+        await reconcileConversationTruth();
+        const runStateSaved = Boolean(maxTurns.serializedRunState) && settings.sessionHistorySource !== "items";
+        if (maxTurns.serializedRunState && settings.sessionHistorySource !== "items") {
           await saveRunState(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -351,8 +403,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // next continuation evaluation, without consuming continuation budget.
       if (error instanceof BudgetExhaustedError && publish && turnId && turnStartedPublished) {
         await batcher?.flush().catch(() => undefined);
-        const runStateSaved = Boolean(error.serializedRunState);
-        if (error.serializedRunState) {
+        await reconcileConversationTruth();
+        const runStateSaved = Boolean(error.serializedRunState) && settings.sessionHistorySource !== "items";
+        if (error.serializedRunState && settings.sessionHistorySource !== "items") {
           await saveRunState(db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -397,9 +450,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Provider errors rarely carry SDK run state; a null falls back to
           // the previous snapshot, same degraded-context contract as the
           // max-turns path above.
+          await reconcileConversationTruth();
           const serializedRunState = agentsErrorRunState(error);
-          const runStateSaved = Boolean(serializedRunState);
-          if (serializedRunState) {
+          const runStateSaved = Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
+          if (serializedRunState && settings.sessionHistorySource !== "items") {
             await saveRunState(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,

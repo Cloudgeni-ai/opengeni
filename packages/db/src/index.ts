@@ -1983,6 +1983,92 @@ export async function getLatestRunState(db: Database, workspaceId: string, sessi
   });
 }
 
+/**
+ * Append conversation items (verbatim SDK AgentInputItems) to the session's
+ * history. Idempotent on (workspace, session, position): concurrent or
+ * repeated writers (streaming writes + turn-end reconciliation) converge
+ * instead of duplicating.
+ */
+export async function appendSessionHistoryItems(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  items: Array<{ position: number; item: Record<string, unknown> }>;
+}): Promise<void> {
+  if (input.items.length === 0) {
+    return;
+  }
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.sessionHistoryItems).values(input.items.map((entry) => ({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      position: entry.position,
+      item: entry.item,
+    }))).onConflictDoNothing({
+      target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+    });
+  });
+}
+
+export async function getSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown> }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select({
+      position: schema.sessionHistoryItems.position,
+      item: schema.sessionHistoryItems.item,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)))
+      .orderBy(schema.sessionHistoryItems.position);
+    return rows;
+  });
+}
+
+export async function countSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)));
+    return Number(row?.count ?? 0);
+  });
+}
+
+/**
+ * Persist the session's sandbox recovery descriptor (the small versioned
+ * envelope used to reattach / snapshot-restore / rebuild the sandbox),
+ * decoupled from the RunState blob.
+ */
+export async function upsertSandboxSessionEnvelope(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  envelope: Record<string, unknown>;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.sandboxSessionEnvelopes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      envelope: input.envelope,
+    }).onConflictDoUpdate({
+      target: [schema.sandboxSessionEnvelopes.workspaceId, schema.sandboxSessionEnvelopes.sessionId],
+      set: { envelope: input.envelope, updatedAt: new Date() },
+    });
+  });
+}
+
+export async function getSandboxSessionEnvelope(db: Database, workspaceId: string, sessionId: string): Promise<Record<string, unknown> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({ envelope: schema.sandboxSessionEnvelopes.envelope })
+      .from(schema.sandboxSessionEnvelopes)
+      .where(and(eq(schema.sandboxSessionEnvelopes.workspaceId, workspaceId), eq(schema.sandboxSessionEnvelopes.sessionId, sessionId)))
+      .limit(1);
+    return row?.envelope ?? null;
+  });
+}
+
 export async function saveRunState(db: Database, input: {
   accountId: string;
   workspaceId: string;

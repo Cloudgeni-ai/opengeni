@@ -50,6 +50,13 @@
       "when": 1781481600000,
       "tag": "0006_workspace_packs",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1781568000000,
+      "tag": "0007_session_history_items",
+      "breakpoints": true
     }
   ]
 }

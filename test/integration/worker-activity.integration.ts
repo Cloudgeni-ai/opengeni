@@ -29,6 +29,7 @@ import {
   getSessionGoal,
   getBillingBalance,
   getLatestRunState,
+  getSessionHistoryItems,
   listSessionTurns,
   listUsageEvents,
   listSessionEvents,
@@ -911,6 +912,71 @@ describe("worker activities integration", () => {
     const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
     const cost = usage.find((event) => event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"));
     expect(cost?.quantity).toBeGreaterThan(1);
+  });
+
+  test("dual-writes conversation items and resumes turns from them in items mode", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "remember the codeword zebra",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const model = new ScriptedModel([
+      { id: "items-t1", outputText: "noted: zebra", chunks: ["noted: zebra"] },
+      { id: "items-t2", outputText: "the codeword is zebra", chunks: ["the codeword is zebra"] },
+    ]);
+    // Turn 1 runs in legacy run_state mode: items must be dual-written anyway.
+    const runStateActivities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const [trigger1] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "remember the codeword zebra" } },
+    ]);
+    await expect(runStateActivities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger1!.id,
+      workflowId: "workflow-items-turn-1",
+    })).resolves.toEqual({ status: "idle" });
+    const itemsAfterTurn1 = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(itemsAfterTurn1.length).toBeGreaterThanOrEqual(2);
+    expect(itemsAfterTurn1.map((row) => row.position)).toEqual(itemsAfterTurn1.map((_, index) => index));
+    expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
+    const blobAfterTurn1 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
+    expect(blobAfterTurn1).not.toBeNull();
+
+    // Turn 2 reads conversation truth from the items table (items mode) and
+    // writes no new blob: the model must still see the full prior turn.
+    const itemsActivities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const [trigger2] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "what is the codeword?" } },
+    ]);
+    await expect(itemsActivities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger2!.id,
+      workflowId: "workflow-items-turn-2",
+    })).resolves.toEqual({ status: "idle" });
+    const lastRequestInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    expect(lastRequestInput).toContain("remember the codeword zebra");
+    expect(lastRequestInput).toContain("noted: zebra");
+    expect(lastRequestInput).toContain("what is the codeword?");
+    const itemsAfterTurn2 = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(itemsAfterTurn2.length).toBeGreaterThan(itemsAfterTurn1.length);
+    const blobAfterTurn2 = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
+    expect(blobAfterTurn2?.id).toBe(blobAfterTurn1?.id);
   });
 
   test("blocks async document embeddings when managed credits are empty", async () => {
