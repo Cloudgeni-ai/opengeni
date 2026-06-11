@@ -32,6 +32,7 @@ describe("workspace isolation matrix", () => {
         databaseUrl: services.databaseUrl,
         productAccessMode: "managed",
         delegationSecret,
+        environmentsEncryptionKey: Buffer.alloc(32, 6).toString("base64"),
       }),
       db: dbClient.db,
       bus: new MemoryEventBus(),
@@ -114,6 +115,27 @@ describe("workspace isolation matrix", () => {
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/mcp"), 403, "POST");
     await expectStatus(app, authA, workspacePath(b.workspaceId, "/github/app"), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, "/github/app"), 200);
+
+    const environmentResponse = await app.request(workspacePath(a.workspaceId, "/environments"), {
+      method: "POST",
+      body: JSON.stringify({ name: "Workspace A environment", variables: [{ name: "ISOLATION_TOKEN", value: "isolation-secret-a" }] }),
+      headers: { ...authA, "content-type": "application/json" },
+    });
+    expect(environmentResponse.status).toBe(201);
+    const environment = await environmentResponse.json() as { id: string };
+    await expectStatus(app, authA, workspacePath(b.workspaceId, `/environments/${environment.id}`), 403);
+    await expectStatus(app, authB, workspacePath(b.workspaceId, `/environments/${environment.id}`), 404);
+    const environmentsVisibleToB = await app.request(workspacePath(b.workspaceId, "/environments"), { headers: authB });
+    expect(environmentsVisibleToB.status).toBe(200);
+    expect((await environmentsVisibleToB.json() as Array<{ id: string }>).some((item) => item.id === environment.id)).toBe(false);
+    // Cross-workspace attachment is indistinguishable from a missing environment.
+    const crossAttachment = await app.request(workspacePath(b.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "cross-workspace attach", environmentId: environment.id }),
+      headers: { ...authB, "content-type": "application/json" },
+    });
+    expect(crossAttachment.status).toBe(422);
+    expect(await crossAttachment.text()).toContain("unknown environmentId");
 
     const apiKeyResponse = await app.request(workspacePath(a.workspaceId, "/api-keys"), {
       method: "POST",

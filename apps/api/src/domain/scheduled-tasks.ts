@@ -15,9 +15,11 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { validateEnvironmentAttachment } from "./environments";
 import {
   normalizeResources,
   validateFileResources,
@@ -31,10 +33,22 @@ export async function createValidatedScheduledTask(input: {
   objectStorage: ObjectStorageDependency;
   grant: AccessGrant;
   payload: CreateScheduledTaskPayload;
+  // Set for pack-installation-inherited attachments that were already
+  // authorized with environments:use when the pack was enabled.
+  environmentPreauthorized?: boolean;
 }): Promise<ScheduledTask> {
   const agentConfig = await validateScheduledTaskAgentConfig({ ...input, workspaceId: input.grant.workspaceId });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
+  if (input.payload.environmentId) {
+    await validateEnvironmentAttachment(
+      { settings: input.settings, db: input.db },
+      input.grant,
+      input.grant.workspaceId,
+      input.payload.environmentId,
+      { preauthorized: input.environmentPreauthorized ?? false },
+    );
+  }
   return await createScheduledTask(input.db, {
     id,
     accountId: input.grant.accountId,
@@ -46,6 +60,7 @@ export async function createValidatedScheduledTask(input: {
     runMode: input.payload.runMode,
     overlapPolicy: input.payload.overlapPolicy,
     agentConfig,
+    environmentId: input.payload.environmentId ?? null,
     metadata: input.payload.metadata,
   });
 }
@@ -54,6 +69,7 @@ export async function validatedScheduledTaskUpdate(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;
+  grant: AccessGrant;
   existing: ScheduledTask;
   payload: UpdateScheduledTaskPayload;
 }): Promise<UpdateScheduledTaskInput> {
@@ -77,7 +93,35 @@ export async function validatedScheduledTaskUpdate(input: {
   if (input.payload.metadata !== undefined) {
     update.metadata = input.payload.metadata;
   }
+  if (input.payload.environmentId !== undefined) {
+    const nextEnvironmentId = input.payload.environmentId;
+    if ((input.existing.environmentId ?? null) !== (nextEnvironmentId ?? null)
+      && input.existing.runMode === "reusable_session"
+      && input.existing.reusableSessionId) {
+      throw new HTTPException(409, { message: "cannot change environment of a task with a live reusable session; recreate the task" });
+    }
+    if (nextEnvironmentId === null) {
+      update.environmentId = null;
+    } else {
+      await validateEnvironmentAttachment(
+        { settings: input.settings, db: input.db },
+        input.grant,
+        input.existing.workspaceId,
+        nextEnvironmentId,
+      );
+      update.environmentId = nextEnvironmentId;
+    }
+  }
   if (input.payload.agentConfig !== undefined) {
+    // Editing the instructions of a task that injects workspace secrets is
+    // equivalent to attaching those secrets to new instructions, so it
+    // requires environments:use even though plain task edits do not.
+    const willHaveEnvironment = input.payload.environmentId !== undefined
+      ? input.payload.environmentId !== null
+      : Boolean(input.existing.environmentId);
+    if (willHaveEnvironment) {
+      requirePermission(input.grant, "environments:use");
+    }
     update.agentConfig = await validateScheduledTaskAgentConfig({
       settings: input.settings,
       db: input.db,
@@ -106,6 +150,7 @@ export async function restoreScheduledTask(db: Database, task: ScheduledTask): P
     overlapPolicy: task.overlapPolicy,
     agentConfig: task.agentConfig,
     reusableSessionId: task.reusableSessionId,
+    environmentId: task.environmentId,
     metadata: task.metadata,
   });
 }

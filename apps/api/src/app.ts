@@ -18,6 +18,7 @@ import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerDocumentRoutes } from "./routes/documents";
+import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
@@ -193,6 +194,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerWorkspaceRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerEnvironmentRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
@@ -267,6 +269,9 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/discovery\/mcp-registry$/, label: "/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/enable$/, label: "/v1/workspaces/:workspaceId/capabilities/:id/enable" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/capabilities\/[^/]+\/disable$/, label: "/v1/workspaces/:workspaceId/capabilities/:id/disable" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/environments$/, label: "/v1/workspaces/:workspaceId/environments" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+\/variables\/[^/]+$/, label: "/v1/workspaces/:workspaceId/environments/:id/variables/:name" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/environments\/[^/]+$/, label: "/v1/workspaces/:workspaceId/environments/:id" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/packs$/, label: "/v1/workspaces/:workspaceId/packs" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/installations$/, label: "/v1/workspaces/:workspaceId/packs/installations" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/marketing-social-daily-analysis\/scheduled-tasks$/, label: "/v1/workspaces/:workspaceId/packs/marketing-social-daily-analysis/scheduled-tasks" },

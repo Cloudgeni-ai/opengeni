@@ -6,6 +6,7 @@ import {
   configuredStaticUsageLimits,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
+  environmentsEncryptionKeyBytes,
   getSettings,
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
@@ -470,6 +471,51 @@ describe("sandbox preparation profiles", () => {
     withEnv({ OPENGENI_ENTITLEMENTS_MODE: "static" }, () => {
       expect(() => getSettings()).toThrow("STATIC_ENTITLEMENTS_JSON");
     });
+  });
+});
+
+describe("workspace environments encryption key", () => {
+  const validKey = Buffer.alloc(32, 7).toString("base64");
+
+  test("decodes a base64 key of exactly 32 bytes", () => {
+    const settings = withEnv({ OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey }, () => getSettings());
+    const key = environmentsEncryptionKeyBytes(settings);
+    expect(key).not.toBeNull();
+    expect(key!.length).toBe(32);
+  });
+
+  test("returns null when the key is unset", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(environmentsEncryptionKeyBytes(settings)).toBeNull();
+  });
+
+  test("rejects keys that do not decode to 32 bytes at boot", () => {
+    expect(() => withEnv({
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(16, 1).toString("base64"),
+    }, () => getSettings())).toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes");
+  });
+
+  test("requires the key for managed mode outside local/test", () => {
+    const managedEnv = {
+      OPENGENI_ENVIRONMENT: "production",
+      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+      OPENGENI_RESEND_API_KEY: "re_test",
+    };
+    expect(() => withEnv(managedEnv, () => getSettings()))
+      .toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test");
+    expect(withEnv({
+      ...managedEnv,
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey,
+    }, () => getSettings()).environmentsEncryptionKey).toBe(validKey);
+    expect(withEnv({
+      OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+      OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+      OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+      OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+    }, () => getSettings()).environmentsEncryptionKey).toBeUndefined();
   });
 });
 

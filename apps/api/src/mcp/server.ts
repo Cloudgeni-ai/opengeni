@@ -22,6 +22,7 @@ import {
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
+import { hasPermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
@@ -179,10 +180,12 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
       overlapPolicy: z4.string().optional(),
       agentConfig: z4.unknown(),
       status: z4.string().optional(),
+      environmentId: z4.string().uuid().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async (args) => {
     const payload = CreateScheduledTaskRequest.parse(args);
+    requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
     await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "schedule:create", quantity: 1 });
     const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, payload });
     await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
@@ -199,12 +202,14 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
       overlapPolicy: z4.string().optional(),
       agentConfig: z4.unknown().optional(),
       status: z4.string().optional(),
+      environmentId: z4.string().uuid().nullable().optional(),
       metadata: z4.record(z4.string(), z4.unknown()).optional(),
     },
   }, async ({ id, ...raw }) => {
     const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
     const payload = UpdateScheduledTaskRequest.parse(raw);
-    const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, existing, payload });
+    requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
+    const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, existing, payload });
     const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
     await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
     return json(task);
@@ -268,6 +273,15 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): 
   }, async ({ taskId, limit }) => json({ runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100) }));
 
   return server;
+}
+
+// Defense-in-depth for invariant "agents cannot self-attach": the worker's
+// first-party delegated token never carries environments:use, so sandboxed
+// agents calling these MCP tools cannot attach a workspace environment.
+function requireEnvironmentsUseForMcpAttachment(grant: AccessGrant, environmentId: string | null | undefined): void {
+  if (environmentId !== undefined && environmentId !== null && !hasPermission(grant.permissions, "environments:use")) {
+    throw new Error("missing permission: environments:use");
+  }
 }
 
 function repositoryWithScheduledTaskResource(repository: GitHubRepository): GitHubRepository & { resource: ResourceRef } {

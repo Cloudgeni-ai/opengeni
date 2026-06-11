@@ -284,6 +284,41 @@ describe("DB integration", () => {
     }
   });
 
+  test("RLS policies isolate workspace environment rows for a non-owner app role", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grantA = await testGrant(dbClient.db);
+      const grantB = await testGrant(dbClient.db);
+      await seedWorkspaceEnvironmentRows(dbClient.db, grantB);
+
+      for (const table of ["workspace_environments", "workspace_environment_variables"]) {
+        const hidden = await appDbClient.db.execute(dbSql<{ count: string }>`select count(*)::text as count from ${dbSql.raw(table)}`);
+        expect(Number(hidden[0]?.count ?? 0)).toBe(0);
+      }
+
+      await withRlsContext(appDbClient.db, grantA, async (db) => {
+        await seedWorkspaceEnvironmentRows(db, grantA);
+      });
+
+      for (const table of ["workspace_environments", "workspace_environment_variables"]) {
+        const visible = await withRlsContext(appDbClient.db, grantA, async (db) =>
+          await db.execute(dbSql<{ workspace_id: string }>`select workspace_id::text from ${dbSql.raw(table)}`)
+        );
+        expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
+      }
+
+      await expect(withRlsContext(appDbClient.db, grantA, async (db) => {
+        await db.execute(dbSql`
+          insert into workspace_environments (account_id, workspace_id, name)
+          values (${grantA.accountId}, ${grantB.workspaceId}, ${`mismatched-${crypto.randomUUID()}`})
+        `);
+      })).rejects.toThrow();
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
   test("exports only runtime-ready enabled MCP capability servers", async () => {
     const grant = await testGrant(dbClient.db);
     const otherGrant = await testGrant(dbClient.db);
@@ -371,6 +406,19 @@ async function seedCapabilityPackAndSocialRows(db: ReturnType<typeof createDb>["
   await db.execute(dbSql`
     insert into social_posts (account_id, workspace_id, connection_id, provider, external_post_id, text, published_at)
     values (${grant.accountId}, ${grant.workspaceId}, ${connectionId}, 'linkedin', ${`post-${suffix}`}, 'RLS post', now())
+  `);
+}
+
+async function seedWorkspaceEnvironmentRows(db: ReturnType<typeof createDb>["db"], grant: AccessGrant): Promise<void> {
+  const suffix = crypto.randomUUID();
+  const environmentId = crypto.randomUUID();
+  await db.execute(dbSql`
+    insert into workspace_environments (id, account_id, workspace_id, name)
+    values (${environmentId}, ${grant.accountId}, ${grant.workspaceId}, ${`rls-environment-${suffix}`})
+  `);
+  await db.execute(dbSql`
+    insert into workspace_environment_variables (account_id, workspace_id, environment_id, name, value_encrypted)
+    values (${grant.accountId}, ${grant.workspaceId}, ${environmentId}, 'RLS_TOKEN', 'v1:placeholder:placeholder')
   `);
 }
 

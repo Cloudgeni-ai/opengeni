@@ -45,11 +45,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
 
   app.patch("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
     const payload = UpdateScheduledTaskRequest.parse(await c.req.json());
-    const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, existing, payload });
+    const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, grant, existing, payload });
     const task = await updateScheduledTask(db, workspaceId, taskId, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);

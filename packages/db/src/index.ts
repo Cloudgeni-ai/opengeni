@@ -41,6 +41,8 @@ import type {
   ReasoningEffort,
   UsageEvent,
   Workspace,
+  WorkspaceEnvironment,
+  WorkspaceEnvironmentVariableMetadata,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -48,6 +50,7 @@ import postgres from "postgres";
 import * as schema from "./schema";
 
 export { sql as dbSql } from "drizzle-orm";
+export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 
 export type Database = PostgresJsDatabase<typeof schema>;
 
@@ -141,6 +144,8 @@ export const allWorkspacePermissions: Permission[] = [
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "environments:manage",
+  "environments:use",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -837,6 +842,7 @@ export type CreateScheduledTaskInput = {
   runMode: ScheduledTaskRunMode;
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
+  environmentId?: string | null;
   metadata: Record<string, unknown>;
 };
 
@@ -848,6 +854,7 @@ export type UpdateScheduledTaskInput = Partial<{
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
+  environmentId: string | null;
   metadata: Record<string, unknown>;
 }>;
 
@@ -1422,6 +1429,7 @@ export async function updateScheduledTask(db: Database, workspaceId: string, tas
       ...(input.overlapPolicy !== undefined ? { overlapPolicy: input.overlapPolicy } : {}),
       ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
       ...(input.reusableSessionId !== undefined ? { reusableSessionId: input.reusableSessionId } : {}),
+      ...(input.environmentId !== undefined ? { environmentId: input.environmentId } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       updatedAt: new Date(),
     }).where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.id, taskId))).returning();
@@ -1524,6 +1532,291 @@ export async function listScheduledTaskRuns(db: Database, workspaceId: string, t
   });
 }
 
+export async function createWorkspaceEnvironment(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  description?: string | null;
+}): Promise<WorkspaceEnvironment> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.workspaceEnvironments).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      name: input.name,
+      description: input.description ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create workspace environment");
+    }
+    return mapWorkspaceEnvironment(row, []);
+  });
+}
+
+export async function listWorkspaceEnvironments(db: Database, workspaceId: string): Promise<WorkspaceEnvironment[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.workspaceEnvironments)
+      .where(eq(schema.workspaceEnvironments.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceEnvironments.createdAt));
+    const variableRows = await scopedDb.select({
+      environmentId: schema.workspaceEnvironmentVariables.environmentId,
+      name: schema.workspaceEnvironmentVariables.name,
+      version: schema.workspaceEnvironmentVariables.version,
+      createdAt: schema.workspaceEnvironmentVariables.createdAt,
+      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+    }).from(schema.workspaceEnvironmentVariables)
+      .where(eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceEnvironmentVariables.name));
+    const grouped = new Map<string, WorkspaceEnvironmentVariableMetadata[]>();
+    for (const variable of variableRows) {
+      const list = grouped.get(variable.environmentId) ?? [];
+      list.push(mapWorkspaceEnvironmentVariableMetadata(variable));
+      grouped.set(variable.environmentId, list);
+    }
+    return rows.map((row) => mapWorkspaceEnvironment(row, grouped.get(row.id) ?? []));
+  });
+}
+
+export async function getWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.workspaceEnvironments)
+      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId));
+  });
+}
+
+export async function getWorkspaceEnvironmentByName(db: Database, workspaceId: string, name: string): Promise<WorkspaceEnvironment | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.workspaceEnvironments)
+      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.name, name)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, row.id));
+  });
+}
+
+export async function updateWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string, input: {
+  name?: string;
+  description?: string | null;
+}): Promise<WorkspaceEnvironment> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.workspaceEnvironments).set({
+      ...(input.name !== undefined ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId))).returning();
+    if (!row) {
+      throw new Error(`Workspace environment not found: ${environmentId}`);
+    }
+    return mapWorkspaceEnvironment(row, await listEnvironmentVariableMetadata(scopedDb, workspaceId, environmentId));
+  });
+}
+
+export async function deleteWorkspaceEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.workspaceEnvironments)
+      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
+      .returning({ id: schema.workspaceEnvironments.id });
+    return rows.length > 0;
+  });
+}
+
+export async function countWorkspaceEnvironments(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.workspaceEnvironments).where(eq(schema.workspaceEnvironments.workspaceId, workspaceId));
+    return Number(count);
+  });
+}
+
+export async function countScheduledTasksUsingEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.scheduledTasks)
+      .where(and(eq(schema.scheduledTasks.workspaceId, workspaceId), eq(schema.scheduledTasks.environmentId, environmentId)));
+    return Number(count);
+  });
+}
+
+export async function countActiveSessionsUsingEnvironment(db: Database, workspaceId: string, environmentId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.environmentId, environmentId),
+        inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
+      ));
+    return Number(count);
+  });
+}
+
+export async function setWorkspaceEnvironmentVariable(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  environmentId: string;
+  name: string;
+  valueEncrypted: string;
+}): Promise<WorkspaceEnvironmentVariableMetadata> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const [row] = await scopedDb.insert(schema.workspaceEnvironmentVariables).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      environmentId: input.environmentId,
+      name: input.name,
+      valueEncrypted: input.valueEncrypted,
+    }).onConflictDoUpdate({
+      target: [
+        schema.workspaceEnvironmentVariables.workspaceId,
+        schema.workspaceEnvironmentVariables.environmentId,
+        schema.workspaceEnvironmentVariables.name,
+      ],
+      set: {
+        valueEncrypted: input.valueEncrypted,
+        version: sql`${schema.workspaceEnvironmentVariables.version} + 1`,
+        updatedAt: now,
+      },
+    }).returning({
+      name: schema.workspaceEnvironmentVariables.name,
+      version: schema.workspaceEnvironmentVariables.version,
+      createdAt: schema.workspaceEnvironmentVariables.createdAt,
+      updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+    });
+    if (!row) {
+      throw new Error("Failed to set workspace environment variable");
+    }
+    await scopedDb.update(schema.workspaceEnvironments).set({ updatedAt: now })
+      .where(and(eq(schema.workspaceEnvironments.workspaceId, input.workspaceId), eq(schema.workspaceEnvironments.id, input.environmentId)));
+    return mapWorkspaceEnvironmentVariableMetadata(row);
+  });
+}
+
+export async function deleteWorkspaceEnvironmentVariable(db: Database, workspaceId: string, environmentId: string, name: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.workspaceEnvironmentVariables)
+      .where(and(
+        eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
+        eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
+        eq(schema.workspaceEnvironmentVariables.name, name),
+      ))
+      .returning({ id: schema.workspaceEnvironmentVariables.id });
+    if (rows.length > 0) {
+      await scopedDb.update(schema.workspaceEnvironments).set({ updatedAt: new Date() })
+        .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)));
+    }
+    return rows.length > 0;
+  });
+}
+
+/**
+ * The ONLY helper that selects value_encrypted. Used exclusively by the worker
+ * activity that materializes a sandbox for a run whose session carries an
+ * environment attachment. Do not call from API routes: values are write-only.
+ */
+export async function getWorkspaceEnvironmentValuesForRun(db: Database, workspaceId: string, environmentId: string): Promise<{
+  environment: { id: string; name: string };
+  values: Record<string, string>;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [environment] = await scopedDb.select({
+      id: schema.workspaceEnvironments.id,
+      name: schema.workspaceEnvironments.name,
+    }).from(schema.workspaceEnvironments)
+      .where(and(eq(schema.workspaceEnvironments.workspaceId, workspaceId), eq(schema.workspaceEnvironments.id, environmentId)))
+      .limit(1);
+    if (!environment) {
+      return null;
+    }
+    const rows = await scopedDb.select({
+      name: schema.workspaceEnvironmentVariables.name,
+      valueEncrypted: schema.workspaceEnvironmentVariables.valueEncrypted,
+    }).from(schema.workspaceEnvironmentVariables)
+      .where(and(
+        eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
+        eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
+      ));
+    return {
+      environment: { id: environment.id, name: environment.name },
+      values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
+    };
+  });
+}
+
+export async function recordAuditEvent(db: Database, input: {
+  accountId: string;
+  workspaceId?: string | null;
+  subjectId?: string | null;
+  action: string;
+  targetType?: string | null;
+  targetId?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  // audit_events has a FORCED RLS policy keyed on the account/workspace GUCs,
+  // so the insert must run inside an RLS context.
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId ?? null }, async (scopedDb) => {
+    await scopedDb.insert(schema.auditEvents).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId ?? null,
+      subjectId: input.subjectId ?? null,
+      action: input.action,
+      targetType: input.targetType ?? null,
+      targetId: input.targetId ?? null,
+      metadata: input.metadata ?? {},
+    });
+  });
+}
+
+async function listEnvironmentVariableMetadata(db: Database, workspaceId: string, environmentId: string): Promise<WorkspaceEnvironmentVariableMetadata[]> {
+  const rows = await db.select({
+    name: schema.workspaceEnvironmentVariables.name,
+    version: schema.workspaceEnvironmentVariables.version,
+    createdAt: schema.workspaceEnvironmentVariables.createdAt,
+    updatedAt: schema.workspaceEnvironmentVariables.updatedAt,
+  }).from(schema.workspaceEnvironmentVariables)
+    .where(and(
+      eq(schema.workspaceEnvironmentVariables.workspaceId, workspaceId),
+      eq(schema.workspaceEnvironmentVariables.environmentId, environmentId),
+    ))
+    .orderBy(asc(schema.workspaceEnvironmentVariables.name));
+  return rows.map(mapWorkspaceEnvironmentVariableMetadata);
+}
+
+function mapWorkspaceEnvironment(row: typeof schema.workspaceEnvironments.$inferSelect, variables: WorkspaceEnvironmentVariableMetadata[]): WorkspaceEnvironment {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    name: row.name,
+    description: row.description,
+    variables,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapWorkspaceEnvironmentVariableMetadata(row: {
+  name: string;
+  version: number;
+  createdAt: Date;
+  updatedAt: Date;
+}): WorkspaceEnvironmentVariableMetadata {
+  return {
+    name: row.name,
+    version: row.version,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
 export async function createSession(db: Database, input: {
   accountId: string;
   workspaceId: string;
@@ -1533,6 +1826,7 @@ export async function createSession(db: Database, input: {
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
+  environmentId?: string | null;
 }): Promise<Session> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.sessions).values({
@@ -1544,6 +1838,7 @@ export async function createSession(db: Database, input: {
       metadata: input.metadata,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
+      environmentId: input.environmentId ?? null,
       status: "queued",
     }).returning();
     if (!row) {
@@ -1974,6 +2269,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     metadata: row.metadata,
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
+    environmentId: row.environmentId,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
     lastSequence: row.lastSequence,
@@ -2098,6 +2394,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     overlapPolicy: row.overlapPolicy as ScheduledTaskOverlapPolicy,
     agentConfig: row.agentConfig as ScheduledTaskAgentConfig,
     reusableSessionId: row.reusableSessionId,
+    environmentId: row.environmentId,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

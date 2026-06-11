@@ -31,6 +31,8 @@ export async function createAndStartSession(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
+  // Names/ids only; the session.created payload never carries variable values.
+  environment?: { id: string; name: string } | null;
 }) {
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -45,6 +47,7 @@ export async function createAndStartSession(input: {
     },
     model: input.model,
     sandboxBackend: input.sandboxBackend,
+    environmentId: input.environment?.id ?? null,
   });
   const initialPayload = {
     text: input.initialMessage,
@@ -52,7 +55,13 @@ export async function createAndStartSession(input: {
     ...(input.tools.length ? { tools: input.tools } : {}),
   };
   const events = await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [
-    { type: "session.created", payload: { status: "queued" } },
+    {
+      type: "session.created",
+      payload: {
+        status: "queued",
+        ...(input.environment ? { environmentId: input.environment.id, environmentName: input.environment.name } : {}),
+      },
+    },
     {
       type: "user.message",
       payload: initialPayload,

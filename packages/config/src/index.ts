@@ -82,6 +82,7 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
+  environmentsEncryptionKey: z.string().optional(),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -293,6 +294,7 @@ export function getSettings(): Settings {
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
+    environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -445,6 +447,22 @@ export function calculateModelUsageCostMicros(settings: Settings, model: string,
 export function configuredAllowedReasoningEfforts(settings: Settings): Array<z.infer<typeof ReasoningEffort>> {
   return uniqueValues([settings.openaiReasoningEffort, ...splitCsv(settings.openaiAllowedReasoningEfforts)])
     .map((value) => ReasoningEffort.parse(value));
+}
+
+/**
+ * Decodes OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY (base64, exactly 32 bytes) for
+ * AES-256-GCM workspace environment value encryption. Returns null when unset.
+ * Throws naming only the env var, never echoing its value.
+ */
+export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array | null {
+  if (!settings.environmentsEncryptionKey) {
+    return null;
+  }
+  const decoded = Buffer.from(settings.environmentsEncryptionKey, "base64");
+  if (decoded.length !== 32) {
+    throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes (generate with: openssl rand -base64 32)");
+  }
+  return new Uint8Array(decoded);
 }
 
 export function collectGitIdentityEnvironment(settings: Settings): Record<string, string> {
@@ -695,7 +713,11 @@ function validateSettings(settings: Settings): void {
     if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
       throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
     }
+    if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
+      throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test");
+    }
   }
+  environmentsEncryptionKeyBytes(settings);
   if (
     settings.productAccessMode === "configured"
     && !["local", "test"].includes(settings.environment)

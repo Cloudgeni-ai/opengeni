@@ -19,6 +19,9 @@ import {
   createFileUpload,
   createScheduledTask,
   createSession,
+  createWorkspaceEnvironment,
+  encryptEnvironmentValue,
+  setWorkspaceEnvironmentVariable,
   finishTurn,
   getSession,
   getBillingBalance,
@@ -31,13 +34,14 @@ import {
   saveRunState,
   setSessionStatus,
   sumUsageQuantity,
+  updateScheduledTask,
 } from "@opengeni/db";
 import type { AccessGrant, ResourceRef, SandboxBackend, ScheduledTaskAgentConfig } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
-import { sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
+import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
 describe("worker activities integration", () => {
@@ -1345,9 +1349,245 @@ describe("worker activities integration", () => {
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
   });
+
+  test("loads and decrypts attached workspace environments for runs and fails closed otherwise", async () => {
+    const grant = await testGrant(dbClient.db);
+    const settings = testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: workerEnvironmentsKey });
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      API_TOKEN: "worker-secret-token-1234",
+      DB_PASSWORD: "worker-secret-pass-5678",
+    });
+
+    expect(await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, null)).toBeNull();
+    const loaded = await loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, environment.id);
+    expect(loaded).toMatchObject({ id: environment.id, name: environment.name });
+    expect(loaded?.values).toEqual({
+      API_TOKEN: "worker-secret-token-1234",
+      DB_PASSWORD: "worker-secret-pass-5678",
+    });
+
+    await expect(loadWorkspaceEnvironmentForRun(
+      dbClient.db,
+      testSettings({ databaseUrl: services.databaseUrl }),
+      grant.workspaceId,
+      environment.id,
+    )).rejects.toThrow("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+    await expect(loadWorkspaceEnvironmentForRun(dbClient.db, settings, grant.workspaceId, crypto.randomUUID()))
+      .rejects.toThrow("workspace environment not found");
+  });
+
+  test("layers workspace environment values between deployment env and GitHub run auth", async () => {
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      sandboxEnvAllowlist: "WORKER_TEST_ALLOWLISTED",
+      gitAuthorName: "Deployment Author",
+      gitAuthorEmail: "author@example.test",
+    });
+    const previous = process.env.WORKER_TEST_ALLOWLISTED;
+    process.env.WORKER_TEST_ALLOWLISTED = "deployment-value";
+    try {
+      const unattached = await sandboxEnvironmentForRun(settings, []);
+      expect(unattached.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
+      const environment = await sandboxEnvironmentForRun(settings, [], {
+        WORKER_TEST_ALLOWLISTED: "workspace-override",
+        WORKSPACE_ONLY_TOKEN: "workspace-only-value",
+      });
+      expect(environment.WORKER_TEST_ALLOWLISTED).toBe("workspace-override");
+      expect(environment.WORKSPACE_ONLY_TOKEN).toBe("workspace-only-value");
+      expect(environment.GIT_AUTHOR_NAME).toBe("Deployment Author");
+      expect(environment.HOME).toBe("/workspace");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.WORKER_TEST_ALLOWLISTED;
+      } else {
+        process.env.WORKER_TEST_ALLOWLISTED = previous;
+      }
+    }
+  });
+
+  test("redacts attached environment values echoed by the agent into session events", async () => {
+    const secret = "echoed-workspace-secret-987654";
+    const grant = await testGrant(dbClient.db);
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { LEAKED_TOKEN: secret });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "run",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      environmentId: environment.id,
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "run" } },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{
+          outputText: `the token is ${secret} end`,
+          chunks: ["the token is ", secret, " end"],
+        }]),
+      }),
+    });
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-environment-redaction",
+    });
+    expect(result.status).toBe("idle");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
+    const completed = events.find((event) => event.type === "agent.message.completed");
+    expect((completed?.payload as { text: string }).text).toBe("the token is [redacted:LEAKED_TOKEN] end");
+  });
+
+  test("fails attached runs closed when the worker has no encryption key", async () => {
+    const grant = await testGrant(dbClient.db);
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { REQUIRED_TOKEN: "required-secret-123456" });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "run",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      environmentId: environment.id,
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "run" } },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "never reached" }]) }),
+    });
+    const result = await activities.runAgentSegment({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-environment-missing-key",
+    });
+    expect(result.status).toBe("failed");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(JSON.stringify(failed?.payload)).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
+  });
+
+  test("propagates scheduled task environment attachments into dispatched sessions", async () => {
+    const grant = await testGrant(dbClient.db);
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { TASK_TOKEN: "task-secret-123456" });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "environment dispatch",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      environmentId: environment.id,
+      metadata: {},
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const dispatched = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    });
+    expect(dispatched.action).toBe("start");
+    const session = await getSession(dbClient.db, grant.workspaceId, dispatched.sessionId);
+    expect(session?.environmentId).toBe(environment.id);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, dispatched.sessionId, 0, 10);
+    const createdEvent = events.find((event) => event.type === "session.created");
+    expect(createdEvent?.payload).toMatchObject({ environmentId: environment.id, environmentName: environment.name });
+    expect(JSON.stringify(events)).not.toContain("task-secret-123456");
+  });
+
+  test("fails reusable dispatch when the task attachment diverges from its session", async () => {
+    const grant = await testGrant(dbClient.db);
+    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, { DIVERGED_TOKEN: "diverged-value-123456" });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "reusable",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "diverged reusable",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      environmentId: environment.id,
+      metadata: {},
+    });
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { reusableSessionId: session.id });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    await expect(activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    })).rejects.toThrow("scheduled task environment attachment does not match its reusable session");
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs[0]?.status).toBe("failed");
+  });
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];
+
+const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
+
+async function seedWorkspaceEnvironment(db: TestDb, grant: AccessGrant, values: Record<string, string>): Promise<{ id: string; name: string }> {
+  const key = new Uint8Array(Buffer.from(workerEnvironmentsKey, "base64"));
+  const environment = await createWorkspaceEnvironment(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    name: `worker-env-${crypto.randomUUID()}`,
+  });
+  for (const [name, value] of Object.entries(values)) {
+    await setWorkspaceEnvironmentVariable(db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      environmentId: environment.id,
+      name,
+      valueEncrypted: encryptEnvironmentValue(key, value),
+    });
+  }
+  return { id: environment.id, name: environment.name };
+}
+
 
 async function testGrant(db: TestDb): Promise<AccessGrant> {
   const id = crypto.randomUUID();

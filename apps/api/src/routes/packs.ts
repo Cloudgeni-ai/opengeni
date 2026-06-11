@@ -16,6 +16,7 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
+import { validateEnvironmentAttachment } from "../domain/environments";
 import {
   buildMarketingDailyAnalysisAgentConfig,
   getCapabilityPack,
@@ -61,6 +62,17 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     const pack = requirePack(c.req.param("packId"));
     const existing = await getPackInstallation(db, workspaceId, pack.id);
     const payload = EnablePackRequest.parse(await c.req.json());
+    if (pack.environment?.required && !payload.environmentId) {
+      throw new HTTPException(422, { message: "this pack requires an environment attachment; pass environmentId" });
+    }
+    if (payload.environmentId) {
+      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId);
+      const missing = (pack.environment?.requiredVariables ?? [])
+        .filter((name) => !environment.variables.some((variable) => variable.name === name));
+      if (missing.length > 0) {
+        throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+      }
+    }
     const installation = await enablePackInstallation(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -68,6 +80,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       metadata: {
         ...payload.metadata,
         packVersion: pack.version,
+        ...(payload.environmentId ? { environmentId: payload.environmentId } : {}),
       },
     });
     return c.json(installation, existing ? 200 : 201);
@@ -93,11 +106,18 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       documentBaseIds: payload.documentBaseIds,
       ...(payload.promptInstructions ? { promptInstructions: payload.promptInstructions } : {}),
     });
+    // Installation-inherited environment attachment: it was authorized with
+    // environments:use at pack-enable time, so the scheduled_tasks:manage
+    // caller here is not re-checked for that permission.
+    const installationEnvironmentId = typeof installation.metadata.environmentId === "string"
+      ? installation.metadata.environmentId
+      : undefined;
     const task = await createValidatedScheduledTask({
       settings,
       db,
       objectStorage,
       grant,
+      environmentPreauthorized: true,
       payload: {
         name: payload.name ?? "Daily social media analysis",
         status: payload.status,
@@ -110,6 +130,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         runMode: payload.runMode,
         overlapPolicy: payload.overlapPolicy,
         agentConfig,
+        ...(installationEnvironmentId ? { environmentId: installationEnvironmentId } : {}),
         metadata: {
           packId: pack.id,
           packVersion: pack.version,

@@ -29,6 +29,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",
+    environmentsEncryptionKey: undefined,
     betterAuthSecret: undefined,
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,

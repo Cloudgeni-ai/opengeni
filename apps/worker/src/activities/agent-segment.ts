@@ -28,7 +28,8 @@ import {
   mergeResourceRefs,
   mergeToolRefs,
 } from "./common";
-import { sandboxEnvironmentForRun } from "./environment";
+import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
+import { createSecretRedactor, identityRedactor } from "./redaction";
 import { segmentInput } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -61,6 +62,10 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
+    // Reassigned after the workspace environment loads; the publish closure is
+    // created (and used for turn.started) before the environment is available.
+    let redact: (payload: unknown) => unknown = identityRedactor;
+    let environmentId = "";
     try {
       const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
       runtime.configure(capabilitySettings);
@@ -95,6 +100,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
         const inputs = events.map((event) => ({
           ...event,
+          payload: redact(event.payload),
           turnId: turnId!,
           producerId,
           producerSeq: ++producerSeq,
@@ -122,7 +128,12 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
       };
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       const turnTools = mergeToolRefs(session.tools, turn.tools);
-      const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources);
+      const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
+      environmentId = workspaceEnvironment?.id ?? "";
+      redact = createSecretRedactor(
+        Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
+      );
+      const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources, workspaceEnvironment?.values ?? {});
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
       preparedTools = await runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
@@ -277,6 +288,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
         attributes: {
           "opengeni.turn_id": turnId ?? "",
           "opengeni.status": activityStatus,
+          "opengeni.environment_id": environmentId,
           "opengeni.duration_ms": Math.round(durationSeconds * 1000),
         },
         error: activityError,

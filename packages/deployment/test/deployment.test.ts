@@ -11,6 +11,8 @@ import {
   stackPlanFor,
 } from "../src/index";
 
+const testEnvironmentsEncryptionKey = Buffer.alloc(32, 2).toString("base64");
+
 describe("deployment contract", () => {
   test("ships valid built-in profiles", () => {
     for (const profile of Object.values(deploymentProfiles)) {
@@ -381,6 +383,7 @@ describe("deployment contract", () => {
       OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
       OPENGENI_DELEGATION_SECRET: "delegation",
       OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
       OPENGENI_RESEND_API_KEY: "resend",
       OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
       OPENGENI_GITHUB_APP_ID: "1",
@@ -449,6 +452,7 @@ describe("deployment contract", () => {
       OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
       OPENGENI_DELEGATION_SECRET: "delegation",
       OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
       OPENGENI_RESEND_API_KEY: "resend",
       OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
       OPENGENI_GITHUB_APP_ID: "3971118",
@@ -513,6 +517,7 @@ describe("deployment contract", () => {
       OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
       OPENGENI_DELEGATION_SECRET: "delegation",
       OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
       OPENGENI_RESEND_API_KEY: "resend",
       OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
       OPENGENI_GITHUB_APP_ID: "1",
@@ -554,6 +559,7 @@ describe("deployment contract", () => {
       OPENGENI_PUBLIC_BASE_URL: "https://preview-123.app.opengeni.ai",
       OPENGENI_DELEGATION_SECRET: "delegation",
       OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
       OPENGENI_RESEND_API_KEY: "resend",
       OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
       OPENGENI_GITHUB_APP_ID: "1",
@@ -608,6 +614,7 @@ describe("deployment contract", () => {
       OPENGENI_DELEGATION_SECRET: "delegation",
       OPENGENI_BETTER_AUTH_SECRET: "better-auth",
       OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS: "https://staging.app.opengeni.ai",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
       OPENGENI_RESEND_API_KEY: "resend",
       OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "github-state",
       OPENGENI_GITHUB_APP_MANIFEST_BASE_URL: "https://staging.app.opengeni.ai",

@@ -29,6 +29,13 @@
       "when": 1781200600000,
       "tag": "0003_capability_catalog",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781201200000,
+      "tag": "0004_workspace_environments",
+      "breakpoints": true
     }
   ]
 }

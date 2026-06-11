@@ -23,6 +23,7 @@ import { requireAccessGrant } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
+import { validateEnvironmentAttachment } from "../domain/environments";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -60,6 +61,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
     await validateFileResources(db, workspaceId, resources);
+    const environment = payload.environmentId
+      ? await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId)
+      : null;
     const model = payload.model ?? settings.openaiModel;
     const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
     await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
@@ -77,6 +81,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       reasoningEffort,
       sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
       metadata: payload.metadata,
+      environment: environment ? { id: environment.id, name: environment.name } : null,
     });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,

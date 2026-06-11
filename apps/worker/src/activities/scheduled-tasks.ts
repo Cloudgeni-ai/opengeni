@@ -4,6 +4,7 @@ import {
   createSession,
   enqueueSessionTurn,
   getBillingBalance,
+  getWorkspaceEnvironment,
   recordUsageEvent,
   requireScheduledTask,
   requireSession,
@@ -54,6 +55,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
+          // The FK on scheduled_tasks.environment_id is ON DELETE RESTRICT, so
+          // an attached environment must still exist here; fail closed if not.
+          const environment = task.environmentId
+            ? await getWorkspaceEnvironment(db, task.workspaceId, task.environmentId)
+            : null;
+          if (task.environmentId && !environment) {
+            throw new Error(`workspace environment not found: ${task.environmentId}`);
+          }
           const session = await createSession(db, {
             accountId: task.accountId,
             workspaceId: task.workspaceId,
@@ -69,6 +78,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             },
             model,
             sandboxBackend,
+            environmentId: task.environmentId ?? null,
           });
           const workflowId = workflowIdForSession(session.id);
           await setTemporalWorkflowId(db, task.workspaceId, session.id, workflowId);
@@ -76,7 +86,16 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             await updateScheduledTask(db, task.workspaceId, task.id, { reusableSessionId: session.id });
           }
           const events = await appendAndPublishEvents(db, bus, task.workspaceId, session.id, [
-            { type: "session.created", payload: { status: "queued", scheduledTaskId: task.id, scheduledTaskRunId: run.id } },
+            {
+              type: "session.created",
+              payload: {
+                status: "queued",
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+                // Names/ids only; never values.
+                ...(environment ? { environmentId: environment.id, environmentName: environment.name } : {}),
+              },
+            },
             {
               type: "user.message",
               payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, task.agentConfig.tools, task.id, run.id),
@@ -125,6 +144,12 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           };
         } else {
           const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          // Defensive backstop for the API-level 409: a reusable session keeps
+          // its creation-time attachment, so a diverged task attachment must
+          // fail the run instead of silently running with the wrong secrets.
+          if ((session.environmentId ?? null) !== (task.environmentId ?? null)) {
+            throw new Error("scheduled task environment attachment does not match its reusable session");
+          }
           const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => ({
             events: [{
               type: "user.message",

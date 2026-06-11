@@ -72,6 +72,35 @@ export const apiKeys = pgTable("api_keys", {
   workspace: index("api_keys_workspace_idx").on(table.workspaceId),
 }));
 
+export const workspaceEnvironments = pgTable("workspace_environments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceName: uniqueIndex("workspace_environments_workspace_name_idx").on(table.workspaceId, table.name),
+  workspaceCreated: index("workspace_environments_workspace_created_idx").on(table.workspaceId, table.createdAt),
+}));
+
+export const workspaceEnvironmentVariables = pgTable("workspace_environment_variables", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  environmentId: uuid("environment_id").notNull().references(() => workspaceEnvironments.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  // Format: v1:<base64 iv>:<base64 ciphertext||gcm-tag>. Never returned by any API.
+  valueEncrypted: text("value_encrypted").notNull(),
+  version: integer("version").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  environmentName: uniqueIndex("workspace_environment_variables_env_name_idx").on(table.workspaceId, table.environmentId, table.name),
+  environment: index("workspace_environment_variables_workspace_env_idx").on(table.workspaceId, table.environmentId),
+}));
+
 export const sessions = pgTable("sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
@@ -83,6 +112,7 @@ export const sessions = pgTable("sessions", {
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   model: text("model").notNull(),
   sandboxBackend: text("sandbox_backend").notNull(),
+  environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
   temporalWorkflowId: text("temporal_workflow_id"),
   activeTurnId: uuid("active_turn_id"),
   lastSequence: integer("last_sequence").notNull().default(0),
@@ -90,6 +120,7 @@ export const sessions = pgTable("sessions", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   workspaceCreated: index("sessions_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  environment: index("sessions_environment_idx").on(table.workspaceId, table.environmentId),
 }));
 
 export const files = pgTable("files", {
@@ -246,12 +277,14 @@ export const scheduledTasks = pgTable("scheduled_tasks", {
   overlapPolicy: text("overlap_policy").notNull().default("allow_concurrent"),
   agentConfig: jsonb("agent_config").$type<unknown>().notNull(),
   reusableSessionId: uuid("reusable_session_id").references(() => sessions.id, { onDelete: "set null" }),
+  environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "restrict" }),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   temporalScheduleId: uniqueIndex("scheduled_tasks_workspace_temporal_schedule_id_idx").on(table.workspaceId, table.temporalScheduleId),
   status: index("scheduled_tasks_workspace_status_idx").on(table.workspaceId, table.status),
+  environment: index("scheduled_tasks_environment_idx").on(table.workspaceId, table.environmentId),
 }));
 
 export const scheduledTaskRuns = pgTable("scheduled_task_runs", {

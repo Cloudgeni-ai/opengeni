@@ -75,6 +75,8 @@ export const Permission = z.enum([
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "environments:manage",
+  "environments:use",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -583,6 +585,53 @@ export const ReorderSessionTurnsRequest = z.object({
 });
 export type ReorderSessionTurnsRequest = z.infer<typeof ReorderSessionTurnsRequest>;
 
+export const WorkspaceEnvironmentVariableName = z.string().regex(/^[A-Z][A-Z0-9_]*$/).max(128);
+export type WorkspaceEnvironmentVariableName = z.infer<typeof WorkspaceEnvironmentVariableName>;
+
+// Metadata only by design: no schema in this file ever carries a variable value
+// back to a client. Values are write-only and decrypted exclusively inside the
+// worker at sandbox materialization time.
+export const WorkspaceEnvironmentVariableMetadata = z.object({
+  name: WorkspaceEnvironmentVariableName,
+  version: z.number().int().positive(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type WorkspaceEnvironmentVariableMetadata = z.infer<typeof WorkspaceEnvironmentVariableMetadata>;
+
+export const WorkspaceEnvironment = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  description: z.string().nullable(),
+  variables: z.array(WorkspaceEnvironmentVariableMetadata),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type WorkspaceEnvironment = z.infer<typeof WorkspaceEnvironment>;
+
+export const CreateWorkspaceEnvironmentRequest = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(2000).optional(),
+  variables: z.array(z.object({
+    name: WorkspaceEnvironmentVariableName,
+    value: z.string().min(1).max(32768),
+  })).default([]),
+});
+export type CreateWorkspaceEnvironmentRequest = z.infer<typeof CreateWorkspaceEnvironmentRequest>;
+
+export const UpdateWorkspaceEnvironmentRequest = z.object({
+  name: z.string().min(1).max(120).optional(),
+  description: z.string().max(2000).nullable().optional(),
+});
+export type UpdateWorkspaceEnvironmentRequest = z.infer<typeof UpdateWorkspaceEnvironmentRequest>;
+
+export const SetWorkspaceEnvironmentVariableRequest = z.object({
+  value: z.string().min(1).max(32768),
+});
+export type SetWorkspaceEnvironmentVariableRequest = z.infer<typeof SetWorkspaceEnvironmentVariableRequest>;
+
 export const ScheduledTaskStatus = z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
@@ -643,6 +692,7 @@ export const ScheduledTask = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy,
   agentConfig: ScheduledTaskAgentConfig,
   reusableSessionId: z.string().uuid().nullable(),
+  environmentId: z.string().uuid().nullable(),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -673,6 +723,7 @@ export const CreateScheduledTaskRequest = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   agentConfig: ScheduledTaskAgentConfig,
   status: ScheduledTaskStatus.default("active"),
+  environmentId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
@@ -684,6 +735,7 @@ export const UpdateScheduledTaskRequest = z.object({
   overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
   agentConfig: ScheduledTaskAgentConfig.optional(),
   status: ScheduledTaskStatus.optional(),
+  environmentId: z.string().uuid().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
@@ -738,6 +790,11 @@ export const CapabilityPack = z.object({
   connectors: z.array(CapabilityPackConnector).default([]),
   knowledge: z.array(CapabilityPackKnowledge).default([]),
   scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+  environment: z.object({
+    description: z.string().min(1),
+    requiredVariables: z.array(WorkspaceEnvironmentVariableName).default([]),
+    required: z.boolean().default(false),
+  }).optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
@@ -758,6 +815,7 @@ export const PackInstallation = z.object({
 export type PackInstallation = z.infer<typeof PackInstallation>;
 
 export const EnablePackRequest = z.object({
+  environmentId: z.string().uuid().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
@@ -951,6 +1009,7 @@ export const Session = z.object({
   metadata: z.record(z.string(), z.unknown()),
   model: z.string(),
   sandboxBackend: SandboxBackend,
+  environmentId: z.string().uuid().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
   lastSequence: z.number().int().nonnegative(),
@@ -1007,6 +1066,9 @@ export const CreateSessionRequest = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
+  // Workspace environment attachment is fixed at session creation; follow-up
+  // user.message events cannot switch or add one.
+  environmentId: z.string().uuid().optional(),
   clientEventId: z.string().min(1).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
