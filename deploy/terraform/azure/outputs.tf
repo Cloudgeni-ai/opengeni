@@ -64,6 +64,18 @@ output "key_vault_name" {
   value       = azurerm_key_vault.this.name
 }
 
+output "observability" {
+  description = "Azure Monitor resources created when observability.enabled is true."
+  value = {
+    enabled                    = try(var.observability.enabled, false)
+    log_analytics_workspace_id = try(azurerm_log_analytics_workspace.observability[0].id, null)
+    application_insights_id    = try(azurerm_application_insights.observability[0].id, null)
+    availability_web_test_id   = try(azurerm_application_insights_standard_web_test.availability[0].id, null)
+    action_group_id            = try(azurerm_monitor_action_group.observability[0].id, null)
+    availability_alert_id      = try(azurerm_monitor_metric_alert.availability[0].id, null)
+  }
+}
+
 output "postgres_host" {
   description = "Postgres host to use for OPENGENI_DATABASE_URL."
   value       = var.postgres.mode == "managed" ? azurerm_postgresql_flexible_server.this[0].fqdn : var.postgres.existing_host

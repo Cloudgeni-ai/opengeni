@@ -95,6 +95,37 @@ variable "dns_zone_contributor_assignments" {
   default = {}
 }
 
+variable "observability" {
+  description = "Optional Azure Monitor resources for production availability probes, alerts, and workspace-backed Application Insights."
+  type = object({
+    enabled                         = optional(bool, false)
+    log_analytics_workspace_name    = optional(string)
+    application_insights_name       = optional(string)
+    action_group_name               = optional(string)
+    action_group_short_name         = optional(string, "opengenialrt")
+    alert_email_receivers           = optional(map(string), {})
+    availability_test_name          = optional(string)
+    availability_test_url           = optional(string)
+    availability_test_frequency     = optional(number, 300)
+    availability_test_timeout       = optional(number, 30)
+    availability_test_geo_locations = optional(list(string), ["emea-nl-ams-azr"])
+    availability_alert_name         = optional(string)
+    availability_alert_severity     = optional(number, 1)
+    availability_failed_locations   = optional(number, 1)
+  })
+  default = {}
+
+  validation {
+    condition     = !try(var.observability.enabled, false) || try(length(var.observability.availability_test_url) > 0, false)
+    error_message = "observability.availability_test_url is required when observability.enabled is true."
+  }
+
+  validation {
+    condition     = !try(var.observability.enabled, false) || try(length(var.observability.alert_email_receivers) > 0, false)
+    error_message = "observability.alert_email_receivers must include at least one receiver when observability.enabled is true."
+  }
+}
+
 variable "postgres" {
   description = "Postgres mode. Use managed to create Azure Database for PostgreSQL Flexible Server or external to connect an existing compatible server."
   type = object({

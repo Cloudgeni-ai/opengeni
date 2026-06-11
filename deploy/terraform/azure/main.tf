@@ -16,6 +16,20 @@ locals {
     0,
     24
   )
+  observability_enabled                 = try(var.observability.enabled, false)
+  log_analytics_workspace_name          = coalesce(try(var.observability.log_analytics_workspace_name, null), "${var.name_prefix}-logs")
+  application_insights_name             = coalesce(try(var.observability.application_insights_name, null), "${var.name_prefix}-appinsights")
+  action_group_name                     = coalesce(try(var.observability.action_group_name, null), "${var.name_prefix}-alerts")
+  availability_test_name                = coalesce(try(var.observability.availability_test_name, null), "${var.name_prefix}-healthz")
+  availability_alert_name               = coalesce(try(var.observability.availability_alert_name, null), "${var.name_prefix}-availability")
+  availability_test_geo_locations       = try(var.observability.availability_test_geo_locations, ["emea-nl-ams-azr"])
+  availability_test_frequency           = try(var.observability.availability_test_frequency, 300)
+  availability_test_timeout             = try(var.observability.availability_test_timeout, 30)
+  availability_alert_severity           = try(var.observability.availability_alert_severity, 1)
+  availability_failed_locations         = try(var.observability.availability_failed_locations, 1)
+  availability_test_url                 = try(var.observability.availability_test_url, null)
+  observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
+  observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
   dns_zone_contributor_principals = {
     for item in flatten([
       for assignment_name, assignment in var.dns_zone_contributor_assignments : [
@@ -146,6 +160,102 @@ resource "azurerm_key_vault" "this" {
   purge_protection_enabled   = var.key_vault.purge_protection_enabled
   soft_delete_retention_days = 7
   tags                       = local.tags
+}
+
+resource "azurerm_log_analytics_workspace" "observability" {
+  count               = local.observability_enabled ? 1 : 0
+  name                = local.log_analytics_workspace_name
+  resource_group_name = local.resource_group_name
+  location            = var.location
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+  tags                = local.tags
+}
+
+resource "azurerm_application_insights" "observability" {
+  count               = local.observability_enabled ? 1 : 0
+  name                = local.application_insights_name
+  resource_group_name = local.resource_group_name
+  location            = var.location
+  application_type    = "web"
+  workspace_id        = azurerm_log_analytics_workspace.observability[0].id
+  retention_in_days   = 30
+  tags                = local.tags
+}
+
+resource "azurerm_monitor_action_group" "observability" {
+  count               = local.observability_enabled ? 1 : 0
+  name                = local.action_group_name
+  resource_group_name = local.resource_group_name
+  short_name          = local.observability_action_group_short_name
+  tags                = local.tags
+
+  dynamic "email_receiver" {
+    for_each = local.observability_alert_email_receivers
+
+    content {
+      name                    = email_receiver.key
+      email_address           = email_receiver.value
+      use_common_alert_schema = true
+    }
+  }
+}
+
+resource "azurerm_application_insights_standard_web_test" "availability" {
+  count                   = local.observability_enabled ? 1 : 0
+  name                    = local.availability_test_name
+  resource_group_name     = local.resource_group_name
+  location                = var.location
+  application_insights_id = azurerm_application_insights.observability[0].id
+  enabled                 = true
+  frequency               = local.availability_test_frequency
+  timeout                 = local.availability_test_timeout
+  retry_enabled           = true
+  geo_locations           = local.availability_test_geo_locations
+  description             = "OpenGeni production health check."
+  tags                    = local.tags
+
+  request {
+    url                              = local.availability_test_url
+    http_verb                        = "GET"
+    follow_redirects_enabled         = true
+    parse_dependent_requests_enabled = false
+  }
+
+  validation_rules {
+    expected_status_code        = 200
+    ssl_check_enabled           = true
+    ssl_cert_remaining_lifetime = 7
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "availability" {
+  count               = local.observability_enabled ? 1 : 0
+  name                = local.availability_alert_name
+  resource_group_name = local.resource_group_name
+  scopes = [
+    azurerm_application_insights_standard_web_test.availability[0].id,
+    azurerm_application_insights.observability[0].id,
+  ]
+  description              = "Alerts when the OpenGeni production availability test fails."
+  severity                 = local.availability_alert_severity
+  enabled                  = true
+  auto_mitigate            = true
+  frequency                = "PT1M"
+  window_size              = "PT5M"
+  target_resource_type     = "Microsoft.Insights/webtests"
+  target_resource_location = var.location
+  tags                     = local.tags
+
+  application_insights_web_test_location_availability_criteria {
+    web_test_id           = azurerm_application_insights_standard_web_test.availability[0].id
+    component_id          = azurerm_application_insights.observability[0].id
+    failed_location_count = local.availability_failed_locations
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.observability[0].id
+  }
 }
 
 resource "azurerm_postgresql_flexible_server" "this" {

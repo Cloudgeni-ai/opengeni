@@ -97,6 +97,23 @@ describe("deployment contract", () => {
     expect(outputs).toContain('output "dns_zone_contributor_assignments"');
   });
 
+  test("Azure Terraform models production observability and availability alerts", () => {
+    const variables = readFileSync(new URL("../../../deploy/terraform/azure/variables.tf", import.meta.url), "utf8");
+    const main = readFileSync(new URL("../../../deploy/terraform/azure/main.tf", import.meta.url), "utf8");
+    const outputs = readFileSync(new URL("../../../deploy/terraform/azure/outputs.tf", import.meta.url), "utf8");
+
+    expect(variables).toContain('variable "observability"');
+    expect(variables).toContain("observability.availability_test_url is required");
+    expect(variables).toContain("observability.alert_email_receivers must include at least one receiver");
+    expect(main).toContain('resource "azurerm_log_analytics_workspace" "observability"');
+    expect(main).toContain('resource "azurerm_application_insights" "observability"');
+    expect(main).toContain('resource "azurerm_application_insights_standard_web_test" "availability"');
+    expect(main).toContain('resource "azurerm_monitor_action_group" "observability"');
+    expect(main).toContain('resource "azurerm_monitor_metric_alert" "availability"');
+    expect(main).toContain("application_insights_web_test_location_availability_criteria");
+    expect(outputs).toContain('output "observability"');
+  });
+
   test("models AWS and GCP managed profiles with native object storage", () => {
     const aws = deploymentProfiles["aws-managed"];
     const gcp = deploymentProfiles["gcp-managed"];
