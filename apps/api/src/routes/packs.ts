@@ -10,6 +10,7 @@ import {
   enablePackInstallation,
   getCapabilityInstallation,
   getPackInstallation,
+  getWorkspacePack,
   getSocialConnection,
   listPackInstallations,
   listSocialConnections,
@@ -71,14 +72,13 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (isBuiltInCapabilityPack(packId)) {
       throw new HTTPException(409, { message: "built-in packs cannot be unregistered" });
     }
-    const deleted = await deleteWorkspacePack(db, workspaceId, packId);
-    if (!deleted) {
+    if (!await getWorkspacePack(db, workspaceId, packId)) {
       throw new HTTPException(404, { message: "pack not found" });
     }
-    // A registration that disappears must not leave an active installation
-    // pointing at a manifest that no longer exists; the capability
-    // installation row for pack:{packId} would otherwise keep a future
-    // re-registration looking enabled.
+    // Disable installations before deleting the registration so a crash in
+    // between can never orphan an active installation whose manifest is
+    // gone; the capability installation row for pack:{packId} would
+    // otherwise keep a future re-registration looking enabled.
     const installation = await getPackInstallation(db, workspaceId, packId);
     if (installation && installation.status === "active") {
       await updatePackInstallationStatus(db, workspaceId, packId, "disabled");
@@ -87,6 +87,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (capabilityInstallation && capabilityInstallation.status === "active") {
       await disableCapabilityInstallation(db, workspaceId, `pack:${packId}`);
     }
+    await deleteWorkspacePack(db, workspaceId, packId);
     return c.body(null, 204);
   });
 
