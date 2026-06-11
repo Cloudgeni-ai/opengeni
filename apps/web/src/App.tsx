@@ -34,7 +34,6 @@ import {
   WrenchIcon,
   XIcon,
 } from "lucide-react";
-import { isCentPrecisionUsdAmount } from "@opengeni/contracts/money";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 
@@ -1265,7 +1264,7 @@ function formatMoneyMicros(amountMicros: number, currency: string): string {
 
 function validTopupAmount(value: string): boolean {
   const amount = Number(value);
-  return amount >= 5 && amount <= 10_000 && isCentPrecisionUsdAmount(amount);
+  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
 }
 
 export function applySessionStatusEvents(session: Session, events: SessionEvent[]): Session {
