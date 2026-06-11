@@ -835,6 +835,9 @@ export const CapabilityPackScheduledTaskTemplate = z.object({
   defaultSchedule: ScheduledTaskScheduleSpec,
   defaultRunMode: ScheduledTaskRunMode.default("new_session_per_run"),
   defaultOverlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
+  // Optional default agent prompt so registered pack manifests can ship fully
+  // instantiable templates; built-in packs may instead build prompts in code.
+  prompt: z.string().min(1).optional(),
 });
 export type CapabilityPackScheduledTaskTemplate = z.infer<typeof CapabilityPackScheduledTaskTemplate>;
 
@@ -857,6 +860,20 @@ export const CapabilityPack = z.object({
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
 export type CapabilityPack = z.infer<typeof CapabilityPack>;
+
+// Registering a pack stores the manifest itself; the request body is a full
+// CapabilityPack manifest.
+export const RegisterCapabilityPackRequest = CapabilityPack;
+export type RegisterCapabilityPackRequest = z.infer<typeof RegisterCapabilityPackRequest>;
+
+export const WorkspaceRegisteredPack = z.object({
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  pack: CapabilityPack,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type WorkspaceRegisteredPack = z.infer<typeof WorkspaceRegisteredPack>;
 
 export const PackInstallationStatus = z.enum(["active", "disabled"]);
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;

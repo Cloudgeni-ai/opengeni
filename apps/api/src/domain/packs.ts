@@ -1,8 +1,9 @@
-import type {
+import {
   CapabilityPack,
-  ScheduledTaskAgentConfig,
-  SocialConnection,
+  type ScheduledTaskAgentConfig,
+  type SocialConnection,
 } from "@opengeni/contracts";
+import { getWorkspacePack, listWorkspacePacks, type Database } from "@opengeni/db";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -121,6 +122,41 @@ export function listCapabilityPacks(): CapabilityPack[] {
 
 export function getCapabilityPack(packId: string): CapabilityPack | null {
   return packs.find((pack) => pack.id === packId) ?? null;
+}
+
+export function isBuiltInCapabilityPack(packId: string): boolean {
+  return getCapabilityPack(packId) !== null;
+}
+
+/**
+ * Built-in packs plus the manifests registered for this workspace. Stored
+ * manifests were validated at registration time; rows that no longer parse
+ * (for example after a contract tightening) are skipped instead of breaking
+ * the whole catalog.
+ */
+export async function listWorkspaceCapabilityPacks(db: Database, workspaceId: string): Promise<CapabilityPack[]> {
+  const registered = await listWorkspacePacks(db, workspaceId);
+  const builtInIds = new Set(packs.map((pack) => pack.id));
+  const registeredPacks = registered
+    .filter((registration) => !builtInIds.has(registration.pack.id))
+    .flatMap((registration) => {
+      const parsed = CapabilityPack.safeParse(registration.pack);
+      return parsed.success ? [parsed.data] : [];
+    });
+  return [...packs, ...registeredPacks];
+}
+
+export async function resolveCapabilityPack(db: Database, workspaceId: string, packId: string): Promise<CapabilityPack | null> {
+  const builtIn = getCapabilityPack(packId);
+  if (builtIn) {
+    return builtIn;
+  }
+  const registration = await getWorkspacePack(db, workspaceId, packId);
+  if (!registration) {
+    return null;
+  }
+  const parsed = CapabilityPack.safeParse(registration.pack);
+  return parsed.success ? parsed.data : null;
 }
 
 export function buildMarketingDailyAnalysisAgentConfig(input: {

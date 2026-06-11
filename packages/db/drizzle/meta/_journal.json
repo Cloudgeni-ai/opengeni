@@ -43,6 +43,13 @@
       "when": 1781201800000,
       "tag": "0005_session_goals",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1781481600000,
+      "tag": "0006_workspace_packs",
+      "breakpoints": true
     }
   ]
 }

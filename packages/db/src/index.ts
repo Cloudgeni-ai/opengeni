@@ -7,6 +7,7 @@ import type {
   CapabilityInstallation,
   CapabilityInstallationStatus,
   CapabilityKind,
+  CapabilityPack,
   CapabilitySource,
   FileAsset,
   FileStatus,
@@ -46,6 +47,7 @@ import type {
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
@@ -869,6 +871,12 @@ export type CreatePackInstallationInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type RegisterWorkspacePackInput = {
+  accountId: string;
+  workspaceId: string;
+  pack: CapabilityPack;
+};
+
 export type CreateSocialConnectionInput = {
   accountId: string;
   workspaceId: string;
@@ -1134,6 +1142,57 @@ export async function updatePackInstallationStatus(db: Database, workspaceId: st
       throw new Error(`Pack installation not found: ${packId}`);
     }
     return mapPackInstallation(row);
+  });
+}
+
+export async function registerWorkspacePack(db: Database, input: RegisterWorkspacePackInput): Promise<{ pack: WorkspaceRegisteredPack; created: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    const [row] = await scopedDb.insert(schema.workspacePacks).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      packId: input.pack.id,
+      manifest: input.pack as unknown as Record<string, unknown>,
+    })
+      .onConflictDoUpdate({
+        target: [schema.workspacePacks.workspaceId, schema.workspacePacks.packId],
+        set: {
+          manifest: input.pack as unknown as Record<string, unknown>,
+          updatedAt: now,
+        },
+      })
+      .returning();
+    if (!row) {
+      throw new Error("Failed to register workspace pack");
+    }
+    return { pack: mapWorkspacePack(row), created: row.createdAt.getTime() === row.updatedAt.getTime() };
+  });
+}
+
+export async function listWorkspacePacks(db: Database, workspaceId: string): Promise<WorkspaceRegisteredPack[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.workspacePacks)
+      .where(eq(schema.workspacePacks.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspacePacks.packId));
+    return rows.map(mapWorkspacePack);
+  });
+}
+
+export async function getWorkspacePack(db: Database, workspaceId: string, packId: string): Promise<WorkspaceRegisteredPack | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.workspacePacks)
+      .where(and(eq(schema.workspacePacks.workspaceId, workspaceId), eq(schema.workspacePacks.packId, packId)))
+      .limit(1);
+    return row ? mapWorkspacePack(row) : null;
+  });
+}
+
+export async function deleteWorkspacePack(db: Database, workspaceId: string, packId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.workspacePacks)
+      .where(and(eq(schema.workspacePacks.workspaceId, workspaceId), eq(schema.workspacePacks.packId, packId)))
+      .returning({ id: schema.workspacePacks.id });
+    return rows.length > 0;
   });
 }
 
@@ -2787,6 +2846,18 @@ function mapPackInstallation(row: typeof schema.packInstallations.$inferSelect):
     status: row.status as PackInstallationStatus,
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapWorkspacePack(row: typeof schema.workspacePacks.$inferSelect): WorkspaceRegisteredPack {
+  return {
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    // Manifests are validated with the CapabilityPack contract at the API
+    // boundary before they are stored.
+    pack: row.manifest as unknown as CapabilityPack,
+    createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
 }

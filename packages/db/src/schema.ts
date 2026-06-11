@@ -437,6 +437,18 @@ export const packInstallations = pgTable("pack_installations", {
   status: index("pack_installations_workspace_status_idx").on(table.workspaceId, table.status),
 }));
 
+export const workspacePacks = pgTable("workspace_packs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  packId: text("pack_id").notNull(),
+  manifest: jsonb("manifest").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspacePack: uniqueIndex("workspace_packs_workspace_pack_idx").on(table.workspaceId, table.packId),
+}));
+
 export const capabilityCatalogItems = pgTable("capability_catalog_items", {
   id: text("id").notNull(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

@@ -17,6 +17,7 @@ import {
   enablePackInstallation,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
+  getPackInstallation,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
   listEnabledMcpCapabilityServers,
@@ -28,7 +29,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { getCapabilityPack, listCapabilityPacks } from "./packs";
+import { listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -45,17 +46,20 @@ export async function buildCapabilityCatalog(input: {
     persistedItems,
     capabilityInstallations,
     packInstallations,
+    workspacePacks,
     bundledSkills,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
+    listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     discoverBundledSkills(),
   ]);
   const capabilityInstallationById = new Map(capabilityInstallations.map((installation) => [installation.capabilityId, installation]));
   const activePackIds = new Set(packInstallations.filter((installation) => installation.status === "active").map((installation) => installation.packId));
+  const builtInPackIds = new Set(listCapabilityPacks().map((pack) => pack.id));
   const builtIns = [
-    ...packCatalogItems(),
+    ...workspacePacks.map((pack) => packCatalogItem(pack, builtInPackIds.has(pack.id) ? "built_in" : "manual")),
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(),
     ...bundledSkills,
@@ -126,9 +130,20 @@ export async function enableCapability(input: {
   }
   if (item.kind === "pack") {
     const packId = packIdFromCapabilityId(item.id);
-    const pack = getCapabilityPack(packId);
+    const pack = await resolveCapabilityPack(input.db, input.workspaceId, packId);
     if (!pack) {
       throw new HTTPException(404, { message: "pack not found" });
+    }
+    // This generic enable path carries no environment attachment, so packs
+    // that demand one must be enabled through the packs endpoint unless a
+    // previous enable already stored an attachment; a stored attachment is
+    // preserved instead of being overwritten by the fresh metadata.
+    const existing = await getPackInstallation(input.db, input.workspaceId, packId);
+    const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
+    if (pack.environment?.required && !storedEnvironmentId) {
+      throw new HTTPException(422, {
+        message: `pack ${packId} requires an environment attachment; enable it through /v1/workspaces/{workspaceId}/packs/${packId}/enable with environmentId`,
+      });
     }
     await enablePackInstallation(input.db, {
       accountId: input.accountId,
@@ -137,6 +152,7 @@ export async function enableCapability(input: {
       metadata: {
         ...input.payload.metadata,
         packVersion: pack.version,
+        ...(storedEnvironmentId ? { environmentId: storedEnvironmentId } : {}),
       },
     });
   }
@@ -364,11 +380,11 @@ async function requireCatalogItem(db: Database, workspaceId: string, settings: S
   return item;
 }
 
-function packCatalogItems(): CapabilityCatalogItem[] {
-  return listCapabilityPacks().map((pack) => CapabilityCatalogItem.parse({
+function packCatalogItem(pack: ReturnType<typeof listCapabilityPacks>[number], source: "built_in" | "manual"): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
     id: `pack:${pack.id}`,
     kind: "pack",
-    source: "built_in",
+    source,
     name: pack.name,
     description: pack.description,
     category: pack.category,
@@ -386,7 +402,7 @@ function packCatalogItems(): CapabilityCatalogItem[] {
       scheduledTaskTemplates: pack.scheduledTaskTemplates,
       ...pack.metadata,
     },
-  }));
+  });
 }
 
 function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] {
@@ -526,15 +542,21 @@ function applyCapabilityEnablement(
   installation: CapabilityInstallation | undefined,
   activePackIds: Set<string>,
 ): CapabilityCatalogItem {
-  if (item.source === "built_in" || item.source === "configured") {
-    const packEnabled = item.kind === "pack" && activePackIds.has(packIdFromCapabilityId(item.id));
-    const enabled = item.kind === "pack" ? packEnabled || installation?.status === "active" : true;
+  if (item.kind === "pack") {
+    // Pack enablement lives in pack_installations regardless of whether the
+    // pack is built in or registered from a workspace manifest.
+    const enabled = activePackIds.has(packIdFromCapabilityId(item.id)) || installation?.status === "active";
     return {
       ...item,
       enabled,
-      enabledReason: enabled
-        ? item.kind === "pack" ? "enabled" : item.source === "configured" ? "configured" : "built in"
-      : null,
+      enabledReason: enabled ? "enabled" : null,
+    };
+  }
+  if (item.source === "built_in" || item.source === "configured") {
+    return {
+      ...item,
+      enabled: true,
+      enabledReason: item.source === "configured" ? "configured" : "built in",
     };
   }
   const activeInstallation = installation?.status === "active";

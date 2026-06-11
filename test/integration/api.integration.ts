@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getPackInstallation, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -1490,6 +1490,152 @@ describe("API component integration", () => {
     expect(task.agentConfig.metadata.socialConnectionIds).toEqual([activeConnection.id]);
     expect(task.metadata.socialConnectionIds).not.toContain(disabledConnection.id);
     expect(workflow.synced).toHaveLength(1);
+  });
+
+  test("registers workspace packs from manifests and installs them", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: environmentsTestKey }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const packId = `infra-test-${crypto.randomUUID().slice(0, 8)}`;
+    const manifest = {
+      id: packId,
+      name: "Infra test pack",
+      description: "Registered from a manifest payload in tests.",
+      role: "infrastructure",
+      category: "deployment",
+      version: "0.1.0",
+      scheduledTaskTemplates: [
+        {
+          id: "drift-daily",
+          name: "Daily drift check",
+          description: "Compare expected state against live state.",
+          defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 6, minute: 0 },
+          defaultRunMode: "new_session_per_run",
+          defaultOverlapPolicy: "skip",
+          prompt: "Run the daily drift check.",
+        },
+      ],
+      environment: {
+        description: "Cloud credentials for substrate work.",
+        requiredVariables: ["CLOUD_TOKEN"],
+        required: true,
+      },
+    };
+
+    const registered = await app.request(workspacePath(workspaceId, "/packs"), {
+      method: "POST",
+      body: JSON.stringify(manifest),
+      headers: { "content-type": "application/json" },
+    });
+    expect(registered.status).toBe(201);
+    const registeredBody = await registered.json() as { pack: { id: string; scheduledTaskTemplates: Array<{ prompt?: string }> } };
+    expect(registeredBody.pack.id).toBe(packId);
+    expect(registeredBody.pack.scheduledTaskTemplates[0]?.prompt).toBe("Run the daily drift check.");
+
+    const replaced = await app.request(workspacePath(workspaceId, "/packs"), {
+      method: "POST",
+      body: JSON.stringify({ ...manifest, version: "0.1.1" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(replaced.status).toBe(200);
+
+    const builtInCollision = await app.request(workspacePath(workspaceId, "/packs"), {
+      method: "POST",
+      body: JSON.stringify({ ...manifest, id: "marketing-social-daily-analysis" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(builtInCollision.status).toBe(409);
+
+    const listed = await app.request(workspacePath(workspaceId, "/packs"));
+    expect(listed.status).toBe(200);
+    const listedBody = await listed.json() as { packs: Array<{ id: string; version: string }> };
+    expect(listedBody.packs.map((pack) => pack.id)).toContain(packId);
+    expect(listedBody.packs.find((pack) => pack.id === packId)?.version).toBe("0.1.1");
+
+    const enabledWithoutEnvironment = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabledWithoutEnvironment.status).toBe(422);
+
+    const environmentResponse = await app.request(workspacePath(workspaceId, "/environments"), {
+      method: "POST",
+      body: JSON.stringify({
+        name: `cloud-${crypto.randomUUID().slice(0, 8)}`,
+        variables: [{ name: "OTHER_TOKEN", value: "value-1" }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(environmentResponse.status).toBe(201);
+    const environment = await environmentResponse.json() as { id: string };
+
+    const enabledMissingVariable = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
+      method: "POST",
+      body: JSON.stringify({ environmentId: environment.id }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabledMissingVariable.status).toBe(422);
+    expect(await enabledMissingVariable.text()).toContain("CLOUD_TOKEN");
+
+    const capabilityEnableWithoutAttachment = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnableWithoutAttachment.status).toBe(422);
+
+    const setVariable = await app.request(workspacePath(workspaceId, `/environments/${environment.id}/variables/CLOUD_TOKEN`), {
+      method: "PUT",
+      body: JSON.stringify({ value: "cloud-token-value" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(setVariable.status).toBeLessThan(300);
+
+    const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
+      method: "POST",
+      body: JSON.stringify({ environmentId: environment.id }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabled.status).toBe(201);
+    const installation = await enabled.json() as { status: string; metadata: Record<string, unknown> };
+    expect(installation.status).toBe("active");
+    expect(installation.metadata.packVersion).toBe("0.1.1");
+    expect(installation.metadata.environmentId).toBe(environment.id);
+
+    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
+    expect(catalogResponse.status).toBe(200);
+    const catalog = await catalogResponse.json() as { items: Array<{ id: string; kind: string; source: string; enabled: boolean }> };
+    expect(catalog.items.find((item) => item.id === `pack:${packId}`)).toMatchObject({
+      kind: "pack",
+      source: "manual",
+      enabled: true,
+    });
+
+    // Re-enabling through the generic capabilities path keeps the stored
+    // environment attachment instead of overwriting it.
+    const capabilityEnable = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnable.status).toBe(201);
+    const installationAfterCapabilityEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
+    expect(installationAfterCapabilityEnable?.metadata.environmentId).toBe(environment.id);
+
+    const deletedBuiltIn = await app.request(workspacePath(workspaceId, "/packs/marketing-social-daily-analysis"), { method: "DELETE" });
+    expect(deletedBuiltIn.status).toBe(409);
+
+    const deleted = await app.request(workspacePath(workspaceId, `/packs/${packId}`), { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+    const missing = await app.request(workspacePath(workspaceId, `/packs/${packId}`));
+    expect(missing.status).toBe(404);
+    const installationAfterDelete = await getPackInstallation(dbClient.db, workspaceId, packId);
+    expect(installationAfterDelete?.status).toBe("disabled");
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
