@@ -1264,7 +1264,7 @@ function formatMoneyMicros(amountMicros: number, currency: string): string {
 
 function validTopupAmount(value: string): boolean {
   const amount = Number(value);
-  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.round(amount * 100) === amount * 100;
+  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
 }
 
 export function applySessionStatusEvents(session: Session, events: SessionEvent[]): Session {
