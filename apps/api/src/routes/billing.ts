@@ -58,7 +58,11 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "stripe billing is not enabled" });
     }
     const context = await requireAccessContext(c, deps);
-    const body = CreateCheckoutRequest.parse(await c.req.json());
+    const parsed = CreateCheckoutRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "invalid checkout request" });
+    }
+    const body = parsed.data;
     const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
     const amountCents = usdToCents(body.amountUsd);
     const amountMicros = centsToMicros(amountCents);
