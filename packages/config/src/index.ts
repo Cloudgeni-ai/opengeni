@@ -170,6 +170,7 @@ const SettingsSchema = z.object({
   stripeSecretKey: z.string().optional(),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
+  stripeCreditsProductId: z.string().optional(),
   mcpServers: z.array(z.object({
     id: z.string().min(1).regex(registryId),
     name: z.string().min(1).optional(),
@@ -384,6 +385,7 @@ export function getSettings(): Settings {
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
+    stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);

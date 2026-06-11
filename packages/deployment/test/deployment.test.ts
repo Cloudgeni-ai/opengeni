@@ -368,6 +368,7 @@ describe("deployment contract", () => {
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
+    expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");
     expect(vars).toContain("OPENGENI_MODEL_PRICING_JSON");
     expect(vars).toContain("OPENGENI_MODAL_TOKEN_SECRET");
     expect(vars).not.toContain("OPENGENI_STATIC_USAGE_LIMITS_JSON");
@@ -394,6 +395,7 @@ describe("deployment contract", () => {
       OPENGENI_STRIPE_SECRET_KEY: "sk_test",
       OPENGENI_STRIPE_PUBLISHABLE_KEY: "pk_test",
       OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+      OPENGENI_STRIPE_CREDITS_PRODUCT_ID: "prod_test_credits",
       OPENGENI_MODEL_PRICING_JSON: "{\"gpt-5.5\":{\"inputMicrosPerMillionTokens\":5000000,\"cachedInputMicrosPerMillionTokens\":500000,\"outputMicrosPerMillionTokens\":30000000,\"marginBps\":2500}}",
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_OPENAI_MODEL: "gpt-5.5",
@@ -463,6 +465,7 @@ describe("deployment contract", () => {
       OPENGENI_STRIPE_SECRET_KEY: "sk_test",
       OPENGENI_STRIPE_PUBLISHABLE_KEY: "pk_test",
       OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+      OPENGENI_STRIPE_CREDITS_PRODUCT_ID: "prod_test_credits",
       OPENGENI_MODEL_PRICING_JSON: "{\"gpt-5.5\":{\"inputMicrosPerMillionTokens\":5000000,\"cachedInputMicrosPerMillionTokens\":500000,\"outputMicrosPerMillionTokens\":30000000,\"marginBps\":2500}}",
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_OPENAI_MODEL: "gpt-5.5",
@@ -489,6 +492,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_APP_SLUG=opengeni-ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_SECRET_KEY=sk_test");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID=prod_test_credits");
     expect(artifacts.helmValuesYaml).toContain("OPENGENI_WEB_ALLOWED_HOSTS: \"app.opengeni.ai\"");
     expect(artifacts.helmValuesYaml).toContain("tag: \"release-prod\"");
     expect(artifacts.helmValuesYaml).toContain("digest: \"sha256:api\"");
@@ -528,6 +532,7 @@ describe("deployment contract", () => {
       OPENGENI_STRIPE_SECRET_KEY: "sk_test",
       OPENGENI_STRIPE_PUBLISHABLE_KEY: "pk_test",
       OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+      OPENGENI_STRIPE_CREDITS_PRODUCT_ID: "prod_test_credits",
       OPENGENI_MODEL_PRICING_JSON: "{\"gpt-5.5\":{\"inputMicrosPerMillionTokens\":5000000,\"cachedInputMicrosPerMillionTokens\":500000,\"outputMicrosPerMillionTokens\":30000000,\"marginBps\":2500}}",
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_OPENAI_MODEL: "gpt-5.5",
@@ -570,6 +575,7 @@ describe("deployment contract", () => {
       OPENGENI_STRIPE_SECRET_KEY: "sk_test",
       OPENGENI_STRIPE_PUBLISHABLE_KEY: "pk_test",
       OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
+      OPENGENI_STRIPE_CREDITS_PRODUCT_ID: "prod_test_credits",
       OPENGENI_MODEL_PRICING_JSON: "{\"gpt-5.5\":{\"inputMicrosPerMillionTokens\":5000000,\"cachedInputMicrosPerMillionTokens\":500000,\"outputMicrosPerMillionTokens\":30000000,\"marginBps\":2500}}",
       OPENGENI_OPENAI_PROVIDER: "azure",
       OPENGENI_OPENAI_MODEL: "gpt-5.5",

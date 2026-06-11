@@ -310,7 +310,9 @@ export type BillingBalance = z.infer<typeof BillingBalance>;
 
 export const CreateCheckoutRequest = z.object({
   accountId: z.string().uuid().optional(),
-  packageId: z.enum(["topup_25", "topup_100", "topup_500", "topup_1000"]),
+  amountUsd: z.number().min(5).max(10_000).refine((value) => Number.isFinite(value) && Math.round(value * 100) === value * 100, {
+    message: "amountUsd must use cent precision",
+  }),
   successUrl: z.string().url().optional(),
   cancelUrl: z.string().url().optional(),
 });

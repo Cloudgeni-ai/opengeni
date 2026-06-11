@@ -649,10 +649,10 @@ export function fetchBilling(accountId?: string): Promise<{ balance: BillingBala
   return request<{ balance: BillingBalance; mode: string }>(`/v1/billing${query}`);
 }
 
-export function createBillingCheckout(packageId: string, accountId?: string): Promise<{ url: string; checkoutSessionId: string }> {
+export function createBillingCheckout(amountUsd: number, accountId?: string): Promise<{ url: string; checkoutSessionId: string }> {
   return request<{ url: string; checkoutSessionId: string }>("/v1/billing/checkout", {
     method: "POST",
-    body: JSON.stringify({ packageId, accountId }),
+    body: JSON.stringify({ amountUsd, accountId }),
   });
 }
 

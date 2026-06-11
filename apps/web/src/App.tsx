@@ -1046,6 +1046,7 @@ function AccountConsole(props: {
   const [apiKeyName, setApiKeyName] = useState("Default API key");
   const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(() => new Set(defaultApiKeyPermissions));
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
   const canManageApiKeys = hasWorkspacePermission(props.accessContext, props.workspaceId, "api_keys:manage");
   const canManageBilling = hasAccountPermission(props.accessContext, props.accountId, "billing:manage");
@@ -1100,10 +1101,10 @@ function AccountConsole(props: {
     }
   }
 
-  async function startCheckout(packageId: string) {
+  async function startCheckout(amountUsd: number) {
     setBusy(true);
     try {
-      const checkout = await createBillingCheckout(packageId, props.accountId || undefined);
+      const checkout = await createBillingCheckout(amountUsd, props.accountId || undefined);
       window.location.assign(checkout.url);
     } catch (error) {
       toast.error("Checkout failed", { description: error instanceof Error ? error.message : String(error) });
@@ -1154,12 +1155,32 @@ function AccountConsole(props: {
           </span>
         </div>
         {billing?.mode === "stripe" && canManageBilling ? (
-          <div className="flex flex-wrap gap-2">
-            {(["topup_25", "topup_100", "topup_500", "topup_1000"] as const).map((packageId) => (
-              <Button key={packageId} type="button" variant="secondary" size="sm" disabled={busy} onClick={() => void startCheckout(packageId)}>
-                {topupLabel(packageId)}
+          <div className="grid gap-2">
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <label className="grid gap-1">
+                <span className="sr-only">Credit amount</span>
+                <input
+                  className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 text-sm outline-none focus:border-[color:var(--color-fg-muted)]"
+                  inputMode="decimal"
+                  min="5"
+                  max="10000"
+                  step="0.01"
+                  value={topupAmount}
+                  onChange={(event) => setTopupAmount(event.target.value)}
+                />
+              </label>
+              <Button type="button" variant="secondary" size="sm" disabled={busy || !validTopupAmount(topupAmount)} onClick={() => void startCheckout(Number(topupAmount))}>
+                Add credits
               </Button>
-            ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[25, 100, 500, 1000].map((amount) => (
+                <Button key={amount} type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setTopupAmount(amount.toFixed(2))}>
+                  {formatMoneyMicros(amount * 1_000_000, "usd")}
+                </Button>
+              ))}
+            </div>
+            <p className="text-xs text-[color:var(--color-fg-subtle)]">Minimum top-up is $5.00.</p>
           </div>
         ) : (
           <p className="text-xs text-[color:var(--color-fg-subtle)]">Credit checkout is available when Stripe billing is enabled for this deployment.</p>
@@ -1241,11 +1262,9 @@ function formatMoneyMicros(amountMicros: number, currency: string): string {
   }).format(amountMicros / 1_000_000);
 }
 
-function topupLabel(packageId: "topup_25" | "topup_100" | "topup_500" | "topup_1000"): string {
-  if (packageId === "topup_25") return "$25";
-  if (packageId === "topup_100") return "$100";
-  if (packageId === "topup_500") return "$500";
-  return "$1,000";
+function validTopupAmount(value: string): boolean {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.round(amount * 100) === amount * 100;
 }
 
 export function applySessionStatusEvents(session: Session, events: SessionEvent[]): Session {

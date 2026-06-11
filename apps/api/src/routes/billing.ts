@@ -23,13 +23,6 @@ import Stripe from "stripe";
 import { requireAccessContext } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
 
-const topups = {
-  topup_25: { label: "$25 OpenGeni credits", amountMicros: 25_000_000 },
-  topup_100: { label: "$100 OpenGeni credits", amountMicros: 100_000_000 },
-  topup_500: { label: "$500 OpenGeni credits", amountMicros: 500_000_000 },
-  topup_1000: { label: "$1,000 OpenGeni credits", amountMicros: 1_000_000_000 },
-} as const;
-
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing", async (c) => {
     const context = await requireAccessContext(c, deps);
@@ -67,16 +60,17 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
     const context = await requireAccessContext(c, deps);
     const body = CreateCheckoutRequest.parse(await c.req.json());
     const accountId = requireSelectedAccount(context, body.accountId, "billing:manage");
-    const packageConfig = topups[body.packageId];
+    const amountCents = usdToCents(body.amountUsd);
+    const amountMicros = centsToMicros(amountCents);
     const stripe = stripeClient(deps);
     const customerId = await getOrCreateStripeCustomer(deps, stripe, context, accountId);
-    const idempotencyKey = `checkout:${accountId}:${body.packageId}:${crypto.randomUUID()}`;
+    const idempotencyKey = `checkout:${accountId}:${amountMicros}:${crypto.randomUUID()}`;
     const session = await stripe.checkout.sessions.create(stripeCheckoutSessionCreateParams({
       accountId,
       customerId,
-      packageId: body.packageId,
-      packageLabel: packageConfig.label,
-      amountMicros: packageConfig.amountMicros,
+      amountCents,
+      amountMicros,
+      creditsProductId: deps.settings.stripeCreditsProductId,
       publicBaseUrl: deps.settings.publicBaseUrl,
       successUrl: body.successUrl,
       cancelUrl: body.cancelUrl,
@@ -130,9 +124,9 @@ export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
 export function stripeCheckoutSessionCreateParams(input: {
   accountId: string;
   customerId: string;
-  packageId: keyof typeof topups;
-  packageLabel: string;
+  amountCents: number;
   amountMicros: number;
+  creditsProductId?: string | undefined;
   publicBaseUrl?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
@@ -155,25 +149,30 @@ export function stripeCheckoutSessionCreateParams(input: {
       quantity: 1,
       price_data: {
         currency: "usd",
-        unit_amount: microsToCents(input.amountMicros),
-        product_data: {
-          name: input.packageLabel,
-          metadata: {
-            opengeni_package_id: input.packageId,
-          },
-        },
+        unit_amount: input.amountCents,
+        ...(input.creditsProductId
+          ? { product: input.creditsProductId }
+          : {
+            product_data: {
+              name: "OpenGeni credits",
+              metadata: {
+                app: "opengeni",
+                billing_model: "prepaid_credits",
+              },
+            },
+          }),
       },
     }],
     metadata: {
       opengeni_account_id: input.accountId,
-      opengeni_package_id: input.packageId,
+      opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
       opengeni_credit_micros: String(input.amountMicros),
       opengeni_credit_idempotency_key: input.idempotencyKey,
     },
     payment_intent_data: {
       metadata: {
         opengeni_account_id: input.accountId,
-        opengeni_package_id: input.packageId,
+        opengeni_credit_amount_usd: (input.amountCents / 100).toFixed(2),
         opengeni_credit_micros: String(input.amountMicros),
         opengeni_credit_idempotency_key: input.idempotencyKey,
       },
@@ -261,6 +260,7 @@ async function handleCheckoutSessionCompleted(deps: ApiRouteDeps, event: Stripe.
       stripeEventId: event.id,
       stripePaymentIntentId: typeof session.payment_intent === "string" ? session.payment_intent : session.payment_intent?.id ?? null,
       stripePackageId: credit.packageId,
+      stripeCreditAmountUsd: credit.amountUsd,
     },
   });
 }
@@ -392,6 +392,7 @@ function creditMetadata(metadata: Stripe.Metadata | null | undefined, label: str
   accountId: string;
   amountMicros: number;
   idempotencyKey: string;
+  amountUsd?: string;
   packageId?: string;
 } {
   const accountId = metadata?.opengeni_account_id;
@@ -404,6 +405,7 @@ function creditMetadata(metadata: Stripe.Metadata | null | undefined, label: str
     accountId,
     amountMicros,
     idempotencyKey,
+    ...(metadata?.opengeni_credit_amount_usd ? { amountUsd: metadata.opengeni_credit_amount_usd } : {}),
     ...(metadata?.opengeni_package_id ? { packageId: metadata.opengeni_package_id } : {}),
   };
 }
@@ -451,12 +453,12 @@ function stripeClient(deps: ApiRouteDeps): Stripe {
   return new Stripe(deps.settings.stripeSecretKey);
 }
 
-function microsToCents(micros: number): number {
-  return Math.round(micros / 10_000);
-}
-
 function centsToMicros(cents: number): number {
   return cents * 10_000;
+}
+
+function usdToCents(amountUsd: number): number {
+  return Math.round(amountUsd * 100);
 }
 
 function paymentIntentId(value: string | Stripe.PaymentIntent | null | undefined): string | null {

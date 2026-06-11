@@ -94,9 +94,12 @@ describe("contracts", () => {
   });
 
   test("accepts checkout requests that use the caller default account", () => {
-    const payload = CreateCheckoutRequest.parse({ packageId: "topup_25" });
-    expect(payload.packageId).toBe("topup_25");
+    const payload = CreateCheckoutRequest.parse({ amountUsd: 25.50 });
+    expect(payload.amountUsd).toBe(25.50);
     expect(payload.accountId).toBeUndefined();
+    expect(CreateCheckoutRequest.parse({ amountUsd: 5 }).amountUsd).toBe(5);
+    expect(() => CreateCheckoutRequest.parse({ amountUsd: 4.99 })).toThrow();
+    expect(() => CreateCheckoutRequest.parse({ amountUsd: 5.001 })).toThrow();
   });
 
   test("accepts structured scheduled task definitions", () => {

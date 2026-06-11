@@ -159,9 +159,9 @@ describe("API helpers", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
       customerId: "cus_test",
-      packageId: "topup_25",
-      packageLabel: "$25 OpenGeni credits",
-      amountMicros: 25_000_000,
+      amountCents: 2550,
+      amountMicros: 25_500_000,
+      creditsProductId: "prod_opengeni_credits",
       publicBaseUrl: "https://app.opengeni.ai",
       idempotencyKey: "checkout:test",
     });
@@ -170,7 +170,9 @@ describe("API helpers", () => {
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
-    expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(2500);
+    expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(2550);
+    expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
+    expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
     expect(params.metadata?.opengeni_credit_idempotency_key).toBe("checkout:test");
     expect(params.payment_intent_data?.metadata?.opengeni_account_id).toBe("00000000-0000-4000-8000-000000000001");
   });
@@ -179,8 +181,7 @@ describe("API helpers", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
       customerId: "cus_test",
-      packageId: "topup_25",
-      packageLabel: "$25 OpenGeni credits",
+      amountCents: 2500,
       amountMicros: 25_000_000,
       publicBaseUrl: "https://app.opengeni.ai",
       successUrl: "https://app.opengeni.ai/billing?checkout=success&source=test",
@@ -193,8 +194,7 @@ describe("API helpers", () => {
     expect(() => stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
       customerId: "cus_test",
-      packageId: "topup_25",
-      packageLabel: "$25 OpenGeni credits",
+      amountCents: 2500,
       amountMicros: 25_000_000,
       publicBaseUrl: "https://app.opengeni.ai",
       successUrl: "https://evil.example/checkout",
