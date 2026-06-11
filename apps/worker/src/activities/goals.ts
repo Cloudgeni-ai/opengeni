@@ -62,6 +62,16 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       return { action: "paused" };
     }
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // Stop/continue race guard: a concurrent goal_complete/goal_pause/operator
+    // PATCH between the locked decision and this synthesis must win. The
+    // version check also catches a replace. A pause landing after this point
+    // results in at most one already-admitted continuation turn; the next
+    // pass sees the non-active goal and stops, and interrupt-driven pauses
+    // additionally cancel the claimed turn via the workflow interrupt path.
+    const recheck = await getSessionGoal(db, input.workspaceId, input.sessionId);
+    if (!recheck || recheck.status !== "active" || recheck.version !== decision.goal.version) {
+      return { action: "none" };
+    }
     const prompt = goalContinuationPrompt(decision.goal, decision.autoContinuation, decision.cap);
     const [continuationEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
       type: "goal.continuation",
