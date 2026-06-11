@@ -33,6 +33,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
     agentMaxModelCallsPerTurn: 40,
+    sessionHistorySource: "run_state",
     betterAuthSecret: undefined,
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,

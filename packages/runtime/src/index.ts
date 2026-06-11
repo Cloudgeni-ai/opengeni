@@ -100,7 +100,16 @@ export function ensureReadableStreamFrom(): void {
 }
 
 export type AgentSegmentInput =
-  | { kind: "message"; text: string; serializedRunState?: string | null }
+  | {
+    kind: "message";
+    text: string;
+    serializedRunState?: string | null;
+    // Items-mode conversation truth (issue #35): when provided, turn input is
+    // built from these verbatim AgentInputItems and the stored sandbox
+    // envelope — no RunState deserialization, no SDK-version coupling.
+    historyItems?: AgentInputItem[] | null;
+    sandboxEnvelope?: Record<string, unknown> | null;
+  }
   | { kind: "approval"; serializedRunState: string; approvalId: string; decision: "approve" | "reject"; message?: string };
 
 export type PreparedAgentInput = {
@@ -585,6 +594,25 @@ export type PrepareInputOptions = {
 
 export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmentInput, options: PrepareInputOptions = {}): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
+    if (input.historyItems && input.historyItems.length > 0) {
+      // Items mode: conversation truth comes from the database, the sandbox
+      // recovery descriptor from its own store. The RunState blob is not
+      // touched at all on this path.
+      const sandboxSessionState = input.sandboxEnvelope
+        ? await restoredSandboxSessionStateFromEntry(input.sandboxEnvelope, options.sandboxClient)
+        : undefined;
+      return {
+        input: [
+          ...input.historyItems,
+          {
+            type: "message",
+            role: "user",
+            content: input.text,
+          } as AgentInputItem,
+        ],
+        ...(sandboxSessionState ? { sandboxSessionState } : {}),
+      };
+    }
     if (!input.serializedRunState) {
       return { input: input.text };
     }
@@ -1269,6 +1297,46 @@ async function restoredSandboxSessionState(state: RunState<any, any>, client: un
   }
   if ((client as SandboxClient).backendId !== entry.backendId) {
     throw new Error("RunState sandbox backend does not match the configured sandbox client");
+  }
+  return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
+}
+
+/**
+ * Extract the sandbox recovery entry from a run state as a plain JSON record,
+ * for storage decoupled from the RunState blob (issue #35). Encapsulates the
+ * underscore-internal `_sandbox` read in exactly one place.
+ */
+export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
+  const sandboxState = (state as any)?._sandbox;
+  if (!sandboxState) {
+    return null;
+  }
+  const entry = sandboxState.sessionsByAgent?.[sandboxState.currentAgentKey]
+    ?? (sandboxState.currentAgentKey && sandboxState.sessionState
+      ? {
+        backendId: sandboxState.backendId,
+        currentAgentKey: sandboxState.currentAgentKey,
+        currentAgentName: sandboxState.currentAgentName,
+        sessionState: sandboxState.sessionState,
+      }
+      : null);
+  if (!entry || !entry.sessionState) {
+    return null;
+  }
+  return entry as Record<string, unknown>;
+}
+
+/**
+ * Items-mode counterpart of restoredSandboxSessionState: rebuild the live
+ * sandbox session state from a stored entry (as produced by
+ * sandboxStateEntryFromRunState) instead of from a RunState blob.
+ */
+export async function restoredSandboxSessionStateFromEntry(entry: Record<string, unknown>, client: unknown): Promise<SandboxSessionState | undefined> {
+  if (!client || !entry || typeof entry !== "object" || !("sessionState" in entry)) {
+    return undefined;
+  }
+  if (entry.backendId && (client as SandboxClient).backendId !== entry.backendId) {
+    throw new Error("Stored sandbox envelope backend does not match the configured sandbox client");
   }
   return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
 }

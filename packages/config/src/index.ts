@@ -95,6 +95,12 @@ const SettingsSchema = z.object({
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
+  // Where turn-input conversation history comes from (issue #35):
+  // "run_state" = legacy serialized RunState blob; "items" = the
+  // session_history_items table (SDK-native, version-stable). Items and the
+  // sandbox envelope are dual-written unconditionally; this flag governs the
+  // read path only, so flipping (and flipping back) is safe at any time.
+  sessionHistorySource: z.enum(["run_state", "items"]).default("run_state"),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -315,6 +321,7 @@ export function getSettings(): Settings {
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
+    sessionHistorySource: optional("OPENGENI_SESSION_HISTORY_SOURCE"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
