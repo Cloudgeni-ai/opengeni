@@ -2186,7 +2186,7 @@ export type GoalContinuationDecision =
   | { decision: "none" }
   | { decision: "queue" }
   | { decision: "paused"; reason: "no_progress" | "max_auto_continuations" | "limits"; goal: SessionGoal }
-  | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number };
+  | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number | null };
 
 /**
  * Core continuation decision, taken in one transaction with the goal row
@@ -2199,7 +2199,9 @@ export type GoalContinuationDecision =
 export async function evaluateGoalContinuation(db: Database, input: {
   workspaceId: string;
   sessionId: string;
-  defaultMaxAutoContinuations: number;
+  // Optional: when absent (the default posture) goals are uncapped and length
+  // is governed by the no-progress and budget guards only.
+  defaultMaxAutoContinuations?: number | null;
   noProgressLimit: number;
   // Caller-computed billing/limits block reason. Applied inside the locked
   // decision (before the counter bump) so a budget pause never consumes
@@ -2288,9 +2290,13 @@ export async function evaluateGoalContinuation(db: Database, input: {
       }).where(eq(schema.sessionGoals.id, row.id)).returning();
       return { decision: "paused", reason: "no_progress", goal: mapSessionGoal(paused!) } as const;
     }
-    // The configured default is a hard ceiling; per-goal overrides only lower it.
-    const cap = Math.min(row.maxAutoContinuations ?? input.defaultMaxAutoContinuations, input.defaultMaxAutoContinuations);
-    if (autoContinuations >= cap) {
+    // No configured default means uncapped: goal length is bounded by the
+    // no-progress and budget guards above, never by count. When a default is
+    // configured it is a hard ceiling; per-goal overrides can only lower it.
+    const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations]
+      .filter((value): value is number => typeof value === "number");
+    const cap = capCandidates.length > 0 ? Math.min(...capCandidates) : null;
+    if (cap !== null && autoContinuations >= cap) {
       const [paused] = await tx.update(schema.sessionGoals).set({
         status: "paused",
         pausedReason: "max_auto_continuations",

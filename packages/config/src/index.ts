@@ -83,16 +83,18 @@ const SettingsSchema = z.object({
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
   environmentsEncryptionKey: z.string().optional(),
-  // Session goal guard rails: the hard ceiling on synthesized continuation
-  // turns per goal arming, and the consecutive zero-progress continuations
-  // tolerated before the goal auto-pauses.
-  goalMaxAutoContinuations: z.coerce.number().int().positive().default(20),
+  // Session goal guard rails. Goals are designed for runs that legitimately
+  // span days, so length is bounded by pathology detection (no-progress
+  // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
+  // therefore UNSET by default (no cap); deployments may configure one, and
+  // it then acts as a hard ceiling that per-goal overrides can only lower.
+  goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
   goalNoProgressLimit: z.coerce.number().int().positive().default(3),
   // Per-segment ceiling on agent loop turns (model calls) within a single
-  // session turn. Exceeding it ends the segment gracefully (the session goes
-  // idle and an active goal continues via a synthesized continuation turn);
-  // it is a pacing valve, not a session failure.
-  agentMaxTurnsPerSegment: z.coerce.number().int().positive().default(40),
+  // session turn. Effectively unbounded by default for the same reason as
+  // above; the graceful max-turns valve (idle + goal continuation, never a
+  // session failure) remains as inert safety should a deployment set a cap.
+  agentMaxTurnsPerSegment: z.coerce.number().int().positive().default(1_000_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),

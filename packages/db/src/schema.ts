@@ -247,7 +247,7 @@ export const sessionGoals = pgTable("session_goals", {
   version: integer("version").notNull().default(1), // bumped on every set/update; progress signal
   autoContinuations: integer("auto_continuations").notNull().default(0),
   noProgressStreak: integer("no_progress_streak").notNull().default(0),
-  maxAutoContinuations: integer("max_auto_continuations"), // per-goal override, clamped to the settings cap
+  maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
   lastContinuationTurnId: uuid("last_continuation_turn_id"),
   versionAtLastContinuation: integer("version_at_last_continuation"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

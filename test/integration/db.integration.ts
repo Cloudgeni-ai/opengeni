@@ -427,6 +427,75 @@ describe("DB integration", () => {
     }
   });
 
+  test("goals are uncapped by count when no default cap is configured", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "multi-day goal",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // No deployment default: length is governed by progress/budget guards only.
+    const guards = { defaultMaxAutoContinuations: null, noProgressLimit: 2 };
+    const enqueueGoalTurn = async () => {
+      const [goalTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "goal.continuation", payload: { text: "continue" } }]);
+      return await enqueueSessionTurn(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: goalTrigger!.id,
+        temporalWorkflowId: "wf-goal-uncapped",
+        source: "goal",
+        prompt: "continue",
+        resources: [],
+        tools: [],
+        model: "scripted-model",
+        reasoningEffort: "low",
+        sandboxBackend: "none",
+        metadata: {},
+      });
+    };
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "keep going for days",
+      createdBy: "api",
+    });
+    // Run well past the old default cap of 20; with progress every round the
+    // loop must keep continuing, with a null cap throughout.
+    let decision = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(decision).toMatchObject({ decision: "continue", autoContinuation: 1, cap: null });
+    for (let round = 2; round <= 25; round += 1) {
+      const turn = await enqueueGoalTurn();
+      await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, turn.id);
+      await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "agent.toolCall.created", turnId: turn.id, payload: {} }]);
+      await finishTurn(dbClient.db, grant.workspaceId, turn.id, "completed");
+      decision = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+      expect(decision).toMatchObject({ decision: "continue", autoContinuation: round, cap: null });
+    }
+    // A per-goal cap still applies on its own, without any deployment default.
+    await upsertSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "bounded push",
+      maxAutoContinuations: 1,
+      createdBy: "agent",
+    });
+    const bounded = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(bounded).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
+    const boundedTurn = await enqueueGoalTurn();
+    await setSessionGoalLastContinuationTurn(dbClient.db, grant.workspaceId, session.id, boundedTurn.id);
+    await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [{ type: "agent.toolCall.created", turnId: boundedTurn.id, payload: {} }]);
+    await finishTurn(dbClient.db, grant.workspaceId, boundedTurn.id, "completed");
+    const atCap = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
+    expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
+  });
+
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {
     const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
     const appDbClient = createDb(appRoleUrl);

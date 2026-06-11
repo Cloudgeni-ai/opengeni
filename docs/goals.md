@@ -44,11 +44,15 @@ activity for a decision:
    turn that produced zero tool calls and no goal revision increments a
    no-progress streak (a user/scheduled turn in between resets the streak and
    the budget — human re-engagement re-arms the loop).
-4. Guards: `noProgressStreak >= OPENGENI_GOAL_NO_PROGRESS_LIMIT` (default 3) or
-   `autoContinuations >= cap` auto-pause the goal with a visible `goal.paused`
-   event (`reason: "no_progress" | "max_auto_continuations"`). The cap is
-   `min(goal.maxAutoContinuations, OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS)`
-   (default 20) — the deployment setting is a hard ceiling.
+4. Guards: `noProgressStreak >= OPENGENI_GOAL_NO_PROGRESS_LIMIT` (default 3)
+   auto-pauses the goal with a visible `goal.paused` event
+   (`reason: "no_progress"`). Goals are NOT capped by continuation count by
+   default — runs legitimately span days, so length is governed by progress
+   and budget guards, never by count. If a deployment sets
+   `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` it becomes a hard ceiling
+   (`min(goal.maxAutoContinuations, setting)`, pause reason
+   `"max_auto_continuations"`); a per-goal `maxAutoContinuations` applies on
+   its own even without the deployment setting.
 5. Otherwise a continuation turn is enqueued: a deterministic prompt referencing
    the goal text and success criteria, the session's tool surface plus the
    first-party `opengeni` MCP server (so the goal tools are always reachable),

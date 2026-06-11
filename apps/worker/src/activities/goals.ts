@@ -40,7 +40,7 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
     const decision = await evaluateGoalContinuation(db, {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      defaultMaxAutoContinuations: settings.goalMaxAutoContinuations,
+      defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
       noProgressLimit: settings.goalNoProgressLimit,
       budgetBlocked,
     });
@@ -164,9 +164,10 @@ export async function pauseActiveGoalOnInterrupt(db: Database, bus: EventBus, wo
   }
 }
 
-export function goalContinuationPrompt(goal: SessionGoal, autoContinuation: number, cap: number): string {
+export function goalContinuationPrompt(goal: SessionGoal, autoContinuation: number, cap: number | null): string {
+  const counter = cap === null ? `${autoContinuation}` : `${autoContinuation}/${cap}`;
   return [
-    `[GOAL CONTINUATION ${autoContinuation}/${cap}] The session goal is not done. Goal: ${goal.text}.`,
+    `[GOAL CONTINUATION ${counter}] The session goal is not done. Goal: ${goal.text}.`,
     `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
     "Continue working toward the goal now. If it is actually complete, call opengeni__goal_complete with concrete evidence.",
     "If you are blocked or continuing is not productive, call opengeni__goal_pause with your rationale.",
