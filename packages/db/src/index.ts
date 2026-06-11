@@ -2023,6 +2023,8 @@ export async function upsertSessionGoal(db: Database, input: CreateSessionGoalIn
       version: existing.version + 1,
       autoContinuations: 0,
       noProgressStreak: 0,
+      lastContinuationTurnId: null,
+      versionAtLastContinuation: null,
       updatedAt: new Date(),
     }).where(eq(schema.sessionGoals.id, existing.id)).returning();
     if (!row) {
@@ -2099,6 +2101,10 @@ export async function setSessionGoalStatus(db: Database, workspaceId: string, se
         pausedReason: null,
         autoContinuations: 0,
         noProgressStreak: 0,
+        // A re-armed goal starts a fresh continuation epoch; stale pointers to
+        // a pre-pause continuation turn must not feed the progress detector.
+        lastContinuationTurnId: null,
+        versionAtLastContinuation: null,
       } : {}),
     }).where(eq(schema.sessionGoals.id, existing.id)).returning();
     if (!row) {
@@ -2120,7 +2126,7 @@ export async function setSessionGoalLastContinuationTurn(db: Database, workspace
 export type GoalContinuationDecision =
   | { decision: "none" }
   | { decision: "queue" }
-  | { decision: "paused"; reason: "no_progress" | "max_auto_continuations"; goal: SessionGoal }
+  | { decision: "paused"; reason: "no_progress" | "max_auto_continuations" | "limits"; goal: SessionGoal }
   | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number };
 
 /**
@@ -2136,6 +2142,10 @@ export async function evaluateGoalContinuation(db: Database, input: {
   sessionId: string;
   defaultMaxAutoContinuations: number;
   noProgressLimit: number;
+  // Caller-computed billing/limits block reason. Applied inside the locked
+  // decision (before the counter bump) so a budget pause never consumes
+  // continuation budget.
+  budgetBlocked?: string | null;
 }): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
     const [row] = await tx.select().from(schema.sessionGoals)
@@ -2212,6 +2222,20 @@ export async function evaluateGoalContinuation(db: Database, input: {
         updatedAt: new Date(),
       }).where(eq(schema.sessionGoals.id, row.id)).returning();
       return { decision: "paused", reason: "max_auto_continuations", goal: mapSessionGoal(paused!) } as const;
+    }
+    if (input.budgetBlocked) {
+      // Budget exhaustion pauses the goal visibly without bumping the
+      // continuation counter — no turn is synthesized for this pass.
+      const [paused] = await tx.update(schema.sessionGoals).set({
+        status: "paused",
+        pausedReason: "limits",
+        rationale: input.budgetBlocked,
+        autoContinuations,
+        noProgressStreak,
+        version: row.version + 1,
+        updatedAt: new Date(),
+      }).where(eq(schema.sessionGoals.id, row.id)).returning();
+      return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
     }
     const [updated] = await tx.update(schema.sessionGoals).set({
       autoContinuations: autoContinuations + 1,

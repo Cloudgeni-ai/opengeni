@@ -28,11 +28,21 @@ import type {
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
   async function maybeContinueGoal(input: MaybeContinueGoalInput): Promise<MaybeContinueGoalResult> {
     const { settings, db, bus } = await services();
+    // Cheap pre-read: the common goal-less session skips the budget queries.
+    const existingGoal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+    if (!existingGoal || existingGoal.status !== "active") {
+      return { action: "none" };
+    }
+    // Budget exhaustion pauses the goal visibly instead of failing the
+    // session. Computed up front and applied inside the locked decision so a
+    // limits pause never consumes continuation budget.
+    const budgetBlocked = await goalRunBudgetBlocked(settings, db, input.accountId, input.workspaceId);
     const decision = await evaluateGoalContinuation(db, {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations,
       noProgressLimit: settings.goalNoProgressLimit,
+      budgetBlocked,
     });
     if (decision.decision === "none" || decision.decision === "queue") {
       return { action: decision.decision };
@@ -44,33 +54,11 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
           goalId: decision.goal.id,
           actor: "system",
           reason: decision.reason,
+          ...(decision.goal.rationale ? { rationale: decision.goal.rationale } : {}),
           autoContinuations: decision.goal.autoContinuations,
           noProgressStreak: decision.goal.noProgressStreak,
         },
       }]);
-      return { action: "paused" };
-    }
-    // Budget exhaustion pauses the goal visibly instead of failing the session.
-    const budgetBlock = await goalRunBudgetBlocked(settings, db, input.accountId, input.workspaceId);
-    if (budgetBlock) {
-      const { goal, changed } = await setSessionGoalStatus(db, input.workspaceId, input.sessionId, {
-        status: "paused",
-        pausedReason: "limits",
-        rationale: budgetBlock,
-      });
-      if (changed) {
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
-          type: "goal.paused",
-          payload: {
-            goalId: goal.id,
-            actor: "system",
-            reason: "limits",
-            rationale: budgetBlock,
-            autoContinuations: goal.autoContinuations,
-            noProgressStreak: goal.noProgressStreak,
-          },
-        }]);
-      }
       return { action: "paused" };
     }
     const session = await requireSession(db, input.workspaceId, input.sessionId);

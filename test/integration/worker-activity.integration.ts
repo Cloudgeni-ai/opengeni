@@ -1653,6 +1653,49 @@ describe("worker activities integration", () => {
     expect((pausedEvent!.payload as { reason?: string }).reason).toBe("no_progress");
   });
 
+  test("pauses goals on exhausted budgets without consuming continuation budget", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "budget goal",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "objective beyond the budget",
+      createdBy: "api",
+    });
+    const activities = createActivities({
+      // Managed limits with a zero credit balance block new agent runs.
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, usageLimitsMode: "managed" }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const result = await activities.maybeContinueGoal({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    });
+    expect(result.action).toBe("paused");
+    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
+    expect(goal?.status).toBe("paused");
+    expect(goal?.pausedReason).toBe("limits");
+    expect(goal?.rationale).toBe("insufficient OpenGeni credits");
+    // The limits pause happened before the counter bump: no budget consumed,
+    // no continuation turn synthesized.
+    expect(goal?.autoContinuations).toBe(0);
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).toHaveLength(0);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const pausedEvent = events.find((event) => event.type === "goal.paused");
+    expect((pausedEvent?.payload as { reason?: string } | undefined)?.reason).toBe("limits");
+  });
+
   test("user interrupts pause active goals even when no turn is active", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {

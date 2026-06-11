@@ -165,20 +165,24 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (existing.status !== "paused") {
       throw new HTTPException(409, { message: `session goal is ${existing.status}; only paused goals can be resumed` });
     }
-    const { goal } = await setSessionGoalStatus(db, workspaceId, sessionId, { status: "active" });
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-      type: "goal.resumed",
-      payload: {
-        goalId: goal.id,
-        text: goal.text,
-        ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-        version: goal.version,
-        actor: "api",
-      },
-    }]);
-    // signalWithStart restarts a completed workflow whose first claim finds no
-    // queued turn, so maybeContinueGoal fires — resume works on an idle session.
-    await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
+    const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, { status: "active" });
+    // `changed` guards the racing-PATCH case: both requests can pass the
+    // status pre-check, but only the transition winner emits and wakes.
+    if (changed) {
+      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
+        type: "goal.resumed",
+        payload: {
+          goalId: goal.id,
+          text: goal.text,
+          ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+          version: goal.version,
+          actor: "api",
+        },
+      }]);
+      // signalWithStart restarts a completed workflow whose first claim finds no
+      // queued turn, so maybeContinueGoal fires — resume works on an idle session.
+      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
+    }
     return c.json(goal);
   });
 

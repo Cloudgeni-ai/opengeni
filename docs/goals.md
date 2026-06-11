@@ -58,7 +58,11 @@ activity for a decision:
 Continuation turns are ordinary turns: they bill, meter (`agent_run.created`
 with source `session_turn`), and stream exactly like user turns. If billing or
 usage limits would block another run, the goal pauses visibly
-(`goal.paused`, `reason: "limits"`) instead of failing the session.
+(`goal.paused`, `reason: "limits"`) instead of failing the session; the limits
+gate is applied inside the same locked decision, before the counter bump, so a
+budget pause never consumes continuation budget. Re-arming a goal (resume or
+replace) starts a fresh continuation epoch: counters and the
+previous-continuation pointers are cleared together.
 
 ## Interrupts and failures
 
