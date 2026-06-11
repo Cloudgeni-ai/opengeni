@@ -3,6 +3,8 @@ import { generateKeyPairSync } from "node:crypto";
 import {
   addDocumentToBase,
   createDocumentBase,
+  DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+  deterministicEmbedding,
   type DocumentServices,
 } from "../../packages/documents/src/index";
 import type { ObjectStorage } from "../../packages/storage/src/index";
@@ -880,6 +882,108 @@ describe("worker activities integration", () => {
     expect(embedderCalled).toBe(false);
     const usage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 20 });
     expect(usage.some((event) => event.eventType === "document.indexed")).toBe(false);
+  });
+
+  test("serializes concurrent document indexing against monthly chunk caps", async () => {
+    const grant = await testGrant(dbClient.db);
+    const uploadOne = await createOwnedFileUpload(dbClient.db, grant, {
+      fileId: crypto.randomUUID(),
+      filename: "limited-doc-1.txt",
+      safeFilename: "limited-doc-1.txt",
+      contentType: "text/plain",
+      sizeBytes: 16,
+      bucket: "test",
+      objectKey: `workspaces/${grant.workspaceId}/files/limited-doc-1.txt`,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const uploadTwo = await createOwnedFileUpload(dbClient.db, grant, {
+      fileId: crypto.randomUUID(),
+      filename: "limited-doc-2.txt",
+      safeFilename: "limited-doc-2.txt",
+      contentType: "text/plain",
+      sizeBytes: 16,
+      bucket: "test",
+      objectKey: `workspaces/${grant.workspaceId}/files/limited-doc-2.txt`,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const fileOne = await completeFileUpload(dbClient.db, grant.workspaceId, uploadOne.uploadId);
+    const fileTwo = await completeFileUpload(dbClient.db, grant.workspaceId, uploadTwo.uploadId);
+    const base = await createDocumentBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "Serialized limit docs",
+    });
+    const documentOne = await addDocumentToBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: base.id,
+      fileId: fileOne.id,
+    });
+    const documentTwo = await addDocumentToBase(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      baseId: base.id,
+      fileId: fileTwo.id,
+    });
+    let embedCalls = 0;
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxDocumentIndexedChunksPerWorkspace: 2 }),
+      }),
+      db: dbClient.db,
+      bus,
+      objectStorage: fakeObjectStorage("0123456789abcdef"),
+      documentServices: {
+        parser: {
+          name: "test-text",
+          parse: async (bytes, inputFile) => ({
+            text: new TextDecoder().decode(bytes),
+            metadata: { filename: inputFile.filename, contentType: inputFile.contentType },
+          }),
+        },
+        chunker: {
+          chunk: (parsed, inputFile) => [0, 1].map((index) => ({
+            text: parsed.text.slice(index * 8, index * 8 + 8),
+            metadata: { filename: inputFile.filename, chunkIndex: index },
+          })),
+        },
+        embedder: {
+          model: "test-embedder",
+          dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+          embedMany: async (chunks) => {
+            embedCalls += 1;
+            return chunks.map((chunk) => deterministicEmbedding(chunk, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS));
+          },
+          embedQuery: async (query) => deterministicEmbedding(query, DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS),
+        },
+      } satisfies DocumentServices,
+    });
+
+    const results = await Promise.all([
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: documentOne.id,
+      }),
+      activities.indexDocument({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        documentId: documentTwo.id,
+      }),
+    ]);
+
+    expect(results.map((document) => document.status).sort()).toEqual(["failed", "ready"]);
+    expect(results.find((document) => document.status === "failed")?.error).toContain("monthly document indexing limit reached (2 chunks)");
+    expect(embedCalls).toBe(1);
+    const indexedChunks = await sumUsageQuantity(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      eventType: "document.indexed",
+      since: startOfUtcMonth(),
+    });
+    expect(indexedChunks).toBe(2);
   });
 
   test("allows the worker to run an already accepted turn at the exact monthly run cap", async () => {

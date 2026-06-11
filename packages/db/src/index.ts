@@ -95,6 +95,18 @@ export async function withWorkspaceRls<T>(
   return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
 }
 
+export async function withWorkspaceUsageLock<T>(
+  db: Database,
+  workspaceId: string,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  const context = await rlsContextForWorkspace(db, workspaceId);
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${`usage:${workspaceId}`}))`);
+    return await fn(scopedDb);
+  });
+}
+
 export async function withAccountRls<T>(
   db: Database,
   accountId: string,
