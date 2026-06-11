@@ -102,6 +102,12 @@ describe("API component integration", () => {
     const keyBody = await createdKey.json() as { token: string; apiKey: { workspaceId: string } };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
+    const keyWorkspaceList = await app.request("/v1/workspaces", {
+      headers: { authorization: `Bearer ${keyBody.token}` },
+    });
+    expect(keyWorkspaceList.status).toBe(200);
+    const keyWorkspaces = await keyWorkspaceList.json() as Array<{ id: string }>;
+    expect(keyWorkspaces.map((workspace) => workspace.id)).toEqual([workspaceId]);
 
     const billingKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",

@@ -15,7 +15,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessContext, requireAccessGrant } from "../access";
+import { hasPermission, requireAccessContext, requireAccessGrant } from "../access";
 import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 
@@ -26,6 +26,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
+    const readableWorkspaceIds = [...new Set(context.workspaceGrants
+      .filter((grant) => hasPermission(grant.permissions, "workspace:read"))
+      .map((grant) => grant.workspaceId))];
+    if (readableWorkspaceIds.length > 0) {
+      const workspaces = await Promise.all(readableWorkspaceIds.map((workspaceId) => requireWorkspace(deps.db, workspaceId)));
+      return c.json(workspaces.map((workspace) => Workspace.parse(workspace)));
+    }
     return c.json((await listWorkspacesForSubject(deps.db, context.subjectId)).map((workspace) => Workspace.parse(workspace)));
   });
 
