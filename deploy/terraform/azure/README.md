@@ -61,6 +61,18 @@ tfvars.
 - If `aks.microsoft_defender_log_analytics_workspace_id` is set, Terraform enables the AKS Microsoft Defender block. The workspace ID field is ignored after creation because Azure may normalize resource ID casing in plan output.
 - Key Vault purge protection defaults to enabled for production-like usage. Disable it only for short-lived evaluation resources that must be deleted immediately.
 - ACR pull role assignment defaults to enabled. Set `create_acr_pull_role_assignment = false` if the current Azure identity cannot create role assignments; in that case an operator with RBAC permissions must grant AKS `AcrPull` before private images can run.
+- Deployment automation identities that call `az aks get-credentials --admin`
+  must be supplied through `aks_admin_principal_ids` so Terraform grants the
+  Azure Kubernetes Service Cluster Admin Role on the created AKS cluster. Do not
+  patch this permission manually and then claim the environment is reproducible;
+  if the private ops workflow cannot load AKS credentials from its configured
+  Azure OIDC identity, the deployment is not ready.
+- Deployment automation identities that create or update public app DNS records
+  must be supplied through `dns_zone_contributor_assignments` so Terraform
+  grants DNS Zone Contributor on the exact Azure DNS zone. Do not manually patch
+  DNS RBAC after a failed deploy and then claim the environment is reproducible;
+  if the private ops workflow cannot set the configured app A record, the
+  deployment is not ready.
 - Object storage defaults to managed Azure Blob for Azure reference deployments with private container access, nested public blob access disabled, blob versioning enabled, and seven-day blob/container delete retention. The sensitive connection string is exposed only as a sensitive Terraform output and should be written to Key Vault or a Kubernetes Secret, not source control.
 - Temporal can be `external` for Temporal Cloud/customer endpoints or `officialChart` for the stack-wrapper managed upstream Temporal chart. The chart still needs durable Postgres persistence prepared outside the OpenGeni app chart.
 - For temporary AKS/Flexible Server smoke tests, `postgres.allow_azure_services = true` can unblock Azure-internal access. Prefer private networking or tightly scoped `postgres.firewall_rules` for long-lived deployments.
@@ -76,6 +88,18 @@ az role assignment create \
 ```
 
 Until that is done, use a temporary Kubernetes image pull secret only for private evaluation.
+
+For deployment automation identity access, prefer setting
+`aks_admin_principal_ids` and reapplying Terraform. A direct `az role
+assignment create --role "Azure Kubernetes Service Cluster Admin Role"` command
+is break-glass only and must be followed by codifying the principal ID in the
+private tfvars/state before readiness can be claimed.
+
+For workflow-managed DNS records, prefer setting
+`dns_zone_contributor_assignments` and reapplying Terraform. A direct `az role
+assignment create --role "DNS Zone Contributor"` command is break-glass only and
+must be followed by codifying the DNS zone and principal ID in the private
+tfvars/state before readiness can be claimed.
 
 ## Example
 

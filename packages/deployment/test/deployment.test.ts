@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   contractForProfile,
   deploymentProfiles,
@@ -77,6 +78,23 @@ describe("deployment contract", () => {
     expect(contract.product.accessMode).toBe("configured");
     expect(contract.product.billingMode).toBe("disabled");
     expect(contract.sandbox.backend).toBe("none");
+  });
+
+  test("Azure Terraform models deployment automation Azure control-plane access", () => {
+    const variables = readFileSync(new URL("../../../deploy/terraform/azure/variables.tf", import.meta.url), "utf8");
+    const main = readFileSync(new URL("../../../deploy/terraform/azure/main.tf", import.meta.url), "utf8");
+    const outputs = readFileSync(new URL("../../../deploy/terraform/azure/outputs.tf", import.meta.url), "utf8");
+
+    expect(variables).toContain('variable "aks_admin_principal_ids"');
+    expect(main).toContain('resource "azurerm_role_assignment" "aks_admin_principals"');
+    expect(main).toContain('role_definition_name = "Azure Kubernetes Service Cluster Admin Role"');
+    expect(main).toContain("scope                = azurerm_kubernetes_cluster.this.id");
+    expect(outputs).toContain('output "aks_admin_principal_ids"');
+    expect(variables).toContain('variable "dns_zone_contributor_assignments"');
+    expect(main).toContain('resource "azurerm_role_assignment" "dns_zone_contributors"');
+    expect(main).toContain('role_definition_name = "DNS Zone Contributor"');
+    expect(main).toContain("/providers/Microsoft.Network/dnsZones/");
+    expect(outputs).toContain('output "dns_zone_contributor_assignments"');
   });
 
   test("models AWS and GCP managed profiles with native object storage", () => {

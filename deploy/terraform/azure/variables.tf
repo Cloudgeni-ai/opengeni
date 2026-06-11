@@ -79,6 +79,22 @@ variable "create_aks_network_role_assignment" {
   default     = true
 }
 
+variable "aks_admin_principal_ids" {
+  description = "Azure AD principal IDs that Terraform should grant Azure Kubernetes Service Cluster Admin Role on the created AKS cluster. Use this for deployment automation identities that run kubectl/Helm through az aks get-credentials --admin."
+  type        = set(string)
+  default     = []
+}
+
+variable "dns_zone_contributor_assignments" {
+  description = "Azure DNS zones where deployment automation principals should receive DNS Zone Contributor. Use this when workflows manage app host records as part of reproducible environment bootstrap."
+  type = map(object({
+    resource_group_name = string
+    zone_name           = string
+    principal_ids       = set(string)
+  }))
+  default = {}
+}
+
 variable "postgres" {
   description = "Postgres mode. Use managed to create Azure Database for PostgreSQL Flexible Server or external to connect an existing compatible server."
   type = object({

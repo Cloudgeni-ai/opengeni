@@ -16,6 +16,18 @@ locals {
     0,
     24
   )
+  dns_zone_contributor_principals = {
+    for item in flatten([
+      for assignment_name, assignment in var.dns_zone_contributor_assignments : [
+        for principal_id in assignment.principal_ids : {
+          key                 = "${assignment_name}/${principal_id}"
+          resource_group_name = assignment.resource_group_name
+          zone_name           = assignment.zone_name
+          principal_id        = principal_id
+        }
+      ]
+    ]) : item.key => item
+  }
 }
 
 data "azurerm_client_config" "current" {}
@@ -108,6 +120,20 @@ resource "azurerm_role_assignment" "aks_network_public_ip" {
   principal_id         = azurerm_kubernetes_cluster.this.identity[0].principal_id
   role_definition_name = "Network Contributor"
   scope                = azurerm_public_ip.aks_egress.id
+}
+
+resource "azurerm_role_assignment" "aks_admin_principals" {
+  for_each             = var.aks_admin_principal_ids
+  principal_id         = each.value
+  role_definition_name = "Azure Kubernetes Service Cluster Admin Role"
+  scope                = azurerm_kubernetes_cluster.this.id
+}
+
+resource "azurerm_role_assignment" "dns_zone_contributors" {
+  for_each             = local.dns_zone_contributor_principals
+  principal_id         = each.value.principal_id
+  role_definition_name = "DNS Zone Contributor"
+  scope                = "/subscriptions/${data.azurerm_client_config.current.subscription_id}/resourceGroups/${each.value.resource_group_name}/providers/Microsoft.Network/dnsZones/${each.value.zone_name}"
 }
 
 resource "azurerm_key_vault" "this" {
