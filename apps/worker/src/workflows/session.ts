@@ -113,7 +113,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
     const scope = new CancellationScope();
     const workflowId = workflowInfo().workflowId;
-    const segment: Promise<activities.RunAgentSegmentResult> = scope.run(() => activity.runAgentSegment({
+    // Deliberately schedules the LEGACY activity name: in-flight session
+    // workflows (multi-day by design) recorded this name in their histories,
+    // and scheduling a different activity type at the same position is a
+    // non-deterministic change on replay. Migrate to runAgentTurn with
+    // patched() once pre-rename sessions have drained.
+    const turn: Promise<activities.RunAgentTurnResult> = scope.run(() => activity.runAgentSegment({
       accountId,
       workspaceId,
       sessionId,
@@ -121,9 +126,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       workflowId,
       turnId,
     }));
-    const outcome: { kind: "result"; result: activities.RunAgentSegmentResult } | { kind: "interrupt" } | { kind: "failure"; error: unknown } = await Promise.race([
-      segment.then(
-        (result: activities.RunAgentSegmentResult) => ({ kind: "result" as const, result }),
+    const outcome: { kind: "result"; result: activities.RunAgentTurnResult } | { kind: "interrupt" } | { kind: "failure"; error: unknown } = await Promise.race([
+      turn.then(
+        (result: activities.RunAgentTurnResult) => ({ kind: "result" as const, result }),
         (error: unknown) => ({ kind: "failure" as const, error }),
       ),
       condition(() => interruptedEventId !== null).then(() => ({ kind: "interrupt" as const })),

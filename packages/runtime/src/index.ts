@@ -653,7 +653,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       : undefined);
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
-    maxTurns: settings.agentMaxTurnsPerSegment,
+    maxTurns: settings.agentMaxModelCallsPerTurn,
   };
   void settings.disableOpenaiTracing;
   if (client) {

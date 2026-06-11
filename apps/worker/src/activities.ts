@@ -5,7 +5,7 @@ import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
-import { createRunAgentSegmentActivity } from "./activities/agent-segment";
+import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createDocumentActivities } from "./activities/documents";
 import { createGoalActivities } from "./activities/goals";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
@@ -20,8 +20,8 @@ export type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
   PauseGoalForInterruptInput,
-  RunAgentSegmentInput,
-  RunAgentSegmentResult,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
 } from "./activities/types";
 
 export function createActivities(dependencies: ActivityDependencies = {}) {
@@ -44,8 +44,15 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     return servicesPromise;
   }
 
+  const runAgentTurn = createRunAgentTurnActivity(services);
   return {
-    runAgentSegment: createRunAgentSegmentActivity(services),
+    runAgentTurn,
+    // Legacy Temporal activity name. In-flight session workflows (which can
+    // legitimately live for days) recorded ScheduleActivityTask events as
+    // "runAgentSegment"; the name must keep resolving until those histories
+    // drain. New workflow code must use runAgentTurn; migrate the session
+    // workflow call site via patched() before removing this alias.
+    runAgentSegment: runAgentTurn,
     ...createDocumentActivities(services),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
@@ -55,6 +62,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
 
 const defaultActivities = createActivities();
 
+export const runAgentTurn = defaultActivities.runAgentTurn;
 export const runAgentSegment = defaultActivities.runAgentSegment;
 export const indexDocument = defaultActivities.indexDocument;
 export const failSession = defaultActivities.failSession;

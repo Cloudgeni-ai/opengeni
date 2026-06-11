@@ -11,11 +11,11 @@ import type {
   ActivityServices,
   ClaimNextQueuedTurnInput,
   MarkSessionIdleInput,
-  RunAgentSegmentInput,
+  RunAgentTurnInput,
 } from "./types";
 
 export function createSessionStateActivities(services: () => Promise<ActivityServices>) {
-  async function failSession(input: RunAgentSegmentInput & { error?: string }): Promise<void> {
+  async function failSession(input: RunAgentTurnInput & { error?: string }): Promise<void> {
     const { db, bus } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
@@ -42,7 +42,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
   }
 
-  async function interruptActiveTurn(input: RunAgentSegmentInput): Promise<void> {
+  async function interruptActiveTurn(input: RunAgentTurnInput): Promise<void> {
     const { db, bus } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
     // Pause an active goal before the early return below: an interrupt can

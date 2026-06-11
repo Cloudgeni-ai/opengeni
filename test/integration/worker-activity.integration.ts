@@ -45,7 +45,7 @@ import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
-import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-segment";
+import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
@@ -88,7 +88,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -126,7 +126,7 @@ describe("worker activities integration", () => {
     const [firstTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "first question" } },
     ]);
-    await activities.runAgentSegment({
+    await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -136,7 +136,7 @@ describe("worker activities integration", () => {
     const [secondTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "second question" } },
     ]);
-    await activities.runAgentSegment({
+    await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -184,7 +184,7 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model }),
     });
 
-    await activities.runAgentSegment({
+    await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -233,7 +233,7 @@ describe("worker activities integration", () => {
       runtime: createProductionAgentRuntime({ model }),
     });
 
-    await activities.runAgentSegment({
+    await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -268,7 +268,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -301,7 +301,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -340,7 +340,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -387,7 +387,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -435,7 +435,7 @@ describe("worker activities integration", () => {
       observability,
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: crypto.randomUUID(),
@@ -500,7 +500,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -578,7 +578,7 @@ describe("worker activities integration", () => {
       runtime,
     });
 
-    await expect(activities.runAgentSegment({
+    await expect(activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -680,7 +680,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -742,7 +742,7 @@ describe("worker activities integration", () => {
         runtime: createProductionAgentRuntime({ model }),
       });
 
-      const result = await activities.runAgentSegment({
+      const result = await activities.runAgentTurn({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -824,7 +824,7 @@ describe("worker activities integration", () => {
         runtime: createProductionAgentRuntime({ model }),
       });
 
-      const result = await activities.runAgentSegment({
+      const result = await activities.runAgentTurn({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -890,7 +890,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1130,7 +1130,7 @@ describe("worker activities integration", () => {
       }),
     });
 
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1193,7 +1193,7 @@ describe("worker activities integration", () => {
         runtime: createProductionAgentRuntime({ model }),
       });
 
-      const result = await activities.runAgentSegment({
+      const result = await activities.runAgentTurn({
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
@@ -1543,7 +1543,7 @@ describe("worker activities integration", () => {
         }]),
       }),
     });
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1579,7 +1579,7 @@ describe("worker activities integration", () => {
       bus,
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "never reached" }]) }),
     });
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1941,7 +1941,7 @@ describe("worker activities integration", () => {
     const [userTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "start" } },
     ]);
-    expect((await activities.runAgentSegment({
+    expect((await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1967,7 +1967,7 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       metadata: {},
     });
-    const result = await activities.runAgentSegment({
+    const result = await activities.runAgentTurn({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,

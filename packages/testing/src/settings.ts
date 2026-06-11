@@ -32,7 +32,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     environmentsEncryptionKey: undefined,
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
-    agentMaxTurnsPerSegment: 40,
+    agentMaxModelCallsPerTurn: 40,
     betterAuthSecret: undefined,
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,

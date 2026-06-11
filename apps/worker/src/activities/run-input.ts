@@ -7,7 +7,7 @@ import {
 } from "@opengeni/db";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 
-export async function segmentInput(
+export async function turnInput(
   db: Database,
   runtime: OpenGeniRuntime,
   agent: any,

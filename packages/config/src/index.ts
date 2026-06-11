@@ -94,7 +94,7 @@ const SettingsSchema = z.object({
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
   // session failure) remains as inert safety should a deployment set a cap.
-  agentMaxTurnsPerSegment: z.coerce.number().int().positive().default(1_000_000),
+  agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -314,7 +314,7 @@ export function getSettings(): Settings {
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
-    agentMaxTurnsPerSegment: optional("OPENGENI_AGENT_MAX_TURNS_PER_SEGMENT"),
+    agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),

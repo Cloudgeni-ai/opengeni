@@ -30,7 +30,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         calls.push(input);
         return { status: "idle" };
       },
@@ -63,7 +63,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         calls.push(input);
         return { status: calls.length === 1 ? "requires_action" : "idle" };
       },
@@ -98,7 +98,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async () => {
+      runAgentTurn: async () => {
         attempts += 1;
         throw new Error("boom");
       },
@@ -134,7 +134,7 @@ describe("Temporal workflow integration", () => {
       markSessionIdle: async (input: unknown) => {
         idleMarks.push(input);
       },
-      runAgentSegment: async () => ({ status: "idle" }),
+      runAgentTurn: async () => ({ status: "idle" }),
       failSession: async () => undefined,
       interruptActiveTurn: async (input: unknown) => {
         interrupts.push(input);
@@ -173,7 +173,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         runs.push(input);
         if (runs.length === 1) {
           while (!allowFirstRunToFinish) {
@@ -223,7 +223,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         runs.push(input);
         return { status: runs.length === 1 ? "requires_action" : "idle" };
       },
@@ -264,7 +264,7 @@ describe("Temporal workflow integration", () => {
     const worker = await testWorker(nativeConnection, taskQueue, {
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: { triggerEventId: string }) => {
+      runAgentTurn: async (input: { triggerEventId: string }) => {
         runs.push(input);
         return { status: "idle" };
       },
@@ -312,7 +312,7 @@ describe("Temporal workflow integration", () => {
         return async () => queuedTurns.shift() ?? null;
       })(),
       markSessionIdle: async () => undefined,
-      runAgentSegment: async () => {
+      runAgentTurn: async () => {
         segmentReturnedAt = Date.now();
         // Provider backpressure idle: the workflow must hold the loop before
         // admitting the goal continuation.
@@ -357,7 +357,7 @@ describe("Temporal workflow integration", () => {
       markSessionIdle: async () => {
         order.push("idle");
       },
-      runAgentSegment: async () => ({ status: "idle" }),
+      runAgentTurn: async () => ({ status: "idle" }),
       failSession: async () => undefined,
       interruptActiveTurn: async () => undefined,
       pauseGoalForInterrupt: async (input: unknown) => {
@@ -395,7 +395,7 @@ describe("Temporal workflow integration", () => {
       markSessionIdle: async (input: unknown) => {
         idleMarks.push(input);
       },
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         runs.push(input);
         return { status: "idle" };
       },
@@ -442,7 +442,7 @@ describe("Temporal workflow integration", () => {
           updatedAt: new Date().toISOString(),
         };
       },
-      runAgentSegment: async () => ({ status: "idle" }),
+      runAgentTurn: async () => ({ status: "idle" }),
       failSession: async () => undefined,
       interruptActiveTurn: async () => undefined,
     });
@@ -487,7 +487,7 @@ describe("Temporal workflow integration", () => {
       },
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         runs.push(input);
         return { status: "idle" };
       },
@@ -539,7 +539,7 @@ describe("Temporal workflow integration", () => {
       },
       claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
       markSessionIdle: async () => undefined,
-      runAgentSegment: async (input: unknown) => {
+      runAgentTurn: async (input: unknown) => {
         calls.push(input);
         return { status: "idle" };
       },
@@ -596,6 +596,10 @@ async function testWorker(nativeConnection: NativeConnection, taskQueue: string,
       maybeContinueGoal: async () => ({ action: "none" }),
       pauseGoalForInterrupt: async () => undefined,
       ...activities,
+      // Mirror production registration: the session workflow schedules the
+      // LEGACY activity name (replay safety for in-flight multi-day sessions),
+      // so the turn mock must answer to it as well.
+      ...(activities.runAgentTurn ? { runAgentSegment: activities.runAgentTurn } : {}),
     },
   });
 }

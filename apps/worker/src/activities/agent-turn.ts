@@ -33,7 +33,7 @@ import {
 } from "./common";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
 import { createSecretRedactor, identityRedactor } from "./redaction";
-import { segmentInput } from "./run-input";
+import { turnInput } from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -42,8 +42,8 @@ import {
 } from "./streaming";
 import type {
   ActivityServices,
-  RunAgentSegmentInput,
-  RunAgentSegmentResult,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
 } from "./types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import type { ResourceRef } from "@opengeni/contracts";
@@ -54,8 +54,8 @@ import type { ResourceRef } from "@opengeni/contracts";
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
-export function createRunAgentSegmentActivity(services: () => Promise<ActivityServices>) {
-  return async function runAgentSegment(input: RunAgentSegmentInput): Promise<RunAgentSegmentResult> {
+export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+  return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const { settings, db, bus, runtime, objectStorage, observability } = await services();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
@@ -166,7 +166,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
           }
           : {}),
       });
-      const runInput = await segmentInput(db, runtime, agent, trigger);
+      const runInput = await turnInput(db, runtime, agent, trigger);
       let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>>;
       let responseUsageCount = 0;
       stream = await runtime.runStream(agent, runInput, runSettings, {
@@ -435,7 +435,7 @@ export function createRunAgentSegmentActivity(services: () => Promise<ActivitySe
     } finally {
       const durationSeconds = (performance.now() - activityStarted) / 1000;
       observability.recordWorkerActivity({
-        activity: "runAgentSegment",
+        activity: "runAgentTurn",
         status: activityStatus,
         durationSeconds,
       });

@@ -19,7 +19,7 @@ export type ActivityServices = {
 
 export type ActivityDependencies = Partial<ActivityServices>;
 
-export type RunAgentSegmentInput = {
+export type RunAgentTurnInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -77,7 +77,7 @@ export type IndexDocumentInput = {
   documentId: string;
 };
 
-export type RunAgentSegmentResult = {
+export type RunAgentTurnResult = {
   status: "idle" | "requires_action" | "failed" | "cancelled";
   // Provider backpressure pacing: when set on an idle result, the session
   // workflow holds the loop this long before admitting the next turn (an
