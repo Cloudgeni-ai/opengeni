@@ -115,14 +115,16 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = EnablePackRequest.parse(await c.req.json());
     // Re-enabling without environmentId keeps the stored attachment instead of
     // silently dropping it; the inherited attachment is re-validated below in
-    // case the environment was deleted or its variables changed since.
+    // case the environment was deleted or its variables changed since. The
+    // inherited attachment was authorized with environments:use when it was
+    // first attached, so only a fresh attachment re-checks that permission.
     const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
     const environmentId = payload.environmentId ?? storedEnvironmentId;
     if (pack.environment?.required && !environmentId) {
       throw new HTTPException(422, { message: "this pack requires an environment attachment; pass environmentId" });
     }
     if (environmentId) {
-      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, environmentId);
+      const environment = await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, environmentId, { preauthorized: !payload.environmentId });
       const missing = (pack.environment?.requiredVariables ?? [])
         .filter((name) => !environment.variables.some((variable) => variable.name === name));
       if (missing.length > 0) {
