@@ -26,7 +26,10 @@ export type StreamSessionEventsOptions = {
   reconnectDelayMs?: number;
   /** Backoff ceiling. Defaults to 10s. */
   maxReconnectDelayMs?: number;
-  /** Give up after this many consecutive failed connection attempts. Defaults to unlimited. */
+  /**
+   * Give up after this many consecutive failed reconnect attempts (i.e. N
+   * reconnects = N+1 total open-stream calls). Defaults to unlimited.
+   */
   maxReconnectAttempts?: number;
   onStateChange?: (state: StreamConnectionState) => void;
 };
@@ -58,11 +61,14 @@ export async function* streamSessionEvents(
   let cursor = options.after ?? 0;
   let failedAttempts = 0;
   let delayMs = baseDelayMs;
+  let everConnected = false;
 
   while (!signal?.aborted) {
-    options.onStateChange?.(failedAttempts === 0 ? "connecting" : "reconnecting");
+    options.onStateChange?.(everConnected || failedAttempts > 0 ? "reconnecting" : "connecting");
+    const cursorAtOpen = cursor;
     try {
       const body = await transport.openStream(cursor, signal);
+      everConnected = true;
       failedAttempts = 0;
       delayMs = baseDelayMs;
       options.onStateChange?.("live");
@@ -91,6 +97,13 @@ export async function* streamSessionEvents(
       if (!reconnect) {
         return;
       }
+      // Clean server close: reconnect immediately when the connection made
+      // progress (servers legitimately cycle long SSE connections); pace
+      // empty closes so a misbehaving server is not hammered in a hot loop.
+      if (cursor === cursorAtOpen) {
+        await sleep(baseDelayMs, signal);
+      }
+      continue;
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) {
         return;
@@ -101,7 +114,7 @@ export async function* streamSessionEvents(
       failedAttempts += 1;
       if (failedAttempts > maxAttempts) {
         throw new OpenGeniStreamError(
-          `event stream gave up after ${maxAttempts} consecutive failed connection attempts: ${error instanceof Error ? error.message : String(error)}`,
+          `event stream gave up after ${maxAttempts} consecutive failed reconnect attempts: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
@@ -112,9 +125,9 @@ export async function* streamSessionEvents(
 
 /**
  * Yield the durable events with `fromExclusive < sequence <= toInclusive`,
- * in order. Throws if the range cannot be fully read — sequences are
- * contiguous, so a hole here means the replay endpoint and the live stream
- * disagree and continuing would silently drop events.
+ * in order. Sequences are contiguous, so every one of them must exist in the
+ * replay endpoint; if any is missing the function throws instead of skipping
+ * it — continuing would silently break the gap-free delivery guarantee.
  */
 async function* backfillEvents(
   transport: SessionEventStreamTransport,
@@ -133,6 +146,11 @@ async function* backfillEvents(
       );
     }
     for (const event of advancing) {
+      if (event.sequence !== cursor + 1) {
+        throw new OpenGeniStreamError(
+          `event replay backfill is missing sequence ${cursor + 1} (replay endpoint skipped to ${event.sequence}); refusing to deliver with a gap`,
+        );
+      }
       cursor = event.sequence;
       yield event;
     }

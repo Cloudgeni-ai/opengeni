@@ -109,6 +109,16 @@ describe("streamSessionEvents", () => {
     expect(transport.listCalls).toEqual([{ after: 1, limit: 3 }]);
   });
 
+  test("fails loudly when the replay endpoint skips over a missing sequence", async () => {
+    // The replay endpoint has 4 and 5 but not 2 and 3: skipping ahead would
+    // silently violate the gap-free guarantee, so the stream must error.
+    const transport = scriptedTransport([
+      { events: [makeEvent(1), makeEvent(5)] },
+    ], [makeEvent(1), makeEvent(4), makeEvent(5)]);
+    const iterator = streamSessionEvents(transport, { reconnect: false });
+    await expect(collect(iterator)).rejects.toBeInstanceOf(OpenGeniStreamError);
+  });
+
   test("fails loudly when a gap cannot be backfilled", async () => {
     const transport = scriptedTransport([
       { events: [makeEvent(1), makeEvent(5)] },
@@ -210,6 +220,69 @@ describe("streamSessionEvents", () => {
     ]);
     const events = await collect(streamSessionEvents(transport, { reconnect: false }));
     expect(sequences(events)).toEqual([1]);
+  });
+
+  test("reconnects immediately after a clean close that made progress", async () => {
+    const controller = new AbortController();
+    // A huge reconnect delay would stall the test if the productive clean
+    // close were paced; immediate reconnect keeps it fast.
+    const transport = scriptedTransport([
+      { events: [makeEvent(1)] },
+      { events: [makeEvent(2)], hang: true },
+    ]);
+    const seen: SessionEvent[] = [];
+    const startedAt = Date.now();
+    for await (const event of streamSessionEvents(transport, {
+      reconnectDelayMs: 120_000,
+      maxReconnectDelayMs: 120_000,
+      signal: controller.signal,
+    })) {
+      seen.push(event);
+      if (event.sequence === 2) {
+        controller.abort();
+      }
+    }
+    expect(sequences(seen)).toEqual([1, 2]);
+    expect(Date.now() - startedAt).toBeLessThan(60_000);
+  });
+
+  test("paces reconnects when clean closes deliver nothing", async () => {
+    const controller = new AbortController();
+    const transport = scriptedTransport([
+      { events: [] }, // empty clean close: must sleep before reconnecting
+      { events: [makeEvent(1)], hang: true },
+    ]);
+    const seen: SessionEvent[] = [];
+    const startedAt = Date.now();
+    for await (const event of streamSessionEvents(transport, {
+      reconnectDelayMs: 100,
+      signal: controller.signal,
+    })) {
+      seen.push(event);
+      controller.abort();
+    }
+    expect(sequences(seen)).toEqual([1]);
+    // The empty close must have been paced by ~reconnectDelayMs.
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(90);
+  });
+
+  test("reports reconnecting (not connecting) after a clean close", async () => {
+    const controller = new AbortController();
+    const states: StreamConnectionState[] = [];
+    const transport = scriptedTransport([
+      { events: [makeEvent(1)] },
+      { events: [makeEvent(2)], hang: true },
+    ]);
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+      onStateChange: (state) => states.push(state),
+    })) {
+      if (event.sequence === 2) {
+        controller.abort();
+      }
+    }
+    expect(states).toEqual(["connecting", "live", "reconnecting", "live"]);
   });
 
   test("reports connection state transitions", async () => {
