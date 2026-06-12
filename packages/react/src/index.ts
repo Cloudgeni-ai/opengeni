@@ -42,6 +42,10 @@ export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-work
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
 
+// Pending-approvals projection
+export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
+export type { PendingApproval } from "./approvals";
+
 // Timeline projection
 export {
   buildTimeline,

@@ -91,20 +91,36 @@ export function turnSourceLabel(source: SessionTurn["source"]): string {
 }
 
 /**
- * Honest one-liner for the compose-time delivery choice. Queue is the
- * default; steer is the explicit interrupt-and-inject alternative — and on a
- * session with nothing running, steering has nothing to interrupt.
+ * Honest one-liner for the compose-time delivery choice, aligned with what
+ * `OpenGeniClient.steerMessage` actually does per status: it interrupts only
+ * `running` and `requires_action` sessions (steering a session paused on an
+ * approval abandons that approval); on a `queued` session it promotes the
+ * message to the queue front without interrupting anything; with nothing
+ * active it degrades to a plain send.
  */
 export function deliveryModeExplanation(mode: ComposerMode, status: SessionStatus | null | undefined): string {
-  const active = status === "running" || status === "queued";
   if (mode === "steer") {
-    return active
-      ? "Steer interrupts the running turn and injects this message now."
-      : "Nothing is running — steering just sends the message.";
+    switch (status) {
+      case "running":
+        return "Steer interrupts the running turn and injects this message now.";
+      case "requires_action":
+        return "Steer interrupts the turn waiting on approval — the pending approval is abandoned and this message runs instead.";
+      case "queued":
+        return "Nothing is running yet — sends now and jumps to the front of the queue.";
+      default:
+        return "Nothing is running — steering just sends the message.";
+    }
   }
-  return active
-    ? "Queues behind the running turn — visible and editable in the queue until claimed."
-    : "Sends now — the agent is idle, so the turn starts immediately.";
+  switch (status) {
+    case "running":
+      return "Queues behind the running turn — visible and editable in the queue until claimed.";
+    case "requires_action":
+      return "Queues behind the turn waiting on approval — it starts once the approval is decided.";
+    case "queued":
+      return "Joins the queue behind the pending turns — visible and editable until claimed.";
+    default:
+      return "Sends now — the agent is idle, so the turn starts immediately.";
+  }
 }
 
 /** Finished turns (newest first) for the history section of the rail. */

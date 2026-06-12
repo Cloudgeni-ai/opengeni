@@ -133,6 +133,26 @@ describe("OpenGeniClient turn queue", () => {
     expect(JSON.parse(requests[4]!.body!)).toEqual({ type: "user.interrupt", payload: { reason: "steer" } });
   });
 
+  test("steerMessage skips the interrupt when the session already claimed the steer turn", async () => {
+    const accepted = makeEvent(9, "user.message", { text: "now" });
+    const steerTurn = fakeTurn({ id: TURN_B, position: 1, triggerEventId: accepted.id });
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/events")) {
+        return jsonResponse(accepted, 202);
+      }
+      if (request.url.endsWith("/turns")) {
+        return jsonResponse([steerTurn]);
+      }
+      // The running turn finished mid-call and the session claimed the steer
+      // turn itself: interrupting now would cancel the steered message.
+      return jsonResponse({ id: SESSION_ID, status: "running", activeTurnId: TURN_B });
+    });
+    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
+    expect(result.turn?.id).toBe(TURN_B);
+    expect(result.interrupted).toBe(false);
+    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
+  });
+
   test("steerMessage retries the turn lookup while the server materializes it", async () => {
     const accepted = makeEvent(9, "user.message", { text: "now" });
     const steerTurn = fakeTurn({ id: TURN_B, position: 2, triggerEventId: accepted.id });

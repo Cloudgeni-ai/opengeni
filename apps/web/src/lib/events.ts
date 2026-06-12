@@ -157,23 +157,6 @@ function providerInternalFailureDisplayMessage(message: string): string {
   return "Sandbox setup failed while preparing the execution environment. Start a new session.";
 }
 
-export function approvalItems(payload: unknown): Array<{ id: string; name: string; arguments?: unknown; raw?: unknown }> {
-  const approvals = (payload as { approvals?: unknown }).approvals;
-  if (!Array.isArray(approvals)) {
-    return [];
-  }
-  return approvals.map((approval, index) => {
-    const raw = approval as Record<string, unknown>;
-    const rawItem = raw.rawItem && typeof raw.rawItem === "object" ? raw.rawItem as Record<string, unknown> : {};
-    return {
-      id: String(raw.id ?? raw.callId ?? rawItem.callId ?? index),
-      name: String(raw.name ?? "approval"),
-      arguments: raw.arguments,
-      raw,
-    };
-  });
-}
-
 export function eventLabel(type: string): string {
   const labels: Record<string, string> = {
     "session.created": "Session created",

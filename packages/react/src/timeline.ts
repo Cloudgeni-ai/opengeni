@@ -363,7 +363,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "notice",
           id: event.id,
           tone: "waiting",
-          text: "Waiting on you — reply below to continue.",
+          text: "Approval needed — the turn is paused until someone decides.",
           occurredAt: event.occurredAt,
         });
         break;

@@ -288,6 +288,9 @@ export class OpenGeniClient {
    * turns are queued, the interrupt is skipped — stopping the running turn
    * would otherwise promote someone else's queued work over this message —
    * and the call degrades to a plain queued send (`interrupted: false`).
+   * The interrupt is also skipped when the session has already claimed the
+   * steer turn itself (the running turn finished mid-call): the message is
+   * being delivered, so interrupting would cancel the steer turn.
    */
   async steerMessage(
     workspaceId: string,
@@ -321,7 +324,15 @@ export class OpenGeniClient {
     // session to whatever else is queued — only safe when nothing else is.
     const canDeliverNext = steerTurn !== null || queued.length === 0;
     const session = await this.getSession(workspaceId, sessionId);
-    const interrupted = canDeliverNext && (session.status === "running" || session.status === "requires_action");
+    // If the previously running turn already finished and the session claimed
+    // the steer turn itself, interrupting now would cancel the very message
+    // being steered. `activeTurnId` is the claim check; the residual window
+    // between this read and the interrupt landing is accepted (an interrupt
+    // can never be atomic with a status read over HTTP).
+    const steerTurnAlreadyActive = steerTurn !== null && session.activeTurnId === steerTurn.id;
+    const interrupted = canDeliverNext
+      && !steerTurnAlreadyActive
+      && (session.status === "running" || session.status === "requires_action");
     if (interrupted) {
       await this.interrupt(workspaceId, sessionId, { reason: "steer" });
     }

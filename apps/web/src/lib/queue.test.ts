@@ -119,6 +119,37 @@ describe("deliveryModeExplanation", () => {
     expect(deliveryModeExplanation("steer", "idle")).toContain("Nothing is running");
     expect(deliveryModeExplanation("steer", "failed")).toContain("Nothing is running");
   });
+
+  // The hint must match steerMessage's actual behavior per status: interrupt
+  // only on running/requires_action, promote-without-interrupt on queued.
+  test("requires_action steers as an interrupt of the approval-blocked turn, not a plain send", () => {
+    const steer = deliveryModeExplanation("steer", "requires_action");
+    expect(steer).toContain("interrupts the turn waiting on approval");
+    expect(steer).not.toContain("Nothing is running");
+  });
+
+  test("requires_action queue hint admits the message waits on the approval instead of starting immediately", () => {
+    const queue = deliveryModeExplanation("queue", "requires_action");
+    expect(queue).toContain("approval is decided");
+    expect(queue).not.toContain("starts immediately");
+  });
+
+  test("queued steers promote to the queue front without claiming an interrupt", () => {
+    const steer = deliveryModeExplanation("steer", "queued");
+    expect(steer).toContain("front of the queue");
+    expect(steer).not.toContain("interrupts");
+  });
+
+  test("queued queue hint says the message waits behind pending turns", () => {
+    const queue = deliveryModeExplanation("queue", "queued");
+    expect(queue).toContain("behind the pending turns");
+    expect(queue).not.toContain("starts immediately");
+  });
+
+  test("unknown/null status reads as a plain send", () => {
+    expect(deliveryModeExplanation("steer", null)).toContain("Nothing is running");
+    expect(deliveryModeExplanation("queue", undefined)).toContain("starts immediately");
+  });
 });
 
 function turn(id: string, status: SessionTurn["status"], position: number): SessionTurn {

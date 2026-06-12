@@ -261,7 +261,7 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
 export function aggregateUsage(events: UsageEvent[]): Array<{ eventType: string; unit: string; total: number; count: number }> {
   const byKey = new Map<string, { eventType: string; unit: string; total: number; count: number }>();
   for (const event of events) {
-    const key = `${event.eventType} ${event.unit}`;
+    const key = `${event.eventType}\u0000${event.unit}`;
     const entry = byKey.get(key) ?? { eventType: event.eventType, unit: event.unit, total: 0, count: 0 };
     entry.total += event.quantity;
     entry.count += 1;

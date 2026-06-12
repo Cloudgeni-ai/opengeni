@@ -4,12 +4,14 @@
 // honest (reason + re-dispatch history) and revivable from the same composer.
 import {
   MessageTimeline,
+  projectPendingApprovals,
   useComposer,
   useGoal,
   useSession,
   useSessionEvents,
   useTurnQueue,
   type AgentMessageItem,
+  type PendingApproval,
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react";
@@ -41,7 +43,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
-import { approvalItems, isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
+import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
@@ -63,7 +65,10 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
   const timeline = useMemo(() => session ? projectSessionTimeline(session, events) : [], [session, events]);
-  const approvals = events.flatMap((event) => event.type === "session.requiresAction" ? approvalItems(event.payload) : []);
+  // Only approvals still awaiting a decision: the durable log replays every
+  // historical `session.requiresAction`, so subtract decisions and finished
+  // turns instead of rendering decided approvals as live buttons forever.
+  const approvals = useMemo(() => projectPendingApprovals(events), [events]);
   const failure = useMemo(
     () => session?.status === "failed" ? summarizeSessionFailure(events, session.status) : null,
     [events, session?.status],
@@ -162,7 +167,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
 function SessionChatPane(props: {
   session: Session;
   timeline: TimelineItem[];
-  approvals: Array<{ id: string; name: string; arguments?: unknown; raw?: unknown }>;
+  approvals: PendingApproval[];
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   goal: ReturnType<typeof useGoal>;
   onOpenSession: (sessionId: string) => void;
@@ -230,7 +235,10 @@ function SessionChatPane(props: {
         </>
       )}
 
-      {props.approvals.length > 0 && !terminal ? (
+      {/* Live decision strip: only while the session is actually paused on
+          an approval — a replayed log or a stale stream must never render
+          actionable Approve/Reject buttons for an already-resumed turn. */}
+      {props.approvals.length > 0 && props.session.status === "requires_action" ? (
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
           <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
             {props.approvals.map((approval) => (
