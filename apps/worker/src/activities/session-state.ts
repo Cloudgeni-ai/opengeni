@@ -138,7 +138,20 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
         payload: { status: "queued" },
       },
     ]);
-    await requeuePreemptedTurn(db, input.workspaceId, turn.id, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+    try {
+      await requeuePreemptedTurn(db, input.workspaceId, turn.id, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+    } catch (requeueError) {
+      // The zombie attempt can settle the turn between the status check above
+      // and this requeue (it keeps executing until it notices the timeout).
+      // A settled turn means its recorded outcome is the truth: report stale
+      // so the workflow continues instead of failing the session over a lost
+      // race. Anything else is a real persistence failure — rethrow.
+      const current = await getSessionTurn(db, input.workspaceId, input.turnId);
+      if (current && current.status !== "running" && current.status !== "requires_action") {
+        return { action: "stale" };
+      }
+      throw requeueError;
+    }
     await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
     return { action: "requeued", redispatches };
   }
