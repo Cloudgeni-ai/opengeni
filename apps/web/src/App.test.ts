@@ -1,30 +1,58 @@
 import { describe, expect, test } from "bun:test";
 import { Permission } from "@opengeni/contracts";
+
 import {
-  agentConfigFromFormState,
-  buildApiKeyPermissionGroups,
-  buildTools,
-  delegableApiKeyPermissions,
   capabilityErrorToast,
-  enabledWorkspaceCapabilityMcpServers,
   filterCapabilityCatalogItems,
-  formStateFromScheduledTask,
-  gitHubRepositoryResource,
-  mergeMcpServerOptions,
+  summarizePackContents,
+} from "./lib/capabilities";
+import {
   projectSessionTimeline,
   sanitizeEventForDisplay,
-  scheduleFromFormState,
+  summarizeSessionFailure,
+} from "./lib/events";
+import {
+  buildApiKeyPermissionGroups,
+  buildSessionMcpPermissionGroups,
+  delegableApiKeyPermissions,
+} from "./lib/permissions";
+import { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "./lib/routes";
+import {
+  emptyAdvancedSessionDraft,
+  submissionExtrasFromAdvancedSessionDraft,
+} from "./lib/session-create";
+import {
+  buildTools,
+  enabledWorkspaceCapabilityMcpServers,
+  gitHubRepositoryResource,
+  mergeMcpServerOptions,
   selectedAvailableCapabilityToolIds,
-  summarizePackContents,
-  workspaceAgentPath,
-  workspaceSessionPath,
-} from "./App";
-import type { CapabilityCatalogItem, GitHubRepository, ResourceRef, ScheduledTask, ScheduledTaskScheduleSpec, Session, SessionEvent } from "./types";
+} from "./lib/session-tools";
+import {
+  agentConfigFromFormState,
+  formStateFromScheduledTask,
+  scheduleFromFormState,
+  summarizeLastRun,
+} from "./lib/scheduled-tasks";
+import type {
+  CapabilityCatalogItem,
+  GitHubRepository,
+  ResourceRef,
+  ScheduledTask,
+  ScheduledTaskRun,
+  ScheduledTaskScheduleSpec,
+  Session,
+  SessionEvent,
+} from "./types";
 
 describe("workspace route helpers", () => {
   test("builds canonical workspace-scoped console URLs", () => {
-    expect(workspaceAgentPath("workspace-1")).toBe("/workspaces/workspace-1/agent");
+    expect(workspaceSessionsPath("workspace-1")).toBe("/workspaces/workspace-1/sessions");
     expect(workspaceSessionPath("workspace-1", "session-1")).toBe("/workspaces/workspace-1/sessions/session-1");
+  });
+
+  test("the legacy agent home maps onto the sessions index", () => {
+    expect(workspaceAgentPath("workspace-1")).toBe("/workspaces/workspace-1/sessions");
   });
 
   test("does not build legacy unscoped session URLs", () => {
@@ -73,6 +101,69 @@ describe("api key permission options", () => {
 
   test("empty grants can delegate nothing", () => {
     expect(delegableApiKeyPermissions([]).size).toBe(0);
+  });
+});
+
+describe("session MCP permission groups", () => {
+  // The session create form reuses the API key dialog's grouped picker idiom
+  // for firstPartyMcpPermissions, minus account-level scopes a workspace
+  // session can never exercise.
+  test("offers only contracts permissions, each exactly once", () => {
+    const offered = buildSessionMcpPermissionGroups().flatMap((group) => group.permissions);
+    expect(offered.length).toBe(new Set(offered).size);
+    for (const permission of offered) {
+      expect([...Permission.options] as string[]).toContain(permission);
+    }
+  });
+
+  test("excludes account-only scopes but keeps workspace scopes", () => {
+    const offered: string[] = buildSessionMcpPermissionGroups().flatMap((group) => group.permissions);
+    for (const accountScope of ["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create"]) {
+      expect(offered).not.toContain(accountScope);
+    }
+    for (const workspaceScope of ["sessions:create", "goals:manage", "environments:use", "workspace:admin"]) {
+      expect(offered).toContain(workspaceScope);
+    }
+  });
+});
+
+describe("advanced session create draft", () => {
+  test("an untouched draft adds nothing to the create payload", () => {
+    expect(submissionExtrasFromAdvancedSessionDraft(emptyAdvancedSessionDraft())).toEqual({});
+  });
+
+  test("maps sandbox, environment, goal, and MCP scope into the payload", () => {
+    const draft = {
+      ...emptyAdvancedSessionDraft(),
+      sandboxBackend: "docker" as const,
+      environmentId: "env-1",
+      goalText: "  Keep CI green  ",
+      goalSuccessCriteria: "All checks pass for 7 days",
+      goalMaxAutoContinuations: "12",
+      customMcpPermissions: true,
+      mcpPermissions: new Set(["sessions:read", "goals:manage"]),
+    };
+    expect(submissionExtrasFromAdvancedSessionDraft(draft)).toEqual({
+      sandboxBackend: "docker",
+      environmentId: "env-1",
+      goal: {
+        text: "Keep CI green",
+        successCriteria: "All checks pass for 7 days",
+        maxAutoContinuations: 12,
+      },
+      firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
+    });
+  });
+
+  test("ignores goal sub-fields without goal text and bad numbers", () => {
+    const draft = {
+      ...emptyAdvancedSessionDraft(),
+      goalSuccessCriteria: "criteria without a goal",
+      goalMaxAutoContinuations: "-3",
+    };
+    expect(submissionExtrasFromAdvancedSessionDraft(draft)).toEqual({});
+    const withGoal = { ...draft, goalText: "goal", goalMaxAutoContinuations: "not-a-number" };
+    expect(submissionExtrasFromAdvancedSessionDraft(withGoal)).toEqual({ goal: { text: "goal", successCriteria: "criteria without a goal" } });
   });
 });
 
@@ -212,6 +303,43 @@ describe("projectSessionTimeline", () => {
     expect(json).not.toContain("RESOURCE_EXHAUSTED");
     expect(json).not.toContain("ModalClient");
     expect(json).toContain("temporary capacity limit");
+  });
+});
+
+describe("summarizeSessionFailure", () => {
+  test("reports the latest failure reason and the re-dispatch history", () => {
+    const summary = summarizeSessionFailure([
+      event(1, "user.message", { text: "Inspect" }),
+      event(2, "turn.preempted", { turnId: "turn-1" }),
+      event(3, "turn.failed", { error: "First failure" }),
+      event(4, "turn.preempted", { turnId: "turn-2" }),
+      event(5, "turn.failed", { error: "Provider exploded" }),
+    ], "failed");
+
+    expect(summary.reason).toBe("Provider exploded");
+    expect(summary.failedAt).toBe(event(5, "turn.failed", {}).occurredAt);
+    expect(summary.redispatchCount).toBe(2);
+    expect(summary.failedTurnCount).toBe(2);
+  });
+
+  test("redacts provider-internal failure reasons like the timeline does", () => {
+    const summary = summarizeSessionFailure([
+      event(1, "turn.failed", {
+        error: "/modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED",
+      }),
+    ], "failed");
+
+    expect(summary.reason).not.toContain("RESOURCE_EXHAUSTED");
+    expect(summary.reason).toContain("Sandbox setup failed");
+  });
+
+  test("reports nothing for a clean session", () => {
+    expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
+      reason: null,
+      failedAt: null,
+      redispatchCount: 0,
+      failedTurnCount: 0,
+    });
   });
 });
 
@@ -454,6 +582,23 @@ describe("scheduled task form helpers", () => {
   });
 });
 
+describe("scheduled task run summaries", () => {
+  test("summarizes the most recent run with honest tones", () => {
+    const summary = summarizeLastRun([
+      taskRun({ id: "run-1", firedAt: "2026-06-10T08:00:00.000Z", status: "dispatched" }),
+      taskRun({ id: "run-2", firedAt: "2026-06-11T08:00:00.000Z", status: "failed", error: "no capacity" }),
+    ]);
+    expect(summary?.run.id).toBe("run-2");
+    expect(summary?.tone).toBe("failed");
+    expect(summary?.label).toContain("no capacity");
+  });
+
+  test("returns null with no runs and pending tone for queued runs", () => {
+    expect(summarizeLastRun([])).toBeNull();
+    expect(summarizeLastRun([taskRun({ status: "queued" })])?.tone).toBe("pending");
+  });
+});
+
 describe("GitHub repository resources", () => {
   test("uses normal git resources for public GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
@@ -571,6 +716,25 @@ function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<Sched
     metadata: {},
     createdAt: "2026-05-12T00:00:00.000Z",
     updatedAt: "2026-05-12T00:00:00.000Z",
+    ...patch,
+  };
+}
+
+function taskRun(patch: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
+  return {
+    id: "run-1",
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    taskId: "task-1",
+    status: "dispatched",
+    triggerType: "scheduled",
+    scheduledAt: null,
+    firedAt: "2026-06-11T08:00:00.000Z",
+    sessionId: null,
+    triggerEventId: null,
+    error: null,
+    createdAt: "2026-06-11T08:00:00.000Z",
+    updatedAt: "2026-06-11T08:00:00.000Z",
     ...patch,
   };
 }

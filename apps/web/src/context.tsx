@@ -1,0 +1,718 @@
+// Root providers: client config bootstrap, auth (deployment key / configured
+// token / managed session), workspace access, and the cross-route console
+// state (model choice, repo selection, tool toggles). Everything below the
+// workspace shell consumes this through `useAppContext`.
+import type { OpenGeniClient } from "@opengeni/sdk";
+import type { SessionEventsConnectionState } from "@opengeni/react";
+import { Outlet, useNavigate } from "@tanstack/react-router";
+import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
+import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
+import {
+  createContext,
+  type Dispatch,
+  type SetStateAction,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Toaster, toast } from "sonner";
+
+import {
+  clearStoredAccessKey,
+  createOpenGeniClient,
+  fetchAuthSession,
+  fetchClientConfig,
+  getStoredAccessKey,
+  sendVerificationEmail,
+  setStoredAccessKey,
+  signInEmail,
+  signOutManaged,
+  signUpEmail,
+} from "@/api";
+import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  buildResources,
+  buildTools,
+  enabledCustomMcpServers,
+  enabledWorkspaceCapabilityMcpServers,
+  groupRepositories,
+  isAbortError,
+  isUiReasoningEffort,
+  mergeMcpServerOptions,
+  selectedAvailableCapabilityToolIds,
+  type IntelligenceEffort,
+  type McpServerOption,
+  type RepoDraft,
+  type RepositoryGroup,
+} from "@/lib/session-tools";
+import type {
+  AccessContext,
+  AuthSession,
+  ClientConfig,
+  GitHubRepository,
+  ResourceRef,
+  Session,
+  TurnSubmission,
+  Workspace,
+} from "@/types";
+
+export type AppContextValue = {
+  client: OpenGeniClient;
+  clientConfig: ClientConfig;
+  authSession: AuthSession | null;
+  accessContext: AccessContext;
+  workspaces: Workspace[];
+  accessKeyVersion: number;
+  keyAuthRequired: boolean;
+  model: string;
+  setModel: Dispatch<SetStateAction<string>>;
+  reasoningEffort: IntelligenceEffort;
+  setReasoningEffort: Dispatch<SetStateAction<IntelligenceEffort>>;
+  inspectorOpen: boolean;
+  setInspectorOpen: Dispatch<SetStateAction<boolean>>;
+  session: Session | null;
+  setSession: Dispatch<SetStateAction<Session | null>>;
+  connectionState: SessionEventsConnectionState;
+  setConnectionState: Dispatch<SetStateAction<SessionEventsConnectionState>>;
+  manualRepos: RepoDraft[];
+  setManualRepos: Dispatch<SetStateAction<RepoDraft[]>>;
+  manualReposOpen: boolean;
+  setManualReposOpen: Dispatch<SetStateAction<boolean>>;
+  selectedRepoIds: Set<number>;
+  setSelectedRepoIds: Dispatch<SetStateAction<Set<number>>>;
+  selectedRepoRefs: Record<number, string>;
+  setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
+  githubRepos: GitHubRepository[];
+  githubStatus: { configured: boolean; missing: string[]; installUrl: string | null } | null;
+  githubAppOpen: boolean;
+  setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
+  githubOrg: string;
+  setGithubOrg: Dispatch<SetStateAction<string>>;
+  openGeniToolEnabled: boolean;
+  setOpenGeniToolEnabled: Dispatch<SetStateAction<boolean>>;
+  documentSearchEnabled: boolean;
+  setDocumentSearchEnabled: Dispatch<SetStateAction<boolean>>;
+  selectedCapabilityToolIds: Set<string>;
+  setSelectedCapabilityToolIds: Dispatch<SetStateAction<Set<string>>>;
+  busy: boolean;
+  repoBusy: boolean;
+  githubAppBusy: boolean;
+  selectedInstallationId: number | null;
+  repositoryGroups: RepositoryGroup[];
+  customMcpServers: McpServerOption[];
+  currentResources: ResourceRef[];
+  addManualRepository: () => void;
+  forgetAccessKey: () => void;
+  handleManagedSignOut: () => Promise<void>;
+  refreshGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
+  toggleGitHubRepository: (repo: GitHubRepository) => void;
+  startSession: (workspaceId: string, submission: TurnSubmission) => Promise<Session | null>;
+  resetSessionView: () => void;
+  resetWorkspaceIntegrations: () => void;
+};
+
+const AppContext = createContext<AppContextValue | null>(null);
+
+export function useAppContext(): AppContextValue {
+  const value = useContext(AppContext);
+  if (!value) {
+    throw new Error("OpenGeni app context is not ready");
+  }
+  return value;
+}
+
+export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): string {
+  const hasMultipleAccounts = new Set(workspaces.map((candidate) => candidate.accountId)).size > 1;
+  if (!hasMultipleAccounts) {
+    return workspace.name;
+  }
+  return `${workspace.name} / ${workspace.accountId.slice(0, 8)}`;
+}
+
+export function RootRouteComponent() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
+  const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [accessLoading, setAccessLoading] = useState(false);
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [model, setModel] = useState("gpt-5.5");
+  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
+  const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
+  const [manualReposOpen, setManualReposOpen] = useState(false);
+  const [nextRepoId, setNextRepoId] = useState(1);
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
+  const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
+  const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
+  const [githubStatus, setGithubStatus] = useState<{ configured: boolean; missing: string[]; installUrl: string | null } | null>(null);
+  const [githubAppOpen, setGithubAppOpen] = useState(false);
+  const [githubOrg, setGithubOrg] = useState("");
+  const [openGeniToolEnabled, setOpenGeniToolEnabled] = useState(true);
+  const [documentSearchEnabled, setDocumentSearchEnabled] = useState(false);
+  const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
+  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(() => new Set());
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
+  const githubRefreshId = useRef(0);
+  const mcpRefreshId = useRef(0);
+  const [busy, setBusy] = useState(false);
+  const [repoBusy, setRepoBusy] = useState(false);
+  const [githubAppBusy, setGithubAppBusy] = useState(false);
+  const [hasAccessKey, setHasAccessKey] = useState(() => getStoredAccessKey() !== null);
+  const [accessKeyDraft, setAccessKeyDraft] = useState("");
+  const [accessKeyVersion, setAccessKeyVersion] = useState(0);
+  const keyAuthRequired = clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
+  const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  const keyAuthReady = !keyAuthRequired || hasAccessKey;
+  const managedAuthReady = !managedAuthRequired || Boolean(authSession);
+  const authReady = keyAuthReady && managedAuthReady;
+  const defaultWorkspaceId = accessContext?.defaultWorkspaceId ?? workspaces[0]?.id ?? accessContext?.workspaceGrants[0]?.workspaceId ?? null;
+  const navigate = useNavigate();
+  // The @opengeni/sdk client behind every console API call and hook. Auth
+  // headers are read per request; a new identity per key version makes the
+  // hooks re-fetch and the event streams reconnect with the new credentials.
+  const client = useMemo(() => createOpenGeniClient(), [accessKeyVersion]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchClientConfig()
+      .then((config) => {
+        if (cancelled) {
+          return;
+        }
+        setClientConfig(config);
+        setConfigError(null);
+        setModel(config.defaultModel);
+        if (isUiReasoningEffort(config.defaultReasoningEffort)) {
+          setReasoningEffort(config.defaultReasoningEffort);
+        }
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        setConfigError(message);
+        toast.error("Failed to load client config", { description: message });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!clientConfig) {
+      return;
+    }
+    if (clientConfig.auth.mode !== "managedSession") {
+      setAuthSession(null);
+      return;
+    }
+    let cancelled = false;
+    setAuthSession(undefined);
+    void fetchAuthSession()
+      .then((nextSession) => {
+        if (!cancelled) {
+          setAuthSession(nextSession);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuthSession(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientConfig]);
+
+  useEffect(() => {
+    if (!clientConfig || !authReady) {
+      setAccessContext(null);
+      setWorkspaces([]);
+      setAccessLoading(false);
+      setAccessError(null);
+      return;
+    }
+    let cancelled = false;
+    setAccessLoading(true);
+    setAccessError(null);
+    void Promise.all([client.getAccessContext(), client.listWorkspaces()])
+      .then(([context, nextWorkspaces]) => {
+        if (cancelled) {
+          return;
+        }
+        setAccessContext(context);
+        setWorkspaces(nextWorkspaces);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        toast.error("Failed to load workspace access", { description: String(error) });
+        setAccessContext(null);
+        setWorkspaces([]);
+        setAccessError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAccessLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientConfig, authReady, client]);
+
+  const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
+  const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
+  const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
+  const customMcpServers = useMemo(
+    () => mergeMcpServerOptions(enabledCustomMcpServers(clientConfig), workspaceMcpServers),
+    [clientConfig, workspaceMcpServers],
+  );
+  const currentResources = useMemo(
+    () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
+    [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
+  );
+
+  useEffect(() => {
+    if (!clientConfig) {
+      return;
+    }
+    const availableIds = customMcpServers.map((server) => server.id);
+    setSelectedCapabilityToolIds((current) => selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current));
+    previousCapabilityToolIds.current = new Set(availableIds);
+  }, [clientConfig, customMcpServers]);
+
+  async function refreshGitHub(workspaceId: string, signal?: AbortSignal) {
+    const refreshId = githubRefreshId.current + 1;
+    githubRefreshId.current = refreshId;
+    setRepoBusy(true);
+    try {
+      const status = await client.getGitHubApp(workspaceId);
+      if (signal?.aborted || githubRefreshId.current !== refreshId) {
+        return;
+      }
+      setGithubStatus({ configured: status.configured, missing: status.missing, installUrl: status.installUrl });
+      setGithubAppOpen(!status.configured);
+      if (status.configured) {
+        const { repositories } = await client.listGitHubRepositories(workspaceId);
+        if (signal?.aborted || githubRefreshId.current !== refreshId) {
+          return;
+        }
+        setGithubRepos(repositories);
+      } else {
+        setGithubRepos([]);
+      }
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+        return;
+      }
+      setGithubStatus({ configured: false, missing: [], installUrl: null });
+      setGithubRepos([]);
+      toast.error("GitHub status unavailable", { description: String(error) });
+    } finally {
+      if (githubRefreshId.current === refreshId) {
+        setRepoBusy(false);
+      }
+    }
+  }
+
+  async function refreshWorkspaceMcpServers(workspaceId: string, signal?: AbortSignal) {
+    const refreshId = mcpRefreshId.current + 1;
+    mcpRefreshId.current = refreshId;
+    const catalog = await client.listCapabilities(workspaceId);
+    if (signal?.aborted || mcpRefreshId.current !== refreshId) {
+      return;
+    }
+    setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+  }
+
+  async function startSession(workspaceId: string, submission: TurnSubmission): Promise<Session | null> {
+    setBusy(true);
+    try {
+      const selectedTools = buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]);
+      const created = await client.createSession(workspaceId, {
+        initialMessage: submission.text,
+        resources: [...currentResources, ...(submission.resources ?? [])],
+        tools: selectedTools,
+        model: submission.model ?? model,
+        reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
+        clientEventId: crypto.randomUUID(),
+        ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
+        ...(submission.environmentId ? { environmentId: submission.environmentId } : {}),
+        ...(submission.goal ? { goal: submission.goal } : {}),
+        ...(submission.firstPartyMcpPermissions ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions } : {}),
+      });
+      setSession(created);
+      setConnectionState("idle");
+      return created;
+    } catch (error) {
+      toast.error("Failed to start session", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startGitHubAppManifestFlow(workspaceId: string) {
+    setGithubAppBusy(true);
+    try {
+      const result = await client.createGitHubAppManifest(workspaceId, {
+        ...(githubOrg.trim() ? { organization: githubOrg.trim() } : {}),
+        public: false,
+        includeCiPermissions: true,
+      });
+      submitGitHubManifest(result.actionUrl, result.manifest);
+    } catch (error) {
+      toast.error("GitHub App setup failed", { description: error instanceof Error ? error.message : String(error) });
+      setGithubAppBusy(false);
+    }
+  }
+
+  function toggleGitHubRepository(repo: GitHubRepository) {
+    if (selectedInstallationId !== null && selectedInstallationId !== repo.installationId && !selectedRepoIds.has(repo.id)) {
+      toast.info("This session uses one GitHub token", {
+        description: "Clear selected repositories to choose repositories from another account.",
+      });
+      return;
+    }
+    setSelectedRepoIds((current) => {
+      const next = new Set(current);
+      if (next.has(repo.id)) {
+        next.delete(repo.id);
+      } else {
+        next.add(repo.id);
+      }
+      return next;
+    });
+    setSelectedRepoRefs((current) => ({ ...current, [repo.id]: current[repo.id] ?? repo.defaultBranch }));
+  }
+
+  function addManualRepository() {
+    setManualRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
+    setNextRepoId((value) => value + 1);
+    setManualReposOpen(true);
+  }
+
+  function saveAccessKey() {
+    const key = accessKeyDraft.trim();
+    if (!key) {
+      toast.error("Enter an access key");
+      return;
+    }
+    setStoredAccessKey(key);
+    setHasAccessKey(true);
+    setAccessKeyDraft("");
+    setAccessError(null);
+    setAccessKeyVersion((version) => version + 1);
+  }
+
+  function forgetAccessKey() {
+    clearStoredAccessKey();
+    setHasAccessKey(false);
+    setSession(null);
+    setAccessContext(null);
+    setWorkspaces([]);
+    setAccessError(null);
+    setAccessKeyVersion((version) => version + 1);
+  }
+
+  async function handleManagedAuth(mode: "signin" | "signup", input: { name: string; email: string; password: string }) {
+    if (mode === "signup") {
+      await signUpEmail(input);
+    } else {
+      await signInEmail({ email: input.email, password: input.password, rememberMe: true });
+    }
+    const nextSession = await fetchAuthSession();
+    setAuthSession(nextSession);
+    setAccessKeyVersion((version) => version + 1);
+    if (!nextSession && mode === "signup") {
+      toast.success("Check your email to verify the account");
+    }
+  }
+
+  async function handleManagedSignOut() {
+    await signOutManaged();
+    setAuthSession(null);
+    setAccessContext(null);
+    setWorkspaces([]);
+    setSession(null);
+    setAccessError(null);
+    setAccessKeyVersion((version) => version + 1);
+    await navigate({ to: "/", replace: true });
+  }
+
+  function resetSessionView() {
+    setSession(null);
+    setConnectionState("idle");
+  }
+
+  function resetWorkspaceIntegrations() {
+    setGithubStatus(null);
+    setGithubRepos([]);
+    setWorkspaceMcpServers([]);
+  }
+
+  const appContext = clientConfig && accessContext ? {
+    client,
+    clientConfig,
+    authSession: authSession ?? null,
+    accessContext,
+    workspaces,
+    accessKeyVersion,
+    keyAuthRequired: keyAuthRequired === true,
+    model,
+    setModel,
+    reasoningEffort,
+    setReasoningEffort,
+    inspectorOpen,
+    setInspectorOpen,
+    session,
+    setSession,
+    connectionState,
+    setConnectionState,
+    manualRepos,
+    setManualRepos,
+    manualReposOpen,
+    setManualReposOpen,
+    selectedRepoIds,
+    setSelectedRepoIds,
+    selectedRepoRefs,
+    setSelectedRepoRefs,
+    githubRepos,
+    githubStatus,
+    githubAppOpen,
+    setGithubAppOpen,
+    githubOrg,
+    setGithubOrg,
+    openGeniToolEnabled,
+    setOpenGeniToolEnabled,
+    documentSearchEnabled,
+    setDocumentSearchEnabled,
+    selectedCapabilityToolIds,
+    setSelectedCapabilityToolIds,
+    busy,
+    repoBusy,
+    githubAppBusy,
+    selectedInstallationId,
+    repositoryGroups,
+    customMcpServers,
+    currentResources,
+    addManualRepository,
+    forgetAccessKey,
+    handleManagedSignOut,
+    refreshGitHub,
+    refreshWorkspaceMcpServers,
+    startGitHubAppManifestFlow,
+    toggleGitHubRepository,
+    startSession,
+    resetSessionView,
+    resetWorkspaceIntegrations,
+  } satisfies AppContextValue : null;
+
+  return (
+    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-[color:var(--color-bg)] text-[color:var(--color-fg)]">
+      <Toaster richColors theme="dark" />
+      {!clientConfig && !configError ? (
+        <LoadingPanel label="Loading OpenGeni" />
+      ) : configError ? (
+        <ProblemPanel title="Client configuration unavailable" description={configError} />
+      ) : keyAuthRequired && !hasAccessKey ? (
+        <AccessKeyPanel
+          authMode={clientConfig?.auth.mode}
+          accessKeyDraft={accessKeyDraft}
+          setAccessKeyDraft={setAccessKeyDraft}
+          onSubmit={saveAccessKey}
+        />
+      ) : managedAuthRequired && authSession === undefined ? (
+        <LoadingPanel label="Checking session" />
+      ) : managedAuthRequired && !authSession ? (
+        <ManagedAuthPanel onSubmit={handleManagedAuth} />
+      ) : accessError && !accessLoading ? (
+        <ProblemPanel
+          title="Workspace access unavailable"
+          description={accessError}
+          action={(
+            <Button type="button" variant="secondary" onClick={() => setAccessKeyVersion((version) => version + 1)}>
+              Retry
+            </Button>
+          )}
+        />
+      ) : accessLoading || !appContext ? (
+        <LoadingPanel label="Loading workspace access" />
+      ) : !defaultWorkspaceId ? (
+        <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />
+      ) : (
+        <AppContext.Provider value={appContext}>
+          <Outlet />
+          {import.meta.env.DEV ? <TanStackRouterDevtools position="bottom-right" /> : null}
+        </AppContext.Provider>
+      )}
+    </main>
+  );
+}
+
+function submitGitHubManifest(actionUrl: string, manifest: Record<string, unknown>): void {
+  const form = document.createElement("form");
+  form.method = "POST";
+  form.action = actionUrl;
+  form.style.display = "none";
+  form.acceptCharset = "utf-8";
+
+  const input = document.createElement("input");
+  input.type = "hidden";
+  input.name = "manifest";
+  input.value = JSON.stringify(manifest);
+
+  form.append(input);
+  document.body.append(form);
+  form.submit();
+}
+
+function AccessKeyPanel(props: {
+  authMode: ClientConfig["auth"]["mode"] | undefined;
+  accessKeyDraft: string;
+  setAccessKeyDraft: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <section className="flex flex-1 items-center justify-center px-4">
+      <form
+        className="w-full max-w-sm rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-5 shadow-sm"
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onSubmit();
+        }}
+      >
+        <div className="mb-4 flex items-center gap-3">
+          <span className="flex size-9 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+            <LockIcon className="size-4" />
+          </span>
+          <div>
+            <h1 className="text-base font-semibold">Access key required</h1>
+            <p className="text-sm text-[color:var(--color-fg-subtle)]">
+              Enter the {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"} for this OpenGeni instance.
+            </p>
+          </div>
+        </div>
+        <Label htmlFor="access-key">Access key</Label>
+        <Input
+          id="access-key"
+          type="password"
+          value={props.accessKeyDraft}
+          onChange={(event) => props.setAccessKeyDraft(event.target.value)}
+          autoComplete="current-password"
+          className="mt-2"
+          autoFocus
+        />
+        <Button type="submit" className="mt-4 w-full">
+          <CheckIcon className="size-4" />
+          Continue
+        </Button>
+      </form>
+    </section>
+  );
+}
+
+function ManagedAuthPanel(props: {
+  onSubmit: (mode: "signin" | "signup", input: { name: string; email: string; password: string }) => Promise<void>;
+}) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [resendBusy, setResendBusy] = useState(false);
+
+  async function submit() {
+    if (!email.trim() || password.length < 8 || (mode === "signup" && !name.trim())) {
+      toast.error("Enter valid account details");
+      return;
+    }
+    setBusy(true);
+    try {
+      await props.onSubmit(mode, { name: name.trim() || email.trim(), email: email.trim(), password });
+    } catch (error) {
+      toast.error(mode === "signup" ? "Sign up failed" : "Sign in failed", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendVerification() {
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      toast.error("Enter your email");
+      return;
+    }
+    setResendBusy(true);
+    try {
+      await sendVerificationEmail({ email: normalizedEmail });
+      toast.success("Verification email sent");
+    } catch (error) {
+      toast.error("Failed to send verification email", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setResendBusy(false);
+    }
+  }
+
+  return (
+    <section className="flex flex-1 items-center justify-center px-4">
+      <form
+        className="w-full max-w-sm rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-5 shadow-sm"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+      >
+        <div className="mb-4 flex items-center gap-3">
+          <span className="flex size-9 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+            <UserIcon className="size-4" />
+          </span>
+          <div>
+            <h1 className="text-base font-semibold">{mode === "signup" ? "Create account" : "Sign in"}</h1>
+            <p className="text-sm text-[color:var(--color-fg-subtle)]">Email and password access for the managed console.</p>
+          </div>
+        </div>
+        <div className="mb-4 grid grid-cols-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-1">
+          <Button type="button" size="sm" variant={mode === "signin" ? "secondary" : "ghost"} onClick={() => setMode("signin")}>Sign in</Button>
+          <Button type="button" size="sm" variant={mode === "signup" ? "secondary" : "ghost"} onClick={() => setMode("signup")}>Sign up</Button>
+        </div>
+        {mode === "signup" ? (
+          <div className="mb-3">
+            <Label htmlFor="managed-auth-name">Name</Label>
+            <Input id="managed-auth-name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" className="mt-2" />
+          </div>
+        ) : null}
+        <div className="mb-3">
+          <Label htmlFor="managed-auth-email">Email</Label>
+          <Input id="managed-auth-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" className="mt-2" autoFocus />
+        </div>
+        <div>
+          <Label htmlFor="managed-auth-password">Password</Label>
+          <Input id="managed-auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "signin" ? "current-password" : "new-password"} className="mt-2" />
+        </div>
+        <Button type="submit" className="mt-4 w-full" disabled={busy}>
+          {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
+          {mode === "signup" ? "Create account" : "Sign in"}
+        </Button>
+        <Button type="button" variant="ghost" className="mt-2 w-full" disabled={resendBusy || busy} onClick={() => void resendVerification()}>
+          {resendBusy ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+          Resend verification email
+        </Button>
+      </form>
+    </section>
+  );
+}

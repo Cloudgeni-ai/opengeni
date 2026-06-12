@@ -3,7 +3,7 @@
 // strip. The textarea, send/stop controls, Enter handling, and draft/error
 // state all come from the package.
 import { ChatComposer, type ComposerState } from "@opengeni/react";
-import { FileIcon, ImageIcon, Loader2Icon, PaperclipIcon, XIcon } from "lucide-react";
+import { FileIcon, ImageIcon, ListPlusIcon, Loader2Icon, PaperclipIcon, XIcon, ZapIcon } from "lucide-react";
 import {
   type ClipboardEvent,
   type ChangeEvent,
@@ -14,8 +14,10 @@ import {
 } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useAppContext } from "@/context";
+import { formatBytes } from "@/lib/format";
+import { deliveryModeExplanation } from "@/lib/queue";
 import { cn } from "@/lib/utils";
-import { uploadFileAsset } from "@/api";
 import type { FileAsset, ResourceRef, SessionStatus } from "@/types";
 
 type DraftAttachment = {
@@ -39,8 +41,9 @@ export type DraftAttachmentsState = {
   clear: () => void;
 };
 
-/** Upload-and-track state for files attached to the next message. */
+/** Upload-and-track state for files attached to the next message (via the SDK's uploadFile). */
 export function useDraftAttachments(workspaceId: string): DraftAttachmentsState {
+  const { client } = useAppContext();
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
 
   const enqueueFiles = useCallback((files: Iterable<File>) => {
@@ -55,7 +58,11 @@ export function useDraftAttachments(workspaceId: string): DraftAttachmentsState 
         status: "uploading",
         ...(previewUrl ? { previewUrl } : {}),
       }]);
-      void uploadFileAsset(workspaceId, file).then((asset) => {
+      void client.uploadFile(workspaceId, {
+        filename: file.name || "file",
+        contentType: file.type || "application/octet-stream",
+        data: file,
+      }).then((asset) => {
         setAttachments((current) => current.map((attachment) => attachment.id === id
           ? { ...attachment, status: "ready", file: asset, name: asset.filename, contentType: asset.contentType, sizeBytes: asset.sizeBytes }
           : attachment));
@@ -65,7 +72,7 @@ export function useDraftAttachments(workspaceId: string): DraftAttachmentsState 
           : attachment));
       });
     }
-  }, [workspaceId]);
+  }, [client, workspaceId]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments((current) => {
@@ -111,6 +118,11 @@ export function ConsoleComposer(props: {
   fileUploadsEnabled: boolean;
   /** Console controls (model picker, tool toggles, ...) in the footer row. */
   controls?: ReactNode;
+  /**
+   * Show the queue-vs-steer delivery choice. Queue (default) stacks the
+   * message behind the running turn; steer interrupts and injects it now.
+   */
+  showDeliveryMode?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { composer, attachments } = props;
@@ -154,6 +166,9 @@ export function ConsoleComposer(props: {
         ) : undefined}
         controlsStart={(
           <>
+            {props.showDeliveryMode ? (
+              <DeliveryModeToggle composer={composer} disabled={props.disabled} />
+            ) : null}
             {props.controls}
             <Button
               type="button"
@@ -170,6 +185,66 @@ export function ConsoleComposer(props: {
           </>
         )}
       />
+      {props.showDeliveryMode && !props.disabled ? (
+        <p
+          data-testid="delivery-mode-hint"
+          className={cn(
+            "px-1.5 pt-1.5 text-[11px] leading-4",
+            composer.mode === "steer" ? "text-amber-300/90" : "text-[color:var(--color-fg-subtle)]",
+          )}
+        >
+          {deliveryModeExplanation(composer.mode, props.status ?? null)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The compose-time queue-vs-steer choice. Queue is the calm default; steer is
+ * visually loud (amber) because it interrupts whatever the agent is doing.
+ */
+function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; disabled?: boolean }) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Delivery mode"
+      className="flex h-8 shrink-0 items-center gap-0.5 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/60 p-0.5"
+    >
+      <button
+        type="button"
+        role="radio"
+        aria-checked={composer.mode === "queue"}
+        disabled={disabled}
+        onClick={() => composer.setMode("queue")}
+        title="Queue (default): runs after the current turn finishes"
+        className={cn(
+          "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
+          composer.mode === "queue"
+            ? "bg-[color:var(--color-surface-2)] text-[color:var(--color-fg)]"
+            : "text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]",
+        )}
+      >
+        <ListPlusIcon className="size-3.5" />
+        Queue
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={composer.mode === "steer"}
+        disabled={disabled}
+        onClick={() => composer.setMode("steer")}
+        title="Steer: interrupt the running turn and inject this message now"
+        className={cn(
+          "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
+          composer.mode === "steer"
+            ? "bg-amber-500/20 text-amber-200"
+            : "text-[color:var(--color-fg-muted)] hover:text-amber-200",
+        )}
+      >
+        <ZapIcon className="size-3.5" />
+        Steer
+      </button>
     </div>
   );
 }
@@ -218,19 +293,4 @@ function AttachmentChips({ attachments, onRemove }: {
       ))}
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  const units = ["KB", "MB", "GB"] as const;
-  let value = bytes / 1024;
-  for (const unit of units) {
-    if (value < 1024 || unit === "GB") {
-      return `${value.toFixed(value < 10 ? 1 : 0)} ${unit}`;
-    }
-    value /= 1024;
-  }
-  return `${bytes} B`;
 }

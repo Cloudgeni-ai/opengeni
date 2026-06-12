@@ -1,0 +1,112 @@
+import { Permission } from "@opengeni/contracts";
+
+import type { AccessContext } from "@/types";
+
+const permissionGroupAssignments: Record<Permission, string> = {
+  "workspace:read": "Workspace",
+  "workspace:create": "Workspace",
+  "sessions:create": "Sessions",
+  "sessions:read": "Sessions",
+  "sessions:control": "Sessions",
+  "files:upload": "Files & documents",
+  "files:read": "Files & documents",
+  "documents:manage": "Files & documents",
+  "documents:search": "Files & documents",
+  "scheduled_tasks:manage": "Scheduled tasks",
+  "scheduled_tasks:run": "Scheduled tasks",
+  "environments:manage": "Environments",
+  "environments:use": "Environments",
+  "github:manage": "GitHub",
+  "github:use": "GitHub",
+  "goals:manage": "Goals",
+  "workspace:admin": "Admin & account",
+  "api_keys:manage": "Admin & account",
+  "members:manage": "Admin & account",
+  "account:read": "Admin & account",
+  "account:admin": "Admin & account",
+  "billing:read": "Admin & account",
+  "billing:manage": "Admin & account",
+};
+
+const permissionGroupOrder = [
+  "Workspace",
+  "Sessions",
+  "Files & documents",
+  "Scheduled tasks",
+  "Environments",
+  "GitHub",
+  "Goals",
+  "Admin & account",
+];
+
+export type PermissionGroup = { label: string; permissions: Permission[] };
+
+// Derived from the contracts Permission enum so pickers can never drift from
+// the API again: every enum value lands in exactly one group.
+export function buildApiKeyPermissionGroups(): PermissionGroup[] {
+  const groups: PermissionGroup[] = [];
+  for (const permission of Permission.options) {
+    const label = permissionGroupAssignments[permission] ?? "Other";
+    const group = groups.find((candidate) => candidate.label === label);
+    if (group) {
+      group.permissions.push(permission);
+    } else {
+      groups.push({ label, permissions: [permission] });
+    }
+  }
+  const rank = (label: string): number => {
+    const index = permissionGroupOrder.indexOf(label);
+    return index === -1 ? permissionGroupOrder.length : index;
+  };
+  return groups.sort((a, b) => rank(a.label) - rank(b.label));
+}
+
+export const apiKeyPermissionGroups = buildApiKeyPermissionGroups();
+
+// Mirrors the API's ensureDelegablePermissions: a workspace:admin grant can
+// delegate everything, any other grant only its own permissions.
+export function delegableApiKeyPermissions(grantPermissions: readonly string[]): Set<string> {
+  if (grantPermissions.includes("workspace:admin")) {
+    return new Set<string>(Permission.options);
+  }
+  return new Set<string>(Permission.options.filter((permission) => grantPermissions.includes(permission)));
+}
+
+export const defaultApiKeyPermissions = new Set<string>([
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:run",
+  "github:use",
+]);
+
+/**
+ * Groups offered for a session's first-party MCP (OpenGeni tool) permission
+ * scope — the same grouped idiom as the API key dialog. Account-level scopes
+ * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
+ */
+export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
+  const accountOnly = new Set<string>(["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create"]);
+  return buildApiKeyPermissionGroups()
+    .map((group) => ({
+      label: group.label,
+      permissions: group.permissions.filter((permission) => !accountOnly.has(permission)),
+    }))
+    .filter((group) => group.permissions.length > 0);
+}
+
+export const sessionMcpPermissionGroups = buildSessionMcpPermissionGroups();
+
+export function hasWorkspacePermission(context: AccessContext | null, workspaceId: string, permission: string): boolean {
+  const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  return Boolean(grant && (grant.permissions.includes(permission) || grant.permissions.includes("workspace:admin")));
+}
+
+export function hasAccountPermission(context: AccessContext | null, accountId: string, permission: string): boolean {
+  const grant = context?.accountGrants.find((candidate) => candidate.accountId === accountId);
+  return Boolean(grant && (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")));
+}
