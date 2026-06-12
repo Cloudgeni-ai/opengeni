@@ -141,6 +141,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // created (and used for turn.started) before the environment is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
     let environmentId = "";
+    // Hoisted for the preemption path: an approval-decision rerun must
+    // re-enter through the approval resume path (its frozen mid-flight state
+    // only exists in the RunState blob), never through a swapped trigger.
+    let triggerType: string | null = null;
     try {
       const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
       runtime.configure(capabilitySettings);
@@ -149,6 +153,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!trigger) {
         throw new Error(`Trigger event not found: ${input.triggerEventId}`);
       }
+      triggerType = trigger.type;
       let turn = input.turnId ? await getSessionTurn(db, input.workspaceId, input.turnId) : await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
       if (!turn && !input.turnId) {
         const createdTurnId = await createTurn(db, {
@@ -410,7 +415,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           await batcher?.flush().catch(() => undefined);
           await reconcileConversationTruth();
-          let resumeWithNotice = settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
+          // An approval-decision rerun always replays its original trigger:
+          // the decision is applied through the approval resume path reading
+          // the frozen RunState blob (the only representation of a turn
+          // paused mid-flight), so swapping the trigger for a resume notice
+          // could drop the user's decision. Re-applying an already-consumed
+          // approval re-executes at most the single approved step — the same
+          // bound every preemption already accepts.
+          const approvalRerun = triggerType === "user.approvalDecision";
+          let resumeWithNotice = !approvalRerun && settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
           if (settings.sessionHistorySource !== "items" && stream) {
             // Legacy run-state mode: the resume reads the RunState blob, so
             // the checkpoint must be captured there — including any pending
