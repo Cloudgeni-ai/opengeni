@@ -131,9 +131,11 @@ export async function enableCapability(input: {
     throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled" });
   }
   let installationMetadata = input.payload.metadata;
-  // Credential-header ciphertext is written exclusively by this flow; strip
-  // any caller-provided values so the stored shape stays trustworthy.
+  // Credential-header storage is written exclusively by this flow; strip the
+  // reserved keys from caller-provided config so the stored shape stays
+  // trustworthy and no plaintext credentials sneak in through config.headers.
   const installationConfig: Record<string, unknown> = { ...input.payload.config };
+  delete installationConfig.headers;
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   if (item.kind === "mcp") {
@@ -256,8 +258,10 @@ function normalizedMcpCredentialHeaders(headers: Record<string, string>): Record
     if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
       throw new HTTPException(422, { message: `credential header ${name} must be 1-${maxMcpCredentialHeaderValueLength} characters` });
     }
+    // RFC 9110 §5.5: field values are HTAB / printable characters — reject
+    // all other control characters (they would also fail at the HTTP client).
     // eslint-disable-next-line no-control-regex
-    if (/[\r\n\0]/.test(value)) {
+    if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(value)) {
       throw new HTTPException(422, { message: `credential header ${name} contains forbidden control characters` });
     }
   }

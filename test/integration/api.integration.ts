@@ -1300,18 +1300,36 @@ describe("API component integration", () => {
       expect(wrongHeaders.status).toBe(422);
       expect(await wrongHeaders.text()).toContain("could not be enabled");
 
+      // Header values must be valid HTTP field values (RFC 9110): control
+      // characters beyond CR/LF are rejected too.
+      const controlChars = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({ headers: { Authorization: "Bearer bad\u0007value" } }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(controlChars.status).toBe(422);
+      expect(await controlChars.text()).toContain("forbidden control characters");
+
       const enabled = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
         method: "POST",
-        body: JSON.stringify({ headers: { Authorization: bearer } }),
+        body: JSON.stringify({
+          headers: { Authorization: bearer },
+          // Reserved keys in caller config must be stripped, never stored —
+          // a plaintext config.headers map must not bypass encryption.
+          config: { headers: { Authorization: "plaintext-bypass" }, headersEncrypted: "spoofed", note: "kept" },
+        }),
         headers: { "content-type": "application/json" },
       });
       expect(enabled.status).toBe(201);
       const enabledBody = await enabled.text();
       // The API response exposes header names only — never the credential.
       expect(enabledBody).not.toContain(bearer);
+      expect(enabledBody).not.toContain("plaintext-bypass");
       const installation = JSON.parse(enabledBody) as { config: Record<string, unknown>; metadata: Record<string, unknown> };
       expect(installation.config.headerNames).toEqual(["Authorization"]);
       expect(installation.config.headersEncrypted).toBeUndefined();
+      expect(installation.config.headers).toBeUndefined();
+      expect(installation.config.note).toBe("kept");
       expect(installation.metadata.mcpConnectivity).toMatchObject({ status: "ok" });
 
       // The stored value is AES-GCM ciphertext that decrypts back to the credential.
