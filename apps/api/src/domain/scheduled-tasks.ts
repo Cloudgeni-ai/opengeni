@@ -25,7 +25,28 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
+  withDefaultEnabledCapabilityMcpTools,
 } from "./resources";
+
+/**
+ * Whether a raw scheduled-task payload explicitly set agentConfig.tools.
+ * Zod's `.default([])` erases the distinction between "absent" and
+ * "explicitly empty", so callers detect it on the raw payload — the same
+ * contract sessions use: absent tools mean "give me the workspace defaults
+ * (enabled capability MCP servers)", an explicit list (even empty) is taken
+ * verbatim.
+ */
+export function scheduledTaskToolsProvided(rawPayload: unknown): boolean {
+  if (!rawPayload || typeof rawPayload !== "object") {
+    return false;
+  }
+  const agentConfig = (rawPayload as { agentConfig?: unknown }).agentConfig;
+  return Boolean(
+    agentConfig
+    && typeof agentConfig === "object"
+    && Object.prototype.hasOwnProperty.call(agentConfig, "tools"),
+  );
+}
 
 export async function createValidatedScheduledTask(input: {
   settings: Settings;
@@ -33,6 +54,10 @@ export async function createValidatedScheduledTask(input: {
   objectStorage: ObjectStorageDependency;
   grant: AccessGrant;
   payload: CreateScheduledTaskPayload;
+  // Whether the caller explicitly set agentConfig.tools (see
+  // scheduledTaskToolsProvided). Absent tools get the workspace's enabled
+  // capability MCP servers, mirroring session creation.
+  toolsProvided?: boolean;
   // Set for pack-installation-inherited attachments that were already
   // authorized with environments:use when the pack was enabled.
   environmentPreauthorized?: boolean;
@@ -72,6 +97,8 @@ export async function validatedScheduledTaskUpdate(input: {
   grant: AccessGrant;
   existing: ScheduledTask;
   payload: UpdateScheduledTaskPayload;
+  /** See createValidatedScheduledTask; only consulted when agentConfig is updated. */
+  toolsProvided?: boolean;
 }): Promise<UpdateScheduledTaskInput> {
   const update: UpdateScheduledTaskInput = {};
   if (input.payload.name !== undefined) {
@@ -133,6 +160,7 @@ export async function validatedScheduledTaskUpdate(input: {
       objectStorage: input.objectStorage,
       workspaceId: input.existing.workspaceId,
       payload: { agentConfig: input.payload.agentConfig },
+      ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
     });
   }
   return update;
@@ -197,10 +225,19 @@ async function validateScheduledTaskAgentConfig(input: {
   objectStorage: ObjectStorageDependency;
   payload: { agentConfig: ScheduledTaskAgentConfig };
   workspaceId: string;
+  toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(input.db, input.workspaceId, input.settings);
-  const tools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
+  const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
+  // A task whose creator did not choose tools gets the workspace's enabled
+  // capability MCP servers, exactly like a session created without a tools
+  // key. Scheduled runs are sessions too; "no MCP servers at all" was a trap
+  // every pack/template instantiation path kept falling into (a maintenance
+  // task that cannot reach its workspace's notebook MCP cannot do its job).
+  const tools = (input.toolsProvided ?? true)
+    ? requestedTools
+    : withDefaultEnabledCapabilityMcpTools(requestedTools, input.settings, runtimeSettings);
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });

@@ -1244,6 +1244,54 @@ describe("API component integration", () => {
     expect(explicitEmptyTools.status).toBe(202);
     const explicitEmptySession = await explicitEmptyTools.json() as { id: string };
     expect((await requireSession(dbClient.db, workspaceId, explicitEmptySession.id)).tools).toEqual([]);
+
+    // Scheduled tasks mirror sessions: an absent agentConfig.tools key means
+    // "give me the workspace's enabled capability MCP servers", an explicit
+    // list (even empty) is taken verbatim. Without this, a task created
+    // toolless runs with no MCP servers at all (live customer-one lesson:
+    // maintenance tasks that cannot reach the workspace notebook MCP).
+    const omittedTaskResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "default tools task",
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "sweep" },
+      }),
+    });
+    expect(omittedTaskResponse.status).toBe(201);
+    const omittedTask = await omittedTaskResponse.json() as { id: string; agentConfig: { tools: unknown[] } };
+    expect(omittedTask.agentConfig.tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+
+    const explicitEmptyTaskResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "explicit empty tools task",
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "sweep", tools: [] },
+      }),
+    });
+    expect(explicitEmptyTaskResponse.status).toBe(201);
+    const explicitEmptyTask = await explicitEmptyTaskResponse.json() as { id: string; agentConfig: { tools: unknown[] } };
+    expect(explicitEmptyTask.agentConfig.tools).toEqual([]);
+
+    // Updates follow the same contract when agentConfig is replaced.
+    const patchedDefault = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${explicitEmptyTask.id}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentConfig: { prompt: "sweep again" } }),
+    });
+    expect(patchedDefault.status).toBe(200);
+    expect(((await patchedDefault.json()) as { agentConfig: { tools: unknown[] } }).agentConfig.tools)
+      .toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+    const patchedExplicit = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${omittedTask.id}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentConfig: { prompt: "sweep verbatim", tools: [] } }),
+    });
+    expect(patchedExplicit.status).toBe(200);
+    expect(((await patchedExplicit.json()) as { agentConfig: { tools: unknown[] } }).agentConfig.tools).toEqual([]);
     await dbClient.db.execute(dbSql`
       update capability_installations
       set status = 'disabled', updated_at = now()

@@ -55,6 +55,7 @@ import {
 } from "../domain/environments";
 import {
   createValidatedScheduledTask,
+  scheduledTaskToolsProvided,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
@@ -245,7 +246,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     const payload = CreateScheduledTaskRequest.parse(args);
     requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
     await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "schedule:create", quantity: 1 });
-    const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, payload });
+    const task = await createValidatedScheduledTask({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, payload, toolsProvided: scheduledTaskToolsProvided(args) });
     await syncCreatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, task });
     return json(task);
   });
@@ -267,7 +268,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
     const payload = UpdateScheduledTaskRequest.parse(raw);
     requireEnvironmentsUseForMcpAttachment(grant, payload.environmentId);
-    const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, existing, payload });
+    const update = await validatedScheduledTaskUpdate({ settings: deps.settings, db: deps.db, objectStorage: deps.objectStorage, grant, existing, payload, toolsProvided: scheduledTaskToolsProvided(raw) });
     const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
     await syncUpdatedScheduledTask({ db: deps.db, workflowClient: deps.workflowClient, previous: existing, task });
     return json(task);

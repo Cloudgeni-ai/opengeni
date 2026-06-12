@@ -11,6 +11,7 @@ import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
+  scheduledTaskToolsProvided,
   requireScheduledTaskForApi,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
@@ -24,9 +25,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
-    const payload = CreateScheduledTaskRequest.parse(await c.req.json());
+    const rawPayload = await c.req.json();
+    const payload = CreateScheduledTaskRequest.parse(rawPayload);
     await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "schedule:create", quantity: 1 });
-    const task = await createValidatedScheduledTask({ settings, db, objectStorage, grant, payload });
+    const task = await createValidatedScheduledTask({ settings, db, objectStorage, grant, payload, toolsProvided: scheduledTaskToolsProvided(rawPayload) });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     return c.json(task, 201);
   });
@@ -48,8 +50,9 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:manage");
     const taskId = c.req.param("taskId");
     const existing = await requireScheduledTaskForApi(db, workspaceId, taskId);
-    const payload = UpdateScheduledTaskRequest.parse(await c.req.json());
-    const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, grant, existing, payload });
+    const rawPayload = await c.req.json();
+    const payload = UpdateScheduledTaskRequest.parse(rawPayload);
+    const update = await validatedScheduledTaskUpdate({ settings, db, objectStorage, grant, existing, payload, toolsProvided: scheduledTaskToolsProvided(rawPayload) });
     const task = await updateScheduledTask(db, workspaceId, taskId, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous: existing, task });
     return c.json(task);
