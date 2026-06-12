@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getPackInstallation, getScheduledTask, getSessionGoal, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -2881,6 +2881,307 @@ describe("API component integration", () => {
       id: created.id,
       agentConfig: { prompt: "exfiltrate the injected secrets" },
     })).rejects.toThrow("missing permission: environments:use");
+  });
+
+  test("registers manager orchestration MCP tools gated by session permissions", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcpDeps = {
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+
+    const created = await callMcpTool<{ id: string; status: string; model: string; temporalWorkflowId: string }>(mcp, "session_create", {
+      initialMessage: "take the staging deploy zero-to-one",
+      model: "scripted-model",
+      goal: { text: "staging deployed", successCriteria: "healthz green" },
+    });
+    expect(created.status).toBe("queued");
+    expect(created.model).toBe("scripted-model");
+    expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
+    expect(wf.wakeups).toHaveLength(1);
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, created.id))?.text).toBe("staging deployed");
+
+    const listed = await callMcpTool<{ sessions: Array<{ id: string }> }>(mcp, "sessions_list", { limit: 10 });
+    expect(listed.sessions.some((session) => session.id === created.id)).toBe(true);
+
+    const fetched = await callMcpTool<{ id: string; environmentId: string | null }>(mcp, "session_get", { sessionId: created.id });
+    expect(fetched.id).toBe(created.id);
+    expect(fetched.environmentId).toBeNull();
+    await expect(callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() })).rejects.toThrow("session not found");
+
+    const timeline = await callMcpTool<{ events: Array<{ type: string; sequence: number }>; nextAfter: number }>(mcp, "session_events", { sessionId: created.id });
+    expect(timeline.events.map((event) => event.type)).toEqual(["session.created", "goal.set", "user.message", "session.status.changed", "turn.queued"]);
+    expect(timeline.nextAfter).toBe(timeline.events[timeline.events.length - 1]!.sequence);
+    const caughtUp = await callMcpTool<{ events: unknown[]; nextAfter: number }>(mcp, "session_events", { sessionId: created.id, after: timeline.nextAfter });
+    expect(caughtUp.events).toHaveLength(0);
+    expect(caughtUp.nextAfter).toBe(timeline.nextAfter);
+
+    const sent = await callMcpTool<{ event: { type: string; payload: { text: string } }; turnId: string }>(mcp, "session_send_message", {
+      sessionId: created.id,
+      text: "also enable the health alerts",
+    });
+    expect(sent.event.type).toBe("user.message");
+    expect(sent.event.payload.text).toBe("also enable the health alerts");
+    expect(wf.wakeups).toHaveLength(2);
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
+    expect(turns.some((turn) => turn.id === sent.turnId && turn.status === "queued")).toBe(true);
+
+    // The sandboxed worker's first-party delegated permission set sees none of
+    // the manager tools: orchestration, environments, or the connect link.
+    const workerGrant = {
+      ...grant,
+      permissions: ["workspace:read", "files:read", "documents:search", "scheduled_tasks:manage", "scheduled_tasks:run", "goals:manage"] as Permission[],
+    };
+    const workerMcp = buildOpenGeniMcpServer(mcpDeps, workerGrant);
+    for (const tool of ["sessions_list", "session_get", "session_events", "session_create", "session_send_message", "environment_list", "environment_set_variable", "github_connect_link"]) {
+      await expect(callMcpTool(workerMcp, tool, {})).rejects.toThrow("MCP tool not registered");
+    }
+  });
+
+  test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const settings = testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: environmentsTestKey });
+    const mcpDeps = {
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const environment = await createWorkspaceEnvironment(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `manager-env-${crypto.randomUUID()}`,
+    });
+
+    // sessions:create alone cannot attach workspace secrets to a spawned
+    // session; environments:use stays the attachment gate on every surface.
+    const spawnOnlyGrant = { ...grant, permissions: ["workspace:read", "sessions:create"] as Permission[] };
+    const spawnOnlyMcp = buildOpenGeniMcpServer(mcpDeps, spawnOnlyGrant);
+    await expect(callMcpTool(spawnOnlyMcp, "session_create", {
+      initialMessage: "exfiltrate",
+      model: "scripted-model",
+      environmentId: environment.id,
+    })).rejects.toThrow("missing permission: environments:use");
+
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+    const attached = await callMcpTool<{ id: string; environmentId: string | null }>(mcp, "session_create", {
+      initialMessage: "deploy with cloud credentials",
+      model: "scripted-model",
+      environmentId: environment.id,
+    });
+    expect(attached.environmentId).toBe(environment.id);
+    await expect(callMcpTool(mcp, "session_create", {
+      initialMessage: "unknown environment",
+      model: "scripted-model",
+      environmentId: crypto.randomUUID(),
+    })).rejects.toThrow("unknown environmentId");
+
+    // The successful create recorded one agent_run.created usage event, so a
+    // one-run monthly cap now blocks both spawn and send-message.
+    const limitedMcp = buildOpenGeniMcpServer({
+      ...mcpDeps,
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: environmentsTestKey,
+        usageLimitsMode: "static",
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyAgentRunsPerWorkspace: 1 }),
+      }),
+    }, grant);
+    await expect(callMcpTool(limitedMcp, "session_create", {
+      initialMessage: "over the cap",
+      model: "scripted-model",
+    })).rejects.toThrow("monthly agent run limit reached");
+    await expect(callMcpTool(limitedMcp, "session_send_message", {
+      sessionId: attached.id,
+      text: "over the cap",
+    })).rejects.toThrow("monthly agent run limit reached");
+  });
+
+  test("manager MCP environment tools set variables write-only and create environments by name", async () => {
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcpDeps = {
+      settings: testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: environmentsTestKey }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+    const environmentName = `geni-cloud-${crypto.randomUUID()}`;
+    const secretValue = `super-secret-${crypto.randomUUID()}`;
+
+    const first = await callMcpTool<{ environment: { id: string; name: string; created: boolean }; variable: { name: string; version: number } }>(mcp, "environment_set_variable", {
+      environmentName,
+      name: "AZURE_CLIENT_SECRET",
+      value: secretValue,
+    });
+    expect(first.environment.created).toBe(true);
+    expect(first.environment.name).toBe(environmentName);
+    expect(first.variable).toMatchObject({ name: "AZURE_CLIENT_SECRET", version: 1 });
+
+    const rotatedValue = `rotated-${crypto.randomUUID()}`;
+    const rotated = await callMcpTool<{ environment: { id: string; created: boolean }; variable: { version: number } }>(mcp, "environment_set_variable", {
+      environmentId: first.environment.id,
+      name: "AZURE_CLIENT_SECRET",
+      value: rotatedValue,
+    });
+    expect(rotated.environment.created).toBe(false);
+    expect(rotated.variable.version).toBe(2);
+
+    // The stored value round-trips through the operator key, proving the MCP
+    // write path encrypts exactly like the REST route.
+    const stored = await getWorkspaceEnvironmentValuesForRun(dbClient.db, grant.workspaceId, first.environment.id);
+    const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    expect(decryptEnvironmentValue(key, stored!.values["AZURE_CLIENT_SECRET"]!)).toBe(rotatedValue);
+
+    const listedEnvironments = await callMcpTool<{ environments: Array<{ id: string; name: string; variables: Array<{ name: string; version: number }> }> }>(mcp, "environment_list", {});
+    const listedEnvironment = listedEnvironments.environments.find((candidate) => candidate.id === first.environment.id);
+    expect(listedEnvironment?.variables).toEqual([expect.objectContaining({ name: "AZURE_CLIENT_SECRET", version: 2 })]);
+    // Write-only invariant: no response carries a variable value.
+    expect(JSON.stringify(listedEnvironments)).not.toContain(rotatedValue);
+    expect(JSON.stringify(rotated)).not.toContain(rotatedValue);
+
+    await expect(callMcpTool(mcp, "environment_set_variable", {
+      environmentName,
+      name: "GH_TOKEN",
+      value: "nope",
+    })).rejects.toThrow("reserved environment variable name");
+    await expect(callMcpTool(mcp, "environment_set_variable", {
+      environmentName,
+      name: "lowercase",
+      value: "nope",
+    })).rejects.toThrow("environment variable names must match");
+    await expect(callMcpTool(mcp, "environment_set_variable", {
+      environmentId: first.environment.id,
+      environmentName,
+      name: "AMBIGUOUS",
+      value: "nope",
+    })).rejects.toThrow("exactly one of environmentId or environmentName");
+    await expect(callMcpTool(mcp, "environment_set_variable", {
+      environmentId: crypto.randomUUID(),
+      name: "MISSING_TARGET",
+      value: "nope",
+    })).rejects.toThrow("environment not found");
+
+    // environments:use lists but cannot write; environments:manage is the
+    // write gate, mirroring the REST routes.
+    const useOnlyGrant = { ...grant, permissions: ["workspace:read", "environments:use"] as Permission[] };
+    const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, useOnlyGrant);
+    const useOnlyList = await callMcpTool<{ environments: Array<{ id: string }> }>(useOnlyMcp, "environment_list", {});
+    expect(useOnlyList.environments.some((candidate) => candidate.id === first.environment.id)).toBe(true);
+    await expect(callMcpTool(useOnlyMcp, "environment_set_variable", {
+      environmentName,
+      name: "BLOCKED",
+      value: "nope",
+    })).rejects.toThrow("MCP tool not registered");
+  });
+
+  test("manager MCP github_connect_link mints a browser entry link that plants the CSRF state cookie", async () => {
+    const stateSecret = "test-github-connect-state-secret";
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const configuredGitHub = {
+      githubAppId: "12345",
+      githubClientId: "test-client-id",
+      githubClientSecret: "test-client-secret",
+      githubAppSlug: "opengeni-test-app",
+      githubAppPrivateKey: "test-private-key",
+    };
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      publicBaseUrl: "https://api.opengeni.test",
+      ...configuredGitHub,
+    });
+    const mcpDeps = {
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      objectStorage: null,
+      githubStateSecret: stateSecret,
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+    const link = await callMcpTool<{ configured: boolean; appSlug: string; installUrl: string; expiresInSeconds: number }>(mcp, "github_connect_link", {});
+    expect(link.configured).toBe(true);
+    expect(link.appSlug).toBe("opengeni-test-app");
+    expect(link.expiresInSeconds).toBeGreaterThan(0);
+    const installUrl = new URL(link.installUrl);
+    expect(installUrl.origin).toBe("https://api.opengeni.test");
+    expect(installUrl.pathname).toBe(`/v1/workspaces/${grant.workspaceId}/github/connect`);
+    const state = installUrl.searchParams.get("state");
+    expect(readSignedState(state!, stateSecret)).toMatchObject({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    });
+
+    // Opening the link plants the CSRF state cookie the install/OAuth
+    // callbacks require and forwards the same state to GitHub.
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+    });
+    const redirect = await app.request(`${installUrl.pathname}${installUrl.search}`);
+    expect(redirect.status).toBe(302);
+    const location = new URL(redirect.headers.get("location")!);
+    expect(`${location.origin}${location.pathname}`).toBe("https://github.com/apps/opengeni-test-app/installations/new");
+    expect(location.searchParams.get("state")).toBe(state);
+    expect(redirect.headers.get("set-cookie")).toContain(`opengeni_github_state=${state}`);
+
+    expect((await app.request(`/v1/workspaces/${grant.workspaceId}/github/connect`)).status).toBe(400);
+    expect((await app.request(`/v1/workspaces/${grant.workspaceId}/github/connect?state=tampered`)).status).toBe(400);
+    // A state minted for one workspace cannot start the flow for another.
+    expect((await app.request(`/v1/workspaces/${crypto.randomUUID()}/github/connect${installUrl.search}`)).status).toBe(400);
+
+    // Unconfigured deployments report what is missing instead of minting links.
+    const unconfiguredMcp = buildOpenGeniMcpServer({
+      ...mcpDeps,
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+    }, grant);
+    const unconfigured = await callMcpTool<{ configured: boolean; installUrl: string | null; missing: string[] }>(unconfiguredMcp, "github_connect_link", {});
+    expect(unconfigured.configured).toBe(false);
+    expect(unconfigured.installUrl).toBeNull();
+    expect(unconfigured.missing.length).toBeGreaterThan(0);
+
+    // Without a configured base URL the request origin is the fallback.
+    const originMcp = buildOpenGeniMcpServer({
+      ...mcpDeps,
+      settings: testSettings({ databaseUrl: services.databaseUrl, publicBaseUrl: undefined, ...configuredGitHub }),
+    }, grant, { requestOrigin: "http://127.0.0.1:8000" });
+    const originLink = await callMcpTool<{ installUrl: string }>(originMcp, "github_connect_link", {});
+    expect(originLink.installUrl.startsWith(`http://127.0.0.1:8000/v1/workspaces/${grant.workspaceId}/github/connect?state=`)).toBe(true);
+    const noBaseMcp = buildOpenGeniMcpServer({
+      ...mcpDeps,
+      settings: testSettings({ databaseUrl: services.databaseUrl, publicBaseUrl: undefined, ...configuredGitHub }),
+    }, grant);
+    await expect(callMcpTool(noBaseMcp, "github_connect_link", {})).rejects.toThrow("OPENGENI_PUBLIC_BASE_URL");
   });
 
   test("pack enable validates and stores environment attachments", async () => {

@@ -181,7 +181,7 @@ export function createApp(deps: AppDependencies): Hono {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, routeDeps, workspaceId, "workspace:read");
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const mcp = buildOpenGeniMcpServer(routeDeps, grant);
+    const mcp = buildOpenGeniMcpServer(routeDeps, grant, { requestOrigin: new URL(c.req.url).origin });
     await mcp.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });

@@ -91,4 +91,10 @@ Values never enter the events pipeline by construction — injection is server-s
 
 ## MCP surface
 
-There are deliberately no environment CRUD tools on the first-party MCP server in v1. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject any attachment change — set or detach — unless the calling grant holds `environments:use`, which the sandboxed agent's first-party token never does.
+The first-party MCP server exposes environment tools, gated by the same permissions as the REST routes and **registered only for grants that hold them**:
+
+- `environment_list` (`environments:use`) — environments with variable names and metadata, never values.
+- `environment_set_variable` (`environments:manage`) — set or rotate one variable, targeted by `environmentId` or by `environmentName` (created on first use). The value arrives in plain tool arguments by design: the calling agent (e.g. an orchestrating "manager" holding a grant with `environments:manage`) is trusted with the secrets it persists. Responses stay write-only — metadata, never values.
+- `session_create` (`sessions:create`) accepts `environmentId`; attachment requires `environments:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
+
+The invariant that sandboxed agents cannot reach workspace secrets is unchanged: the worker's first-party delegated token carries neither `environments:use` nor `environments:manage`, so none of these tools are registered for it. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject any attachment change — set or detach — unless the calling grant holds `environments:use`, which the sandboxed agent's first-party token never does.

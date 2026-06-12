@@ -1,30 +1,45 @@
 import {
   CreateScheduledTaskRequest,
+  WorkspaceEnvironmentVariableName,
   type AccessGrant,
   type GitHubRepository,
+  type Permission,
   type ResourceRef,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
+  countWorkspaceEnvironments,
+  createWorkspaceEnvironment,
   deleteScheduledTask,
+  encryptEnvironmentValue,
+  getSession,
   getSessionGoal,
+  getWorkspaceEnvironment,
+  getWorkspaceEnvironmentByName,
   listGitHubInstallationIdsForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
+  listSessionEvents,
+  listSessions,
   listSocialConnections,
   listSocialPosts,
+  listWorkspaceEnvironments,
   requireFile,
   requireScheduledTask,
   requireSession,
   setSessionGoalStatus,
+  setWorkspaceEnvironmentVariable,
   updateScheduledTask,
   updateSessionGoal,
   upsertSessionGoal,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
+  createSignedState,
   GitHubAppConfigurationError,
+  githubAppMissingSettings,
   listGitHubAppRepositories,
+  stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
@@ -32,25 +47,54 @@ import { hasPermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
+  assertAllowedEnvironmentVariableName,
+  MAX_ENVIRONMENTS_PER_WORKSPACE,
+  MAX_VARIABLES_PER_ENVIRONMENT,
+  recordEnvironmentAuditEvent,
+  requireEnvironmentEncryption,
+} from "../domain/environments";
+import {
   createValidatedScheduledTask,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
+import { acceptSessionUserMessage, createSessionForRequest } from "../domain/sessions";
 
-export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant): McpServer {
+export type McpServerOptions = {
+  // Origin of the HTTP request that reached the MCP route; last-resort base
+  // for links the server mints (github_connect_link) when neither
+  // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
+  requestOrigin?: string | null;
+};
+
+export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, options: McpServerOptions = {}): McpServer {
   const server = new McpServer({
     name: "opengeni",
     version: "1.0.0",
   });
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
+  const can = (permission: Permission) => hasPermission(grant.permissions, permission);
 
   // Goal tools are session-scoped: they are only registered when the grant
   // carries the worker-asserted sessionId claim (signed into the delegated
   // token by the worker, never agent-controlled) plus goals:manage.
   const goalSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
-  if (goalSessionId !== null && hasPermission(grant.permissions, "goals:manage")) {
+  if (goalSessionId !== null && can("goals:manage")) {
     registerGoalTools(server, deps, grant, goalSessionId, json);
+  }
+
+  // Orchestration, environment, and GitHub-connect tools are permission-gated
+  // at registration: a grant without the permission does not see the tool.
+  // Sandboxed workers reach this server with the fixed first-party delegated
+  // permission set (firstPartyMcpPermissions in @opengeni/runtime), which
+  // carries none of sessions:*, environments:*, or github:use — so agents
+  // cannot spawn or read sessions, touch workspace secrets, or mint GitHub
+  // install links unless the operator hands them a grant that says so.
+  registerWorkspaceOrchestrationTools(server, deps, grant, can, json);
+  registerEnvironmentTools(server, deps, grant, can, json);
+  if (can("github:use")) {
+    registerGitHubConnectTool(server, deps, grant, options, json);
   }
 
   server.registerTool("files_get_download_url", {
@@ -412,6 +456,202 @@ function registerGoalTools(
       }]);
     }
     return json(goal);
+  });
+}
+
+type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+
+// Workspace orchestration for manager-style agents: sessions are listed,
+// inspected, spawned, and steered with the same domain functions the REST
+// routes use, so limits, validation, and usage metering cannot drift.
+function registerWorkspaceOrchestrationTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  json: JsonResult,
+): void {
+  if (can("sessions:read")) {
+    server.registerTool("sessions_list", {
+      description: "List sessions in this workspace, newest first.",
+      inputSchema: { limit: z4.number().int().positive().optional() },
+    }, async ({ limit }) => json({ sessions: await listSessions(deps.db, grant.workspaceId, boundedMcpLimit(limit)) }));
+
+    server.registerTool("session_get", {
+      description: "Get one session: status, goal-bearing metadata, resources, tools, and environment attachment (names/ids only, never variable values).",
+      inputSchema: { sessionId: z4.string().uuid() },
+    }, async ({ sessionId }) => {
+      const session = await getSession(deps.db, grant.workspaceId, sessionId);
+      if (!session) {
+        throw new Error("session not found");
+      }
+      return json(session);
+    });
+
+    server.registerTool("session_events", {
+      description: "Read a session's event timeline (oldest first). Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. Use it to monitor another session's progress.",
+      inputSchema: {
+        sessionId: z4.string().uuid(),
+        after: z4.number().int().nonnegative().optional(),
+        limit: z4.number().int().positive().optional(),
+      },
+    }, async ({ sessionId, after, limit }) => {
+      await requireSession(deps.db, grant.workspaceId, sessionId);
+      const events = await listSessionEvents(deps.db, grant.workspaceId, sessionId, after ?? 0, boundedMcpLimit(limit));
+      const last = events[events.length - 1];
+      return json({ events, nextAfter: last ? last.sequence : after ?? 0 });
+    });
+  }
+
+  if (can("sessions:create")) {
+    server.registerTool("session_create", {
+      description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and workspace environment attachment. Environment attachment happens at creation only — it cannot be added to a running session — and requires the environments:use permission.",
+      inputSchema: {
+        initialMessage: z4.string().min(1),
+        goal: z4.unknown().optional(),
+        resources: z4.array(z4.unknown()).optional(),
+        tools: z4.array(z4.unknown()).optional(),
+        environmentId: z4.string().uuid().optional(),
+        model: z4.string().min(1).optional(),
+        reasoningEffort: z4.string().optional(),
+        metadata: z4.record(z4.string(), z4.unknown()).optional(),
+      },
+    }, async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)));
+  }
+
+  if (can("sessions:control")) {
+    server.registerTool("session_send_message", {
+      description: "Post a user message into an existing session; the session queues a turn and resumes if idle.",
+      inputSchema: {
+        sessionId: z4.string().uuid(),
+        text: z4.string().min(1),
+      },
+    }, async ({ sessionId, text }) => {
+      const { accepted, turn } = await acceptSessionUserMessage(deps, grant, grant.workspaceId, sessionId, {
+        text,
+        toolsProvided: false,
+      });
+      return json({ event: accepted, turnId: turn.id });
+    });
+  }
+}
+
+// Environment management for manager-style agents. v1 deliberately accepts
+// variable VALUES in plain tool arguments: the calling model is trusted with
+// the secrets it is persisting (see docs/environments.md). Reads stay
+// write-only — responses carry names and metadata, never values.
+function registerEnvironmentTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  json: JsonResult,
+): void {
+  if (can("environments:use")) {
+    server.registerTool("environment_list", {
+      description: "List workspace environments with variable names and metadata (versions, timestamps). Values are write-only and never returned.",
+      inputSchema: {},
+    }, async () => json({ environments: await listWorkspaceEnvironments(deps.db, grant.workspaceId) }));
+  }
+
+  if (can("environments:manage")) {
+    server.registerTool("environment_set_variable", {
+      description: "Set or rotate one variable in a workspace environment. Target by environmentId, or by environmentName (created if it does not exist). The value is encrypted at rest and injected into sandboxes of sessions the environment is attached to; it is never readable back through any API.",
+      inputSchema: {
+        environmentId: z4.string().uuid().optional(),
+        environmentName: z4.string().min(1).optional(),
+        name: z4.string().min(1),
+        value: z4.string().min(1).max(32768),
+      },
+    }, async ({ environmentId, environmentName, name, value }) => {
+      const key = requireEnvironmentEncryption(deps.settings);
+      const parsedName = WorkspaceEnvironmentVariableName.safeParse(name);
+      if (!parsedName.success) {
+        throw new Error("environment variable names must match ^[A-Z][A-Z0-9_]*$");
+      }
+      assertAllowedEnvironmentVariableName(parsedName.data);
+      if ((environmentId === undefined) === (environmentName === undefined)) {
+        throw new Error("provide exactly one of environmentId or environmentName");
+      }
+      const trimmedEnvironmentName = environmentName?.trim();
+      if (environmentName !== undefined && !trimmedEnvironmentName) {
+        throw new Error("environment name is required");
+      }
+      let created = false;
+      let environment = environmentId !== undefined
+        ? await getWorkspaceEnvironment(deps.db, grant.workspaceId, environmentId)
+        : await getWorkspaceEnvironmentByName(deps.db, grant.workspaceId, trimmedEnvironmentName!);
+      if (!environment && environmentId !== undefined) {
+        throw new Error("environment not found");
+      }
+      if (!environment) {
+        if (await countWorkspaceEnvironments(deps.db, grant.workspaceId) >= MAX_ENVIRONMENTS_PER_WORKSPACE) {
+          throw new Error(`a workspace supports at most ${MAX_ENVIRONMENTS_PER_WORKSPACE} environments`);
+        }
+        environment = await createWorkspaceEnvironment(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          name: trimmedEnvironmentName!,
+        });
+        created = true;
+        await recordEnvironmentAuditEvent(deps.db, { grant, action: "environment.created", environmentId: environment.id });
+      }
+      const exists = environment.variables.some((variable) => variable.name === parsedName.data);
+      if (!exists && environment.variables.length >= MAX_VARIABLES_PER_ENVIRONMENT) {
+        throw new Error(`an environment supports at most ${MAX_VARIABLES_PER_ENVIRONMENT} variables`);
+      }
+      const metadata = await setWorkspaceEnvironmentVariable(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        environmentId: environment.id,
+        name: parsedName.data,
+        valueEncrypted: encryptEnvironmentValue(key, value),
+      });
+      await recordEnvironmentAuditEvent(deps.db, { grant, action: "environment.variable.set", environmentId: environment.id, variableName: parsedName.data });
+      return json({
+        environment: { id: environment.id, name: environment.name, created },
+        variable: metadata,
+      });
+    });
+  }
+}
+
+// GitHub connect link for manager-style agents: mirrors GET .../github/app but
+// returns a browser entry URL (.../github/connect) that plants the CSRF state
+// cookie before forwarding to GitHub, because an MCP-issued link is opened in
+// a browser that never called the API directly.
+function registerGitHubConnectTool(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  options: McpServerOptions,
+  json: JsonResult,
+): void {
+  server.registerTool("github_connect_link", {
+    description: "Create a workspace-bound GitHub App install link to share with a human. Opening it redirects to GitHub to install the app and select repositories for this workspace; completing the connection requires the person to be signed in to this OpenGeni deployment with github:manage. The link expires.",
+    inputSchema: {},
+  }, async () => {
+    const { settings } = deps;
+    const missing = githubAppMissingSettings(settings);
+    const slug = settings.githubAppSlug?.trim() || null;
+    if (missing.length > 0 || !slug) {
+      return json({ configured: false, appSlug: slug, installUrl: null, missing });
+    }
+    const base = (settings.publicBaseUrl ?? settings.githubAppManifestBaseUrl ?? options.requestOrigin ?? "").replace(/\/+$/, "");
+    if (!base) {
+      throw new Error("github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment");
+    }
+    const state = createSignedState(deps.githubStateSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+    });
+    return json({
+      configured: true,
+      appSlug: slug,
+      installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
+      expiresInSeconds: stateMaxAgeSeconds,
+      missing: [],
+    });
   });
 }
 

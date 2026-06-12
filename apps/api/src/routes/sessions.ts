@@ -1,15 +1,11 @@
 import {
   ClientSessionEvent,
-  CreateSessionRequest,
   ReorderSessionTurnsRequest,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
-  type ToolRef,
 } from "@opengeni/contracts";
 import {
-  appendSessionEventsWithLockedSessionUpdate,
   cancelQueuedSessionTurn,
-  enqueueSessionTurn,
   getSession,
   getSessionGoal,
   listSessionEvents,
@@ -25,22 +21,17 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
-import { validateEnvironmentAttachment } from "../domain/environments";
 import {
-  mergeResourceRefs,
-  mergeToolRefs,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  withDefaultEnabledCapabilityMcpTools,
 } from "../domain/resources";
 import {
-  createAndStartSession,
-  reasoningEffortForSession,
+  acceptSessionUserMessage,
+  createSessionForRequest,
   requireQueuedTurnForApi,
   workflowIdForSession,
 } from "../domain/sessions";
@@ -53,56 +44,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const rawPayload = await c.req.json();
-    const payload = CreateSessionRequest.parse(rawPayload);
-    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
-    const resources = normalizeResources(payload.resources);
-    const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
-    const defaultedTools = hasOwnProperty(rawPayload, "tools")
-      ? requestedTools
-      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
-    // Goal-bearing sessions force the first-party MCP server so the goal
-    // tools the continuation prompt references are reachable.
-    const tools = payload.goal ? withFirstPartyGoalTools(defaultedTools, runtimeSettings) : defaultedTools;
-    await validateGitHubRepositorySelection(db, workspaceId, resources);
-    if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-      throw new HTTPException(503, { message: "object storage is not configured" });
-    }
-    await validateFileResources(db, workspaceId, resources);
-    const environment = payload.environmentId
-      ? await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId)
-      : null;
-    const model = payload.model ?? settings.openaiModel;
-    const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
-    const session = await createAndStartSession({
-      db,
-      bus,
-      workflowClient,
-      accountId: grant.accountId,
-      workspaceId,
-      initialMessage: payload.initialMessage,
-      resources,
-      tools,
-      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-      model,
-      reasoningEffort,
-      sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
-      metadata: payload.metadata,
-      environment: environment ? { id: environment.id, name: environment.name } : null,
-      goal: payload.goal ?? null,
-    });
-    await recordWorkspaceUsage(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: grant.subjectId,
-      eventType: "agent_run.created",
-      quantity: 1,
-      unit: "run",
-      sourceResourceType: "session",
-      sourceResourceId: session.id,
-      idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
-    });
+    const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
     return c.json(session, 202);
   });
 
@@ -292,93 +234,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rawEvent = await c.req.json();
     const event = ClientSessionEvent.parse(rawEvent);
     if (event.type === "user.message") {
-      const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
-      const requestedResources = normalizeResources(event.payload.resources ?? []);
-      const validatedTools = validateToolRefs(event.payload.tools ?? [], runtimeSettings);
-      const requestedTools = userMessagePayloadHasOwnProperty(rawEvent, "tools")
-        ? validatedTools
-        : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, runtimeSettings);
-      const requestedModel = event.payload.model ?? null;
-      const requestedReasoningEffort = event.payload.reasoningEffort ?? null;
-      await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
-      if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
-        throw new HTTPException(503, { message: "object storage is not configured" });
-      }
-      await validateFileResources(db, workspaceId, requestedResources);
-      const existingSession = await requireSession(db, workspaceId, sessionId);
-      await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
-      const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, (lockedSession) => {
-        if (lockedSession.status === "failed" || lockedSession.status === "cancelled") {
-          throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
-        }
-        const nextResources = mergeResourceRefs(lockedSession.resources, requestedResources);
-        const nextTools = mergeToolRefs(lockedSession.tools, requestedTools);
-        const shouldQueueSession = lockedSession.status === "idle";
-        return {
-          events: [
-            {
-              type: event.type,
-              payload: {
-                text: event.payload.text,
-                ...(requestedResources.length ? { resources: requestedResources } : {}),
-                ...(requestedTools.length ? { tools: requestedTools } : {}),
-                ...(requestedModel ? { model: requestedModel } : {}),
-                ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
-              },
-              ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-            },
-            ...(shouldQueueSession ? [{ type: "session.status.changed" as const, payload: { status: "queued" } }] : []),
-          ],
-          update: {
-            resources: nextResources,
-            tools: nextTools,
-            ...(shouldQueueSession ? { status: "queued" as const, activeTurnId: null } : {}),
-          },
-        };
-      }).then(async (events) => {
-        await bus.publish(workspaceId, sessionId, events);
-        return events;
+      const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+        text: event.payload.text,
+        resources: event.payload.resources ?? [],
+        tools: event.payload.tools ?? [],
+        toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
+        model: event.payload.model ?? null,
+        reasoningEffort: event.payload.reasoningEffort ?? null,
+        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
       });
-      const accepted = appended[0];
-      if (!accepted) {
-        throw new HTTPException(500, { message: "failed to append client event" });
-      }
-      const workflowId = workflowIdForSession(sessionId);
-      const session = await requireSession(db, workspaceId, sessionId);
-      const turn = await enqueueSessionTurn(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        triggerEventId: accepted.id,
-        temporalWorkflowId: workflowId,
-        source: "user",
-        prompt: event.payload.text,
-        resources: requestedResources,
-        tools: requestedTools,
-        model: requestedModel ?? session.model,
-        reasoningEffort: requestedReasoningEffort ?? reasoningEffortForSession(session.metadata, settings.openaiReasoningEffort),
-        sandboxBackend: session.sandboxBackend,
-        metadata: {},
-      });
-      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
-        type: "turn.queued",
-        turnId: turn.id,
-        payload: { turnId: turn.id, triggerEventId: accepted.id, source: turn.source },
-      }]);
-	      await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId });
-	      await recordWorkspaceUsage(deps, {
-	        accountId: grant.accountId,
-	        workspaceId,
-	        subjectId: grant.subjectId,
-	        eventType: "agent_run.created",
-	        quantity: 1,
-	        unit: "run",
-	        sourceResourceType: "session_turn",
-	        sourceResourceId: turn.id,
-	        idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
-	      });
-	      return c.json(accepted, 202);
-	    }
+      return c.json(accepted, 202);
+    }
 
     const session = await requireSession(db, workspaceId, sessionId);
     if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
@@ -402,13 +268,6 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(accepted, 202);
   });
-}
-
-function withFirstPartyGoalTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
-  if (!runtimeSettings.mcpServers.some((server) => server.id === "opengeni")) {
-    return tools;
-  }
-  return mergeToolRefs(tools, [{ kind: "mcp", id: "opengeni" }]);
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {

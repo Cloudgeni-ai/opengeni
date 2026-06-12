@@ -51,6 +51,31 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
+  // Browser entry point for install links issued outside a browser context
+  // (the first-party MCP github_connect_link tool): it plants the CSRF state
+  // cookie the install/OAuth callbacks require and forwards to GitHub.
+  // Deliberately unauthenticated: the signed state is only ever minted for
+  // grants holding github:use, expires after stateMaxAgeSeconds, and is bound
+  // to this workspace; completing the installation binding still requires an
+  // authenticated github:manage grant in the same browser at the callback.
+  app.get("/v1/workspaces/:workspaceId/github/connect", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const state = c.req.query("state");
+    if (!state) {
+      throw new HTTPException(400, { message: "missing GitHub installation state" });
+    }
+    const statePayload = readSignedState(state, githubStateSecret);
+    if (!statePayload || statePayload.workspaceId !== workspaceId) {
+      throw new HTTPException(400, { message: "invalid or expired GitHub installation state" });
+    }
+    const slug = settings.githubAppSlug?.trim();
+    if (!slug) {
+      throw new HTTPException(409, { message: JSON.stringify({ message: "GitHub App is not configured", missing: githubAppMissingSettings(settings) }) });
+    }
+    setGitHubStateCookie(c, deps, state);
+    return c.redirect(`https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`);
+  });
+
   app.get("/v1/workspaces/:workspaceId/github/repositories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
