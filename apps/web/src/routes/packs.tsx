@@ -39,6 +39,14 @@ export function PacksRoute({ workspaceId }: { workspaceId: string }) {
   const [manifestDraft, setManifestDraft] = useState("");
   const [busyPackId, setBusyPackId] = useState<string | null>(null);
 
+  // Pack toggles change which MCP servers sessions can attach; a failed
+  // refresh must be surfaced, not swallowed into an unhandled rejection.
+  function refreshMcpServers() {
+    void context.refreshWorkspaceMcpServers(workspaceId).catch((error) => {
+      toast.error("Failed to refresh workspace MCP tools", { description: String(error) });
+    });
+  }
+
   async function registerManifest() {
     let manifest: unknown;
     try {
@@ -64,7 +72,7 @@ export function PacksRoute({ workspaceId }: { workspaceId: string }) {
       const installation = await packs.enable(pack.id, environmentId ? { environmentId } : {});
       if (installation) {
         toast.success(`Pack ${pack.name} enabled`);
-        void context.refreshWorkspaceMcpServers(workspaceId);
+        refreshMcpServers();
       } else if (packs.mutationError) {
         const copy = capabilityErrorToast(packs.mutationError, "Failed to enable pack");
         toast.error(copy.title, { description: copy.description });
@@ -81,7 +89,7 @@ export function PacksRoute({ workspaceId }: { workspaceId: string }) {
       // Pack enable/disable rides the capability installation (pack:{id}).
       await context.client.disableCapability(workspaceId, `pack:${pack.id}`);
       await packs.refresh();
-      void context.refreshWorkspaceMcpServers(workspaceId);
+      refreshMcpServers();
       toast.success(`Pack ${pack.name} disabled`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to disable pack");

@@ -52,12 +52,18 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     void refresh();
   }, [workspaceId]);
 
+  // Handles its own failures (toast) so a post-mutation reload error can
+  // never masquerade as a failed mutation in the callers' catch blocks.
   async function refresh() {
-    const next = await client.listScheduledTasks(workspaceId);
-    setTasks(next);
-    const entries = await Promise.all(next.slice(0, 12).map(async (task) =>
-      [task.id, await client.listScheduledTaskRuns(workspaceId, task.id).catch(() => [] as ScheduledTaskRun[])] as const));
-    setRuns(Object.fromEntries(entries));
+    try {
+      const next = await client.listScheduledTasks(workspaceId);
+      setTasks(next);
+      const entries = await Promise.all(next.slice(0, 12).map(async (task) =>
+        [task.id, await client.listScheduledTaskRuns(workspaceId, task.id).catch(() => [] as ScheduledTaskRun[])] as const));
+      setRuns(Object.fromEntries(entries));
+    } catch (error) {
+      toast.error("Failed to load scheduled tasks", { description: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async function createTask(form: ScheduledTaskFormState) {
