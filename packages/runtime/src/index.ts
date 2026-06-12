@@ -1826,11 +1826,13 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
   }
   const packIndex: SkillIndexEntry[] = [];
   const packNames = new Set<string>();
+  const packNameKeys = new Set<string>();
   for (const skill of packSkills) {
     assertSafePackSkillName(skill.name);
-    if (packNames.has(skill.name)) {
+    if (packNameKeys.has(skill.name.toLowerCase())) {
       throw new Error(`Duplicate pack skill name: ${skill.name}`);
     }
+    packNameKeys.add(skill.name.toLowerCase());
     packNames.add(skill.name);
     children[skill.name] = packSkillDirEntry(skill);
     packIndex.push({ name: skill.name, description: packSkillDescription(skill), path: skill.name });

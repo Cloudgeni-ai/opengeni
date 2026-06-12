@@ -66,6 +66,12 @@ describe("workspace pack runtime resolution", () => {
     expect(() => workspacePackRuntimeFromPacks(packs)).toThrow(
       'Enabled packs pack-a and pack-b both declare a skill named "infra-ops".',
     );
+    // Cross-pack uniqueness is case-insensitive, matching the per-pack
+    // contract rule.
+    expect(() => workspacePackRuntimeFromPacks([
+      pack({ id: "pack-a", skills: [infraSkill] }),
+      pack({ id: "pack-b", skills: [{ ...infraSkill, name: "Infra-Ops" }] }),
+    ])).toThrow("both declare a skill named");
   });
 
   test("keeps explicit skill descriptions", () => {

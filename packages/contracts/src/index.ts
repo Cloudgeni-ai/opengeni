@@ -894,7 +894,7 @@ export const CapabilityPack = z.object({
   // Container image ref (digest-pinned recommended) the pack's sessions run
   // in. At most one enabled pack per workspace may declare one; with none,
   // sessions use the deployment-wide image settings.
-  sandboxImage: z.string().min(1).max(512).optional(),
+  sandboxImage: z.string().trim().min(1).max(512).optional(),
   // Skills delivered into the sandbox skill index when the pack is enabled.
   skills: z.array(CapabilityPackSkill).max(32).superRefine((skills, ctx) => {
     const seen = new Set<string>();

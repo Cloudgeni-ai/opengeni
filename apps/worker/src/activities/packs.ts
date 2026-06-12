@@ -57,16 +57,19 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
     );
   }
   const skills: PackSkill[] = [];
+  // Keyed case-insensitively to match the per-pack uniqueness rule in the
+  // CapabilityPack contract (and case-insensitive filesystems).
   const skillOwners = new Map<string, string>();
   for (const pack of [...packs].sort((a, b) => a.id.localeCompare(b.id))) {
     for (const skill of pack.skills) {
-      const existingOwner = skillOwners.get(skill.name);
+      const key = skill.name.toLowerCase();
+      const existingOwner = skillOwners.get(key);
       if (existingOwner !== undefined && existingOwner !== pack.id) {
         throw new Error(
           `Enabled packs ${existingOwner} and ${pack.id} both declare a skill named "${skill.name}". Pack skill names must be unique across enabled packs; disable one of the packs and retry.`,
         );
       }
-      skillOwners.set(skill.name, pack.id);
+      skillOwners.set(key, pack.id);
       skills.push({
         name: skill.name,
         description: skill.description ?? null,
