@@ -519,6 +519,27 @@ describe("workspace environments encryption key", () => {
   });
 });
 
+describe("provider item id policy", () => {
+  test("defaults to stripping provider item ids with encrypted reasoning round-trip", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.openaiProviderItemIds).toBe("strip");
+    expect(settings.openaiReasoningEncryptedContent).toBe(true);
+  });
+
+  test("can preserve provider item ids and disable encrypted reasoning", () => {
+    const settings = withEnv({
+      OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "preserve",
+      OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT: "false",
+    }, () => getSettings());
+    expect(settings.openaiProviderItemIds).toBe("preserve");
+    expect(settings.openaiReasoningEncryptedContent).toBe(false);
+  });
+
+  test("rejects unknown provider item id policies", () => {
+    expect(() => withEnv({ OPENGENI_OPENAI_PROVIDER_ITEM_IDS: "sometimes" }, () => getSettings())).toThrow();
+  });
+});
+
 function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
   const original = process.env;
   process.env = { ...env };

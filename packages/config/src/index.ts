@@ -119,6 +119,19 @@ const SettingsSchema = z.object({
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
+  // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
+  // resolved against the provider's server-side response store. That store is
+  // not durable enough to anchor long runs on: a response that streamed fine
+  // can be missing from the store on the very next model call, which then
+  // fails with 400 "Item with id ... not found". "strip" removes the ids from
+  // every model-call input so requests are self-contained — conversation
+  // truth already lives client-side in session_history_items. "preserve"
+  // keeps the SDK's pass-through behavior.
+  openaiProviderItemIds: z.enum(["strip", "preserve"]).default("strip"),
+  // With ids stripped the provider cannot resolve prior reasoning server-side,
+  // so request reasoning.encrypted_content and send it back with each call:
+  // reasoning continuity without depending on provider-side storage.
+  openaiReasoningEncryptedContent: EnvBoolean.default(true),
   // Model-call retry budget for transient provider failures (429s and friends).
   // The openai client default of 2 retries is too small for sustained TPM
   // backpressure during long autonomous runs.
@@ -347,6 +360,8 @@ export function getSettings(): Settings {
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
+    openaiProviderItemIds: optional("OPENGENI_OPENAI_PROVIDER_ITEM_IDS"),
+    openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),

@@ -14,6 +14,7 @@ import {
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   type AgentInputItem,
+  type CallModelInputFilter,
   type MCPServer,
   type Model,
   type RunStreamEvent,
@@ -270,6 +271,15 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ].join(" "),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
+      // Round-trip the encrypted reasoning payload with every call so chains
+      // of thought survive without provider-side response storage (which is
+      // what stripped provider item ids opt us out of — see
+      // stripProviderItemIds). providerData.include replaces any
+      // tool-derived include entries; OpenGeni's tools are MCP/sandbox
+      // function tools, which contribute none.
+      ...(settings.openaiReasoningEncryptedContent
+        ? { providerData: { include: ["reasoning.encrypted_content"] } }
+        : {}),
     },
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
   } as const;
@@ -689,6 +699,35 @@ export type RunAgentStreamOptions = {
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
 };
 
+/**
+ * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
+ * from every input item immediately before each model call. Responses-API
+ * requests that carry item ids are resolved against the provider's stored
+ * responses, and that store is not durable enough to anchor long runs on: a
+ * response that streamed successfully can be missing from the store on the
+ * very next call, which then fails with 400 "Item with id ... not found"
+ * (observed live on Azure OpenAI mid-turn). All item content — including the
+ * encrypted reasoning payload carried in providerData when
+ * `openaiReasoningEncryptedContent` is on — is sent inline, so the ids add
+ * fragility without adding information. Pairing fields (`call_id`/`callId`)
+ * are separate properties and stay untouched; items are cloned, never mutated.
+ */
+export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) => ({
+  ...modelData,
+  input: modelData.input.map((item) => {
+    if (item && typeof item === "object" && "id" in item) {
+      const { id: _id, ...rest } = item as Record<string, unknown>;
+      return rest as AgentInputItem;
+    }
+    return item;
+  }),
+});
+
+/** The model-input filter the configured provider item id policy selects. */
+export function callModelInputFilterForSettings(settings: Settings): CallModelInputFilter | undefined {
+  return settings.openaiProviderItemIds === "strip" ? stripProviderItemIdsFilter : undefined;
+}
+
 export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgentInput | string | RunState<any, any>, settings: Settings, overrides: RunAgentStreamOptions = {}) {
   const prepared: PreparedAgentInput = typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
@@ -718,9 +757,16 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     ?? (prepared.serializedRunStateForSandbox && client
       ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
       : undefined);
+  const callModelInputFilter = callModelInputFilterForSettings(settings);
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
+    // Strip provider-assigned item ids from every model call (turn-start
+    // history replay AND mid-turn follow-ups) so requests never depend on the
+    // provider's server-side response store. A stored response can vanish
+    // between two calls of the same turn, failing the run with 400 "Item with
+    // id 'rs_…' not found"; with the ids gone the request is self-contained.
+    ...(callModelInputFilter ? { callModelInputFilter } : {}),
   };
   void settings.disableOpenaiTracing;
   if (client) {

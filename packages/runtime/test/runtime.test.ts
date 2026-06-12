@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -973,5 +973,52 @@ describe("pack skills in the sandbox skill index", () => {
     const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
     const plainCapability = ((plainAgent as any).capabilities as Array<{ type: string; lazyFrom?: { source: { type: string } } }>).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+});
+
+describe("provider item id stripping", () => {
+  test("stripProviderItemIdsFilter removes provider ids from every item without touching pairing fields", () => {
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_dangling",
+      content: [{ type: "input_text", text: "thinking" }],
+      providerData: { encrypted_content: "gAAAA-opaque" },
+    } as any;
+    const message = { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "hi" }] } as any;
+    const functionCall = { type: "function_call", id: "fc_1", callId: "call_abc", name: "exec_command", arguments: "{}", status: "completed" } as any;
+    const functionOutput = { type: "function_call_result", id: "fco_1", callId: "call_abc", status: "completed", output: { type: "text", text: "ok" } } as any;
+    const userMessage = { type: "message", role: "user", content: "do the thing" } as any;
+    const input = [reasoning, message, functionCall, functionOutput, userMessage];
+    const result = stripProviderItemIdsFilter({
+      modelData: { input, instructions: "be useful" },
+      agent: undefined as any,
+      context: undefined,
+    }) as { input: any[]; instructions?: string };
+    expect(result.instructions).toBe("be useful");
+    expect(result.input).toHaveLength(5);
+    for (const item of result.input) {
+      expect("id" in item).toBe(false);
+    }
+    // Pairing and content stay intact.
+    expect(result.input[0].providerData.encrypted_content).toBe("gAAAA-opaque");
+    expect(result.input[2].callId).toBe("call_abc");
+    expect(result.input[3].callId).toBe("call_abc");
+    expect(result.input[4]).toBe(userMessage);
+    // Originals are not mutated.
+    expect(reasoning.id).toBe("rs_dangling");
+    expect(message.id).toBe("msg_1");
+  });
+
+  test("callModelInputFilterForSettings follows the configured policy", () => {
+    expect(callModelInputFilterForSettings(testSettings())).toBe(stripProviderItemIdsFilter);
+    expect(callModelInputFilterForSettings(testSettings({ openaiProviderItemIds: "strip" }))).toBe(stripProviderItemIdsFilter);
+    expect(callModelInputFilterForSettings(testSettings({ openaiProviderItemIds: "preserve" }))).toBeUndefined();
+  });
+
+  test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect((agent as any).modelSettings.providerData).toEqual({ include: ["reasoning.encrypted_content"] });
+    const disabled = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", openaiReasoningEncryptedContent: false }), []);
+    expect((disabled as any).modelSettings.providerData).toBeUndefined();
   });
 });

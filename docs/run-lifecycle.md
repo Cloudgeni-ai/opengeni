@@ -87,3 +87,14 @@ the session's sandbox on its next turn — decoupled from the RunState blob.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.
+
+One consequence of client-side conversation truth: model calls must not depend
+on the provider's server-side response store. Provider-assigned item ids
+(`rs_`/`msg_`/`fc_`…) are resolved against that store, and a response that
+streamed successfully can be missing from it on the very next call, failing a
+long run mid-turn with 400 "Item with id … not found". The runtime therefore
+strips provider item ids from every model-call input by default
+(`OPENGENI_OPENAI_PROVIDER_ITEM_IDS=strip`) and round-trips
+`reasoning.encrypted_content` instead
+(`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
+self-contained and reasoning continuity does not hinge on provider storage.
