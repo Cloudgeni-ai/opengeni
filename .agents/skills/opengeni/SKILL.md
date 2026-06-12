@@ -42,6 +42,7 @@ Then open the smallest source files that answer the question:
 - Documents/retrieval: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`.
 - GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
+- TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 
 If paths have moved, find concepts by symbol name, not by old paths:
 
@@ -51,7 +52,7 @@ rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentTurn|crea
 
 ## Client Integration
 
-For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
+For external clients, SaaS integrations, SDK wrappers, customer-side coding agents, or UIs on top of OpenGeni, prefer the separate `opengeni-client` skill when available. For TypeScript clients, `@opengeni/sdk` (`packages/sdk`) is the first-party client: typed session/event API, the SSE streaming core (reconnect + replay-by-sequence + dedup), and proxy-through-your-own-API re-streaming helpers. When staying inside this source-level skill, read `references/client-integration.md`. Treat OpenGeni as a service boundary: the client discovers or chooses a workspace, creates sessions under `/v1/workspaces/:workspaceId/...`, streams/replays events, sends follow-up/control events, uploads files, selects resources/tools, and displays approvals/status. Do not require the client to know worker, Temporal, NATS, or sandbox internals except as concepts for status and product behavior.
 
 ## Access, Workspaces, Billing
 
