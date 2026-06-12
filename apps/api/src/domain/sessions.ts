@@ -296,7 +296,7 @@ export async function createSessionForRequest(
   // (how an operator hands a manager-style session the orchestration tools),
   // but never one out-ranking its creator: every requested permission must be
   // held by the creating grant.
-  const firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
+  let firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -306,6 +306,18 @@ export async function createSessionForRequest(
     if (!hasPermission(grant.permissions, permission)) {
       throw new HTTPException(403, { message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}` });
     }
+  }
+  // Invariant: a goal-bearing session always carries goals:manage in its
+  // effective first-party permissions. Without it the worker's delegated
+  // token never sees the goal tools (goal_complete/goal_pause/...), so the
+  // agent cannot stop its own goal and the continuation loop runs until an
+  // operator intervenes. The auto-added permission is deliberately exempt
+  // from the creating-grant check above: goal tools are scoped to the
+  // spawned session itself via the worker-signed sessionId claim, so a
+  // worker managing its OWN goal is not an escalation of the spawner's
+  // authority.
+  if (payload.goal && firstPartyMcpPermissions && !firstPartyMcpPermissions.includes("goals:manage")) {
+    firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
   }
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
   const session = await createAndStartSession({

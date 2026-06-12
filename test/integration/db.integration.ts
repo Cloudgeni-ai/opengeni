@@ -36,7 +36,7 @@ import {
   withRlsContext,
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, Permission } from "@opengeni/contracts";
 import { expectContiguousSequences, startTestServices, type TestServices } from "@opengeni/testing";
 
 describe("DB integration", () => {
@@ -554,6 +554,67 @@ describe("DB integration", () => {
     await finishTurn(dbClient.db, grant.workspaceId, boundedTurn.id, "completed");
     const atCap = await evaluateGoalContinuation(dbClient.db, { workspaceId: grant.workspaceId, sessionId: session.id, ...guards });
     expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
+  });
+
+  test("migration backfills goals:manage into goal-bearing sessions with explicit first-party permissions", async () => {
+    const migrationName = "0009_goal_sessions_first_party_goals_manage.sql";
+    const grant = await testGrant(dbClient.db);
+    const makeSession = async (firstPartyMcpPermissions: Permission[] | null) => await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "backfill fixture",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      firstPartyMcpPermissions,
+    });
+    const addGoal = async (sessionId: string) => await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+      text: "stay green",
+      createdBy: "api",
+    });
+
+    // Healed: explicit permissions missing goals:manage + a non-completed goal.
+    const activeGoalSession = await makeSession(["workspace:read", "github:use"]);
+    await addGoal(activeGoalSession.id);
+    const pausedGoalSession = await makeSession(["workspace:read"]);
+    await addGoal(pausedGoalSession.id);
+    await setSessionGoalStatus(dbClient.db, grant.workspaceId, pausedGoalSession.id, { status: "paused", pausedReason: "operator hold" });
+    // Untouched: completed goal, no goal, already-holding, and default (null) sets.
+    const completedGoalSession = await makeSession(["workspace:read"]);
+    await addGoal(completedGoalSession.id);
+    await setSessionGoalStatus(dbClient.db, grant.workspaceId, completedGoalSession.id, { status: "completed", evidence: "done" });
+    const noGoalSession = await makeSession(["workspace:read"]);
+    const alreadyHoldingSession = await makeSession(["goals:manage", "workspace:read"]);
+    await addGoal(alreadyHoldingSession.id);
+    const defaultSetSession = await makeSession(null);
+    await addGoal(defaultSetSession.id);
+
+    // The fixture rows were created after beforeAll already applied the
+    // migration, so un-record it and run the migration path again - the same
+    // way an upgraded deployment replays pending files over existing data.
+    const rerunMigration = async () => {
+      await dbClient.db.execute(dbSql`DELETE FROM "schema_migrations" WHERE "name" = ${migrationName}`);
+      await services.migrate();
+    };
+    await rerunMigration();
+
+    const permissionsOf = async (sessionId: string) =>
+      (await getSession(dbClient.db, grant.workspaceId, sessionId))?.firstPartyMcpPermissions ?? null;
+    expect(await permissionsOf(activeGoalSession.id)).toEqual(["workspace:read", "github:use", "goals:manage"] as Permission[]);
+    expect(await permissionsOf(pausedGoalSession.id)).toEqual(["workspace:read", "goals:manage"] as Permission[]);
+    expect(await permissionsOf(completedGoalSession.id)).toEqual(["workspace:read"] as Permission[]);
+    expect(await permissionsOf(noGoalSession.id)).toEqual(["workspace:read"] as Permission[]);
+    expect(await permissionsOf(alreadyHoldingSession.id)).toEqual(["goals:manage", "workspace:read"] as Permission[]);
+    expect(await permissionsOf(defaultSetSession.id)).toBeNull();
+
+    // Idempotent: a second run adds nothing.
+    await rerunMigration();
+    expect(await permissionsOf(activeGoalSession.id)).toEqual(["workspace:read", "github:use", "goals:manage"] as Permission[]);
+    expect(await permissionsOf(alreadyHoldingSession.id)).toEqual(["goals:manage", "workspace:read"] as Permission[]);
   });
 
   test("RLS policies isolate session goal rows for a non-owner app role", async () => {

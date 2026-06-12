@@ -3316,6 +3316,97 @@ describe("API component integration", () => {
     }
   });
 
+  test("goal-bearing sessions always hold goals:manage in their first-party MCP permissions", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const appSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    // The creating grant deliberately lacks goals:manage: the auto-added
+    // permission is exempt from the creator-holds-it check because goal
+    // tools are scoped to the spawned session itself via the worker-signed
+    // sessionId claim - a worker managing its OWN goal is not an escalation
+    // of the spawner's authority.
+    const creatorToken = await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "test:goal-first-party-permissions",
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    // REST create with a goal: goals:manage is unioned into the explicit
+    // set, otherwise the agent could never call goal_complete/goal_pause and
+    // the goal continuation loop would run until an operator intervenes.
+    const withGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "take repo zero-to-one",
+        model: "scripted-model",
+        goal: { text: "repo deployed to staging" },
+        firstPartyMcpPermissions: ["workspace:read"],
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${creatorToken}` },
+    });
+    expect(withGoal.status).toBe(202);
+    const goalSession = await withGoal.json() as { id: string; firstPartyMcpPermissions: string[] | null };
+    expect(goalSession.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
+    expect((await getSession(dbClient.db, grant.workspaceId, goalSession.id))?.firstPartyMcpPermissions)
+      .toEqual(["workspace:read", "goals:manage"] as Permission[]);
+
+    // Without a goal the explicit permission set is stored untouched.
+    const withoutGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "no goal here",
+        model: "scripted-model",
+        firstPartyMcpPermissions: ["workspace:read"],
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${creatorToken}` },
+    });
+    expect(withoutGoal.status).toBe(202);
+    const plainSession = await withoutGoal.json() as { id: string; firstPartyMcpPermissions: string[] | null };
+    expect(plainSession.firstPartyMcpPermissions).toEqual(["workspace:read"]);
+    expect((await getSession(dbClient.db, grant.workspaceId, plainSession.id))?.firstPartyMcpPermissions)
+      .toEqual(["workspace:read"] as Permission[]);
+
+    // Same invariant through the MCP session_create tool, from a manager
+    // grant that also lacks goals:manage.
+    const mcpDeps = {
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const managerGrant = { ...grant, permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[] };
+    const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
+    const spawned = await callMcpTool<{ id: string; firstPartyMcpPermissions: string[] | null }>(managerMcp, "session_create", {
+      initialMessage: "spawn a goal-bearing worker",
+      model: "scripted-model",
+      sandboxBackend: "none",
+      goal: { text: "fleet healthy" },
+      firstPartyMcpPermissions: ["workspace:read"],
+    });
+    expect(spawned.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
+    expect((await getSession(dbClient.db, grant.workspaceId, spawned.id))?.firstPartyMcpPermissions)
+      .toEqual(["workspace:read", "goals:manage"] as Permission[]);
+  });
+
   test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
