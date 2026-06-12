@@ -22,6 +22,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { formatElapsedSeconds, formatTimestamp } from "@/lib/format";
+import { listViewState } from "@/lib/load-state";
 import {
   editedTurnFate,
   finishedTurns,
@@ -42,6 +43,9 @@ export function QueueRail({ queue, sessionStatus }: {
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const queueIds = queue.queue.map((turn) => turn.id);
+  // Honest active-turn area: when the turn list failed to load we do not know
+  // whether a turn is running, so never claim "new messages start immediately".
+  const activeTurnView = listViewState({ loading: queue.loading, error: queue.error, count: queue.activeTurn ? 1 : 0 });
 
   // Claimed/too-late reconciliation: if the turn under edit leaves the queue
   // (the worker claimed it, or someone deleted it), close the editor honestly
@@ -107,7 +111,7 @@ export function QueueRail({ queue, sessionStatus }: {
           Turn queue
         </h3>
         <span className="text-[11px] text-[color:var(--color-fg-subtle)]">
-          {queue.queue.length === 0 ? "empty" : `${queue.queue.length} queued`}
+          {queue.queue.length > 0 ? `${queue.queue.length} queued` : activeTurnView === "error" ? "unavailable" : "empty"}
         </span>
       </div>
 
@@ -133,10 +137,18 @@ export function QueueRail({ queue, sessionStatus }: {
 
       {queue.activeTurn ? (
         <ActiveTurnCard turn={queue.activeTurn} />
-      ) : queue.loading ? (
+      ) : activeTurnView === "loading" ? (
         <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-xs text-[color:var(--color-fg-muted)]">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading turns
+        </div>
+      ) : activeTurnView === "error" ? (
+        <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200" role="alert">
+          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">Couldn't load the turn queue{queue.error?.message ? ` — ${queue.error.message}` : ""}</span>
+          <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="shrink-0 text-red-200 hover:bg-red-500/20 hover:text-red-100">
+            Retry
+          </Button>
         </div>
       ) : (
         <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs leading-5 text-[color:var(--color-fg-subtle)]">

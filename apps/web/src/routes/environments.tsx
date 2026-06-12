@@ -17,11 +17,12 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, PageHeader } from "@/components/common";
+import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { formatTimestamp } from "@/lib/format";
+import { listViewState } from "@/lib/load-state";
 import type { ScheduledTask, Session, WorkspaceEnvironment } from "@/types";
 
 export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
@@ -32,6 +33,9 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
+  // Honest list state: a failed load renders as an error with retry, never as
+  // the "No environments yet…" empty state.
+  const environmentsView = listViewState({ loading: environments.loading, error: environments.error, count: environments.environments.length });
 
   async function createEnvironment() {
     const name = createName.trim();
@@ -93,12 +97,14 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="mt-5 grid gap-3">
-        {environments.loading && environments.environments.length === 0 ? (
+        {environmentsView === "loading" ? (
           <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
             <Loader2Icon className="size-4 animate-spin" />
             Loading environments
           </div>
-        ) : environments.environments.length === 0 ? (
+        ) : environmentsView === "error" ? (
+          <LoadErrorState title="Couldn't load environments" error={environments.error} onRetry={() => void environments.refresh()} />
+        ) : environmentsView === "empty" ? (
           <EmptyState>
             No environments yet. Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts.
           </EmptyState>

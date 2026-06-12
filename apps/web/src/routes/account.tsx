@@ -1,9 +1,11 @@
-// Account: identity, billing balance + usage (from /v1/billing/usage), and
-// workspace API keys with the grouped delegable-permission picker.
+// Account: identity, billing balance + usage (from /v1/billing/usage), plan
+// entitlements (from /v1/billing/entitlements), and workspace API keys with
+// the grouped delegable-permission picker.
 import { useBillingUsage } from "@opengeni/react";
 import {
   ActivityIcon,
   CopyIcon,
+  GaugeIcon,
   Loader2Icon,
   LockIcon,
   PlusIcon,
@@ -14,12 +16,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, PageHeader } from "@/components/common";
+import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
-import { formatMoneyMicros, formatTimestamp, validTopupAmount } from "@/lib/format";
+import { entitlementEntries, formatMoneyMicros, formatTimestamp, validTopupAmount } from "@/lib/format";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -27,7 +29,7 @@ import {
   hasAccountPermission,
   hasWorkspacePermission,
 } from "@/lib/permissions";
-import type { ApiKey, BillingSummary, UsageEvent } from "@/types";
+import type { ApiKey, BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
 
 export function AccountRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
@@ -35,7 +37,11 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
   const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const accountId = activeWorkspace?.accountId ?? "";
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
   const [billing, setBilling] = useState<BillingSummary | null>(null);
+  const [billingError, setBillingError] = useState<Error | null>(null);
+  const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
+  const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [apiKeyName, setApiKeyName] = useState("Default API key");
   const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(() => new Set(defaultApiKeyPermissions));
   const [createdToken, setCreatedToken] = useState<string | null>(null);
@@ -60,13 +66,55 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
     void refresh();
   }, [workspaceId, accountId]);
 
+  // Each loader records its own failure: a failed request must render as an
+  // error with retry, never as "No API keys." or a quietly absent balance.
+  async function refreshApiKeys() {
+    if (!canManageApiKeys) {
+      setApiKeys([]);
+      setApiKeysError(null);
+      return;
+    }
+    try {
+      setApiKeys(await client.listApiKeys(workspaceId));
+      setApiKeysError(null);
+    } catch (error) {
+      setApiKeys([]);
+      setApiKeysError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  async function refreshBilling() {
+    if (!accountId || !canReadBilling) {
+      setBilling(null);
+      setBillingError(null);
+      return;
+    }
+    try {
+      setBilling(await client.getBilling({ accountId }));
+      setBillingError(null);
+    } catch (error) {
+      setBilling(null);
+      setBillingError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  async function refreshEntitlements() {
+    if (!accountId || !canReadBilling) {
+      setEntitlements(null);
+      setEntitlementsError(null);
+      return;
+    }
+    try {
+      setEntitlements(await client.getBillingEntitlements({ accountId }));
+      setEntitlementsError(null);
+    } catch (error) {
+      setEntitlements(null);
+      setEntitlementsError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
   async function refresh() {
-    const [keys, nextBilling] = await Promise.all([
-      canManageApiKeys ? client.listApiKeys(workspaceId).catch(() => [] as ApiKey[]) : Promise.resolve([] as ApiKey[]),
-      accountId ? client.getBilling({ accountId }).catch(() => null) : Promise.resolve(null),
-    ]);
-    setApiKeys(keys);
-    setBilling(nextBilling);
+    await Promise.all([refreshApiKeys(), refreshBilling(), refreshEntitlements()]);
   }
 
   async function createKey() {
@@ -147,13 +195,22 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
             <div>
               <h2 className="text-sm font-medium">Credits</h2>
               <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
-                {billing ? `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available` : "Billing balance unavailable"}
+                {billing
+                  ? `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
+                  : !canReadBilling || !accountId
+                    ? "This subject cannot read billing for the account."
+                    : billingError
+                      ? "Billing balance failed to load."
+                      : "Billing balance unavailable"}
               </p>
             </div>
             <span className="rounded-full border border-[color:var(--color-border)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]">
               {billing?.mode ?? "unknown"}
             </span>
           </div>
+          {billingError ? (
+            <LoadErrorState title="Couldn't load the billing balance" error={billingError} onRetry={() => void refreshBilling()} />
+          ) : null}
           {billing?.mode === "stripe" && canManageBilling ? (
             <div className="grid gap-2">
               <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -186,6 +243,13 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
             <p className="text-xs text-[color:var(--color-fg-subtle)]">Credit checkout is available when Stripe billing is enabled for this deployment.</p>
           )}
         </section>
+
+        <EntitlementsSection
+          enabled={canReadBilling && Boolean(accountId)}
+          entitlements={entitlements}
+          error={entitlementsError}
+          onRetry={() => void refreshEntitlements()}
+        />
 
         <UsageSection
           enabled={canReadBilling && Boolean(accountId)}
@@ -236,7 +300,9 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
             <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot manage API keys for the selected workspace.</p>
           )}
           <div className="grid gap-2">
-            {apiKeys.length === 0 ? (
+            {apiKeysError ? (
+              <LoadErrorState title="Couldn't load API keys" error={apiKeysError} onRetry={() => void refreshApiKeys()} />
+            ) : apiKeys.length === 0 ? (
               <EmptyState>No API keys.</EmptyState>
             ) : apiKeys.map((apiKey) => (
               <div key={apiKey.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-3 py-2">
@@ -268,6 +334,54 @@ export function aggregateUsage(events: UsageEvent[]): Array<{ eventType: string;
     byKey.set(key, entry);
   }
   return [...byKey.values()].sort((a, b) => b.count - a.count || a.eventType.localeCompare(b.eventType));
+}
+
+/** Plan & entitlements (/v1/billing/entitlements): the limits the account runs under. */
+function EntitlementsSection(props: {
+  enabled: boolean;
+  entitlements: BillingEntitlementsResponse | null;
+  error: Error | null;
+  onRetry: () => void;
+}) {
+  const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
+  return (
+    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <GaugeIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            Plan entitlements
+          </h2>
+          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">The limits and features this account runs under.</p>
+        </div>
+        <span className="rounded-full border border-[color:var(--color-border)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]">
+          {props.entitlements?.mode ?? "unknown"}
+        </span>
+      </div>
+
+      {!props.enabled ? (
+        <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot read billing entitlements for the account.</p>
+      ) : props.error ? (
+        <LoadErrorState title="Couldn't load entitlements" error={props.error} onRetry={props.onRetry} />
+      ) : !props.entitlements ? (
+        <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+          <Loader2Icon className="size-3.5 animate-spin" />
+          Loading entitlements
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="text-xs text-[color:var(--color-fg-subtle)]">No entitlement limits — this deployment does not restrict the account.</p>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          {rows.map((row) => (
+            <span key={row.name} className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1 text-xs">
+              <span className="font-medium">{row.name}</span>
+              <span className="font-mono text-[11px] text-[color:var(--color-fg-muted)]">{row.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function UsageSection(props: {

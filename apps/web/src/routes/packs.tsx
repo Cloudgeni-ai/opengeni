@@ -23,10 +23,11 @@ import {
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, PageHeader } from "@/components/common";
+import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import { capabilityErrorToast } from "@/lib/capabilities";
+import { listViewState } from "@/lib/load-state";
 import { scheduleLabel } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
 import type { CapabilityPack, PackInstallation } from "@/types";
@@ -38,6 +39,9 @@ export function PacksRoute({ workspaceId }: { workspaceId: string }) {
   const [registerOpen, setRegisterOpen] = useState(false);
   const [manifestDraft, setManifestDraft] = useState("");
   const [busyPackId, setBusyPackId] = useState<string | null>(null);
+  // Honest list state: a failed load renders as an error with retry, never as
+  // the "No packs are available…" empty state.
+  const packsView = listViewState({ loading: packs.loading, error: packs.error, count: packs.packs.length });
 
   // Pack toggles change which MCP servers sessions can attach; a failed
   // refresh must be surfaced, not swallowed into an unhandled rejection.
@@ -155,12 +159,14 @@ export function PacksRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="mt-5 grid gap-3">
-        {packs.loading && packs.packs.length === 0 ? (
+        {packsView === "loading" ? (
           <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
             <Loader2Icon className="size-4 animate-spin" />
             Loading packs
           </div>
-        ) : packs.packs.length === 0 ? (
+        ) : packsView === "error" ? (
+          <LoadErrorState title="Couldn't load packs" error={packs.error} onRetry={() => void packs.refresh()} />
+        ) : packsView === "empty" ? (
           <EmptyState>No packs are available to this workspace.</EmptyState>
         ) : (
           packs.packs.map((pack) => (

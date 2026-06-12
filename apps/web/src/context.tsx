@@ -50,10 +50,12 @@ import {
   type RepoDraft,
   type RepositoryGroup,
 } from "@/lib/session-tools";
+import { upsertWorkspace } from "@/lib/workspaces";
 import type {
   AccessContext,
   AuthSession,
   ClientConfig,
+  CreateWorkspaceRequest,
   GitHubRepository,
   ResourceRef,
   Session,
@@ -109,7 +111,9 @@ export type AppContextValue = {
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
-  refreshGitHub: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
+  createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
+  renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
@@ -295,7 +299,35 @@ export function RootRouteComponent() {
     previousCapabilityToolIds.current = new Set(availableIds);
   }, [clientConfig, customMcpServers]);
 
-  async function refreshGitHub(workspaceId: string, signal?: AbortSignal) {
+  // Workspace create/rename keep the cached `workspaces` list and the access
+  // context (the create grants the caller an owner grant) in sync.
+  async function createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace | null> {
+    let created: Workspace;
+    try {
+      created = await client.createWorkspace(request);
+    } catch (error) {
+      toast.error("Failed to create workspace", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+    setWorkspaces((current) => upsertWorkspace(current, created));
+    // Refresh grants so the new workspace's owner permissions apply at once;
+    // the workspace itself is already usable if this refresh fails.
+    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    return created;
+  }
+
+  async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace | null> {
+    try {
+      const updated = await client.updateWorkspace(workspaceId, { name });
+      setWorkspaces((current) => upsertWorkspace(current, updated));
+      return updated;
+    } catch (error) {
+      toast.error("Failed to rename workspace", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
+  async function refreshGitHub(workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) {
     const refreshId = githubRefreshId.current + 1;
     githubRefreshId.current = refreshId;
     setRepoBusy(true);
@@ -307,7 +339,12 @@ export function RootRouteComponent() {
       setGithubStatus({ configured: status.configured, missing: status.missing, installUrl: status.installUrl });
       setGithubAppOpen(!status.configured);
       if (status.configured) {
-        const { repositories } = await client.listGitHubRepositories(workspaceId);
+        // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
+        // so installations changed after connect show up; passive loads read
+        // OpenGeni's cached rows.
+        const { repositories } = options?.sync
+          ? await client.syncGitHubRepositories(workspaceId)
+          : await client.listGitHubRepositories(workspaceId);
         if (signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
@@ -513,6 +550,8 @@ export function RootRouteComponent() {
     addManualRepository,
     forgetAccessKey,
     handleManagedSignOut,
+    createWorkspace,
+    renameWorkspace,
     refreshGitHub,
     refreshWorkspaceMcpServers,
     startGitHubAppManifestFlow,

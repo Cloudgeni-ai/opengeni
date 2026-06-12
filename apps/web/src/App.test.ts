@@ -34,7 +34,11 @@ import {
   scheduleFromFormState,
   summarizeLastRun,
 } from "./lib/scheduled-tasks";
+import { entitlementEntries, formatEntitlementValue } from "./lib/format";
+import { listViewState } from "./lib/load-state";
+import { upsertWorkspace, workspaceCreationAccountId } from "./lib/workspaces";
 import type {
+  AccessContext,
   CapabilityCatalogItem,
   GitHubRepository,
   ResourceRef,
@@ -43,6 +47,7 @@ import type {
   ScheduledTaskScheduleSpec,
   Session,
   SessionEvent,
+  Workspace,
 } from "./types";
 
 describe("workspace route helpers", () => {
@@ -786,3 +791,106 @@ function event(sequence: number, type: string, payload: unknown): SessionEvent {
     occurredAt: `2026-05-07T00:00:${String(sequence).padStart(2, "0")}.000Z`,
   };
 }
+
+describe("listViewState", () => {
+  test("a failed load renders as error, never as the empty state", () => {
+    expect(listViewState({ loading: false, error: new Error("boom"), count: 0 })).toBe("error");
+  });
+
+  test("the error wins over a concurrent load so retries stay honest", () => {
+    expect(listViewState({ loading: true, error: new Error("boom"), count: 0 })).toBe("error");
+  });
+
+  test("data already on screen keeps rendering through a refresh failure", () => {
+    expect(listViewState({ loading: false, error: new Error("boom"), count: 3 })).toBe("ready");
+  });
+
+  test("initial load and true emptiness keep their states", () => {
+    expect(listViewState({ loading: true, error: null, count: 0 })).toBe("loading");
+    expect(listViewState({ loading: false, error: null, count: 0 })).toBe("empty");
+  });
+});
+
+describe("entitlement formatting", () => {
+  test("booleans read as enabled/disabled and arrays join", () => {
+    expect(formatEntitlementValue(true)).toBe("enabled");
+    expect(formatEntitlementValue(false)).toBe("disabled");
+    expect(formatEntitlementValue(["gpt-5.5", "o4"])).toBe("gpt-5.5, o4");
+    expect(formatEntitlementValue([])).toBe("none");
+    expect(formatEntitlementValue(25)).toBe("25");
+  });
+
+  test("entries sort by name for a stable render", () => {
+    expect(entitlementEntries({ "sessions.max": 10, "models.allowed": ["gpt-5.5"], "packs.custom": true })).toEqual([
+      { name: "models.allowed", value: "gpt-5.5" },
+      { name: "packs.custom", value: "enabled" },
+      { name: "sessions.max", value: "10" },
+    ]);
+  });
+});
+
+describe("workspace switcher helpers", () => {
+  function accessContext(patch: Partial<AccessContext> = {}): AccessContext {
+    return {
+      mode: "managed",
+      subjectId: "subject-1",
+      accountGrants: [],
+      workspaceGrants: [],
+      defaultAccountId: null,
+      defaultWorkspaceId: null,
+      ...patch,
+    };
+  }
+
+  test("prefers the active workspace's account when it can create there", () => {
+    const context = accessContext({
+      defaultAccountId: "account-default",
+      accountGrants: [
+        { accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] },
+        { accountId: "account-active", subjectId: "subject-1", permissions: ["account:admin"] },
+      ],
+    });
+    expect(workspaceCreationAccountId(context, "account-active")).toBe("account-active");
+  });
+
+  test("falls back to the default account, then any creatable grant", () => {
+    const context = accessContext({
+      defaultAccountId: "account-default",
+      accountGrants: [{ accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] }],
+    });
+    expect(workspaceCreationAccountId(context, "account-other")).toBe("account-default");
+
+    const indirect = accessContext({
+      accountGrants: [{ accountId: "account-3", subjectId: "subject-1", permissions: ["workspace:create"] }],
+    });
+    expect(workspaceCreationAccountId(indirect, null)).toBe("account-3");
+  });
+
+  test("returns null when no account grant can create — the affordance hides", () => {
+    const context = accessContext({
+      defaultAccountId: "account-default",
+      accountGrants: [{ accountId: "account-default", subjectId: "subject-1", permissions: ["billing:read"] }],
+    });
+    expect(workspaceCreationAccountId(context, null)).toBeNull();
+  });
+
+  test("upsertWorkspace replaces renamed workspaces and appends created ones", () => {
+    const existing = workspaceFixture({ id: "workspace-1", name: "old" });
+    const renamed = workspaceFixture({ id: "workspace-1", name: "new" });
+    const created = workspaceFixture({ id: "workspace-2", name: "second" });
+    expect(upsertWorkspace([existing], renamed).map((workspace) => workspace.name)).toEqual(["new"]);
+    expect(upsertWorkspace([existing], created).map((workspace) => workspace.id)).toEqual(["workspace-1", "workspace-2"]);
+  });
+
+  function workspaceFixture(patch: Partial<Workspace> & Pick<Workspace, "id" | "name">): Workspace {
+    return {
+      accountId: "account-1",
+      slug: null,
+      externalSource: null,
+      externalId: null,
+      createdAt: "2026-06-11T08:00:00.000Z",
+      updatedAt: "2026-06-11T08:00:00.000Z",
+      ...patch,
+    };
+  }
+});

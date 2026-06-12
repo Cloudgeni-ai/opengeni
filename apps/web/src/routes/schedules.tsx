@@ -418,7 +418,7 @@ function ScheduledTaskForm(props: {
         resources={form.resources}
         busy={props.busy}
         repoBusy={context.repoBusy}
-        onRefresh={() => context.refreshGitHub(props.workspaceId)}
+        onRefresh={() => context.refreshGitHub(props.workspaceId, undefined, { sync: true })}
         onResourcesChange={(resources) => update("resources", resources)}
       />
       <div className="flex flex-wrap items-center justify-end gap-2">

@@ -1,5 +1,5 @@
 import type { SessionEventsConnectionState } from "@opengeni/react";
-import { AlertTriangleIcon, CopyIcon, Loader2Icon } from "lucide-react";
+import { AlertTriangleIcon, CopyIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -106,6 +106,31 @@ export function EmptyState({ children }: { children: ReactNode }) {
   return (
     <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-sm text-[color:var(--color-fg-subtle)]">
       {children}
+    </div>
+  );
+}
+
+/**
+ * Honest failed-load state for list surfaces. Renders the error with a retry
+ * affordance instead of letting routes fall through to "No X yet…" copy when
+ * the request failed.
+ */
+export function LoadErrorState({ title, error, onRetry }: { title: string; error?: Error | null; onRetry: () => void }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+      <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium">{title}</div>
+        {error?.message ? <div className="mt-0.5 break-words text-xs leading-4 text-red-200/80">{error.message}</div> : null}
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-red-500/40 px-2 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/20"
+      >
+        <RefreshCwIcon className="size-3" />
+        Retry
+      </button>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 // Shared formatting helpers for the console.
+import type { EntitlementValue, Entitlements } from "@/types";
 
 export function formatTimestamp(value: string): string {
   const timestamp = new Date(value);
@@ -24,6 +25,24 @@ export function formatMoneyMicros(amountMicros: number, currency: string): strin
 export function validTopupAmount(value: string): boolean {
   const amount = Number(value);
   return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
+}
+
+/** Human label for an entitlement value (`true` reads as "enabled", not "true"). */
+export function formatEntitlementValue(value: EntitlementValue): string {
+  if (typeof value === "boolean") {
+    return value ? "enabled" : "disabled";
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(", ") : "none";
+  }
+  return String(value);
+}
+
+/** Stable, render-ready rows for the account's entitlements map. */
+export function entitlementEntries(entitlements: Entitlements): Array<{ name: string; value: string }> {
+  return Object.entries(entitlements)
+    .map(([name, value]) => ({ name, value: formatEntitlementValue(value) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 export function repoCountLabel(count: number): string {

@@ -174,7 +174,7 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
         pending={context.busy}
         repoBusy={context.repoBusy}
         githubAppBusy={context.githubAppBusy}
-        onRefresh={() => context.refreshGitHub(workspaceId)}
+        onRefresh={() => context.refreshGitHub(workspaceId, undefined, { sync: true })}
         onToggleRepo={context.toggleGitHubRepository}
         onRefChange={(repoId, ref) => context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref }))}
         onManualOpenChange={context.setManualReposOpen}

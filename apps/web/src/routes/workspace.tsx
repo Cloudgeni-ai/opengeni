@@ -7,22 +7,37 @@ import {
   BotIcon,
   BoxIcon,
   CalendarClockIcon,
+  CheckIcon,
   FileSearchIcon,
+  Loader2Icon,
   LockIcon,
   PackageIcon,
   PanelRightIcon,
+  PencilIcon,
   PlugIcon,
   SparkleIcon,
   UserIcon,
 } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { ConnectionPill, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useAppContext, workspaceLabel } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { isAbortError } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
+import { CREATE_WORKSPACE_OPTION, workspaceCreationAccountId } from "@/lib/workspaces";
 import type { Workspace } from "@/types";
 
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
@@ -88,6 +103,48 @@ function WorkspaceHeader(props: {
   onChangeWorkspace: (workspaceId: string) => void;
 }) {
   const context = useAppContext();
+  // Workspace create (POST /workspaces) and rename (PATCH /workspaces/:id)
+  // live on the switcher: "New workspace…" as the last option, rename as a
+  // pencil next to it. Both hide when the subject lacks the permission.
+  const [workspaceDialog, setWorkspaceDialog] = useState<"create" | "rename" | null>(null);
+  const [workspaceNameDraft, setWorkspaceNameDraft] = useState("");
+  const [workspaceDialogBusy, setWorkspaceDialogBusy] = useState(false);
+  const createAccountId = workspaceCreationAccountId(context.accessContext, props.activeWorkspace?.accountId ?? null);
+  const canRenameWorkspace = props.activeWorkspace !== null
+    && hasWorkspacePermission(context.accessContext, props.workspaceId, "workspace:admin");
+
+  function openWorkspaceDialog(mode: "create" | "rename") {
+    setWorkspaceNameDraft(mode === "rename" ? props.activeWorkspace?.name ?? "" : "");
+    setWorkspaceDialog(mode);
+  }
+
+  async function submitWorkspaceDialog() {
+    const name = workspaceNameDraft.trim();
+    if (!name || !workspaceDialog) {
+      return;
+    }
+    setWorkspaceDialogBusy(true);
+    try {
+      if (workspaceDialog === "create") {
+        const created = await context.createWorkspace({ name, ...(createAccountId ? { accountId: createAccountId } : {}) });
+        if (!created) {
+          return;
+        }
+        toast.success(`Workspace ${created.name} created`);
+        props.onChangeWorkspace(created.id);
+      } else {
+        const renamed = await context.renameWorkspace(props.workspaceId, name);
+        if (!renamed) {
+          return;
+        }
+        toast.success("Workspace renamed");
+      }
+      setWorkspaceDialog(null);
+    } finally {
+      setWorkspaceDialogBusy(false);
+    }
+  }
+
   return (
     <header className="sticky top-0 z-40 flex h-14 items-center gap-2 border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/75 px-3 backdrop-blur sm:gap-3 sm:px-6">
       <Button asChild type="button" variant="ghost" size="sm" className="h-9 shrink-0 px-1.5 text-[15px] font-medium">
@@ -129,14 +186,39 @@ function WorkspaceHeader(props: {
         <span className="sr-only">Workspace</span>
         <select
           value={props.activeWorkspace?.id ?? props.workspaceId}
-          onChange={(event) => props.onChangeWorkspace(event.target.value)}
+          onChange={(event) => {
+            if (event.target.value === CREATE_WORKSPACE_OPTION) {
+              openWorkspaceDialog("create");
+              return;
+            }
+            props.onChangeWorkspace(event.target.value);
+          }}
           className="h-8 w-full rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 text-xs text-[color:var(--color-fg)]"
         >
           {context.workspaces.map((workspace) => (
             <option key={workspace.id} value={workspace.id}>{workspaceLabel(workspace, context.workspaces)}</option>
           ))}
+          {createAccountId ? <option value={CREATE_WORKSPACE_OPTION}>New workspace…</option> : null}
         </select>
       </label>
+      {canRenameWorkspace ? (
+        <Button type="button" variant="ghost" size="icon-sm" onClick={() => openWorkspaceDialog("rename")} aria-label="Rename workspace">
+          <PencilIcon className="size-3.5" />
+        </Button>
+      ) : null}
+
+      <WorkspaceNameDialog
+        mode={workspaceDialog}
+        name={workspaceNameDraft}
+        busy={workspaceDialogBusy}
+        onNameChange={setWorkspaceNameDraft}
+        onOpenChange={(open) => {
+          if (!open) {
+            setWorkspaceDialog(null);
+          }
+        }}
+        onSubmit={() => void submitWorkspaceDialog()}
+      />
 
       <div className="flex shrink-0 items-center gap-2">
         {context.keyAuthRequired ? (
@@ -159,6 +241,55 @@ function WorkspaceHeader(props: {
         ) : null}
       </div>
     </header>
+  );
+}
+
+function WorkspaceNameDialog(props: {
+  mode: "create" | "rename" | null;
+  name: string;
+  busy: boolean;
+  onNameChange: (name: string) => void;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: () => void;
+}) {
+  const creating = props.mode === "create";
+  return (
+    <Dialog open={props.mode !== null} onOpenChange={props.onOpenChange}>
+      <DialogContent className="sm:max-w-sm">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            props.onSubmit();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{creating ? "New workspace" : "Rename workspace"}</DialogTitle>
+            <DialogDescription>
+              {creating
+                ? "A separate space with its own sessions, environments, packs, and API keys."
+                : "The new name shows everywhere this workspace appears."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 grid gap-1.5">
+            <Label htmlFor="workspace-name">Name</Label>
+            <Input
+              id="workspace-name"
+              value={props.name}
+              onChange={(event) => props.onNameChange(event.target.value)}
+              placeholder="production"
+              autoFocus
+            />
+          </div>
+          <DialogFooter className="mt-4">
+            <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>Cancel</Button>
+            <Button type="submit" disabled={props.busy || !props.name.trim()}>
+              {props.busy ? <Loader2Icon className="size-4 animate-spin" /> : <CheckIcon className="size-4" />}
+              {creating ? "Create workspace" : "Rename"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
