@@ -402,7 +402,7 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
       {item.workerSessionId && onOpenSession ? (
         <button
           type="button"
-          onClick={() => onOpenSession(item.workerSessionId as string)}
+          onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}
           className={cn(
             "shrink-0 self-center rounded-og-sm border border-og-border px-2.5 py-1 text-xs font-medium text-og-fg-muted",
             "transition-colors duration-150 hover:border-og-border-strong hover:text-og-fg",
