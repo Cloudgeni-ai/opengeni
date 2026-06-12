@@ -4,7 +4,8 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
-import { MemoryEventBus, parseSseBlock, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
+import { settingsWithEnabledCapabilityMcpServers } from "../../apps/worker/src/activities/capabilities";
+import { MemoryEventBus, parseSseBlock, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
 
@@ -1248,6 +1249,118 @@ describe("API component integration", () => {
       set status = 'disabled', updated_at = now()
       where workspace_id = ${workspaceId} and capability_id = ${capabilityId}
     `);
+  });
+
+  test("enables a credential-header MCP capability end to end with encrypted storage", async () => {
+    const encryptionKey = crypto.getRandomValues(new Uint8Array(32));
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      environmentsEncryptionKey: Buffer.from(encryptionKey).toString("base64"),
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const context = await defaultAccessContext(app);
+    const bearer = `Bearer secure-${crypto.randomUUID()}`;
+    const mcp = startTestMcpServer({ requiredAuthorization: bearer });
+    const capabilityId = `mcp:secure-test-${crypto.randomUUID()}`;
+    const mcpServerId = `cap-secure-${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      await upsertCapabilityCatalogItem(dbClient.db, {
+        accountId: context.defaultAccountId!,
+        workspaceId,
+        id: capabilityId,
+        kind: "mcp",
+        source: "manual",
+        name: "Secure Test MCP",
+        endpointUrl: mcp.url,
+        authModel: "credential_ref",
+        metadata: { mcpServerId, requiredHeaders: ["Authorization"] },
+      });
+
+      // Without the declared credential header the enable is rejected up front.
+      const withoutHeaders = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      });
+      expect(withoutHeaders.status).toBe(422);
+      expect(await withoutHeaders.text()).toContain("requires credential header(s) Authorization");
+
+      // A wrong credential fails the live probe (the test MCP returns 401).
+      const wrongHeaders = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({ headers: { Authorization: "Bearer wrong" } }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(wrongHeaders.status).toBe(422);
+      expect(await wrongHeaders.text()).toContain("could not be enabled");
+
+      const enabled = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({ headers: { Authorization: bearer } }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(enabled.status).toBe(201);
+      const enabledBody = await enabled.text();
+      // The API response exposes header names only — never the credential.
+      expect(enabledBody).not.toContain(bearer);
+      const installation = JSON.parse(enabledBody) as { config: Record<string, unknown>; metadata: Record<string, unknown> };
+      expect(installation.config.headerNames).toEqual(["Authorization"]);
+      expect(installation.config.headersEncrypted).toBeUndefined();
+      expect(installation.metadata.mcpConnectivity).toMatchObject({ status: "ok" });
+
+      // The stored value is AES-GCM ciphertext that decrypts back to the credential.
+      const [row] = await dbClient.db.execute(dbSql`
+        select config from capability_installations
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}
+      `) as Array<{ config: { headersEncrypted: Record<string, string> } }>;
+      const storedCiphertext = row!.config.headersEncrypted.Authorization!;
+      expect(storedCiphertext.startsWith("v1:")).toBe(true);
+      expect(decryptEnvironmentValue(encryptionKey, storedCiphertext)).toBe(bearer);
+
+      // The catalog reports the capability enabled and runtime-ready.
+      const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
+      const catalog = await catalogResponse.json() as { items: Array<{ id: string; enabled: boolean; runtime: { available: boolean; mcpServerId?: string } }> };
+      expect(catalog.items.find((item) => item.id === capabilityId)).toMatchObject({
+        enabled: true,
+        runtime: { available: true, mcpServerId },
+      });
+
+      // The worker-side merge decrypts the headers for the runtime MCP client,
+      // and the runtime can list tools against the credentialed server.
+      const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(dbClient.db, workspaceId, settings);
+      const merged = runtimeSettings.mcpServers.find((server) => server.id === mcpServerId);
+      expect(merged?.headers).toEqual({ Authorization: bearer });
+      const prepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: mcpServerId }]);
+      try {
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
+      } finally {
+        await prepared.close();
+      }
+
+      // Re-enabling without headers reuses the stored credentials (probe still passes).
+      const reEnabled = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({}),
+        headers: { "content-type": "application/json" },
+      });
+      expect(reEnabled.status).toBe(201);
+      const reEnabledInstallation = await reEnabled.json() as { config: Record<string, unknown> };
+      expect(reEnabledInstallation.config.headerNames).toEqual(["Authorization"]);
+    } finally {
+      mcp.close();
+      await dbClient.db.execute(dbSql`
+        update capability_installations
+        set status = 'disabled', updated_at = now()
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}
+      `);
+    }
   });
 
   test("returns 409 when disabling a never-enabled capability", async () => {

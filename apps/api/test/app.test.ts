@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
@@ -13,7 +14,9 @@ import {
 } from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
-import { discoverMcpRegistryCapabilities, validateMcpCapabilityConnection } from "../src/domain/capabilities";
+import { discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "../src/domain/capabilities";
+import { encryptEnvironmentValue } from "@opengeni/db";
+import { testSettings } from "@opengeni/testing";
 import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/contracts";
 
 describe("API helpers", () => {
@@ -279,14 +282,16 @@ describe("API helpers", () => {
       name: "Secure MCP",
       authModel: "credential_ref",
       runtime: {
-        available: false,
-        notes: "This MCP declares required remote headers. Capability credential injection is not implemented yet.",
+        available: true,
+        transport: "streamable-http",
+        notes: 'This MCP requires credential header(s) Authorization supplied in the enable request.',
       },
       metadata: {
         requiredHeaders: ["Authorization"],
       },
     });
-    expect(item?.tools).toEqual([]);
+    expect(item?.tags).toContain("requires-credentials");
+    expect(item?.tools).toHaveLength(1);
   });
 
   test("records MCP connectivity metadata after a successful enable probe", async () => {
@@ -310,6 +315,69 @@ describe("API helpers", () => {
       status: "ok",
       toolCount: 3,
     });
+  });
+
+  test("passes credential headers to the MCP enable probe", async () => {
+    const metadata = await validateMcpCapabilityConnection(capabilityItem({
+      id: "mcp:secure",
+      kind: "mcp",
+      name: "Secure MCP",
+      endpointUrl: "https://secure.example/mcp",
+      runtime: { available: true, mcpServerId: "cap-secure", transport: "streamable-http", notes: null },
+    }), async (input) => {
+      expect(input.headers).toEqual({ Authorization: "Bearer probe-token" });
+      return { toolCount: 1 };
+    }, { Authorization: "Bearer probe-token" });
+
+    expect(metadata.mcpConnectivity).toMatchObject({ status: "ok", toolCount: 1 });
+  });
+
+  test("merges enabled capability MCPs with decrypted credential headers into runtime settings", () => {
+    const key = randomBytes(32);
+    const settings = testSettings({ environmentsEncryptionKey: Buffer.from(key).toString("base64") });
+    const merged = settingsWithMcpCapabilityServers(settings, [{
+      capabilityId: "mcp:secure",
+      id: "cap-secure",
+      name: "Secure MCP",
+      url: "https://secure.example/mcp",
+      headersEncrypted: { Authorization: encryptEnvironmentValue(key, "Bearer runtime-token") },
+    }]);
+
+    const server = merged.mcpServers.find((candidate) => candidate.id === "cap-secure");
+    expect(server?.headers).toEqual({ Authorization: "Bearer runtime-token" });
+  });
+
+  test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {
+    const key = randomBytes(32);
+    const otherKey = randomBytes(32);
+    const withoutKey = settingsWithMcpCapabilityServers(testSettings(), [{
+      capabilityId: "mcp:secure",
+      id: "cap-secure",
+      name: "Secure MCP",
+      url: "https://secure.example/mcp",
+      headersEncrypted: { Authorization: encryptEnvironmentValue(key, "Bearer runtime-token") },
+    }]);
+    expect(withoutKey.mcpServers.find((candidate) => candidate.id === "cap-secure")).toBeUndefined();
+
+    const wrongKey = settingsWithMcpCapabilityServers(
+      testSettings({ environmentsEncryptionKey: Buffer.from(otherKey).toString("base64") }),
+      [{
+        capabilityId: "mcp:secure",
+        id: "cap-secure",
+        name: "Secure MCP",
+        url: "https://secure.example/mcp",
+        headersEncrypted: { Authorization: encryptEnvironmentValue(key, "Bearer runtime-token") },
+      }],
+    );
+    expect(wrongKey.mcpServers.find((candidate) => candidate.id === "cap-secure")).toBeUndefined();
+
+    const headerless = settingsWithMcpCapabilityServers(testSettings(), [{
+      capabilityId: "mcp:open",
+      id: "cap-open",
+      name: "Open MCP",
+      url: "https://open.example/mcp",
+    }]);
+    expect(headerless.mcpServers.find((candidate) => candidate.id === "cap-open")).toMatchObject({ url: "https://open.example/mcp" });
   });
 
   test("rejects MCP enablement when the server cannot initialize", async () => {

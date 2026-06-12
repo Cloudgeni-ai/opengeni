@@ -316,7 +316,7 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       url,
       name: config.name ?? config.id,
       cacheToolsList: config.cacheToolsList,
-      ...await firstPartyMcpRequestInit(settings, config, options),
+      ...await mcpServerRequestInit(settings, config, options),
       ...(config.timeoutMs ? {
         timeout: config.timeoutMs,
         clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
@@ -333,6 +333,19 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       await connected.close();
     },
   };
+}
+
+async function mcpServerRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
+  if (isFirstPartyMcpServer(settings, config)) {
+    return await firstPartyMcpRequestInit(settings, config, options);
+  }
+  // Third-party MCP servers get their configured credential headers (for
+  // example workspace-enabled capability MCP credentials) and nothing else —
+  // never OpenGeni's own access key or delegated tokens.
+  if (config.headers && Object.keys(config.headers).length > 0) {
+    return { requestInit: { headers: { ...config.headers } } };
+  }
+  return {};
 }
 
 async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {

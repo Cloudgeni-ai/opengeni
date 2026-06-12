@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Settings } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
   type CapabilityCatalogResponse,
@@ -12,12 +12,16 @@ import {
   type EnableCapabilityRequest,
 } from "@opengeni/contracts";
 import {
+  decryptEnvironmentValue,
+  decryptedCapabilityHeaders,
   disableCapabilityInstallation,
   enableCapabilityInstallation,
   enablePackInstallation,
+  encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
   getPackInstallation,
+  getStoredCapabilityHeaderCiphertext,
   getWorkspaceEnvironment,
   listCapabilityCatalogItems,
   listCapabilityInstallations,
@@ -37,6 +41,10 @@ const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
 const mcpRegistryFetchTimeoutMs = 15000;
 const mcpRegistryMaxPages = 3;
 const mcpCapabilityProbeTimeoutMs = 15000;
+const maxMcpCredentialHeaders = 16;
+const maxMcpCredentialHeaderValueLength = 4096;
+// RFC 9110 field-name token characters.
+const mcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
 export async function buildCapabilityCatalog(input: {
   db: Database;
@@ -123,11 +131,24 @@ export async function enableCapability(input: {
     throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled" });
   }
   let installationMetadata = input.payload.metadata;
+  // Credential-header ciphertext is written exclusively by this flow; strip
+  // any caller-provided values so the stored shape stays trustworthy.
+  const installationConfig: Record<string, unknown> = { ...input.payload.config };
+  delete installationConfig.headersEncrypted;
+  delete installationConfig.headerNames;
   if (item.kind === "mcp") {
+    const headers = await resolveMcpCredentialHeaders(input, item);
+    assertRequiredMcpCredentialHeaders(item, headers);
     installationMetadata = {
       ...installationMetadata,
-      ...await validateMcpCapabilityConnection(item, input.probeMcpServer),
+      ...await validateMcpCapabilityConnection(item, input.probeMcpServer, headers ?? undefined),
     };
+    if (headers) {
+      const key = requireCapabilityHeaderEncryption(input.settings);
+      installationConfig.headersEncrypted = Object.fromEntries(
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(key, value)]),
+      );
+    }
   }
   if (item.kind === "pack") {
     const packId = packIdFromCapabilityId(item.id);
@@ -178,9 +199,101 @@ export async function enableCapability(input: {
     workspaceId: input.workspaceId,
     capabilityId: item.id,
     kind: item.kind,
-    config: input.payload.config,
+    config: installationConfig,
     metadata: installationMetadata,
   });
+}
+
+/**
+ * Resolves the plaintext credential headers an MCP enable should use: the
+ * validated headers from the request when provided, otherwise headers stored
+ * encrypted by a previous enable (so re-enabling never requires re-pasting
+ * credentials). Returns null when neither exists.
+ */
+async function resolveMcpCredentialHeaders(
+  input: { db: Database; workspaceId: string; settings: Settings; payload: EnableCapabilityRequest },
+  item: CapabilityCatalogItem,
+): Promise<Record<string, string> | null> {
+  const provided = normalizedMcpCredentialHeaders(input.payload.headers);
+  if (provided) {
+    // Validate the key is configured before probing so a misconfigured
+    // deployment fails fast instead of after a successful remote probe.
+    requireCapabilityHeaderEncryption(input.settings);
+    return provided;
+  }
+  const storedCiphertext = await getStoredCapabilityHeaderCiphertext(input.db, input.workspaceId, item.id);
+  if (!storedCiphertext) {
+    return null;
+  }
+  const key = requireCapabilityHeaderEncryption(input.settings);
+  try {
+    return Object.fromEntries(Object.entries(storedCiphertext).map(([name, value]) => [name, decryptEnvironmentValue(key, value)]));
+  } catch {
+    throw new HTTPException(422, {
+      message: `stored credential headers for "${item.name}" could not be decrypted; supply them again in the enable request "headers" field`,
+    });
+  }
+}
+
+function normalizedMcpCredentialHeaders(headers: Record<string, string>): Record<string, string> | null {
+  const entries = Object.entries(headers).map(([name, value]) => [name.trim(), value] as const).filter(([name]) => name.length > 0);
+  if (entries.length === 0) {
+    return null;
+  }
+  if (entries.length > maxMcpCredentialHeaders) {
+    throw new HTTPException(422, { message: `an MCP capability supports at most ${maxMcpCredentialHeaders} credential headers` });
+  }
+  const seen = new Set<string>();
+  for (const [name, value] of entries) {
+    if (!mcpCredentialHeaderName.test(name)) {
+      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+    }
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) {
+      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+    }
+    seen.add(lower);
+    if (value.length === 0 || value.length > maxMcpCredentialHeaderValueLength) {
+      throw new HTTPException(422, { message: `credential header ${name} must be 1-${maxMcpCredentialHeaderValueLength} characters` });
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\r\n\0]/.test(value)) {
+      throw new HTTPException(422, { message: `credential header ${name} contains forbidden control characters` });
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
+function assertRequiredMcpCredentialHeaders(item: CapabilityCatalogItem, headers: Record<string, string> | null): void {
+  const required = requiredCapabilityHeaders(item.metadata);
+  const names = new Set(Object.keys(headers ?? {}).map((name) => name.toLowerCase()));
+  const missing = required.filter((name) => !names.has(name.toLowerCase()));
+  if (missing.length > 0) {
+    throw new HTTPException(422, {
+      message: `MCP capability "${item.name}" requires credential header(s) ${missing.join(", ")}; pass them in the enable request "headers" field`,
+    });
+  }
+  if (item.authModel && names.size === 0) {
+    throw new HTTPException(422, {
+      message: `MCP capability "${item.name}" requires credentials; pass them in the enable request "headers" field`,
+    });
+  }
+}
+
+function requiredCapabilityHeaders(metadata: Record<string, unknown>): string[] {
+  const value = metadata.requiredHeaders;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim());
+}
+
+function requireCapabilityHeaderEncryption(settings: Settings): Uint8Array {
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (!key) {
+    throw new HTTPException(503, { message: "MCP credential headers require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" });
+  }
+  return key;
 }
 
 export type McpCapabilityProbeInput = {
@@ -188,6 +301,7 @@ export type McpCapabilityProbeInput = {
   name: string;
   url: string;
   timeoutMs: number;
+  headers?: Record<string, string>;
 };
 
 export type McpCapabilityProbeResult = {
@@ -199,6 +313,7 @@ export type McpCapabilityProbe = (input: McpCapabilityProbeInput) => Promise<Mcp
 export async function validateMcpCapabilityConnection(
   item: CapabilityCatalogItem,
   probe: McpCapabilityProbe = probeStreamableHttpMcpServer,
+  headers?: Record<string, string>,
 ): Promise<Record<string, unknown>> {
   if (item.kind !== "mcp") {
     return {};
@@ -212,6 +327,7 @@ export async function validateMcpCapabilityConnection(
       name: item.name,
       url: item.endpointUrl,
       timeoutMs: mcpCapabilityProbeTimeoutMs,
+      ...(headers ? { headers } : {}),
     });
     return {
       mcpConnectivity: {
@@ -233,7 +349,10 @@ async function probeStreamableHttpMcpServer(input: McpCapabilityProbeInput): Pro
   const client = new Client({ name: "opengeni-capability-probe", version: "0.1.0" }, { capabilities: {} });
   try {
     const transport = new StreamableHTTPClientTransport(new URL(input.url), {
-      requestInit: { signal: controller.signal },
+      requestInit: {
+        signal: controller.signal,
+        ...(input.headers ? { headers: input.headers } : {}),
+      },
     });
     await client.connect(transport as unknown as Transport, { timeout: input.timeoutMs, maxTotalTimeout: input.timeoutMs });
     const tools = await client.listTools(undefined, { timeout: input.timeoutMs, maxTotalTimeout: input.timeoutMs });
@@ -287,17 +406,27 @@ export function settingsWithMcpCapabilityServers(settings: Settings, enabled: En
   if (enabled.length === 0) {
     return settings;
   }
+  const encryptionKey = environmentsEncryptionKeyBytes(settings);
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = enabled
     .filter((server) => !existingIds.has(server.id))
-    .map((server) => ({
-      id: server.id,
-      name: server.name,
-      url: server.url,
-      ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
-      ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
-      cacheToolsList: server.cacheToolsList ?? false,
-    }));
+    .flatMap((server) => {
+      const headers = decryptedCapabilityHeaders(server, encryptionKey);
+      if (headers === "unavailable") {
+        // Without its credential headers this server can only fail auth at
+        // connect time and break agent turns; leave it out of the run.
+        return [];
+      }
+      return [{
+        id: server.id,
+        name: server.name,
+        url: server.url,
+        ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+        ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+        cacheToolsList: server.cacheToolsList ?? false,
+        ...(headers ? { headers } : {}),
+      }];
+    });
   return dynamicServers.length ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] } : settings;
 }
 
@@ -701,7 +830,6 @@ function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatal
   const id = publicRegistryCapabilityId(server.name, version, endpointUrl);
   const homepageUrl = validUrl(server.websiteUrl) ?? validUrl(server.repository?.url);
   const requiredHeaders = requiredRemoteHeaders(remote);
-  const runtimeAvailable = requiredHeaders.length === 0;
   const mcpServerId = mcpServerIdForCapability(id, {});
   return CapabilityCatalogItem.parse({
     id,
@@ -715,14 +843,14 @@ function mcpRegistryEntryToCatalogItem(entry: McpRegistryEntry): CapabilityCatal
     endpointUrl,
     installUrl: homepageUrl,
     authModel: requiredHeaders.length ? "credential_ref" : null,
-    tools: runtimeAvailable ? [{ kind: "mcp", id: mcpServerId }] : [],
+    tools: [{ kind: "mcp", id: mcpServerId }],
     runtime: {
-      available: runtimeAvailable,
-      ...(runtimeAvailable ? { mcpServerId } : {}),
+      available: true,
+      mcpServerId,
       transport: "streamable-http",
-      notes: runtimeAvailable
+      notes: requiredHeaders.length === 0
         ? "Remote MCP server from the official MCP Registry."
-        : "This MCP declares required remote headers. Capability credential injection is not implemented yet.",
+        : `This MCP requires credential header(s) ${requiredHeaders.join(", ")} supplied in the enable request.`,
     },
     metadata: {
       registry: "official_mcp_registry",
@@ -773,9 +901,29 @@ function capabilityInstallationRuntimeReady(
   if (!installation || item.kind !== "mcp") {
     return !!installation;
   }
-  if (!item.runtime.available || item.authModel) {
+  if (!item.runtime.available) {
+    return false;
+  }
+  if (!storedCredentialHeadersSatisfy(item, installation)) {
     return false;
   }
   const connectivity = installation.metadata.mcpConnectivity;
   return !!connectivity && typeof connectivity === "object" && "status" in connectivity && connectivity.status === "ok";
+}
+
+/**
+ * Checks the redacted installation config (header names only) against the
+ * capability's declared credential requirements.
+ */
+function storedCredentialHeadersSatisfy(item: CapabilityCatalogItem, installation: CapabilityInstallation): boolean {
+  const storedNames = new Set(
+    (Array.isArray(installation.config.headerNames) ? installation.config.headerNames : [])
+      .filter((name): name is string => typeof name === "string")
+      .map((name) => name.toLowerCase()),
+  );
+  const required = requiredCapabilityHeaders(item.metadata);
+  if (required.some((name) => !storedNames.has(name.toLowerCase()))) {
+    return false;
+  }
+  return !item.authModel || storedNames.size > 0;
 }

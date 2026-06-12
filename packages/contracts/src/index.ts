@@ -1058,6 +1058,13 @@ export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapability
 export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  /**
+   * Credential headers for remote MCP capabilities (for example an
+   * Authorization bearer token). Values are encrypted at rest with the
+   * workspace-environments key, injected only into the runtime MCP client,
+   * and never returned by the API — responses expose header names only.
+   */
+  headers: z.record(z.string(), z.string()).default({}),
 });
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 

@@ -196,6 +196,13 @@ const SettingsSchema = z.object({
     allowedTools: z.array(z.string().min(1)).optional(),
     timeoutMs: z.number().int().positive().optional(),
     cacheToolsList: z.boolean().default(false),
+    /**
+     * Extra request headers sent to this MCP server (credential injection
+     * for workspace-enabled capability MCPs). Populated at runtime from
+     * encrypted capability-installation credentials; do not put secrets in
+     * OPENGENI_MCP_SERVERS.
+     */
+    headers: z.record(z.string(), z.string()).optional(),
   })).default([]),
 });
 

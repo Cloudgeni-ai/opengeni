@@ -52,6 +52,7 @@ import type {
 import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import { decryptEnvironmentValue } from "./environment-crypto";
 import * as schema from "./schema";
 
 export { sql as dbSql } from "drizzle-orm";
@@ -938,6 +939,13 @@ export type EnabledMcpCapabilityServer = {
   allowedTools?: string[];
   timeoutMs?: number;
   cacheToolsList?: boolean;
+  /**
+   * Credential request headers stored encrypted at enable time
+   * (AES-256-GCM under the workspace-environments key). Decrypted only at
+   * the runtime boundary that builds the MCP client; never exposed by the
+   * capability API surface.
+   */
+  headersEncrypted?: Record<string, string>;
 };
 
 export type EnqueueSessionTurnInput = {
@@ -1264,7 +1272,11 @@ export async function getCapabilityCatalogItem(db: Database, workspaceId: string
 export async function enableCapabilityInstallation(db: Database, input: EnableCapabilityInstallationInput): Promise<CapabilityInstallation> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const now = new Date();
-    const existing = await getCapabilityInstallation(scopedDb, input.workspaceId, input.capabilityId);
+    // Read the raw row (not the redacted mapping) so an omitted config
+    // preserves stored credential-header ciphertext instead of the redaction.
+    const [existing] = await scopedDb.select().from(schema.capabilityInstallations)
+      .where(and(eq(schema.capabilityInstallations.workspaceId, input.workspaceId), eq(schema.capabilityInstallations.capabilityId, input.capabilityId)))
+      .limit(1);
     if (existing) {
       const [row] = await scopedDb.update(schema.capabilityInstallations).set({
         kind: input.kind,
@@ -1343,7 +1355,13 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
     .orderBy(asc(schema.capabilityCatalogItems.name)));
 
   return rows.flatMap(({ item, installation }) => {
-    if (!item.endpointUrl || item.authModel || !mcpConnectivityOk(installation.metadata)) {
+    if (!item.endpointUrl || !mcpConnectivityOk(installation.metadata)) {
+      return [];
+    }
+    const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
+    if (item.authModel && !headersEncrypted) {
+      // Credential-gated MCPs are runnable only when credential headers were
+      // stored at enable time.
       return [];
     }
     const metadata = item.metadata;
@@ -1359,7 +1377,46 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
       ...(allowedTools ? { allowedTools } : {}),
       ...(timeoutMs ? { timeoutMs } : {}),
       ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
+      ...(headersEncrypted ? { headersEncrypted } : {}),
     }];
+  });
+}
+
+/**
+ * Decrypts an enabled capability MCP's stored credential headers. Returns
+ * null when the server has none, and "unavailable" when headers exist but
+ * cannot be recovered (missing key or failed decryption) — in which case the
+ * server must be skipped rather than connected without credentials.
+ */
+export function decryptedCapabilityHeaders(
+  server: EnabledMcpCapabilityServer,
+  encryptionKey: Uint8Array | null,
+): Record<string, string> | null | "unavailable" {
+  if (!server.headersEncrypted || Object.keys(server.headersEncrypted).length === 0) {
+    return null;
+  }
+  if (!encryptionKey) {
+    return "unavailable";
+  }
+  try {
+    return Object.fromEntries(Object.entries(server.headersEncrypted).map(([name, value]) => [name, decryptEnvironmentValue(encryptionKey, value)]));
+  } catch {
+    return "unavailable";
+  }
+}
+
+/**
+ * Returns the encrypted credential-header map stored on a capability
+ * installation, or null when none is stored. This is the only read path for
+ * the ciphertext besides listEnabledMcpCapabilityServers; the generic
+ * installation mapping redacts it to header names.
+ */
+export async function getStoredCapabilityHeaderCiphertext(db: Database, workspaceId: string, capabilityId: string): Promise<Record<string, string> | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({ config: schema.capabilityInstallations.config }).from(schema.capabilityInstallations)
+      .where(and(eq(schema.capabilityInstallations.workspaceId, workspaceId), eq(schema.capabilityInstallations.capabilityId, capabilityId)))
+      .limit(1);
+    return row ? encryptedHeadersConfig(row.config.headersEncrypted) ?? null : null;
   });
 }
 
@@ -3015,19 +3072,19 @@ function mapWorkspacePack(row: typeof schema.workspacePacks.$inferSelect): Works
 }
 
 function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inferSelect): CapabilityCatalogItem {
-  const runtime = row.kind === "mcp" && row.endpointUrl && !row.authModel
+  const runtime = row.kind === "mcp" && row.endpointUrl
     ? {
       available: true,
       mcpServerId: mcpServerIdForCapability(row.id, row.metadata),
       transport: "streamable-http",
-      notes: null,
+      notes: row.authModel
+        ? "Requires credential headers supplied in the enable request."
+        : null,
     }
     : {
       available: false,
       notes: row.kind === "mcp"
-        ? row.authModel
-          ? "Credential injection for remote MCP capabilities is not implemented yet."
-          : "Remote streamable HTTP endpoint is required for runtime use."
+        ? "Remote streamable HTTP endpoint is required for runtime use."
         : null,
     };
   return {
@@ -3075,11 +3132,26 @@ function mapCapabilityInstallation(row: typeof schema.capabilityInstallations.$i
     capabilityId: row.capabilityId,
     kind: row.kind as CapabilityKind,
     status: row.status as CapabilityInstallationStatus,
-    config: row.config,
+    config: redactInstallationConfig(row.config),
     metadata: row.metadata,
     enabledAt: row.enabledAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Stored credential-header ciphertext never leaves the database through the
+ * generic installation mapping — callers see only the sorted header names.
+ * The runtime reads ciphertext through listEnabledMcpCapabilityServers and
+ * the enable flow through getStoredCapabilityHeaderCiphertext.
+ */
+function redactInstallationConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const headersEncrypted = encryptedHeadersConfig(config.headersEncrypted);
+  if (!headersEncrypted) {
+    return config;
+  }
+  const { headersEncrypted: _omitted, ...rest } = config;
+  return { ...rest, headerNames: Object.keys(headersEncrypted).sort() };
 }
 
 function mapSocialConnection(row: typeof schema.socialConnections.$inferSelect): SocialConnection {
@@ -3187,6 +3259,15 @@ function positiveIntegerConfig(value: unknown): number | undefined {
 
 function booleanConfig(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function encryptedHeadersConfig(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function mcpConnectivityOk(metadata: Record<string, unknown>): boolean {

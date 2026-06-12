@@ -827,6 +827,44 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("sends configured credential headers to third-party MCP servers", async () => {
+    const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-secure",
+        name: "Secure capability MCP",
+        url: mcp.url,
+        headers: { "x-api-key": "capability-credential" },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-secure" }]);
+    try {
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("cap-secure__search_documents");
+      const result = await prepared.mcpServers[0]!.callTool("cap-secure__search_documents", { query: "headers" });
+      expect(JSON.stringify(result)).toContain("found document for headers");
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("connecting without the required credential headers fails", async () => {
+    const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    try {
+      await expect(prepareAgentTools(testSettings({
+        mcpServers: [{
+          id: "cap-secure",
+          name: "Secure capability MCP",
+          url: mcp.url,
+          cacheToolsList: false,
+        }],
+      }), [{ kind: "mcp", id: "cap-secure" }])).rejects.toThrow();
+    } finally {
+      mcp.close();
+    }
+  });
+
   test("rejects unknown MCP tool ids during runtime preparation", async () => {
     await expect(prepareAgentTools(testSettings(), [{ kind: "mcp", id: "missing" }])).rejects.toThrow("Unknown MCP server id");
   });
