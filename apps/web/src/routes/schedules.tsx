@@ -4,7 +4,6 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   CalendarClockIcon,
-  ChevronDownIcon,
   HistoryIcon,
   Loader2Icon,
   PauseIcon,

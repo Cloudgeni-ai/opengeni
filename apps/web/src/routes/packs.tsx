@@ -25,7 +25,6 @@ import { toast } from "sonner";
 
 import { EmptyState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useAppContext } from "@/context";
 import { capabilityErrorToast } from "@/lib/capabilities";
 import { scheduleLabel } from "@/lib/scheduled-tasks";
