@@ -502,9 +502,9 @@ describe("useWorkspaces", () => {
     await flush();
     expect(hook.result.current.workspaces).toHaveLength(1);
     await flushing(async () => {
-      await hook.result.current.create({ name: "Geni" });
+      await hook.result.current.create({ name: "Acme Staging" });
     });
-    expect(names).toEqual(["Geni"]);
+    expect(names).toEqual(["Acme Staging"]);
     expect(hook.result.current.workspaces).toHaveLength(2);
     await hook.unmount();
   });
