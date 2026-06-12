@@ -15,6 +15,7 @@ COPY packages/events/package.json packages/events/package.json
 COPY packages/github/package.json packages/github/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
 
