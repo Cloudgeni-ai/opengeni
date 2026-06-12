@@ -26,6 +26,7 @@
       "@opengeni/github": ["packages/github/src/index.ts"],
       "@opengeni/documents": ["packages/documents/src/index.ts"],
       "@opengeni/runtime": ["packages/runtime/src/index.ts"],
+      "@opengeni/sdk": ["packages/sdk/src/index.ts"],
       "@opengeni/storage": ["packages/storage/src/index.ts"],
       "@opengeni/testing": ["packages/testing/src/index.ts"],
       "@opengeni/api": ["apps/api/src/index.ts"],

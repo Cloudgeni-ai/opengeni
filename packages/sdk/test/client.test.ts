@@ -1,0 +1,131 @@
+import { describe, expect, test } from "bun:test";
+import { OpenGeniClient } from "../src/client";
+import { OpenGeniApiError } from "../src/errors";
+import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
+
+type RecordedRequest = { url: string; method: string; headers: Record<string, string>; body: string | null };
+
+function recordingFetch(responder: (request: RecordedRequest) => Response): {
+  fetch: typeof fetch;
+  requests: RecordedRequest[];
+} {
+  const requests: RecordedRequest[] = [];
+  const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const request = new Request(input instanceof Request ? input : String(input), init);
+    const recorded: RecordedRequest = {
+      url: request.url,
+      method: request.method,
+      headers: Object.fromEntries(request.headers.entries()),
+      body: init?.body !== undefined && init?.body !== null ? String(init.body) : null,
+    };
+    requests.push(recorded);
+    return responder(recorded);
+  }) as typeof fetch;
+  return { fetch: impl, requests };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+}
+
+function makeClient(responder: (request: RecordedRequest) => Response): { client: OpenGeniClient; requests: RecordedRequest[] } {
+  const { fetch, requests } = recordingFetch(responder);
+  const client = new OpenGeniClient({ baseUrl: "https://api.example.test/", apiKey: "og_test_key", fetch });
+  return { client, requests };
+}
+
+describe("OpenGeniClient", () => {
+  test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
+    const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
+    const { client, requests } = makeClient(() => jsonResponse(session, 202));
+    const created = await client.createSession(WORKSPACE_ID, { initialMessage: "hello", sandboxBackend: "none" });
+    expect(created).toEqual(session as never);
+    expect(requests).toHaveLength(1);
+    const request = requests[0]!;
+    expect(request.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions`);
+    expect(request.method).toBe("POST");
+    expect(request.headers.authorization).toBe("Bearer og_test_key");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(request.body!)).toEqual({ initialMessage: "hello", sandboxBackend: "none" });
+  });
+
+  test("getSession and listEvents hit the expected paths and query params", async () => {
+    const { client, requests } = makeClient((request) =>
+      request.url.includes("/events") ? jsonResponse([makeEvent(3)]) : jsonResponse({ id: SESSION_ID }));
+    await client.getSession(WORKSPACE_ID, SESSION_ID);
+    const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, { after: 2, limit: 10 });
+    expect(events.map((event) => event.sequence)).toEqual([3]);
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`);
+    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&limit=10`);
+  });
+
+  test("sendMessage wraps text in a user.message control event", async () => {
+    const accepted = makeEvent(4, "user.message", { text: "do the thing" });
+    const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
+    const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, { text: "do the thing", clientEventId: "ce-1" });
+    expect(result.sequence).toBe(4);
+    const request = requests[0]!;
+    expect(request.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`);
+    expect(JSON.parse(request.body!)).toEqual({
+      type: "user.message",
+      clientEventId: "ce-1",
+      payload: { text: "do the thing" },
+    });
+  });
+
+  test("interrupt and approval decisions post typed control events", async () => {
+    const { client, requests } = makeClient(() => jsonResponse(makeEvent(5, "user.interrupt"), 202));
+    await client.interrupt(WORKSPACE_ID, SESSION_ID, { reason: "stop" });
+    await client.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, { approvalId: "ap-1", decision: "approve" });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ type: "user.interrupt", payload: { reason: "stop" } });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      type: "user.approvalDecision",
+      payload: { approvalId: "ap-1", decision: "approve" },
+    });
+  });
+
+  test("non-2xx responses raise OpenGeniApiError with status and body", async () => {
+    const { client } = makeClient(() => new Response("workspace not found", { status: 404 }));
+    const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(404);
+    expect((error as OpenGeniApiError).body).toBe("workspace not found");
+  });
+
+  test("merges extra headers from a header factory", async () => {
+    const { fetch, requests } = recordingFetch(() => jsonResponse([]));
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      apiKey: "og_test_key",
+      headers: () => ({ "x-request-id": "rid-1" }),
+      fetch,
+    });
+    await client.listSessions(WORKSPACE_ID, { limit: 5 });
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5`);
+    expect(requests[0]!.headers["x-request-id"]).toBe("rid-1");
+    expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
+  });
+
+  test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
+    const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
+    const { client, requests } = makeClient((request) => {
+      if (request.url.includes("/events/stream")) {
+        return new Response(wire, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    });
+    const events = await collect(client.streamEvents(WORKSPACE_ID, SESSION_ID, { reconnect: false }));
+    expect(events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events/stream?after=0`);
+    expect(requests[0]!.headers.accept).toBe("text/event-stream");
+    expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
+  });
+
+  test("openEventStream rejects non-2xx responses with OpenGeniApiError", async () => {
+    const { client } = makeClient(() => new Response("no access", { status: 403 }));
+    await expect(client.openEventStream(WORKSPACE_ID, SESSION_ID)).rejects.toMatchObject({ status: 403 });
+  });
+});

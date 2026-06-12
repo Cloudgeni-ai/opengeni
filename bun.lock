@@ -14,6 +14,7 @@
         "@opengeni/github": "workspace:*",
         "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
+        "@opengeni/sdk": "workspace:*",
         "@opengeni/testing": "workspace:*",
         "@opengeni/worker": "workspace:*",
         "@temporalio/client": "^1.17.0",
@@ -206,6 +207,15 @@
       },
       "devDependencies": {
         "typescript": "^6.0.3",
+      },
+    },
+    "packages/sdk": {
+      "name": "@opengeni/sdk",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@opengeni/contracts": "workspace:*",
+        "typescript": "^6.0.3",
+        "zod": "^4.2.1",
       },
     },
     "packages/storage": {
@@ -668,6 +678,8 @@
     "@opengeni/observability": ["@opengeni/observability@workspace:packages/observability"],
 
     "@opengeni/runtime": ["@opengeni/runtime@workspace:packages/runtime"],
+
+    "@opengeni/sdk": ["@opengeni/sdk@workspace:packages/sdk"],
 
     "@opengeni/storage": ["@opengeni/storage@workspace:packages/storage"],
 
