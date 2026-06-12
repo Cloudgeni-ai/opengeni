@@ -158,7 +158,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
     switch (event.type) {
       case "user.message": {
-        finalizeOpen();
+        // A steering message must not mark in-flight tools complete; it only
+        // ends whatever text was streaming. Turn lifecycle events finalize.
+        closeStreamingTail();
         items.push({
           kind: "user-message",
           id: event.id,
@@ -192,8 +194,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "agent.message.completed": {
         const text = typeof payload.text === "string" ? payload.text : "";
-        const open = last();
-        if (open?.kind === "agent-message" && open.streaming) {
+        // Reconcile the most recent same-turn agent message — even when
+        // activity (tool calls, reasoning) landed after its deltas — so the
+        // completed text never duplicates the streamed one.
+        const open = [...items]
+          .reverse()
+          .find((item): item is AgentMessageItem => item.kind === "agent-message" && item.turnId === turnId);
+        if (open && (open.streaming || !open.text || text === open.text || text.startsWith(open.text))) {
           // The completed text is authoritative when it extends what streamed.
           if (!open.text || (text && text.startsWith(open.text))) {
             open.text = text || open.text;

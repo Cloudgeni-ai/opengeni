@@ -18,6 +18,17 @@ export function usePolledValue<T>(load: () => Promise<T>, options: { pollInterva
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
   const generation = useRef(0);
+  const loadRef = useRef(load);
+
+  // A new loader identity means a new query (different session/workspace/...):
+  // drop the previous result instead of showing it as the new query's data.
+  useEffect(() => {
+    if (loadRef.current !== load) {
+      loadRef.current = load;
+      setData(null);
+      setError(null);
+    }
+  }, [load]);
 
   const run = useCallback(async () => {
     const ticket = ++generation.current;

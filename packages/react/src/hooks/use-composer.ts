@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
 export type UseComposerOptions = ClientOverride & {
@@ -34,6 +34,19 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
   const [error, setError] = useState<Error | null>(null);
   const pendingClientEventId = useRef<string | null>(null);
   const onSent = options.onSent;
+
+  // A composer is bound to one session: switching targets must not leak the
+  // previous session's draft, error, or retry idempotency key.
+  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const targetKeyRef = useRef(targetKey);
+  useEffect(() => {
+    if (targetKeyRef.current !== targetKey) {
+      targetKeyRef.current = targetKey;
+      pendingClientEventId.current = null;
+      setValue("");
+      setError(null);
+    }
+  }, [targetKey]);
 
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {

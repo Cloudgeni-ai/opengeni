@@ -39,11 +39,18 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const lastSequenceRef = useRef(after);
+  const streamKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    setEvents([]);
-    setError(null);
-    lastSequenceRef.current = after;
+    // Reset the accumulated log only when the stream identity changes —
+    // pausing via `enabled: false` keeps the timeline visible.
+    const streamKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${after}`;
+    if (streamKeyRef.current !== streamKey) {
+      streamKeyRef.current = streamKey;
+      setEvents([]);
+      setError(null);
+      lastSequenceRef.current = after;
+    }
     if (!sessionId || !enabled) {
       setConnectionState("idle");
       return;
@@ -69,7 +76,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
     void (async () => {
       try {
         const stream = client.streamEvents(workspaceId, sessionId, {
-          after,
+          after: lastSequenceRef.current,
           signal: controller.signal,
           onStateChange: (state) => {
             if (!controller.signal.aborted) {

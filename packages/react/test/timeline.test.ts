@@ -57,6 +57,30 @@ describe("buildTimeline", () => {
     expect(message.streaming).toBe(false);
   });
 
+  test("completed reconciles the same-turn message even after intervening activity", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.message.delta", { text: "Checking the cluster" }),
+      event("agent.toolCall.created", { id: "call-1", name: "exec", arguments: { cmd: "kubectl get pods" } }),
+      event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      event("agent.message.completed", { text: "Checking the cluster now." }),
+    ]);
+    const messages = items.filter((item) => item.kind === "agent-message");
+    expect(messages).toHaveLength(1);
+    expect((messages[0] as AgentMessageItem).text).toBe("Checking the cluster now.");
+    expect((messages[0] as AgentMessageItem).streaming).toBe(false);
+  });
+
+  test("a steering user message does not complete in-flight tool calls", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "terraform_apply", arguments: {} }),
+      event("user.message", { text: "Hold off on the database changes" }),
+    ]);
+    expect((items[0] as ToolCallItem).status).toBe("running");
+    expect(items[1]?.kind).toBe("user-message");
+  });
+
   test("a delta after a tool call starts a new message instead of appending", () => {
     reset();
     const items = buildTimeline([
