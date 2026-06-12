@@ -133,6 +133,68 @@ describe("OpenGeniClient turn queue", () => {
     expect(JSON.parse(requests[4]!.body!)).toEqual({ type: "user.interrupt", payload: { reason: "steer" } });
   });
 
+  test("steerMessage retries the turn lookup while the server materializes it", async () => {
+    const accepted = makeEvent(9, "user.message", { text: "now" });
+    const steerTurn = fakeTurn({ id: TURN_B, position: 2, triggerEventId: accepted.id });
+    let turnListings = 0;
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/events")) {
+        return jsonResponse(accepted, 202);
+      }
+      if (request.url.endsWith("/turns")) {
+        turnListings += 1;
+        // First listing races the turn creation; the retry sees it.
+        return jsonResponse(turnListings === 1 ? [fakeTurn({ id: TURN_A })] : [fakeTurn({ id: TURN_A }), steerTurn]);
+      }
+      if (request.url.endsWith("/turns/reorder")) {
+        return jsonResponse([steerTurn, fakeTurn({ id: TURN_A, position: 2 })]);
+      }
+      return jsonResponse({ id: SESSION_ID, status: "running" });
+    });
+    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
+    expect(turnListings).toBe(2);
+    expect(result.turn?.id).toBe(TURN_B);
+    expect(result.interrupted).toBe(true);
+    expect(requests.some((request) => request.url.endsWith("/turns/reorder"))).toBe(true);
+  });
+
+  test("steerMessage skips the interrupt when the steer turn cannot be promoted over queued work", async () => {
+    const accepted = makeEvent(9, "user.message", { text: "now" });
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/events")) {
+        return jsonResponse(accepted, 202);
+      }
+      if (request.url.endsWith("/turns")) {
+        // The steer turn never shows up, but another queued turn exists:
+        // interrupting would promote that one instead of the steer message.
+        return jsonResponse([fakeTurn({ id: TURN_A })]);
+      }
+      return jsonResponse({ id: SESSION_ID, status: "running" });
+    });
+    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
+    expect(result.turn).toBeNull();
+    expect(result.interrupted).toBe(false);
+    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(0);
+    expect(requests.filter((request) => request.url.endsWith("/turns"))).toHaveLength(4);
+  });
+
+  test("steerMessage with an empty queue still interrupts (next claim is the steer turn)", async () => {
+    const accepted = makeEvent(9, "user.message", { text: "now" });
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/events")) {
+        return jsonResponse(accepted, 202);
+      }
+      if (request.url.endsWith("/turns")) {
+        return jsonResponse([fakeTurn({ id: "done", status: "completed" })]);
+      }
+      return jsonResponse({ id: SESSION_ID, status: "running" });
+    });
+    const result = await client.steerMessage(WORKSPACE_ID, SESSION_ID, "now");
+    expect(result.turn).toBeNull();
+    expect(result.interrupted).toBe(true);
+    expect(requests.filter((request) => request.body?.includes("user.interrupt"))).toHaveLength(1);
+  });
+
   test("steerMessage does not interrupt an idle session", async () => {
     const accepted = makeEvent(3, "user.message", { text: "later" });
     const steerTurn = fakeTurn({ triggerEventId: accepted.id });

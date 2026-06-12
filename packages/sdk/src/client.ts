@@ -282,6 +282,12 @@ export class OpenGeniClient {
    * message, promotes its queued turn to the front, and interrupts the
    * running turn so the session picks the steer turn up next. On a session
    * that is not running this degrades gracefully to a plain queued message.
+   *
+   * The queued turn is located by `triggerEventId` (retried briefly in case
+   * the server is still materializing it). If it cannot be found while other
+   * turns are queued, the interrupt is skipped — stopping the running turn
+   * would otherwise promote someone else's queued work over this message —
+   * and the call degrades to a plain queued send (`interrupted: false`).
    */
   async steerMessage(
     workspaceId: string,
@@ -289,19 +295,33 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    const turns = await this.listTurns(workspaceId, sessionId);
-    const queued = turns
-      .filter((turn) => turn.status === "queued")
-      .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
-    const steerTurn = queued.find((turn) => turn.triggerEventId === accepted.id) ?? null;
+    let steerTurn: SessionTurn | null = null;
+    let queued: SessionTurn[] = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (attempt > 0) {
+        await delay(150 * attempt);
+      }
+      const turns = await this.listTurns(workspaceId, sessionId);
+      queued = turns
+        .filter((turn) => turn.status === "queued")
+        .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
+      steerTurn = queued.find((turn) => turn.triggerEventId === accepted.id) ?? null;
+      if (steerTurn) {
+        break;
+      }
+    }
     if (steerTurn && queued.length > 1) {
+      const front = steerTurn;
       await this.reorderQueuedTurns(workspaceId, sessionId, [
-        steerTurn.id,
-        ...queued.filter((turn) => turn.id !== steerTurn.id).map((turn) => turn.id),
+        front.id,
+        ...queued.filter((turn) => turn.id !== front.id).map((turn) => turn.id),
       ]);
     }
+    // Without the steer turn at the queue front, an interrupt would hand the
+    // session to whatever else is queued — only safe when nothing else is.
+    const canDeliverNext = steerTurn !== null || queued.length === 0;
     const session = await this.getSession(workspaceId, sessionId);
-    const interrupted = session.status === "running" || session.status === "requires_action";
+    const interrupted = canDeliverNext && (session.status === "running" || session.status === "requires_action");
     if (interrupted) {
       await this.interrupt(workspaceId, sessionId, { reason: "steer" });
     }
@@ -754,4 +774,8 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
