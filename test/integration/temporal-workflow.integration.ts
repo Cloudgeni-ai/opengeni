@@ -124,6 +124,51 @@ describe("Temporal workflow integration", () => {
     }
   }, temporalWorkflowTestTimeoutMs);
 
+  test("re-dispatches a preempted turn instead of failing the session", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const turn = queuedTurn("event-1");
+    const queuedTurns = [turn];
+    const runs: Array<{ turnId?: string; triggerEventId: string }> = [];
+    const failures: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentTurn: async (input: { turnId?: string; triggerEventId: string }) => {
+        runs.push(input);
+        if (runs.length === 1) {
+          // Mirror the real preemption contract: the activity re-queues the
+          // same turn (behind a synthesized resume trigger) before completing
+          // with "preempted"; the workflow must claim and re-dispatch it.
+          queuedTurns.push({ id: turn.id, triggerEventId: "resume-event" });
+          return { status: "preempted" };
+        }
+        return { status: "idle" };
+      },
+      failSession: async (input: unknown) => {
+        failures.push(input);
+      },
+      interruptActiveTurn: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({ turnId: turn.id, triggerEventId: "event-1" });
+      expect(runs[1]).toMatchObject({ turnId: turn.id, triggerEventId: "resume-event" });
+      expect(failures).toHaveLength(0);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
   test("idle interrupt marks the session idle without cancelling a turn", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
     const scope = workflowScope();

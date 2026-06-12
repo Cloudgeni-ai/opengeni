@@ -32,6 +32,23 @@ goal-bearing session. A budget/credit exhaustion between model calls likewise
 idles the turn rather than failing the session, so a top-up lets the same
 session continue.
 
+**Worker restarts are survivable.** A graceful worker shutdown (a deploy or
+rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
+reason `WORKER_SHUTDOWN`) preempts the in-flight turn instead of failing the
+session: the activity checkpoints (final conversation-truth reconcile plus the
+sandbox envelope; legacy run-state mode captures the RunState blob), puts the
+turn back on the session queue, emits a `turn.preempted` event, and completes
+with status `preempted`. The session workflow then re-dispatches the same turn
+on a healthy worker — entering through a synthesized resume notice when the
+turn had already persisted progress (so the model is not handed duplicate
+input and is told to verify in-flight side effects before repeating them), or
+replaying the original trigger when nothing was persisted yet. At most the
+single in-flight model step is lost, the same bound as a crash. This is an
+explicit checkpoint/resume, not an automatic Temporal retry: a hard kill
+(SIGKILL, no grace period) still fails the session via the heartbeat timeout,
+deliberately, because an uncheckpointed death must not be replayed blindly
+against side-effectful work.
+
 ## Goals — what makes long runs continue
 
 Agents stop prematurely. A **goal** flips the default so that finishing a turn

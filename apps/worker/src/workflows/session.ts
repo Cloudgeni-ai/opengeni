@@ -163,6 +163,14 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return outcome.result.status === "cancelled";
     }
 
+    if (outcome.result.status === "preempted") {
+      // The hosting worker shut down gracefully mid-turn: the activity
+      // checkpointed conversation truth and put the turn back on the queue
+      // before completing. Loop again so the next claim re-dispatches it on a
+      // healthy worker (a pending interrupt is honored first by the loop).
+      return true;
+    }
+
     if (outcome.result.status === "requires_action") {
       await condition(() => interruptedEventId !== null || approvalQueue.length > 0);
       if (interruptedEventId) {

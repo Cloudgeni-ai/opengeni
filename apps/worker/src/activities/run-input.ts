@@ -42,6 +42,16 @@ export async function turnInput(
     // continuations — this is what makes "keep working" coherent.
     return await messageInput(db, runtime, agent, trigger, payload.text, settings);
   }
+  if (trigger.type === "turn.preempted") {
+    const payload = trigger.payload as { text?: unknown };
+    if (typeof payload.text !== "string" || payload.text.trim().length === 0) {
+      throw new Error("turn.preempted payload is missing text");
+    }
+    // A turn re-entering after a graceful worker shutdown checkpointed it
+    // mid-flight: thread the stored conversation (which includes the turn's
+    // original input and its progress so far) behind a resume notice.
+    return await messageInput(db, runtime, agent, trigger, payload.text, settings);
+  }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
       approvalId?: unknown;

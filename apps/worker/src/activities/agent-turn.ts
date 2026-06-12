@@ -12,6 +12,7 @@ import {
   recordUsageEvent,
   appendSessionHistoryItems,
   countSessionHistoryItems,
+  requeuePreemptedTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionStatus,
@@ -58,6 +59,26 @@ import type { ResourceRef } from "@opengeni/contracts";
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
+// Resume notice fed to the model when a turn re-enters after a graceful
+// worker shutdown (deploy/rollout restart) checkpointed it mid-flight. The
+// agent must not blindly replay side effects it cannot see in its history:
+// at most the single in-flight model step was lost, and anything it started
+// there may or may not have completed.
+export const WORKER_SHUTDOWN_RESUME_TEXT = [
+  "[TURN RESUMED AFTER WORKER RESTART] The platform worker running this turn restarted (deploy/rollout) before the turn finished.",
+  "Your conversation history above, including this turn's earlier work, is preserved up to the last checkpoint; at most the single in-flight model step after it was lost.",
+  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
+].join("\n");
+
+/**
+ * True when this activity attempt was cancelled because its hosting worker is
+ * shutting down gracefully (SIGTERM during a deploy), as opposed to a
+ * workflow-requested cancellation (user interrupt) or a server-side timeout.
+ */
+export function isWorkerShutdownCancellation(error: unknown): boolean {
+  return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const { settings, db, bus, runtime, objectStorage, observability } = await services();
@@ -82,6 +103,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // sandbox recovery envelope is upserted alongside. Best-effort by design:
     // persistence problems must never fail the run.
     let persistedHistoryCount = 0;
+    let historyCountAtTurnStart = 0;
     const reconcileConversationTruth = async () => {
       if (!stream || !turnId) {
         return;
@@ -143,13 +165,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       turnId = turn.id;
       await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
       const activityContext = currentActivityContext();
+      // Setup (environment load, MCP connects, sandbox restore) does not
+      // stream and so never observes cancellation on its own; these explicit
+      // checks let a graceful shutdown preempt the turn before the worker is
+      // force-killed instead of riding the setup to a heartbeat timeout.
+      const throwIfWorkerShuttingDown = () => {
+        const reason = activityContext?.cancellationSignal.reason;
+        if (isWorkerShutdownCancellation(reason)) {
+          throw reason;
+        }
+      };
       heartbeatTimer = startActivityHeartbeat(activityContext, {
         phase: "running",
         sessionId: input.sessionId,
         turnId,
       });
       let producerSeq = 0;
-      const producerId = `${input.workflowId}:${turnId}`;
+      // One producer per activity execution, not per turn: a turn can run
+      // again on the same workflow (preemption resume, approval rerun), and
+      // each execution restarts producerSeq at 1 — a shared producer id would
+      // trip the per-producer uniqueness constraint on the event log. The
+      // Temporal activity id is unique per scheduled execution.
+      const producerId = `${input.workflowId}:${turnId}${activityContext ? `:${activityContext.info.activityId}` : ""}`;
       publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
         const inputs = events.map((event) => ({
           ...event,
@@ -188,6 +225,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources, workspaceEnvironment?.values ?? {});
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
+      throwIfWorkerShuttingDown();
       preparedTools = await runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -212,7 +250,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const runInput = await turnInput(db, runtime, agent, trigger, runSettings);
       persistedHistoryCount = await countSessionHistoryItems(db, input.workspaceId, input.sessionId);
+      historyCountAtTurnStart = persistedHistoryCount;
       let responseUsageCount = 0;
+      throwIfWorkerShuttingDown();
       stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
         onRuntimeEvent: async (event) => {
@@ -342,6 +382,61 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       activityStatus = "idle";
       return { status: "idle" };
     } catch (error) {
+      // Graceful worker shutdown (deploy / rollout restart): checkpoint and
+      // hand the turn back instead of failing the session. Conversation truth
+      // is already dual-written per model response; the final reconcile below
+      // bounds the loss to at most the single in-flight model step. The turn
+      // is re-queued so the session workflow re-dispatches it on a healthy
+      // worker — through a synthesized resume notice when this turn already
+      // persisted progress (replaying the original trigger would duplicate
+      // input the model has already seen and invite it to redo side effects),
+      // or through the original trigger when nothing was persisted yet. This
+      // is an explicit checkpoint/resume, not a blind activity retry: the
+      // resumed attempt sees everything the first attempt did.
+      if (isWorkerShutdownCancellation(error) && publish && turnId && turnStartedPublished) {
+        await batcher?.flush().catch(() => undefined);
+        await reconcileConversationTruth();
+        let resumeWithNotice = settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
+        if (settings.sessionHistorySource !== "items" && stream) {
+          // Legacy run-state mode: the resume reads the RunState blob, so the
+          // checkpoint must be captured there. A failed capture falls back to
+          // the previous snapshot and a clean re-run of the original trigger.
+          try {
+            await saveRunState(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              serializedRunState: stream.state.toString(),
+              pendingApprovals: [],
+            });
+            resumeWithNotice = true;
+          } catch {
+            resumeWithNotice = false;
+          }
+        }
+        const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+          {
+            turnId,
+            type: "turn.preempted",
+            payload: {
+              triggerEventId: input.triggerEventId,
+              reason: "worker_shutdown",
+              resumeWithNotice,
+              ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+            },
+          },
+          {
+            turnId,
+            type: "session.status.changed",
+            payload: { status: "queued" },
+          },
+        ]);
+        await requeuePreemptedTurn(db, input.workspaceId, turnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
+        activityStatus = "preempted";
+        return { status: "preempted" };
+      }
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";
         activityError = error;

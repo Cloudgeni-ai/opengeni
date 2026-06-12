@@ -5433,6 +5433,7 @@ function eventLabel(type: string): string {
     "turn.completed": "Turn completed",
     "turn.failed": "Turn failed",
     "turn.cancelled": "Turn cancelled",
+    "turn.preempted": "Turn preempted (worker restart)",
     "agent.message.delta": "Assistant delta",
     "agent.message.completed": "Assistant completed",
     "agent.reasoning.delta": "Model activity",

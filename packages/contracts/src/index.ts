@@ -1107,6 +1107,7 @@ export const SessionEventType = z.enum([
   "turn.completed",
   "turn.failed",
   "turn.cancelled",
+  "turn.preempted",
   "agent.message.delta",
   "agent.message.completed",
   "agent.reasoning.delta",

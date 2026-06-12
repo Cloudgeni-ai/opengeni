@@ -78,7 +78,10 @@ export type IndexDocumentInput = {
 };
 
 export type RunAgentTurnResult = {
-  status: "idle" | "requires_action" | "failed" | "cancelled";
+  // "preempted": the worker hosting this turn shut down gracefully mid-turn;
+  // the activity checkpointed conversation truth, re-queued the turn, and the
+  // session workflow re-dispatches it on a healthy worker.
+  status: "idle" | "requires_action" | "failed" | "cancelled" | "preempted";
   // Provider backpressure pacing: when set on an idle result, the session
   // workflow holds the loop this long before admitting the next turn (an
   // active goal's continuation would otherwise immediately re-hit the limit).

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
+  claimNextQueuedTurn,
   createDb,
   createScheduledTask,
   createScheduledTaskRun,
@@ -25,7 +26,9 @@ import {
   listEnabledMcpCapabilityServers,
   listScheduledTaskRuns,
   listScheduledTasks,
+  getSessionTurn,
   listSessionEvents,
+  requeuePreemptedTurn,
   saveRunState,
   setSessionStatus,
   updateScheduledTask,
@@ -159,6 +162,55 @@ describe("DB integration", () => {
     expect(latest?.serializedRunState).toBe("state-2");
     await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
     await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "idle", null);
+  });
+
+  test("requeues a preempted running turn behind a swapped trigger event", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "long task",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger, resumeTrigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "long task" } },
+      { type: "turn.preempted", payload: { reason: "worker_shutdown", text: "resume" } },
+    ]);
+    const turn = await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: "wf-preempt-db",
+      source: "user",
+      prompt: "long task",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "low",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const claimed = await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-preempt-db");
+    expect(claimed?.id).toBe(turn.id);
+
+    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id);
+    const requeued = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
+    expect(requeued?.status).toBe("queued");
+    expect(requeued?.triggerEventId).toBe(resumeTrigger!.id);
+    expect(requeued?.startedAt).toBeNull();
+
+    // The next claim re-dispatches the same turn through the resume trigger.
+    const reclaimed = await claimNextQueuedTurn(dbClient.db, grant.workspaceId, session.id, "wf-preempt-db-2");
+    expect(reclaimed?.id).toBe(turn.id);
+    expect(reclaimed?.triggerEventId).toBe(resumeTrigger!.id);
+
+    // Only running turns can be preempt-requeued.
+    await finishTurn(dbClient.db, grant.workspaceId, turn.id, "idle");
+    await expect(requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id)).rejects.toThrow("Running session turn not found");
   });
 
   test("persists scheduled tasks and run history", async () => {
