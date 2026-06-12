@@ -297,6 +297,11 @@ export async function createSessionForRequest(
   // but never one out-ranking its creator: every requested permission must be
   // held by the creating grant.
   const firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
+  if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
+    // An empty set would sign an unusable zero-permission token; the default
+    // worker set is expressed by omitting the field.
+    throw new HTTPException(422, { message: "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set" });
+  }
   for (const permission of firstPartyMcpPermissions ?? []) {
     if (!hasPermission(grant.permissions, permission)) {
       throw new HTTPException(403, { message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}` });

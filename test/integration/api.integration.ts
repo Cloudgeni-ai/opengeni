@@ -3006,6 +3006,20 @@ describe("API component integration", () => {
     expect(escalation.status).toBe(403);
     expect(await escalation.text()).toContain("cannot grant first-party MCP permission beyond the creating grant: environments:manage");
 
+    // An empty set would sign an unusable zero-permission token; omit the
+    // field for the default worker set instead.
+    const emptySet = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "empty permission set",
+        model: "scripted-model",
+        firstPartyMcpPermissions: [],
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${managerToken}` },
+    });
+    expect(emptySet.status).toBe(422);
+    expect(await emptySet.text()).toContain("firstPartyMcpPermissions must not be empty");
+
     // Same rule through the MCP session_create tool: a manager can only
     // delegate a subset of what it was itself granted.
     const mcpDeps = {

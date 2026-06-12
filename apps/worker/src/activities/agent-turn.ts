@@ -243,7 +243,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         subjectLabel: "OpenGeni worker",
         // Manager-style sessions carry a creation-validated permission set
         // for their first-party MCP token; null keeps the fixed default.
-        ...(session.firstPartyMcpPermissions ? { firstPartyPermissions: session.firstPartyMcpPermissions } : {}),
+        ...(session.firstPartyMcpPermissions?.length ? { firstPartyPermissions: session.firstPartyMcpPermissions } : {}),
       });
       const agent = runtime.buildAgent(runSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
