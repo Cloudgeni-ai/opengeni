@@ -5,7 +5,7 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type { SessionClientLike } from "./client";
-export { OpenGeniProvider, useOpenGeni } from "./provider";
+export { OpenGeniProvider, useOpenGeni, useOpenGeniClient } from "./provider";
 export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from "./provider";
 
 // Hooks
@@ -14,11 +14,33 @@ export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type { SessionEventsConnectionState, UseSessionEventsOptions, UseSessionEventsResult } from "./hooks/use-session-events";
 export { useComposer, composeSendInput, shouldSubmitOnKey } from "./hooks/use-composer";
-export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export type { ComposerMode, ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export {
+  useTurnQueue,
+  isTurnQueueEvent,
+  queueFromTurns,
+  activeTurnFromTurns,
+  applyTurnEdit,
+  applyTurnReorder,
+  applyTurnRemoval,
+} from "./hooks/use-turn-queue";
+export type { UseTurnQueueOptions, UseTurnQueueResult } from "./hooks/use-turn-queue";
+export { useGoal, isGoalEvent } from "./hooks/use-goal";
+export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
+export { useSessionControl } from "./hooks/use-session-control";
+export type { UseSessionControlOptions, UseSessionControlResult } from "./hooks/use-session-control";
 export { useScheduledTasks } from "./hooks/use-scheduled-tasks";
 export type { UseScheduledTasksOptions, UseScheduledTasksResult } from "./hooks/use-scheduled-tasks";
 export { useWorkspaceSessions } from "./hooks/use-workspace-sessions";
 export type { UseWorkspaceSessionsOptions, UseWorkspaceSessionsResult } from "./hooks/use-workspace-sessions";
+export { useEnvironments } from "./hooks/use-environments";
+export type { UseEnvironmentsOptions, UseEnvironmentsResult } from "./hooks/use-environments";
+export { usePacks } from "./hooks/use-packs";
+export type { UsePacksOptions, UsePacksResult } from "./hooks/use-packs";
+export { useWorkspaces } from "./hooks/use-workspaces";
+export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
+export { useBillingUsage } from "./hooks/use-billing-usage";
+export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
 
 // Timeline projection
 export {

@@ -4,6 +4,13 @@ import { useOpenGeni, type ClientOverride } from "../provider";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
+/**
+ * Compose-time delivery choice. `queue` (the default) stacks the message
+ * behind the running turn — visible, editable, reorderable until claimed.
+ * `steer` interrupts the running turn and injects the message now.
+ */
+export type ComposerMode = "queue" | "steer";
+
 export type UseComposerOptions = ClientOverride & {
   /** Called with the accepted text after a successful send. */
   onSent?: ((text: string) => void) | undefined;
@@ -13,15 +20,20 @@ export type UseComposerOptions = ClientOverride & {
    * surrounding UI state (attachment pickers, model selectors, ...).
    */
   sendExtras?: ComposerSendExtras | (() => ComposerSendExtras) | undefined;
+  /** Initial delivery mode. Defaults to `"queue"`. */
+  defaultMode?: ComposerMode | undefined;
 };
 
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
-  /** Send the draft (or an explicit text). No-op for blank drafts. */
+  /** Send the draft (or an explicit text) using the current mode. */
   send: (text?: string) => Promise<boolean>;
   sending: boolean;
   canSend: boolean;
+  /** Queue (default) vs steer — the compose-time delivery choice. */
+  mode: ComposerMode;
+  setMode: (mode: ComposerMode) => void;
   /** Ask the agent to stop the current turn. */
   interrupt: (reason?: string) => Promise<void>;
   interrupting: boolean;
@@ -37,12 +49,17 @@ export type ComposerState = {
  */
 export function useComposer(sessionId: string | null | undefined, options: UseComposerOptions = {}): ComposerState {
   const { client, workspaceId } = useOpenGeni(options);
+  const defaultMode = options.defaultMode ?? "queue";
   const [value, setValue] = useState("");
+  const [mode, setMode] = useState<ComposerMode>(defaultMode);
   const [sending, setSending] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const pendingClientEventId = useRef<string | null>(null);
   const onSent = options.onSent;
+  // Read at send time so an in-flight send uses the mode chosen at submit.
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -58,8 +75,9 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
       pendingClientEventId.current = null;
       setValue("");
       setError(null);
+      setMode(defaultMode);
     }
-  }, [targetKey]);
+  }, [targetKey, defaultMode]);
 
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {
@@ -74,11 +92,12 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
       setSending(true);
       setError(null);
       try {
-        await client.sendMessage(
-          workspaceId,
-          sessionId,
-          composeSendInput(text, pendingClientEventId.current, sendExtrasRef.current),
-        );
+        const input = composeSendInput(text, pendingClientEventId.current, sendExtrasRef.current);
+        if (modeRef.current === "steer") {
+          await client.steerMessage(workspaceId, sessionId, input);
+        } else {
+          await client.sendMessage(workspaceId, sessionId, input);
+        }
         pendingClientEventId.current = null;
         if (explicit === undefined) {
           // Clear only the draft that was sent: edits made while the request
@@ -126,6 +145,8 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     send,
     sending,
     canSend: Boolean(sessionId) && !sending && value.trim().length > 0,
+    mode,
+    setMode,
     interrupt,
     interrupting,
     error,

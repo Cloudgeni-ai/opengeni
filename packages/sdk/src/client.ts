@@ -1,15 +1,64 @@
 import { OpenGeniApiError } from "./errors";
 import { streamSessionEvents, type SessionEventStreamTransport, type StreamSessionEventsOptions } from "./stream";
 import type {
+  AccessContext,
+  ApiKey,
+  BillingEntitlementsResponse,
+  BillingSummary,
+  BillingUsageResponse,
+  CapabilityCatalogItem,
+  CapabilityCatalogResponse,
+  CapabilityInstallation,
   ClientSessionEventInput,
+  CompleteFileUploadResponse,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
+  CreateCapabilityCatalogItemRequest,
+  CreateCheckoutRequest,
+  CreateCheckoutResponse,
+  CreateDocumentBaseRequest,
+  CreateFileUploadRequest,
+  CreateFileUploadResponse,
+  CreateGitHubAppManifestRequest,
+  CreateGitHubAppManifestResponse,
+  CreateScheduledTaskRequest,
   CreateSessionRequest,
+  CreateWorkspaceEnvironmentRequest,
+  CreateWorkspaceRequest,
+  DiscoverMcpCapabilitiesResponse,
+  Document,
+  DocumentBase,
+  DocumentSearchResponse,
+  EnableCapabilityRequest,
+  EnablePackRequest,
+  FileAsset,
+  FileDownloadUrlResponse,
+  GetPackResponse,
+  GitHubAppInfo,
+  GitHubRepositoriesResponse,
+  ListApiKeysResponse,
+  ListPacksResponse,
+  PackInstallation,
   ReasoningEffort,
+  RegisterCapabilityPackRequest,
   ResourceRef,
   ScheduledTask,
+  ScheduledTaskRun,
   Session,
   SessionEvent,
+  SessionGoal,
   SessionTurn,
   ToolRef,
+  UpdateScheduledTaskRequest,
+  UpdateSessionGoalRequest,
+  UpdateSessionTurnRequest,
+  UpdateWorkspaceEnvironmentRequest,
+  UpdateWorkspaceRequest,
+  UploadFileInput,
+  WorkspaceEnvironment,
+  WorkspaceEnvironmentVariableMetadata,
+  WorkspaceRegisteredPack,
+  Workspace,
 } from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -32,6 +81,15 @@ export type SendMessageInput = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   clientEventId?: string;
+};
+
+export type SteerMessageResult = {
+  /** The accepted `user.message` event. */
+  accepted: SessionEvent;
+  /** The queued turn created for the message, when it could be located. */
+  turn: SessionTurn | null;
+  /** True when the running turn was interrupted to make way for the message. */
+  interrupted: boolean;
 };
 
 /**
@@ -183,6 +241,470 @@ export class OpenGeniClient {
     return response.body;
   }
 
+  // --- Turn queue ------------------------------------------------------------
+
+  /** Edit a still-queued turn (prompt, model, resources, tools, ...). */
+  async updateQueuedTurn(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    update: UpdateSessionTurnRequest,
+  ): Promise<SessionTurn> {
+    return await this.requestJson<SessionTurn>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
+      update,
+    );
+  }
+
+  /**
+   * Reorder the queued turns. `turnIds` must all reference queued turns; the
+   * server assigns positions in the given order and returns the queue.
+   */
+  async reorderQueuedTurns(workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
+    return await this.requestJson<SessionTurn[]>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/reorder`,
+      { turnIds },
+    );
+  }
+
+  /** Cancel a queued turn before it is claimed. Returns the cancelled turn. */
+  async deleteQueuedTurn(workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
+    return await this.requestJson<SessionTurn>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
+    );
+  }
+
+  /**
+   * Steer: deliver a message *now* instead of behind the queue. Sends the
+   * message, promotes its queued turn to the front, and interrupts the
+   * running turn so the session picks the steer turn up next. On a session
+   * that is not running this degrades gracefully to a plain queued message.
+   */
+  async steerMessage(
+    workspaceId: string,
+    sessionId: string,
+    message: string | SendMessageInput,
+  ): Promise<SteerMessageResult> {
+    const accepted = await this.sendMessage(workspaceId, sessionId, message);
+    const turns = await this.listTurns(workspaceId, sessionId);
+    const queued = turns
+      .filter((turn) => turn.status === "queued")
+      .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
+    const steerTurn = queued.find((turn) => turn.triggerEventId === accepted.id) ?? null;
+    if (steerTurn && queued.length > 1) {
+      await this.reorderQueuedTurns(workspaceId, sessionId, [
+        steerTurn.id,
+        ...queued.filter((turn) => turn.id !== steerTurn.id).map((turn) => turn.id),
+      ]);
+    }
+    const session = await this.getSession(workspaceId, sessionId);
+    const interrupted = session.status === "running" || session.status === "requires_action";
+    if (interrupted) {
+      await this.interrupt(workspaceId, sessionId, { reason: "steer" });
+    }
+    return { accepted, turn: steerTurn, interrupted };
+  }
+
+  // --- Goals -------------------------------------------------------------------
+
+  /** The session's goal. 404s when the session never had one. */
+  async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`);
+  }
+
+  async updateGoal(workspaceId: string, sessionId: string, request: UpdateSessionGoalRequest): Promise<SessionGoal> {
+    return await this.requestJson<SessionGoal>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`, request);
+  }
+
+  /** Pause the goal loop: the session stops self-continuing until resumed. */
+  async pauseGoal(workspaceId: string, sessionId: string, options: { rationale?: string } = {}): Promise<SessionGoal> {
+    return await this.updateGoal(workspaceId, sessionId, {
+      status: "paused",
+      ...(options.rationale !== undefined ? { rationale: options.rationale } : {}),
+    });
+  }
+
+  /** Resume a paused goal: resets counters and re-arms the continuation loop. */
+  async resumeGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
+    return await this.updateGoal(workspaceId, sessionId, { status: "active" });
+  }
+
+  // --- Access + workspaces -----------------------------------------------------
+
+  /** The caller's access context: subject, account + workspace grants, defaults. */
+  async getAccessContext(): Promise<AccessContext> {
+    return await this.requestJson<AccessContext>("GET", "/v1/access/me");
+  }
+
+  async listWorkspaces(): Promise<Workspace[]> {
+    return await this.requestJson<Workspace[]>("GET", "/v1/workspaces");
+  }
+
+  async createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("POST", "/v1/workspaces", request);
+  }
+
+  async getWorkspace(workspaceId: string): Promise<Workspace> {
+    return await this.requestJson<Workspace>("GET", `/v1/workspaces/${workspaceId}`);
+  }
+
+  async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
+    return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
+  }
+
+  // --- Scheduled tasks (write + runs) -------------------------------------------
+
+  async createScheduledTask(workspaceId: string, request: CreateScheduledTaskRequest): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks`, request);
+  }
+
+  async updateScheduledTask(workspaceId: string, taskId: string, request: UpdateScheduledTaskRequest): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("PATCH", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`, request);
+  }
+
+  async pauseScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/pause`);
+  }
+
+  async resumeScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/resume`);
+  }
+
+  /** Fire the task immediately (manual trigger), independent of its schedule. */
+  async triggerScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/trigger`);
+  }
+
+  async deleteScheduledTask(workspaceId: string, taskId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`);
+  }
+
+  async listScheduledTaskRuns(
+    workspaceId: string,
+    taskId: string,
+    options: { limit?: number } = {},
+  ): Promise<ScheduledTaskRun[]> {
+    return await this.requestJson<ScheduledTaskRun[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/runs`,
+      undefined,
+      { ...(options.limit !== undefined ? { limit: String(options.limit) } : {}) },
+    );
+  }
+
+  // --- Environments --------------------------------------------------------------
+  // Variable values are write-only: reads return name/version metadata only.
+
+  async listEnvironments(workspaceId: string): Promise<WorkspaceEnvironment[]> {
+    return await this.requestJson<WorkspaceEnvironment[]>("GET", `/v1/workspaces/${workspaceId}/environments`);
+  }
+
+  async createEnvironment(workspaceId: string, request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment> {
+    return await this.requestJson<WorkspaceEnvironment>("POST", `/v1/workspaces/${workspaceId}/environments`, request);
+  }
+
+  async getEnvironment(workspaceId: string, environmentId: string): Promise<WorkspaceEnvironment> {
+    return await this.requestJson<WorkspaceEnvironment>("GET", `/v1/workspaces/${workspaceId}/environments/${environmentId}`);
+  }
+
+  async updateEnvironment(
+    workspaceId: string,
+    environmentId: string,
+    request: UpdateWorkspaceEnvironmentRequest,
+  ): Promise<WorkspaceEnvironment> {
+    return await this.requestJson<WorkspaceEnvironment>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/environments/${environmentId}`,
+      request,
+    );
+  }
+
+  async deleteEnvironment(workspaceId: string, environmentId: string): Promise<void> {
+    await this.requestJson<unknown>("DELETE", `/v1/workspaces/${workspaceId}/environments/${environmentId}`);
+  }
+
+  /** Create or rotate a variable. The value never comes back on any read. */
+  async setEnvironmentVariable(
+    workspaceId: string,
+    environmentId: string,
+    name: string,
+    value: string,
+  ): Promise<WorkspaceEnvironmentVariableMetadata> {
+    return await this.requestJson<WorkspaceEnvironmentVariableMetadata>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+      { value },
+    );
+  }
+
+  async deleteEnvironmentVariable(workspaceId: string, environmentId: string, name: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/environments/${environmentId}/variables/${encodeURIComponent(name)}`,
+    );
+  }
+
+  // --- Files -----------------------------------------------------------------------
+
+  /** Step 1 of the upload flow: returns the pre-signed PUT target. */
+  async beginFileUpload(workspaceId: string, request: CreateFileUploadRequest): Promise<CreateFileUploadResponse> {
+    return await this.requestJson<CreateFileUploadResponse>("POST", `/v1/workspaces/${workspaceId}/files/uploads`, request);
+  }
+
+  /** Step 3 of the upload flow: server verifies the object and marks it ready. */
+  async completeFileUpload(workspaceId: string, uploadId: string): Promise<FileAsset> {
+    const response = await this.requestJson<CompleteFileUploadResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/files/uploads/${uploadId}/complete`,
+    );
+    return response.file;
+  }
+
+  /**
+   * The whole upload flow as one call: begin -> PUT the bytes to the signed
+   * URL (with its required headers; no API auth is sent to object storage)
+   * -> complete. Returns the ready `FileAsset`.
+   */
+  async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
+    // Copy Uint8Array views into a Blob so byte offsets/shared buffers can't
+    // leak surrounding bytes into the PUT body.
+    const body: Blob | ArrayBuffer | string = input.data instanceof Uint8Array
+      ? new Blob([input.data.slice()])
+      : input.data;
+    const sizeBytes = typeof body === "string"
+      ? new TextEncoder().encode(body).byteLength
+      : body instanceof Blob ? body.size : body.byteLength;
+    const upload = await this.beginFileUpload(workspaceId, {
+      filename: input.filename,
+      contentType: input.contentType,
+      sizeBytes,
+      ...(input.sha256 !== undefined ? { sha256: input.sha256 } : {}),
+    });
+    const putResponse = await this.fetchImpl(upload.putUrl, {
+      method: "PUT",
+      headers: { "Content-Type": input.contentType, ...upload.requiredHeaders },
+      body,
+    });
+    if (!putResponse.ok) {
+      throw new OpenGeniApiError(putResponse.status, await safeText(putResponse));
+    }
+    return await this.completeFileUpload(workspaceId, upload.uploadId);
+  }
+
+  async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
+    return await this.requestJson<FileAsset>("GET", `/v1/workspaces/${workspaceId}/files/${fileId}`);
+  }
+
+  /** Mint a short-lived signed download URL for a ready file. */
+  async createFileDownloadUrl(workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
+    return await this.requestJson<FileDownloadUrlResponse>("POST", `/v1/workspaces/${workspaceId}/files/${fileId}/download-url`);
+  }
+
+  // --- Documents ----------------------------------------------------------------------
+
+  async createDocumentBase(workspaceId: string, request: CreateDocumentBaseRequest): Promise<DocumentBase> {
+    return await this.requestJson<DocumentBase>("POST", `/v1/workspaces/${workspaceId}/document-bases`, request);
+  }
+
+  async listDocumentBases(workspaceId: string): Promise<DocumentBase[]> {
+    return await this.requestJson<DocumentBase[]>("GET", `/v1/workspaces/${workspaceId}/document-bases`);
+  }
+
+  async getDocumentBase(workspaceId: string, baseId: string): Promise<DocumentBase> {
+    return await this.requestJson<DocumentBase>("GET", `/v1/workspaces/${workspaceId}/document-bases/${baseId}`);
+  }
+
+  /** Index an uploaded file into the base. The file must be `ready`. */
+  async addDocument(workspaceId: string, baseId: string, request: { fileId: string }): Promise<Document> {
+    return await this.requestJson<Document>("POST", `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`, request);
+  }
+
+  async listDocuments(workspaceId: string, baseId: string): Promise<Document[]> {
+    return await this.requestJson<Document[]>("GET", `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`);
+  }
+
+  /** Retry indexing for a failed document. */
+  async reindexDocument(workspaceId: string, baseId: string, documentId: string): Promise<Document> {
+    return await this.requestJson<Document>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents/${documentId}/reindex`,
+    );
+  }
+
+  async searchDocuments(
+    workspaceId: string,
+    baseId: string,
+    request: { query: string; limit?: number },
+  ): Promise<DocumentSearchResponse> {
+    return await this.requestJson<DocumentSearchResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/search`,
+      request,
+    );
+  }
+
+  // --- Capability packs ------------------------------------------------------------------
+
+  /** Built-in + registered packs, with the workspace's installations. */
+  async listPacks(workspaceId: string): Promise<ListPacksResponse> {
+    return await this.requestJson<ListPacksResponse>("GET", `/v1/workspaces/${workspaceId}/packs`);
+  }
+
+  /** Register (or replace) a workspace-scoped pack from a manifest. */
+  async registerPack(workspaceId: string, manifest: RegisterCapabilityPackRequest): Promise<WorkspaceRegisteredPack> {
+    return await this.requestJson<WorkspaceRegisteredPack>("POST", `/v1/workspaces/${workspaceId}/packs`, manifest);
+  }
+
+  async getPack(workspaceId: string, packId: string): Promise<GetPackResponse> {
+    return await this.requestJson<GetPackResponse>("GET", `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`);
+  }
+
+  async enablePack(workspaceId: string, packId: string, request: EnablePackRequest = {}): Promise<PackInstallation> {
+    return await this.requestJson<PackInstallation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}/enable`,
+      request,
+    );
+  }
+
+  /** Unregister a workspace-scoped pack (built-in packs cannot be deleted). */
+  async deletePack(workspaceId: string, packId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/packs/${encodeURIComponent(packId)}`);
+  }
+
+  async listPackInstallations(workspaceId: string): Promise<PackInstallation[]> {
+    return await this.requestJson<PackInstallation[]>("GET", `/v1/workspaces/${workspaceId}/packs/installations`);
+  }
+
+  // --- Capabilities -------------------------------------------------------------------------
+
+  async listCapabilities(workspaceId: string): Promise<CapabilityCatalogResponse> {
+    return await this.requestJson<CapabilityCatalogResponse>("GET", `/v1/workspaces/${workspaceId}/capabilities`);
+  }
+
+  /** Add a manual capability catalog item (e.g. a remote MCP server). */
+  async createCapability(workspaceId: string, request: CreateCapabilityCatalogItemRequest): Promise<CapabilityCatalogItem> {
+    return await this.requestJson<CapabilityCatalogItem>("POST", `/v1/workspaces/${workspaceId}/capabilities`, request);
+  }
+
+  async enableCapability(
+    workspaceId: string,
+    capabilityId: string,
+    request: EnableCapabilityRequest = {},
+  ): Promise<CapabilityInstallation> {
+    return await this.requestJson<CapabilityInstallation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/enable`,
+      request,
+    );
+  }
+
+  async disableCapability(workspaceId: string, capabilityId: string): Promise<CapabilityInstallation> {
+    return await this.requestJson<CapabilityInstallation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/disable`,
+    );
+  }
+
+  /** Search the official MCP registry for installable capabilities. */
+  async discoverMcpCapabilities(
+    workspaceId: string,
+    options: { query?: string; limit?: number } = {},
+  ): Promise<DiscoverMcpCapabilitiesResponse> {
+    return await this.requestJson<DiscoverMcpCapabilitiesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/mcp-registry`,
+      undefined,
+      {
+        ...(options.query !== undefined ? { query: options.query } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
+  // --- GitHub ----------------------------------------------------------------------------------
+
+  /** GitHub App configuration status + a signed install URL when configured. */
+  async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
+    return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
+  }
+
+  /**
+   * Browser entry point that plants the CSRF cookie and forwards to GitHub's
+   * install page. Open this in a browser (it redirects); `state` comes from
+   * `getGitHubApp().installUrl` or a github_connect_link tool.
+   */
+  githubConnectUrl(workspaceId: string, state: string): string {
+    return this.url(`/v1/workspaces/${workspaceId}/github/connect`, { state });
+  }
+
+  async listGitHubRepositories(workspaceId: string): Promise<GitHubRepositoriesResponse> {
+    return await this.requestJson<GitHubRepositoriesResponse>("GET", `/v1/workspaces/${workspaceId}/github/repositories`);
+  }
+
+  /** Re-sync the installation's repository list from GitHub. */
+  async syncGitHubRepositories(workspaceId: string): Promise<GitHubRepositoriesResponse> {
+    return await this.requestJson<GitHubRepositoriesResponse>("POST", `/v1/workspaces/${workspaceId}/github/repositories/sync`);
+  }
+
+  /** Build a GitHub App manifest + the GitHub URL to submit it to. */
+  async createGitHubAppManifest(
+    workspaceId: string,
+    request: CreateGitHubAppManifestRequest = {},
+  ): Promise<CreateGitHubAppManifestResponse> {
+    return await this.requestJson<CreateGitHubAppManifestResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/github/app-manifest`,
+      request,
+    );
+  }
+
+  // --- API keys ----------------------------------------------------------------------------------
+
+  async listApiKeys(workspaceId: string): Promise<ApiKey[]> {
+    const response = await this.requestJson<ListApiKeysResponse>("GET", `/v1/workspaces/${workspaceId}/api-keys`);
+    return response.apiKeys;
+  }
+
+  /** The returned `token` is shown once; only its prefix is stored. */
+  async createApiKey(workspaceId: string, request: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    return await this.requestJson<CreateApiKeyResponse>("POST", `/v1/workspaces/${workspaceId}/api-keys`, request);
+  }
+
+  /** Revoke an API key. Returns the revoked key. */
+  async deleteApiKey(workspaceId: string, apiKeyId: string): Promise<ApiKey> {
+    return await this.requestJson<ApiKey>("DELETE", `/v1/workspaces/${workspaceId}/api-keys/${apiKeyId}`);
+  }
+
+  // --- Billing (account-scoped) --------------------------------------------------------------------
+
+  async getBilling(options: { accountId?: string } = {}): Promise<BillingSummary> {
+    return await this.requestJson<BillingSummary>("GET", "/v1/billing", undefined, {
+      ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+    });
+  }
+
+  async getBillingUsage(options: { accountId?: string; workspaceId?: string } = {}): Promise<BillingUsageResponse> {
+    return await this.requestJson<BillingUsageResponse>("GET", "/v1/billing/usage", undefined, {
+      ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+      ...(options.workspaceId !== undefined ? { workspaceId: options.workspaceId } : {}),
+    });
+  }
+
+  async getBillingEntitlements(options: { accountId?: string } = {}): Promise<BillingEntitlementsResponse> {
+    return await this.requestJson<BillingEntitlementsResponse>("GET", "/v1/billing/entitlements", undefined, {
+      ...(options.accountId !== undefined ? { accountId: options.accountId } : {}),
+    });
+  }
+
+  /** Start a Stripe checkout for prepaid credits. */
+  async createBillingCheckout(request: CreateCheckoutRequest): Promise<CreateCheckoutResponse> {
+    return await this.requestJson<CreateCheckoutResponse>("POST", "/v1/billing/checkout", request);
+  }
+
   // --- Internals -------------------------------------------------------------
 
   private headers(): Record<string, string> {
@@ -212,6 +734,17 @@ export class OpenGeniClient {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
     return (await response.json()) as T;
+  }
+
+  /** Like `requestJson` for endpoints that respond with no body (204). */
+  private async requestVoid(method: string, path: string): Promise<void> {
+    const response = await this.fetchImpl(this.url(path), {
+      method,
+      headers: { ...this.headers(), Accept: "application/json" },
+    });
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeText(response));
+    }
   }
 }
 

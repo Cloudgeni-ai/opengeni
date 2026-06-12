@@ -9,11 +9,31 @@
    -------------------------------------------------------------------------- */
 
 import type {
+  BillingUsageResponse,
+  CapabilityPack,
+  CreateWorkspaceEnvironmentRequest,
+  CreateWorkspaceRequest,
+  EnablePackRequest,
+  ListPacksResponse,
+  PackInstallation,
+  RegisterCapabilityPackRequest,
   ScheduledTask,
+  SendMessageInput,
   Session,
   SessionEvent,
+  SessionGoal,
   SessionStatus,
+  SessionTurn,
+  SteerMessageResult,
   StreamSessionEventsOptions,
+  UpdateSessionGoalRequest,
+  UpdateSessionTurnRequest,
+  UpdateWorkspaceEnvironmentRequest,
+  UpdateWorkspaceRequest,
+  Workspace,
+  WorkspaceEnvironment,
+  WorkspaceEnvironmentVariableMetadata,
+  WorkspaceRegisteredPack,
 } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/index";
 
@@ -143,6 +163,250 @@ export class MockOpenGeniClient implements SessionClientLike {
     return bus.stream(options.after ?? 0, options.signal);
   }
 
+  // --- Turn queue (in-memory, drives the queue UI in the demo) ---------------
+
+  private turns = new Map<string, SessionTurn[]>();
+
+  private sessionTurns(sessionId: string): SessionTurn[] {
+    let turns = this.turns.get(sessionId);
+    if (!turns) {
+      turns = [
+        fabricateTurn(sessionId, 1, "Summarize the staging rollout status for the changelog"),
+        fabricateTurn(sessionId, 2, "Open a PR bumping the api service base image"),
+      ];
+      this.turns.set(sessionId, turns);
+    }
+    return turns;
+  }
+
+  async listTurns(_workspaceId: string, sessionId: string): Promise<SessionTurn[]> {
+    return [...this.sessionTurns(sessionId)];
+  }
+
+  async updateQueuedTurn(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    update: UpdateSessionTurnRequest,
+  ): Promise<SessionTurn> {
+    const turns = this.sessionTurns(sessionId);
+    const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+    if (!turn) {
+      throw new Error(`queued turn not found: ${turnId}`);
+    }
+    Object.assign(turn, {
+      ...(update.prompt !== undefined ? { prompt: update.prompt } : {}),
+      ...(update.model !== undefined ? { model: update.model } : {}),
+      ...(update.reasoningEffort !== undefined ? { reasoningEffort: update.reasoningEffort } : {}),
+      updatedAt: new Date().toISOString(),
+    });
+    this.bus(sessionId).append("turn.updated", { turnId }, turnId);
+    return { ...turn };
+  }
+
+  async reorderQueuedTurns(_workspaceId: string, sessionId: string, turnIds: string[]): Promise<SessionTurn[]> {
+    const turns = this.sessionTurns(sessionId);
+    turnIds.forEach((turnId, index) => {
+      const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+      if (turn) {
+        turn.position = index + 1;
+      }
+    });
+    this.bus(sessionId).append("turn.updated", { reorderedTurnIds: turnIds });
+    return turns.filter((turn) => turn.status === "queued").sort((a, b) => a.position - b.position);
+  }
+
+  async deleteQueuedTurn(_workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
+    const turns = this.sessionTurns(sessionId);
+    const turn = turns.find((candidate) => candidate.id === turnId && candidate.status === "queued");
+    if (!turn) {
+      throw new Error(`queued turn not found: ${turnId}`);
+    }
+    turn.status = "cancelled";
+    this.bus(sessionId).append("turn.cancelled", { turnId }, turnId);
+    return { ...turn };
+  }
+
+  async steerMessage(
+    workspaceId: string,
+    sessionId: string,
+    message: string | SendMessageInput,
+  ): Promise<SteerMessageResult> {
+    const accepted = await this.sendMessage(workspaceId, sessionId, message);
+    return { accepted, turn: null, interrupted: this.bus(sessionId).status === "running" };
+  }
+
+  // --- Goal -------------------------------------------------------------------
+
+  private goals = new Map<string, SessionGoal>();
+
+  async getGoal(_workspaceId: string, sessionId: string): Promise<SessionGoal> {
+    let goal = this.goals.get(sessionId);
+    if (!goal) {
+      goal = fabricateGoal(sessionId);
+      this.goals.set(sessionId, goal);
+    }
+    return { ...goal };
+  }
+
+  async updateGoal(workspaceId: string, sessionId: string, request: UpdateSessionGoalRequest): Promise<SessionGoal> {
+    const goal = await this.getGoal(workspaceId, sessionId);
+    goal.status = request.status;
+    goal.rationale = request.rationale ?? goal.rationale;
+    goal.pausedReason = request.status === "paused" ? "api" : null;
+    goal.updatedAt = new Date().toISOString();
+    this.goals.set(sessionId, goal);
+    this.bus(sessionId).append(request.status === "paused" ? "goal.paused" : "goal.resumed", { goalId: goal.id });
+    return { ...goal };
+  }
+
+  async sendApprovalDecision(
+    _workspaceId: string,
+    sessionId: string,
+    decision: { approvalId: string; decision: "approve" | "reject"; message?: string },
+  ): Promise<SessionEvent> {
+    return this.bus(sessionId).append("user.approvalDecision", decision);
+  }
+
+  // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
+
+  private environments: WorkspaceEnvironment[] = [fabricateEnvironment("staging"), fabricateEnvironment("production")];
+
+  async listEnvironments(): Promise<WorkspaceEnvironment[]> {
+    return [...this.environments];
+  }
+
+  async createEnvironment(_workspaceId: string, request: CreateWorkspaceEnvironmentRequest): Promise<WorkspaceEnvironment> {
+    const environment = fabricateEnvironment(request.name, request.variables?.map((variable) => variable.name) ?? []);
+    this.environments.push(environment);
+    return { ...environment };
+  }
+
+  async updateEnvironment(
+    _workspaceId: string,
+    environmentId: string,
+    request: UpdateWorkspaceEnvironmentRequest,
+  ): Promise<WorkspaceEnvironment> {
+    const environment = this.environments.find((candidate) => candidate.id === environmentId);
+    if (!environment) {
+      throw new Error("environment not found");
+    }
+    if (request.name !== undefined) {
+      environment.name = request.name;
+    }
+    if (request.description !== undefined) {
+      environment.description = request.description;
+    }
+    return { ...environment };
+  }
+
+  async deleteEnvironment(_workspaceId: string, environmentId: string): Promise<void> {
+    this.environments = this.environments.filter((candidate) => candidate.id !== environmentId);
+  }
+
+  async setEnvironmentVariable(
+    _workspaceId: string,
+    environmentId: string,
+    name: string,
+    _value: string,
+  ): Promise<WorkspaceEnvironmentVariableMetadata> {
+    const environment = this.environments.find((candidate) => candidate.id === environmentId);
+    if (!environment) {
+      throw new Error("environment not found");
+    }
+    const now = new Date().toISOString();
+    const existing = environment.variables.find((variable) => variable.name === name);
+    if (existing) {
+      existing.version += 1;
+      existing.updatedAt = now;
+      return { ...existing };
+    }
+    const created = { name, version: 1, createdAt: now, updatedAt: now };
+    environment.variables.push(created);
+    return { ...created };
+  }
+
+  async deleteEnvironmentVariable(_workspaceId: string, environmentId: string, name: string): Promise<void> {
+    const environment = this.environments.find((candidate) => candidate.id === environmentId);
+    if (environment) {
+      environment.variables = environment.variables.filter((variable) => variable.name !== name);
+    }
+  }
+
+  private registeredPacks: WorkspaceRegisteredPack[] = [];
+  private packInstallations: PackInstallation[] = [];
+
+  async listPacks(): Promise<ListPacksResponse> {
+    return {
+      packs: [DEVOPS_PACK, ...this.registeredPacks.map((registration) => registration.pack)],
+      installations: [...this.packInstallations],
+    };
+  }
+
+  async registerPack(_workspaceId: string, manifest: RegisterCapabilityPackRequest): Promise<WorkspaceRegisteredPack> {
+    const now = new Date().toISOString();
+    const registration: WorkspaceRegisteredPack = {
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      pack: fabricatePack(manifest),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.registeredPacks = [...this.registeredPacks.filter((existing) => existing.pack.id !== manifest.id), registration];
+    return registration;
+  }
+
+  async enablePack(_workspaceId: string, packId: string, request: EnablePackRequest = {}): Promise<PackInstallation> {
+    const now = new Date().toISOString();
+    const installation: PackInstallation = {
+      id: crypto.randomUUID(),
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      packId,
+      status: "active",
+      metadata: { ...request.metadata, ...(request.environmentId ? { environmentId: request.environmentId } : {}) },
+      enabledAt: now,
+      updatedAt: now,
+    };
+    this.packInstallations = [...this.packInstallations.filter((existing) => existing.packId !== packId), installation];
+    return installation;
+  }
+
+  async deletePack(_workspaceId: string, packId: string): Promise<void> {
+    this.registeredPacks = this.registeredPacks.filter((registration) => registration.pack.id !== packId);
+    this.packInstallations = this.packInstallations.filter((installation) => installation.packId !== packId);
+  }
+
+  private workspaces: Workspace[] = [fabricateWorkspace("Acme Platform")];
+
+  async listWorkspaces(): Promise<Workspace[]> {
+    return [...this.workspaces];
+  }
+
+  async createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace> {
+    const workspace = fabricateWorkspace(request.name);
+    this.workspaces.push(workspace);
+    return { ...workspace };
+  }
+
+  async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
+    const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) {
+      throw new Error("workspace not found");
+    }
+    if (request.name !== undefined) {
+      workspace.name = request.name;
+    }
+    return { ...workspace };
+  }
+
+  async getBillingUsage(): Promise<BillingUsageResponse> {
+    return {
+      balance: { accountId: ACCOUNT_ID, balanceMicros: 42_500_000, currency: "usd", updatedAt: new Date().toISOString() },
+      usage: [],
+    };
+  }
+
   /** Canned manager acknowledgment for anything typed into the composer. */
   private async respond(bus: SessionBus, text: string): Promise<void> {
     bus.setStatus("running");
@@ -242,6 +506,114 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   await streamText(bus, turn, "I'll report back when the worker has staging reachable. If the drift check finds anything that needs a decision (destructive changes, spend), I'll ask you here first.");
   bus.append("turn.completed", {}, turn);
   bus.setStatus("idle");
+}
+
+/* --- fixtures ------------------------------------------------------------------ */
+
+const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
+  const now = new Date(Date.now() - (10 - position) * 60_000).toISOString();
+  return {
+    id: crypto.randomUUID(),
+    workspaceId: WORKSPACE_ID,
+    sessionId,
+    triggerEventId: crypto.randomUUID(),
+    temporalWorkflowId: `wf-${sessionId.slice(0, 8)}`,
+    status: "queued",
+    source: "user",
+    position,
+    prompt,
+    resources: [],
+    tools: [],
+    model: "gpt-5.2",
+    reasoningEffort: "medium",
+    sandboxBackend: "modal",
+    metadata: {},
+    startedAt: null,
+    finishedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function fabricateGoal(sessionId: string): SessionGoal {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    sessionId,
+    status: "active",
+    text: "Staging live for api + prod drift report delivered",
+    successCriteria: "Staging environment reachable and drift report filed",
+    evidence: null,
+    rationale: null,
+    pausedReason: null,
+    createdBy: "agent",
+    version: 1,
+    autoContinuations: 2,
+    noProgressStreak: 0,
+    maxAutoContinuations: 25,
+    metadata: {},
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function fabricateEnvironment(name: string, variableNames: string[] = ["CLOUD_API_TOKEN", "DATABASE_URL"]): WorkspaceEnvironment {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    name,
+    description: `${name} credentials`,
+    variables: variableNames.map((variableName) => ({ name: variableName, version: 1, createdAt: now, updatedAt: now })),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function fabricatePack(manifest: RegisterCapabilityPackRequest): CapabilityPack {
+  return {
+    id: manifest.id,
+    name: manifest.name,
+    description: manifest.description,
+    role: manifest.role,
+    category: manifest.category,
+    version: manifest.version,
+    skills: (manifest.skills ?? []).map((skill) => ({ name: skill.name, files: skill.files })),
+    tools: manifest.tools ?? [],
+    connectors: [],
+    knowledge: [],
+    scheduledTaskTemplates: [],
+    metadata: manifest.metadata ?? {},
+  };
+}
+
+const DEVOPS_PACK: CapabilityPack = fabricatePack({
+  id: "autonomous-devops",
+  name: "Autonomous DevOps",
+  description: "Long-running infrastructure agents: drift checks, deploys, incident response.",
+  role: "devops",
+  category: "infrastructure",
+  version: "1.2.0",
+  skills: [{ name: "drift-checks", files: [{ path: "SKILL.md", content: "# Drift checks" }] }],
+});
+
+function fabricateWorkspace(name: string): Workspace {
+  const now = new Date().toISOString();
+  return {
+    id: crypto.randomUUID(),
+    accountId: ACCOUNT_ID,
+    name,
+    slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    externalSource: null,
+    externalId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 /* --- fleet + schedule fixtures ----------------------------------------------- */

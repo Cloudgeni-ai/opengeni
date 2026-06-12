@@ -7,10 +7,39 @@ import type { OpenGeniClient } from "@opengeni/sdk";
  */
 export type SessionClientLike = Pick<
   OpenGeniClient,
+  // Sessions, events, composer
   | "getSession"
   | "listSessions"
-  | "listScheduledTasks"
   | "sendMessage"
+  | "steerMessage"
   | "interrupt"
+  | "sendApprovalDecision"
   | "streamEvents"
+  // Turn queue
+  | "listTurns"
+  | "updateQueuedTurn"
+  | "reorderQueuedTurns"
+  | "deleteQueuedTurn"
+  // Goal
+  | "getGoal"
+  | "updateGoal"
+  // Scheduled tasks
+  | "listScheduledTasks"
+  // Environments
+  | "listEnvironments"
+  | "createEnvironment"
+  | "updateEnvironment"
+  | "deleteEnvironment"
+  | "setEnvironmentVariable"
+  | "deleteEnvironmentVariable"
+  // Packs
+  | "listPacks"
+  | "registerPack"
+  | "enablePack"
+  | "deletePack"
+  // Workspaces + billing
+  | "listWorkspaces"
+  | "createWorkspace"
+  | "updateWorkspace"
+  | "getBillingUsage"
 >;

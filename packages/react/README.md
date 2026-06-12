@@ -69,21 +69,44 @@ export function App() {
   exactly-once/ordered event delivery; returns the raw `events`, the projected
   `timeline`, the latest `sessionStatus`, and the connection state. Updates are
   batched per animation-frame-ish window so long replays stay smooth.
-- `useComposer(sessionId, { sendExtras })` — draft/send/interrupt state. Drafts
-  survive failed sends; each draft reuses one `clientEventId` across retries so
-  the server dedupes. `sendExtras` (object or function evaluated at send time)
-  merges resources/tools/model/reasoningEffort into every message — attachment
-  pickers and model selectors plug in without leaving the hook. Chat is the
-  only human→agent input surface by design — there are no approval or decision
-  widgets.
+- `useComposer(sessionId, { sendExtras, defaultMode })` — draft/send/interrupt
+  state plus the compose-time **queue-vs-steer** choice (`mode`/`setMode`,
+  default `"queue"`): queue stacks the message behind the running turn, steer
+  interrupts and injects it now. Drafts survive failed sends; each draft
+  reuses one `clientEventId` across retries so the server dedupes.
+  `sendExtras` (object or function evaluated at send time) merges
+  resources/tools/model/reasoningEffort into every message. All human input is
+  plain chat text by design; approvals flow as control events
+  (`useSessionControl`), not bespoke widgets.
+- `useTurnQueue(sessionId, { events })` — the live turn queue: `queue` (queued
+  turns in execution order), `activeTurn`, and optimistic `editTurn` /
+  `reorderTurns` / `removeTurn` that reconcile with the server (failed
+  mutations roll back via refetch). Live-updates on `turn.*` events — pass the
+  `events` log from `useSessionEvents` to reuse its stream, or let it tail the
+  session itself.
+- `useGoal(sessionId, { events })` — goal state + autonomy counters
+  (`autoContinuations`, `noProgressStreak`) with `pause(rationale?)` /
+  `resume()`. Goal-less sessions yield `goal: null`. Live-updates on `goal.*`
+  events.
+- `useSessionControl(sessionId)` — `interrupt(reason?)` and
+  `approve`/`reject(approvalId, message?)` for `requires_action` approvals.
 - `useSession(sessionId)` — fetch one session (optional polling).
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
   fleet/manager views (optional polling).
+- `useEnvironments()` — workspace environments with create/update/remove and
+  write-only `setVariable`/`deleteVariable` (values never come back on reads).
+- `usePacks()` — capability packs + installations with
+  register/enable/remove and `installationFor(packId)`.
+- `useWorkspaces()` — the caller's workspaces with create/update (client-only;
+  not bound to the provider's workspace).
+- `useBillingUsage({ accountId?, workspaceId? })` — credit balance + recent
+  usage events for billing meters (client-only, optional polling).
 
-All hooks resolve the client/workspace from `<OpenGeniProvider>` or accept
-`{ client, workspaceId }` per call. They depend on `SessionClientLike` — a
-structural slice of `OpenGeniClient` — so proxy-backed or scripted clients work
-unchanged.
+All workspace-scoped hooks resolve the client/workspace from
+`<OpenGeniProvider>` or accept `{ client, workspaceId }` per call
+(`useWorkspaces`/`useBillingUsage` need only the client). They depend on
+`SessionClientLike` — a structural slice of `OpenGeniClient` — so proxy-backed
+or scripted clients work unchanged.
 
 ## Timeline projection
 

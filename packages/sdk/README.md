@@ -55,16 +55,71 @@ for await (const event of client.streamEvents(workspaceId, sessionId, {
 }
 ```
 
-## Sending messages and control events
+## Messages, the turn queue, and steering
+
+Messages sent while a turn is running **queue by default** — visible,
+editable, reorderable, and deletable until the worker claims them. Steering is
+the explicit alternative: deliver now by interrupting the running turn.
 
 ```ts
+// Queue (default): stacks behind the running turn.
 await client.sendMessage(workspaceId, sessionId, "Also check the nginx config");
+
+// Steer: send + promote to the queue front + interrupt the running turn.
+await client.steerMessage(workspaceId, sessionId, "Stop — prod is paging, look at that first");
+
+// Manage the queue while it waits.
+const turns = await client.listTurns(workspaceId, sessionId);
+await client.updateQueuedTurn(workspaceId, sessionId, turnId, { prompt: "rewritten" });
+await client.reorderQueuedTurns(workspaceId, sessionId, [turnB, turnA]);
+await client.deleteQueuedTurn(workspaceId, sessionId, turnId);
+
+// Control events.
 await client.interrupt(workspaceId, sessionId, { reason: "stop and report" });
-await client.sendApprovalDecision(workspaceId, sessionId, {
-  approvalId,
-  decision: "approve",
-});
+await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
+
+## Goals
+
+```ts
+const goal = await client.getGoal(workspaceId, sessionId); // counters: autoContinuations, noProgressStreak
+await client.pauseGoal(workspaceId, sessionId, { rationale: "manual review" });
+await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms continuations
+```
+
+## Files
+
+`uploadFile` wraps the three-step flow (begin → signed PUT → complete) in one
+call; the lower-level steps are exported for resumable/custom flows.
+
+```ts
+const file = await client.uploadFile(workspaceId, {
+  filename: "incident-notes.md",
+  contentType: "text/markdown",
+  data: notes, // string | Blob | ArrayBuffer | Uint8Array
+});
+const { url } = await client.createFileDownloadUrl(workspaceId, file.id);
+```
+
+## Full API coverage
+
+Every public endpoint group has typed methods:
+
+| Group | Methods |
+| --- | --- |
+| Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Sessions + events | `createSession`, `listSessions`, `getSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `interrupt`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Turn queue | `listTurns`, `updateQueuedTurn`, `reorderQueuedTurns`, `deleteQueuedTurn` |
+| Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
+| Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
+| Environments | `listEnvironments`, `createEnvironment`, `getEnvironment`, `updateEnvironment`, `deleteEnvironment`, `setEnvironmentVariable`, `deleteEnvironmentVariable` (values are write-only) |
+| Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |
+| Documents | `createDocumentBase`, `listDocumentBases`, `getDocumentBase`, `addDocument`, `listDocuments`, `reindexDocument`, `searchDocuments` |
+| Packs | `listPacks`, `registerPack`, `getPack`, `enablePack`, `deletePack`, `listPackInstallations` |
+| Capabilities | `listCapabilities`, `createCapability`, `enableCapability`, `disableCapability`, `discoverMcpCapabilities` |
+| GitHub | `getGitHubApp`, `githubConnectUrl`, `listGitHubRepositories`, `syncGitHubRepositories`, `createGitHubAppManifest` |
+| API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
+| Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout` |
 
 ## Proxy through your own API
 

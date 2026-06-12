@@ -934,6 +934,9 @@ function AgentHomeRoute() {
     setValue: setDraft,
     sending: context.busy,
     canSend: draft.trim().length > 0 && !context.busy && !attachments.uploading,
+    // Queue-vs-steer is meaningless before the session exists.
+    mode: "queue",
+    setMode: () => {},
     interrupt: async () => {},
     interrupting: false,
     error: null,
