@@ -67,6 +67,13 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
       }
       const batch = pending;
       pending = [];
+      // The resume cursor only advances with delivered batches: events still
+      // sitting in `pending` when the stream is torn down are re-fetched on
+      // the next connect instead of being skipped.
+      const lastInBatch = batch[batch.length - 1];
+      if (lastInBatch) {
+        lastSequenceRef.current = lastInBatch.sequence;
+      }
       setEvents((existing) => [...existing, ...batch]);
     };
     const scheduleFlush = () => {
@@ -85,7 +92,6 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
           },
         });
         for await (const event of stream) {
-          lastSequenceRef.current = event.sequence;
           pending.push(event);
           scheduleFlush();
         }
