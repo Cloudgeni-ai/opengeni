@@ -1,0 +1,109 @@
+/* ----------------------------------------------------------------------------
+   @opengeni/react design tokens
+
+   Pure CSS variables — no Tailwind required to consume them. Dark is the
+   first-class default (`:root`); light is an explicit opt-in via
+   `[data-og-theme="light"]` (or the `.og-light` class) on any ancestor, so
+   themes can be nested and rebranded per subtree.
+
+   All colors are OKLCH for perceptual consistency. The palette is deliberately
+   calm: one accent, desaturated status hues, low-chroma neutral ramps on a
+   cool slate hue. Information density comes from typography and spacing, not
+   from color shouting.
+   -------------------------------------------------------------------------- */
+
+:root {
+  /* Typography ------------------------------------------------------------- */
+  --og-font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --og-font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --og-font-features: "cv11", "ss01", "ss03";
+
+  /* Radius ----------------------------------------------------------------- */
+  --og-radius-xs: 4px;
+  --og-radius-sm: 6px;
+  --og-radius-md: 10px;
+  --og-radius-lg: 14px;
+  --og-radius-xl: 20px;
+  --og-radius-full: 9999px;
+
+  /* Motion — communicates state; never decorates ---------------------------- */
+  --og-duration-fast: 120ms;
+  --og-duration-base: 180ms;
+  --og-duration-slow: 320ms;
+  --og-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --og-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --og-ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
+
+  /* Neutrals (dark) ---------------------------------------------------------- */
+  --og-color-bg: oklch(0.155 0.012 260);
+  --og-color-surface-1: oklch(0.19 0.014 260);
+  --og-color-surface-2: oklch(0.225 0.015 260);
+  --og-color-surface-3: oklch(0.265 0.016 260);
+  --og-color-border: oklch(0.3 0.014 260);
+  --og-color-border-strong: oklch(0.42 0.016 260);
+  --og-color-fg: oklch(0.955 0.005 260);
+  --og-color-fg-muted: oklch(0.73 0.012 260);
+  --og-color-fg-subtle: oklch(0.56 0.013 260);
+
+  /* Accent — one brand hue, used sparingly ----------------------------------- */
+  --og-color-accent: oklch(0.72 0.15 255);
+  --og-color-accent-strong: oklch(0.78 0.14 255);
+  --og-color-accent-fg: oklch(0.985 0.005 260);
+  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+
+  /* Status — muted so they inform without alarming --------------------------- */
+  --og-color-status-queued: oklch(0.62 0.03 260);
+  --og-color-status-running: oklch(0.78 0.11 80);
+  --og-color-status-idle: oklch(0.78 0.12 155);
+  --og-color-status-waiting: oklch(0.74 0.12 305);
+  --og-color-status-failed: oklch(0.7 0.16 22);
+  --og-color-status-cancelled: oklch(0.6 0.035 260);
+  --og-color-danger: oklch(0.66 0.18 22);
+
+  /* Elevation ----------------------------------------------------------------
+     Dark surfaces barely cast shadows; elevation reads mostly from the
+     surface ramp. Shadows stay soft and tight. The glow is for the one thing
+     that should feel alive (focused composer, running session). */
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.28);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.32), 0 1px 2px oklch(0 0 0 / 0.24);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.42), 0 2px 8px oklch(0 0 0 / 0.28);
+  --og-shadow-glow: 0 0 0 1px color-mix(in oklch, var(--og-color-accent) 45%, transparent),
+    0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+
+  color-scheme: dark;
+}
+
+/* Light theme — explicit opt-in, themable per subtree ----------------------- */
+[data-og-theme="light"],
+.og-light {
+  --og-color-bg: oklch(0.978 0.003 260);
+  --og-color-surface-1: oklch(1 0 0);
+  --og-color-surface-2: oklch(0.962 0.004 260);
+  --og-color-surface-3: oklch(0.935 0.006 260);
+  --og-color-border: oklch(0.9 0.006 260);
+  --og-color-border-strong: oklch(0.8 0.01 260);
+  --og-color-fg: oklch(0.21 0.015 260);
+  --og-color-fg-muted: oklch(0.46 0.014 260);
+  --og-color-fg-subtle: oklch(0.6 0.012 260);
+
+  --og-color-accent: oklch(0.55 0.18 255);
+  --og-color-accent-strong: oklch(0.48 0.19 255);
+  --og-color-accent-fg: oklch(0.985 0.005 260);
+  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+
+  --og-color-status-queued: oklch(0.55 0.03 260);
+  --og-color-status-running: oklch(0.6 0.13 80);
+  --og-color-status-idle: oklch(0.56 0.13 155);
+  --og-color-status-waiting: oklch(0.54 0.15 305);
+  --og-color-status-failed: oklch(0.55 0.19 22);
+  --og-color-status-cancelled: oklch(0.55 0.025 260);
+  --og-color-danger: oklch(0.55 0.2 22);
+
+  --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
+  --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
+  --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
+  --og-shadow-glow: 0 0 0 1px color-mix(in oklch, var(--og-color-accent) 38%, transparent),
+    0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+
+  color-scheme: light;
+}

@@ -1,0 +1,157 @@
+/* ----------------------------------------------------------------------------
+   @opengeni/react — Tailwind v4 theme bridge + component keyframes
+
+   Consumers import this once inside their Tailwind entry CSS:
+
+     @import "tailwindcss";
+     @import "@opengeni/react/styles.css";
+     @source "../node_modules/@opengeni/react/src";
+
+   The @source directive makes Tailwind compile the utility classes used by
+   the components in this package. Everything themable lives in tokens.css
+   (plain CSS variables) — override those to rebrand; this file only maps them
+   into Tailwind utility names (`bg-og-surface-1`, `text-og-fg-muted`,
+   `rounded-og-md`, `shadow-og-glow`, `font-og-mono`, ...).
+   -------------------------------------------------------------------------- */
+
+@import "./tokens.css";
+
+@theme inline {
+  --font-og-sans: var(--og-font-sans);
+  --font-og-mono: var(--og-font-mono);
+
+  --color-og-bg: var(--og-color-bg);
+  --color-og-surface-1: var(--og-color-surface-1);
+  --color-og-surface-2: var(--og-color-surface-2);
+  --color-og-surface-3: var(--og-color-surface-3);
+  --color-og-border: var(--og-color-border);
+  --color-og-border-strong: var(--og-color-border-strong);
+  --color-og-fg: var(--og-color-fg);
+  --color-og-fg-muted: var(--og-color-fg-muted);
+  --color-og-fg-subtle: var(--og-color-fg-subtle);
+
+  --color-og-accent: var(--og-color-accent);
+  --color-og-accent-strong: var(--og-color-accent-strong);
+  --color-og-accent-fg: var(--og-color-accent-fg);
+  --color-og-accent-soft: var(--og-color-accent-soft);
+
+  --color-og-status-queued: var(--og-color-status-queued);
+  --color-og-status-running: var(--og-color-status-running);
+  --color-og-status-idle: var(--og-color-status-idle);
+  --color-og-status-waiting: var(--og-color-status-waiting);
+  --color-og-status-failed: var(--og-color-status-failed);
+  --color-og-status-cancelled: var(--og-color-status-cancelled);
+  --color-og-danger: var(--og-color-danger);
+
+  --radius-og-xs: var(--og-radius-xs);
+  --radius-og-sm: var(--og-radius-sm);
+  --radius-og-md: var(--og-radius-md);
+  --radius-og-lg: var(--og-radius-lg);
+  --radius-og-xl: var(--og-radius-xl);
+
+  --shadow-og-sm: var(--og-shadow-sm);
+  --shadow-og-md: var(--og-shadow-md);
+  --shadow-og-lg: var(--og-shadow-lg);
+  --shadow-og-glow: var(--og-shadow-glow);
+
+  --ease-og-out: var(--og-ease-out);
+  --ease-og-in-out: var(--og-ease-in-out);
+  --ease-og-spring: var(--og-ease-spring);
+
+  --animate-og-enter: og-enter var(--og-duration-base) var(--og-ease-out) both;
+  --animate-og-pulse: og-pulse 2s var(--og-ease-in-out) infinite;
+  --animate-og-blink: og-blink 1s steps(2, start) infinite;
+  --animate-og-shimmer: og-shimmer 2.2s linear infinite;
+  --animate-og-spin: og-spin 0.9s linear infinite;
+}
+
+/* Entry: messages and timeline rows slide in just enough to feel placed. */
+@keyframes og-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Live/running indicators breathe; they do not flash. */
+@keyframes og-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Streaming caret. */
+@keyframes og-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Text shimmer for in-flight labels ("Thinking", "Running tool…"). */
+@keyframes og-shimmer {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
+}
+
+@keyframes og-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Shimmer helper: gradient text the keyframe scrolls through. */
+.og-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--og-color-fg-subtle) 0%,
+    var(--og-color-fg) 50%,
+    var(--og-color-fg-subtle) 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: og-shimmer 2.2s linear infinite;
+}
+
+/* Scoped base for component subtrees (applied by the components themselves). */
+.og-root {
+  font-family: var(--og-font-sans);
+  font-feature-settings: var(--og-font-features);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  color: var(--og-color-fg);
+}
+
+.og-root :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--og-color-border-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .og-root *,
+  .og-root *::before,
+  .og-root *::after,
+  .og-shimmer-text {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

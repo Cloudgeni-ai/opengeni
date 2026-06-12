@@ -5,6 +5,7 @@ import type {
   CreateSessionRequest,
   ReasoningEffort,
   ResourceRef,
+  ScheduledTask,
   Session,
   SessionEvent,
   SessionTurn,
@@ -70,6 +71,18 @@ export class OpenGeniClient {
     return await this.requestJson<SessionTurn[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns`, undefined, {
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
     });
+  }
+
+  // --- Scheduled tasks -------------------------------------------------------
+
+  async listScheduledTasks(workspaceId: string, options: { limit?: number } = {}): Promise<ScheduledTask[]> {
+    return await this.requestJson<ScheduledTask[]>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks`, undefined, {
+      ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+    });
+  }
+
+  async getScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>("GET", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}`);
   }
 
   // --- Events: replay, send, stream ----------------------------------------

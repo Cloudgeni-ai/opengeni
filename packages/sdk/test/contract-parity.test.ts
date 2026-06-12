@@ -9,6 +9,10 @@ import {
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
   ReasoningEffort as ContractReasoningEffort,
+  ScheduledTask as ContractScheduledTask,
+  ScheduledTaskOverlapPolicy as ContractScheduledTaskOverlapPolicy,
+  ScheduledTaskRunMode as ContractScheduledTaskRunMode,
+  ScheduledTaskStatus as ContractScheduledTaskStatus,
 } from "@opengeni/contracts";
 import type { z } from "zod";
 import { SESSION_EVENT_TYPES } from "../src/types";
@@ -17,6 +21,10 @@ import type {
   CreateSessionRequest,
   ReasoningEffort,
   SandboxBackend,
+  ScheduledTask,
+  ScheduledTaskOverlapPolicy,
+  ScheduledTaskRunMode,
+  ScheduledTaskStatus,
   Session,
   SessionEvent,
   SessionStatus,
@@ -60,6 +68,18 @@ describe("SDK / contracts parity", () => {
     const acceptClientEvent = (value: ClientSessionEventInput): z.input<typeof ClientSessionEvent> => value;
     const checks = [acceptSession, acceptEvent, acceptTurn, acceptTurnStatus, acceptTurnSource, acceptCreateRequest, acceptClientEvent];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
+  });
+
+  test("scheduled task literals and shapes match the contracts", () => {
+    const statuses: readonly ScheduledTaskStatus[] = ContractScheduledTaskStatus.options;
+    const runModes: readonly ScheduledTaskRunMode[] = ContractScheduledTaskRunMode.options;
+    const overlapPolicies: readonly ScheduledTaskOverlapPolicy[] = ContractScheduledTaskOverlapPolicy.options;
+    expect(statuses).toEqual(ContractScheduledTaskStatus.options);
+    expect(runModes).toEqual(ContractScheduledTaskRunMode.options);
+    expect(overlapPolicies).toEqual(ContractScheduledTaskOverlapPolicy.options);
+    // Server -> client: anything the contract produces, the SDK type accepts.
+    const acceptScheduledTask = (value: z.infer<typeof ContractScheduledTask>): ScheduledTask => value;
+    expect(typeof acceptScheduledTask).toBe("function");
   });
 
   test("SDK-built control events parse under the contracts schema", () => {

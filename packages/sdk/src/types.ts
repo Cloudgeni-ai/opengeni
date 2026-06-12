@@ -163,6 +163,66 @@ export type AgentToolCallCreatedPayload = {
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
 
+export type ScheduledTaskStatus = "active" | "paused";
+
+export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session";
+
+export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
+
+export type ScheduledTaskDayOfWeek =
+  | "SUNDAY"
+  | "MONDAY"
+  | "TUESDAY"
+  | "WEDNESDAY"
+  | "THURSDAY"
+  | "FRIDAY"
+  | "SATURDAY";
+
+export type ScheduledTaskScheduleSpec =
+  | { type: "once"; runAt: string; timeZone: string }
+  | {
+      type: "interval";
+      everySeconds: number;
+      startAt?: string | undefined;
+      endAt?: string | undefined;
+    }
+  | {
+      type: "calendar";
+      timeZone: string;
+      hour: number;
+      minute: number;
+      daysOfWeek?: ScheduledTaskDayOfWeek[] | undefined;
+    };
+
+export type ScheduledTaskAgentConfig = {
+  prompt: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  metadata: Record<string, unknown>;
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  sandboxBackend?: SandboxBackend | undefined;
+  goal?: GoalSpec | undefined;
+};
+
+export type ScheduledTask = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  status: ScheduledTaskStatus;
+  schedule: ScheduledTaskScheduleSpec;
+  temporalScheduleId: string;
+  runMode: ScheduledTaskRunMode;
+  overlapPolicy: ScheduledTaskOverlapPolicy;
+  agentConfig: ScheduledTaskAgentConfig;
+  reusableSessionId: string | null;
+  environmentId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CreateSessionRequest = {
   initialMessage: string;
   resources?: ResourceRef[] | undefined;

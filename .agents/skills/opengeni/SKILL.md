@@ -43,6 +43,7 @@ Then open the smallest source files that answer the question:
 - GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
+- React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
 
 If paths have moved, find concepts by symbol name, not by old paths:
 
