@@ -4,6 +4,7 @@ import {
   reasoningEffortForMetadata,
   type AccessGrant,
   type GoalSpec,
+  type Permission,
   type ReasoningEffort,
   type ResourceRef,
   type Session,
@@ -23,6 +24,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import { hasPermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
@@ -54,6 +56,8 @@ export async function createAndStartSession(input: {
   // Names/ids only; the session.created payload never carries variable values.
   environment?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
+  // Validated against the creating grant before this is called.
+  firstPartyMcpPermissions?: Permission[] | null;
 }) {
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -69,6 +73,7 @@ export async function createAndStartSession(input: {
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     environmentId: input.environment?.id ?? null,
+    firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
   });
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
@@ -287,6 +292,16 @@ export async function createSessionForRequest(
     : null;
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  // A session's first-party MCP token can carry a non-default permission set
+  // (how an operator hands a manager-style session the orchestration tools),
+  // but never one out-ranking its creator: every requested permission must be
+  // held by the creating grant.
+  const firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
+  for (const permission of firstPartyMcpPermissions ?? []) {
+    if (!hasPermission(grant.permissions, permission)) {
+      throw new HTTPException(403, { message: `cannot grant first-party MCP permission beyond the creating grant: ${permission}` });
+    }
+  }
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
   const session = await createAndStartSession({
     db,
@@ -304,6 +319,7 @@ export async function createSessionForRequest(
     metadata: payload.metadata,
     environment: environment ? { id: environment.id, name: environment.name } : null,
     goal: payload.goal ?? null,
+    firstPartyMcpPermissions,
   });
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,

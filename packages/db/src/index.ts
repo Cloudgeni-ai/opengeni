@@ -1912,6 +1912,7 @@ export async function createSession(db: Database, input: {
   model: string;
   sandboxBackend: SandboxBackend;
   environmentId?: string | null;
+  firstPartyMcpPermissions?: Permission[] | null;
 }): Promise<Session> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.sessions).values({
@@ -1924,6 +1925,7 @@ export async function createSession(db: Database, input: {
       model: input.model,
       sandboxBackend: input.sandboxBackend,
       environmentId: input.environmentId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       status: "queued",
     }).returning();
     if (!row) {
@@ -2826,6 +2828,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     environmentId: row.environmentId,
+    firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
     lastSequence: row.lastSequence,

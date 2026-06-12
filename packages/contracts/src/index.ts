@@ -1086,6 +1086,9 @@ export const Session = z.object({
   model: z.string(),
   sandboxBackend: SandboxBackend,
   environmentId: z.string().uuid().nullable(),
+  // Non-default first-party MCP token permissions (manager-style sessions);
+  // null means the fixed worker default set.
+  firstPartyMcpPermissions: z.array(Permission).nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
   lastSequence: z.number().int().nonnegative(),
@@ -1154,6 +1157,11 @@ export const CreateSessionRequest = z.object({
   environmentId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   clientEventId: z.string().min(1).optional(),
+  // Permissions the session's first-party MCP token should carry instead of
+  // the fixed worker default — how an operator hands a manager-style session
+  // the orchestration/environment/github tools. Capped at creation: every
+  // requested permission must be held by the creating grant (no escalation).
+  firstPartyMcpPermissions: z.array(Permission).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

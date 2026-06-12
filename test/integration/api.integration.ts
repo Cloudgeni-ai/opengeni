@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -2945,6 +2945,136 @@ describe("API component integration", () => {
     const workerMcp = buildOpenGeniMcpServer(mcpDeps, workerGrant);
     for (const tool of ["sessions_list", "session_get", "session_events", "session_create", "session_send_message", "environment_list", "environment_set_variable", "github_connect_link"]) {
       await expect(callMcpTool(workerMcp, tool, {})).rejects.toThrow("MCP tool not registered");
+    }
+  });
+
+  test("per-session first-party MCP permissions are capped by the creator and gate the manager tools", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    // Configured access mode: every request authenticates with a delegated
+    // bearer token, so the grant the MCP endpoint sees is exactly the token's
+    // permission set - the same shape the worker runtime uses live.
+    const appSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const signToken = async (permissions: Permission[]) => await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "test:first-party-mcp-permissions",
+      permissions,
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+
+    // REST create: the permission set is stored and echoed; the creator must
+    // hold every requested permission.
+    const managerToken = await signToken(["workspace:read", "sessions:create", "sessions:read", "goals:manage"]);
+    const createResponse = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "orchestrate the fleet",
+        model: "scripted-model",
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read", "sessions:create", "goals:manage"],
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${managerToken}` },
+    });
+    expect(createResponse.status).toBe(202);
+    const managerSession = await createResponse.json() as { id: string; firstPartyMcpPermissions: string[] | null };
+    expect(managerSession.firstPartyMcpPermissions).toEqual(["workspace:read", "sessions:read", "sessions:create", "goals:manage"]);
+    expect((await getSession(dbClient.db, grant.workspaceId, managerSession.id))?.firstPartyMcpPermissions)
+      .toEqual(["workspace:read", "sessions:read", "sessions:create", "goals:manage"] as Permission[]);
+
+    // No escalation: a creator without the permission cannot mint it.
+    const limitedToken = await signToken(["workspace:read", "sessions:create"]);
+    const escalation = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "try to escalate",
+        model: "scripted-model",
+        firstPartyMcpPermissions: ["environments:manage"],
+      }),
+      headers: { "content-type": "application/json", authorization: `Bearer ${limitedToken}` },
+    });
+    expect(escalation.status).toBe(403);
+    expect(await escalation.text()).toContain("cannot grant first-party MCP permission beyond the creating grant: environments:manage");
+
+    // Same rule through the MCP session_create tool: a manager can only
+    // delegate a subset of what it was itself granted.
+    const mcpDeps = {
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const managerGrant = { ...grant, permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[] };
+    const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
+    await expect(callMcpTool(managerMcp, "session_create", {
+      initialMessage: "spawn an over-privileged worker",
+      model: "scripted-model",
+      firstPartyMcpPermissions: ["environments:manage"],
+    })).rejects.toThrow("cannot grant first-party MCP permission beyond the creating grant");
+    const spawned = await callMcpTool<{ id: string; firstPartyMcpPermissions: string[] | null }>(managerMcp, "session_create", {
+      initialMessage: "spawn a delegated worker",
+      model: "scripted-model",
+      firstPartyMcpPermissions: ["sessions:read"],
+    });
+    expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+
+    // The delegated token the runtime mints for a session's first-party MCP
+    // connection carries the session's permission set, which gates manager
+    // tool visibility end to end; the default set stays worker-shaped.
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    let managerPrepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    let workerPrepared: Awaited<ReturnType<typeof prepareAgentTools>> | null = null;
+    try {
+      const runtimeSettings = {
+        ...appSettings,
+        mcpServers: [{
+          id: "opengeni",
+          name: "OpenGeni",
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          timeoutMs: undefined,
+          cacheToolsList: false,
+        }],
+      };
+      managerPrepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: managerSession.id,
+        firstPartyPermissions: ["workspace:read", "sessions:read", "sessions:create", "goals:manage"],
+      });
+      const managerTools = (await managerPrepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(managerTools).toContain("opengeni__sessions_list");
+      expect(managerTools).toContain("opengeni__session_create");
+      expect(managerTools).not.toContain("opengeni__environment_set_variable");
+
+      workerPrepared = await prepareAgentTools(runtimeSettings, [{ kind: "mcp", id: "opengeni" }], {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: managerSession.id,
+      });
+      const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(workerTools).not.toContain("opengeni__sessions_list");
+      expect(workerTools).not.toContain("opengeni__session_create");
+      expect(workerTools).toContain("opengeni__scheduled_tasks_list");
+    } finally {
+      await managerPrepared?.close().catch(() => undefined);
+      await workerPrepared?.close().catch(() => undefined);
+      server.stop(true);
     }
   });
 

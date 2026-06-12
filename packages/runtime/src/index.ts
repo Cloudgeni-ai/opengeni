@@ -295,6 +295,10 @@ export type PrepareToolsOptions = {
   sessionId?: string;
   subjectId?: string;
   subjectLabel?: string;
+  // Overrides the fixed first-party MCP permission set for this session's
+  // delegated token (manager-style sessions). The caller is responsible for
+  // having validated the set against the session creator's grant.
+  firstPartyPermissions?: Permission[];
 };
 
 export async function prepareAgentTools(settings: Settings, tools: ToolRef[], options: PrepareToolsOptions = {}): Promise<PreparedAgentTools> {
@@ -345,7 +349,7 @@ async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mc
       workspaceId: options.workspaceId,
       subjectId: options.subjectId ?? "worker:first-party-mcp",
       ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
-      permissions: firstPartyMcpPermissions,
+      permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       exp: Math.floor(Date.now() / 1000) + 60 * 60,
     })}`;

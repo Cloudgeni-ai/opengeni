@@ -113,6 +113,9 @@ export const sessions = pgTable("sessions", {
   model: text("model").notNull(),
   sandboxBackend: text("sandbox_backend").notNull(),
   environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
+  // Non-default first-party MCP token permissions (manager-style sessions);
+  // null means the fixed worker default set in @opengeni/runtime.
+  firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
   temporalWorkflowId: text("temporal_workflow_id"),
   activeTurnId: uuid("active_turn_id"),
   lastSequence: integer("last_sequence").notNull().default(0),

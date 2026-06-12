@@ -46,6 +46,7 @@ import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
+import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
@@ -103,6 +104,89 @@ describe("worker activities integration", () => {
     expect(latestStatus(events)).toBe("idle");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).not.toBeNull();
+  });
+
+  test("manager session's first-party MCP token carries its granted permissions end to end", async () => {
+    // A manager-style session (created with firstPartyMcpPermissions) calls
+    // the workspace-orchestration tools through its own first-party MCP
+    // connection - the exact wiring the live manager probe uses.
+    const noopWorkflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      signalApprovalDecision: async () => undefined,
+      signalInterrupt: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const grant = await testGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const apiSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+    });
+    const app = createApp({
+      settings: apiSettings,
+      db: dbClient.db,
+      bus,
+      workflowClient: noopWorkflowClient,
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    try {
+      const settings = {
+        ...apiSettings,
+        mcpServers: [{
+          id: "opengeni",
+          name: "OpenGeni",
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          timeoutMs: undefined,
+          cacheToolsList: false,
+        }],
+      };
+      const model = new ScriptedModel([
+        { id: "manager-call-1", output: [functionCall("opengeni__sessions_list", { limit: 10 }, "call-manager-1")] },
+        { id: "manager-call-2", outputText: "fleet listed", chunks: ["fleet ", "listed"] },
+      ]);
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "list the fleet",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read", "sessions:create"],
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "list the fleet" } },
+      ]);
+      const activities = createActivities({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+      const result = await activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-manager-mcp",
+      });
+      expect(result.status).toBe("idle");
+      // The sessions_list result (containing this very session) was fed back
+      // to the model: the tool call resolved against the live MCP endpoint
+      // with a token carrying the session's permission set.
+      expect(model.calls).toBe(2);
+      const followupInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+      expect(followupInput).toContain(session.id);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("uses saved SDK history for follow-up turns", async () => {

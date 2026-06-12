@@ -6,7 +6,7 @@ A workspace owns named **environments**: sets of environment variables whose val
 
 1. **Write-only values.** No API response, session event, log, span, or audit record ever contains a variable value. Reads return names and metadata (version, timestamps) only; there is no read-back even at create time. Rotation is `PUT` with a new value.
 2. **No attachment, no injection.** A run whose session has `environmentId = null` gets exactly the pre-existing behavior: the deployment env allowlist, git identity, and run-scoped GitHub auth. Nothing more.
-3. **Agents cannot self-attach.** The worker's first-party MCP delegated token never carries `environments:use`, and the MCP scheduled-task tools reject attachment changes (set **or** detach) and instruction edits to environment-attached tasks for grants without it.
+3. **Agents cannot self-attach.** The worker's **default** first-party MCP delegated token never carries `environments:use`, and the MCP scheduled-task tools reject attachment changes (set **or** detach) and instruction edits to environment-attached tasks for grants without it. A session only holds a stronger first-party token when its creator explicitly granted one at creation (`firstPartyMcpPermissions`, capped by the creating grant) — agents can never escalate themselves.
 4. **Workspace isolation.** Both tables are protected by the same forced row-level-security policy as every other workspace table.
 5. **Encryption at rest.** Values are AES-256-GCM encrypted with an operator key (`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`) held outside Postgres. A database dump alone does not reveal values.
 
@@ -97,4 +97,11 @@ The first-party MCP server exposes environment tools, gated by the same permissi
 - `environment_set_variable` (`environments:manage`) — set or rotate one variable, targeted by `environmentId` or by `environmentName` (created on first use). The value arrives in plain tool arguments by design: the calling agent (e.g. an orchestrating "manager" holding a grant with `environments:manage`) is trusted with the secrets it persists. Responses stay write-only — metadata, never values.
 - `session_create` (`sessions:create`) accepts `environmentId`; attachment requires `environments:use` like the REST route. There is deliberately no attach-after-create tool because attachment is fixed at session creation (see above).
 
-The invariant that sandboxed agents cannot reach workspace secrets is unchanged: the worker's first-party delegated token carries neither `environments:use` nor `environments:manage`, so none of these tools are registered for it. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject any attachment change — set or detach — unless the calling grant holds `environments:use`, which the sandboxed agent's first-party token never does.
+The invariant that sandboxed agents cannot reach workspace secrets is unchanged: the worker's **default** first-party delegated token carries neither `environments:use` nor `environments:manage`, so none of these tools are registered for it. The `scheduled_tasks_create`/`scheduled_tasks_update` tools accept `environmentId` but reject any attachment change — set or detach — unless the calling grant holds `environments:use`, which the sandboxed agent's default first-party token never does.
+
+### Manager sessions: per-session first-party MCP permissions
+
+`CreateSessionRequest.firstPartyMcpPermissions` (REST `POST /sessions` and the MCP `session_create` tool) lets an operator create a session whose first-party MCP token carries a **non-default permission set** — this is how a manager-style session sees the orchestration (`sessions:*`), environment, and `github:use` tools. Two rules keep this safe:
+
+1. **Capped at creation.** Every requested permission must be held by the creating grant (`workspace:admin` covers all); otherwise the request is rejected with 403. A session can never out-rank its creator, and a manager spawning workers via `session_create` can only delegate a subset of what it was itself granted.
+2. **Fixed for the session's lifetime.** Like environment attachment, the permission set is fixed at creation; there is no way for a running agent to widen its own token.
