@@ -3,7 +3,8 @@ import {
   type ScheduledTaskAgentConfig,
   type SocialConnection,
 } from "@opengeni/contracts";
-import { getWorkspacePack, listWorkspacePacks, type Database } from "@opengeni/db";
+import { getWorkspacePack, listPackInstallations, listWorkspacePacks, type Database } from "@opengeni/db";
+import { HTTPException } from "hono/http-exception";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -14,6 +15,10 @@ const marketingSocialPack: CapabilityPack = {
   role: "marketing",
   category: "social-media",
   version: "0.1.0",
+  // Built-in packs deliberately declare no sandboxImage and no skills: the
+  // worker's pack-runtime resolution only reads manifest-registered packs
+  // (see apps/worker/src/activities/packs.ts), and a test enforces this.
+  skills: [],
   tools: [
     { kind: "mcp", id: "opengeni" },
     { kind: "mcp", id: "docs" },
@@ -157,6 +162,31 @@ export async function resolveCapabilityPack(db: Database, workspaceId: string, p
   }
   const parsed = CapabilityPack.safeParse(registration.pack);
   return parsed.success ? parsed.data : null;
+}
+
+/**
+ * v1 pack-scoped runtime rule: at most one enabled pack per workspace may
+ * declare a `sandboxImage` — there is deliberately no image composition or
+ * layering. Enforced when a pack is enabled (both the packs endpoint and the
+ * generic capability enable path) and re-checked at session start by the
+ * worker, which also covers manifests re-registered after enablement.
+ */
+export async function assertPackSandboxImageCompatible(db: Database, workspaceId: string, pack: CapabilityPack): Promise<void> {
+  if (!pack.sandboxImage) {
+    return;
+  }
+  const installations = await listPackInstallations(db, workspaceId);
+  for (const installation of installations) {
+    if (installation.status !== "active" || installation.packId === pack.id) {
+      continue;
+    }
+    const other = await resolveCapabilityPack(db, workspaceId, installation.packId);
+    if (other?.sandboxImage) {
+      throw new HTTPException(409, {
+        message: `pack ${pack.id} declares a sandbox image, but enabled pack ${other.id} already declares one; only one enabled pack per workspace may declare sandboxImage — disable ${other.id} first`,
+      });
+    }
+  }
 }
 
 export function buildMarketingDailyAnalysisAgentConfig(input: {

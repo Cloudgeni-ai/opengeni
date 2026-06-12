@@ -35,14 +35,18 @@ import {
   localDir,
   s3Mount,
   skills,
+  type Dir,
+  type Entry,
+  type LocalDirLazySkillSource,
   type SandboxClient,
   type SandboxSessionLike,
   type SandboxSessionState,
   type SandboxRunConfig,
+  type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy, ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,6 +198,23 @@ export type BuildAgentOptions = {
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
+  // Skills delivered by enabled capability packs. They join the bundled
+  // skills in the sandbox skill index (mounted under .agents/) so
+  // skills/<name> references resolve like any other indexed skill.
+  packSkills?: PackSkill[];
+};
+
+export type PackSkillFile = {
+  // Relative POSIX path inside the skill directory, e.g. "SKILL.md" or
+  // "references/runbook.md".
+  path: string;
+  content: string;
+};
+
+export type PackSkill = {
+  name: string;
+  description?: string | null;
+  files: PackSkillFile[];
 };
 
 /**
@@ -264,7 +285,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ...(runAs ? { runAs } : {}),
     capabilities: [
       ...Capabilities.default(),
-      skills({ lazyFrom: localDirLazySkillSource({ src: bundledSkillsDir() }) }),
+      skills({ lazyFrom: lazySkillSourceWithPackSkills(options.packSkills ?? []) }),
     ],
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
@@ -1782,6 +1803,159 @@ function stageBundledSkills(packaged: string, target: string): string {
 function isPathWithin(root: string, candidate: string): boolean {
   const relativePath = relative(root, candidate);
   return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+/**
+ * The skill source fed to the SDK Skills capability. Without pack skills this
+ * is the plain bundled local-dir source, byte-for-byte the pre-pack behavior.
+ * With pack skills it becomes a single in-memory dir source combining bundled
+ * skill directories (as local_dir entries the SDK materializes lazily) with
+ * pack skill directories built from manifest-carried file content — one skill
+ * index, one `## Skills` instruction section, lazy `load_skill` for all of
+ * them. A pack skill shadows a bundled skill with the same directory name.
+ */
+export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDirLazySkillSource {
+  const bundledDir = bundledSkillsDir();
+  const bundled = localDirLazySkillSource({ src: bundledDir });
+  if (packSkills.length === 0) {
+    return bundled;
+  }
+  const children: Record<string, Entry> = {};
+  for (const name of bundledSkillDirNames(bundledDir)) {
+    children[name] = localDir({ src: join(bundledDir, name) });
+  }
+  const packIndex: SkillIndexEntry[] = [];
+  const packNames = new Set<string>();
+  for (const skill of packSkills) {
+    assertSafePackSkillName(skill.name);
+    if (packNames.has(skill.name)) {
+      throw new Error(`Duplicate pack skill name: ${skill.name}`);
+    }
+    packNames.add(skill.name);
+    children[skill.name] = packSkillDirEntry(skill);
+    packIndex.push({ name: skill.name, description: packSkillDescription(skill), path: skill.name });
+  }
+  return {
+    source: dir({ children }),
+    getIndex: (manifest, skillsPath) => [
+      ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter((entry) => !packNames.has(entry.path ?? entry.name)),
+      ...packIndex,
+    ],
+  };
+}
+
+function bundledSkillDirNames(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "SKILL.md")))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+type PackSkillDirNode = {
+  dirs: Map<string, PackSkillDirNode>;
+  files: Map<string, string>;
+};
+
+function packSkillDirEntry(skill: PackSkill): Dir {
+  const root: PackSkillDirNode = { dirs: new Map(), files: new Map() };
+  for (const skillFile of skill.files) {
+    const segments = packSkillPathSegments(skill.name, skillFile.path);
+    let node = root;
+    for (const segment of segments.slice(0, -1)) {
+      if (node.files.has(segment)) {
+        throw new Error(`Pack skill ${skill.name} uses ${segment} as both a file and a directory`);
+      }
+      let next = node.dirs.get(segment);
+      if (!next) {
+        next = { dirs: new Map(), files: new Map() };
+        node.dirs.set(segment, next);
+      }
+      node = next;
+    }
+    const filename = segments[segments.length - 1]!;
+    if (node.dirs.has(filename) || node.files.has(filename)) {
+      throw new Error(`Duplicate pack skill file path in ${skill.name}: ${skillFile.path}`);
+    }
+    node.files.set(filename, skillFile.content);
+  }
+  if (!root.files.has("SKILL.md")) {
+    throw new Error(`Pack skill ${skill.name} is missing a top-level SKILL.md file`);
+  }
+  return packSkillDirFromNode(root);
+}
+
+function packSkillDirFromNode(node: PackSkillDirNode): Dir {
+  const children: Record<string, Entry> = {};
+  for (const [name, child] of node.dirs) {
+    children[name] = packSkillDirFromNode(child);
+  }
+  for (const [name, content] of node.files) {
+    children[name] = file({ content });
+  }
+  return dir({ children });
+}
+
+function assertSafePackSkillName(name: string): void {
+  if (packSkillPathSegments(name, name).length !== 1) {
+    throw new Error(`Invalid pack skill name: ${name}`);
+  }
+}
+
+function packSkillPathSegments(skillName: string, path: string): string[] {
+  const segments = path.split("/");
+  if (path.startsWith("/") || path.includes("\\") || segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
+    throw new Error(`Invalid pack skill file path for ${skillName}: ${path}`);
+  }
+  return segments;
+}
+
+function packSkillDescription(skill: PackSkill): string {
+  const explicit = skill.description?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
+  return skillFrontmatterDescription(markdown) ?? "No description provided.";
+}
+
+function skillFrontmatterDescription(markdown: string): string | null {
+  const lines = markdown.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return null;
+  }
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+  if (end === -1) {
+    return null;
+  }
+  const collected: string[] = [];
+  let inDescription = false;
+  for (const line of lines.slice(1, end)) {
+    const match = line.match(/^description:\s*(.*)$/);
+    if (match) {
+      const inline = match[1]!.trim();
+      if (inline && inline !== ">-" && inline !== ">" && inline !== "|" && inline !== "|-") {
+        return unquoteFrontmatterValue(inline);
+      }
+      inDescription = true;
+      continue;
+    }
+    if (inDescription) {
+      if (/^\s+\S/.test(line)) {
+        collected.push(line.trim());
+        continue;
+      }
+      break;
+    }
+  }
+  const blockValue = collected.join(" ").trim();
+  return blockValue ? blockValue : null;
+}
+
+function unquoteFrontmatterValue(value: string): string {
+  if (value.length >= 2 && value[0] === value[value.length - 1] && (value[0] === '"' || value[0] === "'")) {
+    return value.slice(1, -1);
+  }
+  return value;
 }
 
 function stringValue(value: unknown): string | undefined {

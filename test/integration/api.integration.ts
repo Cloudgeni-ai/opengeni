@@ -1790,6 +1790,97 @@ describe("API component integration", () => {
     expect(capabilityInstallationAfterDelete?.status).toBe("disabled");
   });
 
+  test("allows only one enabled pack per workspace to declare a sandbox image", async () => {
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: environmentsTestKey }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const imagePackManifest = (id: string, image: string) => ({
+      id,
+      name: `Pack ${id}`,
+      description: "Pack with a pack-scoped sandbox image.",
+      role: "infrastructure",
+      category: "infrastructure",
+      version: "0.1.0",
+      sandboxImage: image,
+      skills: [{
+        name: "infra-ops",
+        description: "Operate infrastructure with the pack runbook.",
+        files: [
+          { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate infrastructure.\n---\n# Infra ops\n" },
+          { path: "references/runbook.md", content: "Runbook." },
+        ],
+      }],
+    });
+    const packA = `img-a-${suffix}`;
+    const packB = `img-b-${suffix}`;
+    for (const [packId, image] of [[packA, "example.com/sandbox-a@sha256:aaaa"], [packB, "example.com/sandbox-b@sha256:bbbb"]] as const) {
+      const registered = await app.request(workspacePath(workspaceId, "/packs"), {
+        method: "POST",
+        body: JSON.stringify(imagePackManifest(packId, image)),
+        headers: { "content-type": "application/json" },
+      });
+      expect(registered.status).toBe(201);
+    }
+
+    const enabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabledA.status).toBe(201);
+
+    // The catalog surfaces the pack's runtime composition (image ref and
+    // skill names) without leaking skill file content.
+    const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
+    const catalog = await catalogResponse.json() as { items: Array<{ id: string; metadata: Record<string, unknown> }> };
+    const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
+    expect(packAItem?.metadata.sandboxImage).toBe("example.com/sandbox-a@sha256:aaaa");
+    expect(packAItem?.metadata.skills).toEqual(["infra-ops"]);
+    expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");
+
+    // A second image-declaring pack cannot be enabled, on either enable path.
+    const enabledB = await app.request(workspacePath(workspaceId, `/packs/${packB}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabledB.status).toBe(409);
+    expect(await enabledB.text()).toContain("only one enabled pack per workspace may declare sandboxImage");
+    const capabilityEnabledB = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packB}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnabledB.status).toBe(409);
+
+    // Re-enabling the already-enabled image pack stays allowed.
+    const reenabledA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(reenabledA.status).toBe(200);
+
+    // Disabling the first pack frees the slot for the second.
+    const disabledA = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packA}`)}/disable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disabledA.status).toBeLessThan(300);
+    const enabledBAfterDisable = await app.request(workspacePath(workspaceId, `/packs/${packB}/enable`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enabledBAfterDisable.status).toBe(201);
+  });
+
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({

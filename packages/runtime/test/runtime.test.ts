@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -885,3 +885,93 @@ function fakeMcpServer(name: string): MCPServer {
     async invalidateToolsCache() {},
   };
 }
+
+describe("pack skills in the sandbox skill index", () => {
+  const infraSkill = {
+    name: "infra-ops",
+    files: [
+      { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate workspace infrastructure.\n---\n# Infra ops\n" },
+      { path: "references/runbook.md", content: "Runbook." },
+    ],
+  };
+  const emptyManifest = new Manifest({ root: "/workspace", entries: {}, environment: {} });
+
+  test("without pack skills the source is the unchanged bundled local-dir source", () => {
+    const source = lazySkillSourceWithPackSkills([]);
+    expect((source.source as { type: string }).type).toBe("local_dir");
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.map((entry) => entry.name)).toContain("checkov");
+    expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
+  });
+
+  test("pack skills join the bundled skills in one lazy skill index", () => {
+    const source = lazySkillSourceWithPackSkills([infraSkill]);
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.type).toBe("dir");
+    // Bundled skills stay lazily materializable from their local directories.
+    expect(sourceDir.children.checkov.type).toBe("local_dir");
+    // Pack skill content is carried in-memory from the manifest.
+    expect(sourceDir.children["infra-ops"].type).toBe("dir");
+    expect(sourceDir.children["infra-ops"].children["SKILL.md"].content).toContain("# Infra ops");
+    expect(sourceDir.children["infra-ops"].children.references.children["runbook.md"].content).toBe("Runbook.");
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    const names = index.map((entry) => entry.name);
+    expect(names).toContain("checkov");
+    expect(names).toContain("infra-ops");
+    const infra = index.find((entry) => entry.name === "infra-ops");
+    expect(infra?.description).toBe("Operate workspace infrastructure.");
+    expect(infra?.path).toBe("infra-ops");
+  });
+
+  test("an explicit pack skill description wins over SKILL.md frontmatter", () => {
+    const source = lazySkillSourceWithPackSkills([{ ...infraSkill, description: "Explicit description." }]);
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe("Explicit description.");
+  });
+
+  test("a pack skill shadows a bundled skill with the same name", () => {
+    const source = lazySkillSourceWithPackSkills([{
+      name: "checkov",
+      files: [{ path: "SKILL.md", content: "---\ndescription: Pack-provided checkov.\n---\n" }],
+    }]);
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children.checkov.type).toBe("dir");
+    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
+    const checkovEntries = index.filter((entry) => entry.name === "checkov");
+    expect(checkovEntries).toHaveLength(1);
+    expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+  });
+
+  test("rejects unsafe pack skill content instead of mounting it", () => {
+    expect(() => lazySkillSourceWithPackSkills([{
+      name: "bad",
+      files: [{ path: "SKILL.md", content: "x" }, { path: "../escape.md", content: "x" }],
+    }])).toThrow("Invalid pack skill file path");
+    expect(() => lazySkillSourceWithPackSkills([{
+      name: "no-entry",
+      files: [{ path: "references/only.md", content: "x" }],
+    }])).toThrow("missing a top-level SKILL.md");
+    expect(() => lazySkillSourceWithPackSkills([
+      { name: "dup", files: [{ path: "SKILL.md", content: "a" }] },
+      { name: "dup", files: [{ path: "SKILL.md", content: "b" }] },
+    ])).toThrow("Duplicate pack skill name");
+    expect(() => lazySkillSourceWithPackSkills([{
+      name: "bad/name",
+      files: [{ path: "SKILL.md", content: "x" }],
+    }])).toThrow("Invalid pack skill name");
+  });
+
+  test("buildOpenGeniAgent feeds pack skills through the SDK skills capability", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], { packSkills: [infraSkill] });
+    const capabilities = (agent as any).capabilities as Array<{ type: string; lazyFrom?: { source: { type: string }; getIndex?: (manifest: unknown, skillsPath: string) => Array<{ name: string }> } }>;
+    const skillsCapability = capabilities.find((capability) => capability.type === "skills");
+    expect(skillsCapability?.lazyFrom?.source.type).toBe("dir");
+    const index = skillsCapability?.lazyFrom?.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.map((entry) => entry.name)).toContain("infra-ops");
+    // Backward compatibility: without pack skills the capability keeps the
+    // plain bundled local-dir source.
+    const plainAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
+    const plainCapability = ((plainAgent as any).capabilities as Array<{ type: string; lazyFrom?: { source: { type: string } } }>).find((capability) => capability.type === "skills");
+    expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+});

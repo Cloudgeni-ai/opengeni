@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
   CapabilityCatalogResponse,
+  CapabilityPack,
   ClientConfig,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
@@ -246,5 +247,76 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+  });
+});
+
+describe("capability pack runtime manifest fields", () => {
+  const baseManifest = {
+    id: "infra-runtime",
+    name: "Infra runtime",
+    description: "Infrastructure operations pack.",
+    role: "infrastructure",
+    category: "infrastructure",
+    version: "0.1.0",
+  };
+  const skill = {
+    name: "infra-ops",
+    files: [
+      { path: "SKILL.md", content: "---\nname: infra-ops\ndescription: Operate infra.\n---\n# Infra ops\n" },
+      { path: "references/runbook.md", content: "Runbook." },
+    ],
+  };
+
+  test("packs without runtime fields keep their existing shape", () => {
+    const pack = CapabilityPack.parse(baseManifest);
+    expect(pack.sandboxImage).toBeUndefined();
+    expect(pack.skills).toEqual([]);
+  });
+
+  test("accepts a sandbox image ref and inline skills", () => {
+    const pack = CapabilityPack.parse({
+      ...baseManifest,
+      sandboxImage: "ghcr.io/example/infra-sandbox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      skills: [skill],
+    });
+    expect(pack.sandboxImage).toContain("@sha256:");
+    expect(pack.skills).toHaveLength(1);
+    expect(pack.skills[0]?.files.map((file) => file.path)).toEqual(["SKILL.md", "references/runbook.md"]);
+  });
+
+  test("requires every skill to include a top-level SKILL.md", () => {
+    expect(() => CapabilityPack.parse({
+      ...baseManifest,
+      skills: [{ name: "infra-ops", files: [{ path: "references/runbook.md", content: "Runbook." }] }],
+    })).toThrow();
+  });
+
+  test("rejects unsafe skill file paths", () => {
+    for (const path of ["../escape.md", "/absolute.md", "a//b.md", "./SKILL.md", "refs/../SKILL.md", "refs\\windows.md"]) {
+      expect(() => CapabilityPack.parse({
+        ...baseManifest,
+        skills: [{ name: "infra-ops", files: [{ path: "SKILL.md", content: "x" }, { path, content: "x" }] }],
+      })).toThrow();
+    }
+  });
+
+  test("rejects skill names that are not a single safe path segment", () => {
+    for (const name of ["infra/ops", "..", ".hidden", "-leading", ""]) {
+      expect(() => CapabilityPack.parse({
+        ...baseManifest,
+        skills: [{ name, files: [{ path: "SKILL.md", content: "x" }] }],
+      })).toThrow();
+    }
+  });
+
+  test("rejects duplicate skill names and duplicate file paths", () => {
+    expect(() => CapabilityPack.parse({
+      ...baseManifest,
+      skills: [skill, { ...skill, description: "duplicate" }],
+    })).toThrow();
+    expect(() => CapabilityPack.parse({
+      ...baseManifest,
+      skills: [{ name: "infra-ops", files: [{ path: "SKILL.md", content: "a" }, { path: "SKILL.md", content: "b" }] }],
+    })).toThrow();
   });
 });

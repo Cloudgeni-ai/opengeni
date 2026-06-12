@@ -96,6 +96,8 @@ If a change alters architecture, terminology, the run lifecycle, the memory mode
 
 The Docker sandbox image includes Terraform, Checkov, Azure CLI, GitHub CLI, git, jq, curl, and base shell utilities. Bundled Terraform/checkov skills live under `packages/runtime/src/bundled_hashicorp_terraform_skills` and are mounted into the sandbox under `.agents/`.
 
+Enabled capability packs can scope the runtime per workspace: a registered pack manifest may declare `skills` (delivered into the same `.agents/` skill index as the bundled skills) and a `sandboxImage` that replaces the global `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF` for that workspace's sessions. At most one enabled pack per workspace may declare an image — no image composition. See `docs/packs.md`.
+
 When the `azure` sandbox preparation profile is enabled and ARM/AZURE service-principal variables are allowed into the sandbox, the worker pre-authenticates normal Azure CLI inside the sandbox with `az login --service-principal` before the agent starts. There is no custom `opengeni-azure-login` helper.
 
 Sandbox preparation is controlled by:

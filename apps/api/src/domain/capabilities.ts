@@ -34,7 +34,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
+import { assertPackSandboxImageCompatible, listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -158,6 +158,7 @@ export async function enableCapability(input: {
     if (!pack) {
       throw new HTTPException(404, { message: "pack not found" });
     }
+    await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
     // This generic enable path carries no environment attachment, so packs
     // that demand one must be enabled through the packs endpoint unless a
     // previous enable already stored an attachment; a stored attachment is
@@ -550,6 +551,9 @@ function packCatalogItem(pack: ReturnType<typeof listCapabilityPacks>[number], s
       connectors: pack.connectors,
       knowledge: pack.knowledge,
       scheduledTaskTemplates: pack.scheduledTaskTemplates,
+      // Runtime composition surface only: skill names, never file content.
+      ...(pack.sandboxImage ? { sandboxImage: pack.sandboxImage } : {}),
+      ...(pack.skills.length > 0 ? { skills: pack.skills.map((skill) => skill.name) } : {}),
       ...pack.metadata,
     },
   });

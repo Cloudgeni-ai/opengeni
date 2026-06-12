@@ -37,6 +37,7 @@ import {
   mergeToolRefs,
 } from "./common";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
+import { resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { turnInput } from "./run-input";
 import {
@@ -219,8 +220,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ], true);
       turnStartedPublished = true;
 
+      // Pack-scoped runtime: enabled packs may declare the sandbox image this
+      // workspace's sessions run in and skills for the sandbox skill index.
+      // Resolved after turn.started so a composition conflict (two enabled
+      // packs declaring images) fails the turn with its plain error instead
+      // of failing the activity opaquely.
+      const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
       const runSettings = {
-        ...capabilitySettings,
+        ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
@@ -250,6 +257,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceEnvironment
           ? {
             workspaceEnvironment: {

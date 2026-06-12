@@ -26,6 +26,15 @@ CloudGeni used a similar split: a general integration record, provider-specific 
 
 Packs may also declare an `environment` block (`description`, `requiredVariables`, `required`). Enabling such a pack accepts an `environmentId` pointing at a workspace environment (see `docs/environments.md`); the required variable **names** are validated at enable time and scheduled tasks created from the pack's templates inherit the attachment. Environments store encrypted `NAME=value` material in Postgres under an operator key — a deliberate, documented contrast with the `credentialRef` rule above.
 
+## Pack-Scoped Runtime
+
+A registered pack manifest may declare the runtime its sessions compose into:
+
+- `sandboxImage` (optional string): a container image ref — digest-pinned recommended — that the workspace's sessions run in. With one enabled image-declaring pack, the worker derives run settings with `dockerImage`/`modalImageRef` replaced by the pack image. With none, sessions keep the deployment-wide `OPENGENI_DOCKER_IMAGE` / `OPENGENI_MODAL_IMAGE_REF` behavior exactly. If **more than one** enabled pack declares an image, enabling the second pack fails with `409`, and a session start that still finds two (for example after a manifest re-registration) fails the turn with a plain error. There is deliberately no image composition or layering in v1.
+- `skills` (optional array): skills delivered into the sandbox skill index. Each skill is `{ name, description?, files: [{ path, content }] }` where `files` must include a top-level `SKILL.md` and paths are safe relative POSIX paths (`references/...`, `scripts/...`). Skill content travels inline in the manifest and is stored with it (the `workspace_packs` JSONB row); no image baking or extra storage is involved. At run time the worker feeds enabled packs' skills into the OpenAI Agents SDK Skills capability alongside the bundled skills, so they appear in the same `.agents/` skill index, are lazily materialized via `load_skill`, and `skills/<name>` references resolve. A pack skill with the same directory name as a bundled skill shadows it; two enabled packs declaring the same skill name fail the turn plainly.
+
+Built-in packs never declare `sandboxImage` or `skills`; only registered (manifest-backed) packs participate in pack-scoped runtime composition.
+
 ## Marketing Social Pack
 
 The pack exposes:

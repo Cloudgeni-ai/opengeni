@@ -25,6 +25,7 @@ import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import { validateEnvironmentAttachment } from "../domain/environments";
 import {
+  assertPackSandboxImageCompatible,
   buildMarketingDailyAnalysisAgentConfig,
   isBuiltInCapabilityPack,
   listWorkspaceCapabilityPacks,
@@ -111,6 +112,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    await assertPackSandboxImageCompatible(db, workspaceId, pack);
     const existing = await getPackInstallation(db, workspaceId, pack.id);
     const payload = EnablePackRequest.parse(await c.req.json());
     // Re-enabling without environmentId keeps the stored attachment instead of

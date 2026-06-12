@@ -98,6 +98,7 @@ Common resource behavior:
 - File resources become object-storage-backed mounts, commonly under `files/<file-id>`.
 - Uploaded files are read-only. Agents should copy them before modifying.
 - Bundled infrastructure skills may be made available under `.agents/` through the Agents SDK skills capability.
+- Enabled capability packs may add skills to the same `.agents/` skill index and may declare a `sandboxImage` that overrides `OPENGENI_DOCKER_IMAGE`/`OPENGENI_MODAL_IMAGE_REF` for the workspace's sessions (one image-declaring pack per workspace; see `docs/packs.md`).
 
 Always trace resource flow end to end:
 

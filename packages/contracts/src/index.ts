@@ -841,6 +841,49 @@ export const CapabilityPackScheduledTaskTemplate = z.object({
 });
 export type CapabilityPackScheduledTaskTemplate = z.infer<typeof CapabilityPackScheduledTaskTemplate>;
 
+// One file inside a pack skill directory. Paths are workspace-relative POSIX
+// paths inside the skill directory (for example "SKILL.md" or
+// "references/runbook.md"); content is UTF-8 text carried inline in the pack
+// manifest, which is also how registered packs persist it (the manifest JSONB
+// row in workspace_packs is the storage of record for pack skills).
+export const CapabilityPackSkillFile = z.object({
+  path: z.string().min(1).max(512).refine(isSafePackSkillRelativePath, {
+    message: "skill file path must be a safe relative POSIX path without '..' segments",
+  }),
+  content: z.string().max(256 * 1024),
+});
+export type CapabilityPackSkillFile = z.infer<typeof CapabilityPackSkillFile>;
+
+// A skill delivered by a capability pack. The name doubles as the skill
+// directory under the sandbox skill index (skills/<name>), so it must be a
+// single safe path segment. Every skill must ship a top-level SKILL.md.
+export const CapabilityPackSkill = z.object({
+  name: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
+  }),
+  description: z.string().min(1).max(2048).optional(),
+  files: z.array(CapabilityPackSkillFile).min(1).max(64),
+}).superRefine((skill, ctx) => {
+  const seen = new Set<string>();
+  skill.files.forEach((file, index) => {
+    if (seen.has(file.path)) {
+      ctx.addIssue({ code: "custom", message: `duplicate skill file path: ${file.path}`, path: ["files", index, "path"] });
+    }
+    seen.add(file.path);
+  });
+  if (!skill.files.some((file) => file.path === "SKILL.md")) {
+    ctx.addIssue({ code: "custom", message: "skill must include a top-level SKILL.md file", path: ["files"] });
+  }
+});
+export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
+
+function isSafePackSkillRelativePath(path: string): boolean {
+  if (path.startsWith("/") || path.includes("\\")) {
+    return false;
+  }
+  return path.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
 export const CapabilityPack = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -848,6 +891,21 @@ export const CapabilityPack = z.object({
   role: z.string().min(1),
   category: z.string().min(1),
   version: z.string().min(1),
+  // Container image ref (digest-pinned recommended) the pack's sessions run
+  // in. At most one enabled pack per workspace may declare one; with none,
+  // sessions use the deployment-wide image settings.
+  sandboxImage: z.string().min(1).max(512).optional(),
+  // Skills delivered into the sandbox skill index when the pack is enabled.
+  skills: z.array(CapabilityPackSkill).max(32).superRefine((skills, ctx) => {
+    const seen = new Set<string>();
+    skills.forEach((skill, index) => {
+      const key = skill.name.toLowerCase();
+      if (seen.has(key)) {
+        ctx.addIssue({ code: "custom", message: `duplicate pack skill name: ${skill.name}`, path: [index, "name"] });
+      }
+      seen.add(key);
+    });
+  }).default([]),
   tools: z.array(ToolRef).default([]),
   connectors: z.array(CapabilityPackConnector).default([]),
   knowledge: z.array(CapabilityPackKnowledge).default([]),
