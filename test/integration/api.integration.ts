@@ -3027,12 +3027,14 @@ describe("API component integration", () => {
       model: "scripted-model",
       firstPartyMcpPermissions: ["environments:manage"],
     })).rejects.toThrow("cannot grant first-party MCP permission beyond the creating grant");
-    const spawned = await callMcpTool<{ id: string; firstPartyMcpPermissions: string[] | null }>(managerMcp, "session_create", {
+    const spawned = await callMcpTool<{ id: string; firstPartyMcpPermissions: string[] | null; sandboxBackend: string }>(managerMcp, "session_create", {
       initialMessage: "spawn a delegated worker",
       model: "scripted-model",
+      sandboxBackend: "none",
       firstPartyMcpPermissions: ["sessions:read"],
     });
     expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+    expect(spawned.sandboxBackend).toBe("none");
 
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager

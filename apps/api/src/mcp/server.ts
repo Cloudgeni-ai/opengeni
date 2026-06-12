@@ -514,6 +514,7 @@ function registerWorkspaceOrchestrationTools(
         environmentId: z4.string().uuid().optional(),
         model: z4.string().min(1).optional(),
         reasoningEffort: z4.string().optional(),
+        sandboxBackend: z4.string().optional(),
         metadata: z4.record(z4.string(), z4.unknown()).optional(),
         // First-party MCP token permissions for the spawned session; every
         // permission must be held by this grant (validated in the domain).
