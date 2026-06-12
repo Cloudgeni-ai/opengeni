@@ -31,6 +31,8 @@ Then open the smallest source files that answer the question:
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
+- Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn.ts`.
+- Feature subsystems: `docs/environments.md` (workspace secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog).
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
@@ -44,7 +46,7 @@ Then open the smallest source files that answer the question:
 If paths have moved, find concepts by symbol name, not by old paths:
 
 ```bash
-rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentSegment|createSandboxClient|buildManifest|createObjectStorage|build.*McpServer|getSettings"
+rg -n "CreateSessionRequest|ClientSessionEvent|sessionWorkflow|runAgentTurn|createSandboxClient|buildManifest|createObjectStorage|build.*McpServer|getSettings"
 ```
 
 ## Client Integration
@@ -71,7 +73,10 @@ Keep these concepts straight while working:
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installations, usage, and first-party MCP.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
-- **Turn**: one queued/running unit of agent work inside a session. Follow-ups and scheduled task firings become turns.
+- **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. See `docs/run-lifecycle.md`.
+- **Goal**: optional durable per-session objective that flips "stop" into an explicit act — while active, the session workflow synthesizes continuation turns until the agent calls `goal_complete`/`goal_pause` or a user interrupts. The mechanism behind long-running autonomous runs. See `docs/goals.md`.
+- **Session memory (three stores, three jobs)**: `session_history_items` is the conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the redacted/lossy human-audit timeline and is never fed back to the model. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
+- **Workspace environment**: named per-workspace set of secret env vars, attached to a session/scheduled-task/pack and injected into the sandbox at run time; values are write-only. See `docs/environments.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
@@ -214,7 +219,8 @@ Avoid absolute claims until verified in current code:
 Update this skill in the same change whenever the repo changes any of these:
 
 - Core architecture: API/worker/runtime/storage/event-bus boundaries.
-- Terminology: session, turn, event, resource, tool, schedule, sandbox, activity.
+- Terminology: session, turn, goal, event, resource, tool, schedule, sandbox, activity, workspace environment.
+- Run lifecycle: the goal continuation loop, the no-run-length-limits principle, and the three-store session memory model (history items / run-state blob / event log).
 - Public workflow: how to create sessions, stream events, upload files, attach resources, approve/interrupt, schedule tasks.
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
 - Source layout: if important files move or names change.

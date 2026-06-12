@@ -96,11 +96,12 @@ const SettingsSchema = z.object({
   // session failure) remains as inert safety should a deployment set a cap.
   agentMaxModelCallsPerTurn: z.coerce.number().int().positive().default(1_000_000),
   // Where turn-input conversation history comes from (issue #35):
-  // "run_state" = legacy serialized RunState blob; "items" = the
-  // session_history_items table (SDK-native, version-stable). Items and the
-  // sandbox envelope are dual-written unconditionally; this flag governs the
-  // read path only, so flipping (and flipping back) is safe at any time.
-  sessionHistorySource: z.enum(["run_state", "items"]).default("run_state"),
+  // "items" (default) = the session_history_items table (SDK-native,
+  // version-stable conversation truth); "run_state" = the legacy serialized
+  // RunState blob. Items and the sandbox envelope are dual-written
+  // unconditionally; this flag governs the read path only, so flipping back to
+  // "run_state" remains a safe rollback at any time.
+  sessionHistorySource: z.enum(["run_state", "items"]).default("items"),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),

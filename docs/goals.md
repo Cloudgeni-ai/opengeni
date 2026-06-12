@@ -56,8 +56,10 @@ activity for a decision:
 5. Otherwise a continuation turn is enqueued: a deterministic prompt referencing
    the goal text and success criteria, the session's tool surface plus the
    first-party `opengeni` MCP server (so the goal tools are always reachable),
-   and the session's saved run state — the agent keeps its full conversation
-   context.
+   and the session's stored conversation — the agent keeps its full context.
+   By default that conversation comes from `session_history_items` (the
+   SDK-native memory store; see `docs/run-lifecycle.md`); the legacy run-state
+   blob path remains available behind `OPENGENI_SESSION_HISTORY_SOURCE`.
 
 Continuation turns are ordinary turns: they bill, meter (`agent_run.created`
 with source `session_turn`), and stream exactly like user turns. If billing or
@@ -117,5 +119,6 @@ reachable even when the session was created with an empty tool list.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | `20` | Hard ceiling on synthesized continuation turns per goal arming. |
+| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default: goals are bounded by the progress and budget guards, not by count, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |
 | `OPENGENI_GOAL_NO_PROGRESS_LIMIT` | `3` | Consecutive zero-progress continuations tolerated before auto-pause. |
+| `OPENGENI_SESSION_HISTORY_SOURCE` | `items` | Conversation-memory read path: `items` (SDK-native `session_history_items`) or `run_state` (legacy blob). See `docs/run-lifecycle.md`. |

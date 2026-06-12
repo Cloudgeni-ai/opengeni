@@ -75,7 +75,21 @@ MinIO is the local S3-compatible object storage default for Docker Compose and o
 - Postgres is the durable event store and replay source.
 - Temporal is orchestration only. Token streams do not go through workflow history.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
-- Agent activities are side-effectful. Do not add automatic Temporal retries around full agent segments unless each model/tool/sandbox boundary has been made idempotent.
+- Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.
+
+## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
+
+Three principles here are load-bearing and easy to break by accident:
+
+- **No run-length limits, by design.** OpenGeni runs agents that legitimately work for days. Run length is bounded by symptoms (no-progress detection, budget exhaustion), never by counts or clocks. Do not add or lower caps on model calls per turn, continuation count, or activity timeout as a way to "be safe" — fix the pathology instead. See `docs/run-lifecycle.md` and `docs/goals.md`.
+- **Three memory stores, three jobs.** `session_history_items` is conversation truth fed to the model (default read path). `agent_run_states` is the serialized RunState blob, used *only* to resume a turn paused for a human approval — never as conversation memory. `session_events` is the redacted, lossy human/audit timeline and must never be fed back to the model. Sandbox recovery state is separate again in `sandbox_session_envelopes`.
+- **Goals drive long runs.** An active goal turns "stop" into an explicit act; the continuation loop is replay-safe and lives in the session workflow. See `docs/goals.md`.
+
+The agent turn activity is `runAgentTurn`, also registered under the legacy alias `runAgentSegment` for in-flight workflow histories — schedule `runAgentTurn` in new code.
+
+## Keeping these notes current
+
+If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file and the relevant `docs/*.md` in the same change. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 
 ## Sandbox Notes
 

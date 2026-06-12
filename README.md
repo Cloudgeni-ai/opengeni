@@ -53,7 +53,7 @@ flowchart LR
 
   subgraph Managed["Managed agent service"]
     API["Hono API<br/>public contract"]
-    DB["Postgres<br/>sessions, events, run state"]
+    DB["Postgres<br/>sessions, events, history items, run state"]
     Temporal["Temporal<br/>orchestration and signals"]
     Worker["Worker<br/>OpenAI Agents SDK harness"]
     NATS["NATS Core<br/>live fanout"]
@@ -309,7 +309,7 @@ Integration and E2E tests use Bun's test runner. Deterministic SDK-level tests u
 
 - Public clients should treat the API as the source of truth.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream`.
-- Agent activities are side-effectful. Do not add automatic Temporal retries around full agent segments unless each model, tool, and sandbox boundary has been made idempotent.
+- Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model, tool, and sandbox boundary has been made idempotent.
 - Docker sandbox file resources from local S3-compatible storage are materialized into the sandbox before the run. Attach file resources before the first run when using the Docker backend.
 - Sandbox preparation profiles are explicit. Model provider credentials are not automatically exposed inside sandboxes unless configured.
 
