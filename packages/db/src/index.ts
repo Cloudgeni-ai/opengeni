@@ -2579,13 +2579,16 @@ export async function finishTurn(db: Database, workspaceId: string, turnId: stri
 }
 
 /**
- * Put a preempted (worker shutdown mid-flight) running turn back on the
- * session queue so the workflow's next claim re-dispatches it on a healthy
- * worker. The trigger event is swapped when the resumed attempt should enter
+ * Put a preempted (worker shutdown mid-flight) turn back on the session
+ * queue so the workflow's next claim re-dispatches it on a healthy worker.
+ * The trigger event is swapped when the resumed attempt should enter
  * through a synthesized resume notice instead of replaying the original
  * trigger (the original input is already part of persisted conversation
  * truth by then). Keeping the original position lets the resumed turn run
- * before any turns queued behind it.
+ * before any turns queued behind it. Accepts `running` turns and
+ * `requires_action` turns: an approval rerun re-dispatches the same turn
+ * without a fresh claim, so the row still carries the approval-wait status
+ * while the rerun activity executes.
  */
 export async function requeuePreemptedTurn(db: Database, workspaceId: string, turnId: string, triggerEventId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -2595,9 +2598,9 @@ export async function requeuePreemptedTurn(db: Database, workspaceId: string, tu
       startedAt: null,
       finishedAt: null,
       updatedAt: new Date(),
-    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), eq(schema.sessionTurns.status, "running"))).returning({ id: schema.sessionTurns.id });
+    }).where(and(eq(schema.sessionTurns.workspaceId, workspaceId), eq(schema.sessionTurns.id, turnId), inArray(schema.sessionTurns.status, ["running", "requires_action"]))).returning({ id: schema.sessionTurns.id });
     if (!row) {
-      throw new Error(`Running session turn not found: ${turnId}`);
+      throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
   });
 }

@@ -208,9 +208,17 @@ describe("DB integration", () => {
     expect(reclaimed?.id).toBe(turn.id);
     expect(reclaimed?.triggerEventId).toBe(resumeTrigger!.id);
 
-    // Only running turns can be preempt-requeued.
+    // An approval rerun re-dispatches the same turn without a fresh claim, so
+    // a shutdown there preempts a turn still marked requires_action.
+    await finishTurn(dbClient.db, grant.workspaceId, turn.id, "requires_action");
+    await requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, trigger!.id);
+    const requeuedFromApproval = await getSessionTurn(dbClient.db, grant.workspaceId, turn.id);
+    expect(requeuedFromApproval?.status).toBe("queued");
+    expect(requeuedFromApproval?.triggerEventId).toBe(trigger!.id);
+
+    // Terminal turns cannot be preempt-requeued.
     await finishTurn(dbClient.db, grant.workspaceId, turn.id, "idle");
-    await expect(requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id)).rejects.toThrow("Running session turn not found");
+    await expect(requeuePreemptedTurn(dbClient.db, grant.workspaceId, turn.id, resumeTrigger!.id)).rejects.toThrow("Preemptible session turn not found");
   });
 
   test("persists scheduled tasks and run history", async () => {
