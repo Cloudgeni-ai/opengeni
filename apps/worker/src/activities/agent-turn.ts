@@ -579,45 +579,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return { status: "idle" };
       }
-      // A retryable provider failure (rate limit) on a goal-bearing session is
-      // transient backpressure, not a session failure: the in-client retry
-      // budget is already exhausted by the time the error reaches here, so
-      // fail the turn truthfully but idle the session and let the goal
-      // continuation loop resume after a pacing delay. Sessions without an
-      // active goal keep the terminal behavior -- there is no continuation
-      // machinery to resume them, and a failed session is the honest signal
-      // for the user to retry.
+      // A retryable provider failure (rate limit) is transient backpressure,
+      // not a session failure: the in-client retry budget is already
+      // exhausted by the time the error reaches here, so fail the turn
+      // truthfully but idle the session. With an active goal the continuation
+      // loop resumes after a pacing delay; without one the session simply
+      // waits for the next user message. Long-lived sessions (a per-customer
+      // ops channel between goals) must never go terminal because the
+      // provider had a bad minute -- a failed session would reject the very
+      // retry message the failure asks for.
       const failure = agentRunFailurePayload(error);
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
-        if (goal && goal.status === "active") {
-          await batcher?.flush().catch(() => undefined);
-          // Provider errors rarely carry SDK run state; a null falls back to
-          // the previous snapshot, same degraded-context contract as the
-          // max-turns path above.
-          await reconcileConversationTruth();
-          const serializedRunState = agentsErrorRunState(error);
-          const runStateSaved = Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
-          if (serializedRunState && settings.sessionHistorySource !== "items") {
-            await saveRunState(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              serializedRunState,
-              pendingApprovals: [],
-            });
-          }
-          await publish([
-            { type: "turn.failed", payload: { ...failure, recovery: "goal_continuation", runStateSaved } },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ], true);
-          await finishTurn(db, input.workspaceId, turnId, "failed");
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-          activityStatus = "idle";
-          activityError = error;
-          return { status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS };
+        const goalActive = Boolean(goal && goal.status === "active");
+        await batcher?.flush().catch(() => undefined);
+        // Provider errors rarely carry SDK run state; a null falls back to
+        // the previous snapshot, same degraded-context contract as the
+        // max-turns path above.
+        await reconcileConversationTruth();
+        const serializedRunState = agentsErrorRunState(error);
+        const runStateSaved = Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
+        if (serializedRunState && settings.sessionHistorySource !== "items") {
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            serializedRunState,
+            pendingApprovals: [],
+          });
         }
+        await publish([
+          { type: "turn.failed", payload: { ...failure, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ], true);
+        await finishTurn(db, input.workspaceId, turnId, "failed");
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+        activityStatus = "idle";
+        activityError = error;
+        return goalActive ? { status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS } : { status: "idle" };
       }
       activityStatus = "failed";
       activityError = error;

@@ -468,7 +468,7 @@ describe("worker activities integration", () => {
     expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
   });
 
-  test("classifies provider rate limits as retryable turn failures", async () => {
+  test("idles the session on a retryable provider failure without a goal", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "rate limit",
@@ -497,15 +497,22 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       triggerEventId: trigger!.id,
       workflowId: "workflow-rate-limit",
-    })).resolves.toEqual({ status: "failed" });
+    })).resolves.toEqual({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     const failed = events.find((event) => event.type === "turn.failed");
     expect(failed?.payload).toEqual({
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
       code: "provider_rate_limited",
       retryable: true,
+      recovery: "user_message",
+      runStateSaved: false,
     });
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+    // The turn is truthfully failed, but a transient provider failure must
+    // not kill a long-lived session: it idles and the next user message
+    // resumes it (no continuation pacing -- there is no goal to continue).
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
+    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
   });
 
   test("idles the session on a retryable provider failure when a goal is active", async () => {

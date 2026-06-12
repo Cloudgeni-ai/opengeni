@@ -27,10 +27,13 @@ run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
 Two recoverable conditions end a turn gracefully (idle the session, keep the
 context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured) and provider rate-limit backpressure on a
-goal-bearing session. A budget/credit exhaustion between model calls likewise
-idles the turn rather than failing the session, so a top-up lets the same
-session continue.
+model-call cap (if one is configured) and provider rate-limit backpressure —
+with an active goal the continuation loop resumes after a pacing delay, and
+without one the session idles until the next user message (a long-lived
+session between goals must not go terminal because the provider had a bad
+minute). A budget/credit exhaustion between model calls likewise idles the
+turn rather than failing the session, so a top-up lets the same session
+continue.
 
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
