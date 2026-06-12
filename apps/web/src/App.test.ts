@@ -165,7 +165,7 @@ describe("projectSessionTimeline", () => {
   });
 
   test("hides archived terminal failure payloads in the main timeline projection", () => {
-    const items = projectSessionTimeline(session({ status: "failed" }), [
+    const items = projectSessionTimeline(session({ status: "cancelled" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
         error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
@@ -186,6 +186,18 @@ describe("projectSessionTimeline", () => {
     ]);
 
     expect(JSON.stringify(items)).toContain("Current run failed");
+  });
+
+  test("treats failed sessions as live: failure payloads stay visible for the revival flow", () => {
+    // Failed sessions are revivable by sending a new message, so the timeline
+    // must keep behaving like an active session (no archived placeholders).
+    const items = projectSessionTimeline(session({ status: "failed" }), [
+      event(1, "user.message", { text: "Inspect" }),
+      event(2, "turn.failed", { error: "Last turn failed" }),
+    ]);
+
+    expect(JSON.stringify(items)).toContain("Last turn failed");
+    expect(JSON.stringify(items)).not.toContain("Historical failure payload hidden in the web console.");
   });
 
   test("redacts active provider-internal sandbox failures in the main timeline projection", () => {
@@ -468,12 +480,12 @@ describe("sanitizeEventForDisplay", () => {
   test("hides historical terminal failure payloads in the web console", () => {
     const sanitized = sanitizeEventForDisplay(event(7, "turn.failed", {
       error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
-    }), "failed");
+    }), "cancelled");
 
     expect(JSON.stringify(sanitized.payload)).not.toContain("RESOURCE_EXHAUSTED");
     expect(sanitized.payload).toEqual({
       archived: true,
-      status: "failed",
+      status: "cancelled",
       message: "Historical failure payload hidden in the web console.",
     });
   });
@@ -484,6 +496,14 @@ describe("sanitizeEventForDisplay", () => {
     }), "running");
 
     expect(active.payload).toEqual({ error: "Current run failed" });
+  });
+
+  test("keeps failed-session failure payloads available: failed sessions are revivable, not archived", () => {
+    const active = sanitizeEventForDisplay(event(7, "turn.failed", {
+      error: "Last turn failed",
+    }), "failed");
+
+    expect(active.payload).toEqual({ error: "Last turn failed" });
   });
 
   test("redacts active provider-internal sandbox failures in debug payloads", () => {

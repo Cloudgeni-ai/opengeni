@@ -1773,8 +1773,11 @@ function validTopupAmount(value: string): boolean {
   return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
 }
 
+// Only "cancelled" is terminal for the console: a FAILED session is revivable
+// by sending it a new message (the API transitions failed -> queued and
+// restarts the workflow), so the composer must stay open for it.
 function isTerminalSessionStatus(value: SessionStatus): boolean {
-  return value === "failed" || value === "cancelled";
+  return value === "cancelled";
 }
 
 function RepositoryContextPicker(props: {
@@ -3131,20 +3134,23 @@ function SessionChatPane(props: {
           <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
         </div>
       ) : (
-        <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-          <MessageTimeline
-            className="h-full"
-            items={props.timeline}
-            status={props.session.status}
-            renderMessageText={renderMessageText}
-            onOpenSession={props.onOpenSession}
-            emptyState={(
-              <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
-                Waiting for session activity
-              </div>
-            )}
-          />
-        </div>
+        <>
+          {props.session.status === "failed" ? <FailedSessionRevivalBanner /> : null}
+          <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
+            <MessageTimeline
+              className="h-full"
+              items={props.timeline}
+              status={props.session.status}
+              renderMessageText={renderMessageText}
+              onOpenSession={props.onOpenSession}
+              emptyState={(
+                <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
+                  Waiting for session activity
+                </div>
+              )}
+            />
+          </div>
+        </>
       )}
 
       {props.approvals.length > 0 && !terminal ? (
@@ -3252,21 +3258,13 @@ function UserMessageBody({ workspaceId, item }: { workspaceId: string; item: Use
 }
 
 function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
-  const failed = props.session.status === "failed";
   return (
-    <div
-      className={cn(
-        "mb-4 flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between",
-        failed
-          ? "border-red-500/30 bg-red-500/10 text-red-100"
-          : "border-zinc-500/30 bg-zinc-500/10 text-zinc-100",
-      )}
-    >
+    <div className="mb-4 flex flex-col gap-3 rounded-lg border border-zinc-500/30 bg-zinc-500/10 p-3 text-zinc-100 sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 gap-2.5">
-        <AlertTriangleIcon className={cn("mt-0.5 size-4 shrink-0", failed ? "text-red-300" : "text-zinc-300")} />
+        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-zinc-300" />
         <div className="min-w-0">
           <div className="text-sm font-medium">
-            This session {failed ? "failed" : "was cancelled"} and cannot be continued.
+            This session was cancelled and cannot be continued.
           </div>
           <div className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
             Historical session from {formatTimestamp(props.session.createdAt)}.
@@ -3281,8 +3279,23 @@ function TerminalSessionBanner(props: { session: Session; onNewSession: () => vo
   );
 }
 
+function FailedSessionRevivalBanner() {
+  return (
+    <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
+      <div className="flex gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-red-100">
+        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-red-300" />
+        <div className="min-w-0 text-sm">
+          <span className="font-medium">This session failed.</span>{" "}
+          <span className="text-[color:var(--color-fg-muted)]">
+            Its conversation history is preserved — send a message to revive it and keep working.
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TerminalSessionArchive(props: { session: Session; eventCount: number }) {
-  const failed = props.session.status === "failed";
   return (
     <div className="grid min-h-[18rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] px-4 py-10 text-center">
       <div className="max-w-md">
@@ -3290,7 +3303,7 @@ function TerminalSessionArchive(props: { session: Session; eventCount: number })
           <TerminalIcon className="size-4" />
         </div>
         <div className="text-sm font-medium">
-          {failed ? "Historical failed session" : "Historical cancelled session"}
+          Historical cancelled session
         </div>
         <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
           This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Sanitized debug metadata is available in the inspector.

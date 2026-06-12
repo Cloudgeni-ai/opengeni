@@ -2105,6 +2105,23 @@ export async function countSessionHistoryItems(db: Database, workspaceId: string
 }
 
 /**
+ * Number of conversation-truth items a specific turn persisted. The
+ * worker-death requeue path uses this to decide whether the re-dispatched
+ * turn must enter through a resume notice (its partial progress is already
+ * part of conversation truth, so replaying the original trigger would hand
+ * the model duplicate input) or can replay its original trigger cleanly.
+ */
+export async function countTurnSessionHistoryItems(db: Database, workspaceId: string, turnId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)`,
+    }).from(schema.sessionHistoryItems)
+      .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.turnId, turnId)));
+    return Number(row?.count ?? 0);
+  });
+}
+
+/**
  * Persist the session's sandbox recovery descriptor (the small versioned
  * envelope used to reattach / snapshot-restore / rebuild the sandbox),
  * decoupled from the RunState blob.
@@ -2661,6 +2678,35 @@ export async function requeuePreemptedTurn(db: Database, workspaceId: string, tu
     if (!row) {
       throw new Error(`Preemptible session turn not found: ${turnId}`);
     }
+  });
+}
+
+/**
+ * Bump the per-turn worker-death redispatch counter and return the new value.
+ * Stored in the turn row's metadata (not workflow-local state) so the
+ * crash-loop guard is replay-safe: the count survives workflow replay, worker
+ * restarts, and even a session-workflow re-run, and the increment is a single
+ * atomic statement.
+ */
+export async function incrementTurnWorkerDeathRedispatches(db: Database, workspaceId: string, turnId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute(sql<{ count: number }>`
+      update session_turns
+      set metadata = jsonb_set(
+            coalesce(metadata, '{}'::jsonb),
+            '{workerDeathRedispatches}',
+            to_jsonb(coalesce((metadata->>'workerDeathRedispatches')::int, 0) + 1),
+            true
+          ),
+          updated_at = now()
+      where workspace_id = ${workspaceId} and id = ${turnId}
+      returning (metadata->>'workerDeathRedispatches')::int as count
+    `);
+    const count = rows[0]?.count;
+    if (count === undefined || count === null) {
+      throw new Error(`Session turn not found: ${turnId}`);
+    }
+    return Number(count);
   });
 }
 

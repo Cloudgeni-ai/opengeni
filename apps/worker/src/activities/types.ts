@@ -28,6 +28,31 @@ export type RunAgentTurnInput = {
   turnId?: string;
 };
 
+export type RequeueTurnAfterWorkerDeathInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  // The trigger the dead attempt was actually running (for an approval rerun
+  // this is the approval-decision event, not the turn row's original trigger).
+  triggerEventId: string;
+  workflowId: string;
+  turnId: string;
+};
+
+export type RequeueTurnAfterWorkerDeathResult =
+  // The turn is back on the queue; the session workflow's next claim
+  // re-dispatches it on a healthy worker. `redispatches` is the total number
+  // of worker-death re-dispatches this turn has now consumed.
+  | { action: "requeued"; redispatches: number }
+  // The turn is no longer running/requires_action: the timed-out attempt was
+  // a zombie that actually settled the turn after the server gave up on its
+  // heartbeats. Nothing to redo; the workflow just continues its loop.
+  | { action: "stale" }
+  // The per-turn crash-loop guard tripped; the workflow must fail the
+  // session for real. `redispatches` is the count already consumed (== the
+  // ceiling), so the failed attempt was worker death number redispatches + 1.
+  | { action: "exceeded"; redispatches: number };
+
 export type ClaimNextQueuedTurnInput = {
   workspaceId: string;
   sessionId: string;

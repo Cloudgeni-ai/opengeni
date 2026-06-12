@@ -1,6 +1,29 @@
-import { CancellationScope, condition, defineSignal, isCancellation, setHandler, workflowInfo } from "@temporalio/workflow";
+import { ActivityFailure, CancellationScope, condition, defineSignal, isCancellation, patched, setHandler, TimeoutFailure, workflowInfo } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import { activity, workflowFailureMessage } from "./activities";
+
+/**
+ * True when an agent-turn activity failure means "the worker hosting the
+ * turn died or vanished" rather than "the turn itself failed": the server
+ * closed the activity with a HEARTBEAT timeout (the worker was killed before
+ * the graceful-preempt checkpoint could run — SIGKILL, OOM, node loss, or a
+ * rollout whose grace period expired) or a SCHEDULE_TO_START timeout (no
+ * worker ever picked the task up). Detection uses the SDK's typed failure
+ * classes, not message-string matching: the failure converter rehydrates
+ * ActivityFailure/TimeoutFailure instances deterministically from recorded
+ * history on replay, so instanceof + timeoutType checks are replay-safe and
+ * do not depend on server-controlled message text. START_TO_CLOSE /
+ * SCHEDULE_TO_CLOSE timeouts are deliberately excluded: with the 30-day
+ * startToClose they mean the turn truly overran, which stays a real failure.
+ */
+function isWorkerDeathFailure(error: unknown): boolean {
+  if (!(error instanceof ActivityFailure)) {
+    return false;
+  }
+  const cause = error.cause;
+  return cause instanceof TimeoutFailure
+    && (cause.timeoutType === "HEARTBEAT" || cause.timeoutType === "SCHEDULE_TO_START");
+}
 
 export const userMessage = defineSignal<[string]>("userMessage");
 export const queueChanged = defineSignal("queueChanged");
@@ -148,6 +171,39 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.kind === "failure") {
+      // An ungraceful worker death never reaches the activity's graceful
+      // preemption path — it surfaces here as a heartbeat-timeout failure.
+      // Conversation truth was still dual-written during the turn, so the
+      // turn is re-queued (resume notice when it persisted progress, original
+      // trigger otherwise) and the loop re-claims it on a healthy worker —
+      // bounded by a per-turn redispatch counter persisted on the turn row.
+      // patched() keeps replays of histories recorded before this branch
+      // existed on their original failSession path.
+      if (isWorkerDeathFailure(outcome.error) && patched("worker-death-redispatch")) {
+        const requeue = await activity.requeueTurnAfterWorkerDeath({
+          accountId,
+          workspaceId,
+          sessionId,
+          triggerEventId,
+          workflowId,
+          turnId,
+        });
+        if (requeue.action !== "exceeded") {
+          // "requeued": the next claim re-dispatches the turn. "stale": the
+          // timed-out attempt actually settled the turn (a zombie finished
+          // after the server gave up on its heartbeats); nothing to redo.
+          return true;
+        }
+        await activity.failSession({
+          accountId,
+          workspaceId,
+          sessionId,
+          triggerEventId,
+          workflowId,
+          error: `Worker died ${requeue.redispatches + 1} times while running this turn (heartbeat timeout); giving up after ${requeue.redispatches} re-dispatches.`,
+        });
+        return false;
+      }
       await activity.failSession({
         accountId,
         workspaceId,

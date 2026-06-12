@@ -20,6 +20,8 @@ export type {
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
   PauseGoalForInterruptInput,
+  RequeueTurnAfterWorkerDeathInput,
+  RequeueTurnAfterWorkerDeathResult,
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./activities/types";
@@ -67,6 +69,7 @@ export const runAgentSegment = defaultActivities.runAgentSegment;
 export const indexDocument = defaultActivities.indexDocument;
 export const failSession = defaultActivities.failSession;
 export const interruptActiveTurn = defaultActivities.interruptActiveTurn;
+export const requeueTurnAfterWorkerDeath = defaultActivities.requeueTurnAfterWorkerDeath;
 export const claimNextQueuedTurn = defaultActivities.claimNextQueuedTurn;
 export const markSessionIdle = defaultActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;

@@ -25,6 +25,8 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
+import { postUserMessageTurn } from "../../apps/api/src/domain/sessions";
+import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivities } from "../../apps/worker/src/activities";
 import { WORKER_SHUTDOWN_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
@@ -307,6 +309,134 @@ describe("worker restart resilience", () => {
     expect(rerunRequest).toContain("do the early work");
     expect(rerunRequest).not.toContain(WORKER_SHUTDOWN_RESUME_TEXT.split("\n")[0]);
     expect(events.some((event) => event.type === "agent.message.completed" && JSON.stringify(event.payload).includes("did the work"))).toBe(true);
+  }, 180_000);
+
+  test("a failed session accepts a new user message and revives from stored items", async () => {
+    const grant = await testGrant();
+    const taskQueue = `failed-revival-${crypto.randomUUID()}`;
+    const model = new ScriptedModel([
+      // Turn 1 completes normally so the session has stored conversation truth.
+      { id: "revive-call-1", outputText: "first answer", chunks: ["first ", "answer"] },
+      // Turn 2 blows up with a non-retryable agent error: the session fails.
+      { id: "revive-call-2", error: new Error("agent exploded mid-turn") },
+      // Turn 3 is the revival turn, running from stored items.
+      { id: "revive-call-3", outputText: "revived and answered", chunks: ["revived ", "and ", "answered"] },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+      sessionHistorySource: "items",
+    });
+    const activities = createActivities({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "answer me",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
+      { type: "user.message", payload: { text: "answer me" } },
+    ]);
+    await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: workflowId,
+      source: "user",
+      prompt: "answer me",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: settings.openaiReasoningEffort,
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const client = new Client({ connection });
+    // Same signalWithStart wiring as the production API client: revival of a
+    // failed session must start a fresh workflow run for the completed one.
+    const workflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async (input) => {
+        await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId: input.workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId }],
+          signal: "queueChanged",
+        });
+      },
+      signalApprovalDecision: async () => undefined,
+      signalInterrupt: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const sendUserMessage = async (text: string) => await postUserMessageTurn({
+      db: dbClient.db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text,
+      resources: [],
+      tools: [],
+    });
+
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const run = worker.run();
+    try {
+      await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      });
+      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle");
+
+      // Turn 2 fails the session for real.
+      await sendUserMessage("do the next thing");
+      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "failed");
+      const turnsAfterFailure = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+      expect(turnsAfterFailure.map((turn) => turn.status)).toEqual(["completed", "failed"]);
+
+      // Revival: the failed session accepts the message (no 409), goes back
+      // to queued, and a fresh workflow run executes the turn from stored
+      // conversation truth.
+      await sendUserMessage("are you still there?");
+      await waitFor(async () => (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "idle");
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns.map((turn) => turn.status)).toEqual(["completed", "failed", "completed"]);
+    expect(model.calls).toBe(3);
+    // The revival turn was built from stored items: turn 1's conversation
+    // truth is threaded in alongside the new user message.
+    const revivalRequest = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    expect(revivalRequest).toContain("first answer");
+    expect(revivalRequest).toContain("are you still there?");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
+    const statuses = events
+      .filter((event) => event.type === "session.status.changed")
+      .map((event) => (event.payload as { status?: string }).status);
+    expect(statuses.slice(statuses.lastIndexOf("failed"))).toEqual(["failed", "queued", "running", "idle"]);
+    expect(events.some((event) => event.type === "agent.message.completed" && JSON.stringify(event.payload).includes("revived and answered"))).toBe(true);
   }, 180_000);
 
   async function testGrant(): Promise<AccessGrant> {

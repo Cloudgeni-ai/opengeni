@@ -1014,6 +1014,51 @@ describe("API component integration", () => {
     ).toHaveLength(3);
   });
 
+  test("revives a failed session on a new user message but keeps cancelled terminal", async () => {
+    const workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "hello" }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = await created.json() as { id: string };
+    // A failed manager channel must answer when spoken to: the message is
+    // accepted, the session transitions failed -> queued (stale active turn
+    // cleared), the status change is on the timeline, and the workflow is
+    // woken via signalWithStart exactly as for idle sessions.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "failed", null);
+    const wakeupsBefore = workflow.wakeups.length;
+    const revived = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({ type: "user.message", payload: { text: "are you still there?" } }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(revived.status).toBe(202);
+    const afterRevival = await requireSession(dbClient.db, workspaceId, session.id);
+    expect(afterRevival.status).toBe("queued");
+    expect(afterRevival.activeTurnId).toBeNull();
+    expect(workflow.wakeups.length).toBe(wakeupsBefore + 1);
+    const events = await listSessionEvents(dbClient.db, workspaceId, session.id, 0, 100);
+    const statusChanges = events.filter((event) => event.type === "session.status.changed");
+    expect((statusChanges.at(-1)?.payload as { status?: string }).status).toBe("queued");
+
+    // Cancelled stays terminal: an explicit user act, not a failure.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
+    const rejected = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({ type: "user.message", payload: { text: "hello?" } }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(rejected.status).toBe(409);
+  });
+
 	  test("queues model settings on follow-up user messages", async () => {
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),

@@ -47,10 +47,29 @@ turn had already persisted progress (so the model is not handed duplicate
 input and is told to verify in-flight side effects before repeating them), or
 replaying the original trigger when nothing was persisted yet. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
-explicit checkpoint/resume, not an automatic Temporal retry: a hard kill
-(SIGKILL, no grace period) still fails the session via the heartbeat timeout,
-deliberately, because an uncheckpointed death must not be replayed blindly
-against side-effectful work.
+explicit checkpoint/resume, not an automatic Temporal retry.
+
+**Ungraceful worker death is also survivable — bounded, never blind.** A hard
+kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
+runs the graceful checkpoint; it surfaces to the session workflow as a
+heartbeat-timeout `ActivityFailure`. The workflow does not fail the session
+for that shape: conversation truth was still dual-written after every model
+response during the turn, so the `requeueTurnAfterWorkerDeath` activity puts
+the turn back on the queue and the loop re-dispatches it — through a
+synthesized `turn.preempted` resume notice (reason `worker_death`) when the
+dead attempt had persisted items for the turn, or by replaying the original
+trigger when nothing was persisted. This is still not an automatic Temporal
+retry of side-effectful work: the resumed attempt sees everything the dead
+attempt checkpointed and is told to verify in-flight side effects before
+repeating them. A per-turn redispatch counter persisted on the turn row
+(ceiling 3) breaks crash loops: a turn that keeps killing workers fails the
+session for real with a clear error.
+
+**Failed sessions are revivable by talking to them.** Conversation truth is
+items, so a failed turn does not invalidate history. A new `user.message`
+into a failed session transitions it failed → queued, restarts the session
+workflow (signalWithStart), and the next turn runs from the stored items.
+Only `cancelled` — an explicit user act — is terminal.
 
 ## Goals — what makes long runs continue
 

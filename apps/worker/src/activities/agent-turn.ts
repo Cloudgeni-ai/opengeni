@@ -71,6 +71,18 @@ export const WORKER_SHUTDOWN_RESUME_TEXT = [
   "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
 ].join("\n");
 
+// Resume notice for the harder variant: the worker died WITHOUT running the
+// graceful checkpoint (SIGKILL, OOM, node loss — surfaced to the workflow as
+// a heartbeat-timeout activity failure). Conversation truth is still
+// dual-written after every model response, so the bound is the same order as
+// a graceful preempt, but nothing after the last reconcile was captured and
+// the agent must be even more suspicious about repeated side effects.
+export const WORKER_DEATH_RESUME_TEXT = [
+  "[TURN RESUMED AFTER WORKER CRASH] The platform worker running this turn died before the turn finished.",
+  "Your conversation history above, including this turn's earlier work, is preserved up to the last checkpoint; anything in flight after that checkpoint was lost.",
+  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
+].join("\n");
+
 /**
  * True when this activity attempt was cancelled because its hosting worker is
  * shutting down gracefully (SIGTERM during a deploy), as opposed to a

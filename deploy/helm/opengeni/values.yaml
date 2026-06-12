@@ -179,7 +179,15 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  terminationGracePeriodSeconds: 60
+  # Worker pods checkpoint in-flight agent turns on SIGTERM (graceful
+  # preemption: final conversation-truth reconcile, sandbox envelope,
+  # turn requeue). The Temporal worker cancels in-flight activities
+  # immediately on shutdown and then waits for them to finish, so this pod
+  # grace period is the only bound on the checkpoint window — give it real
+  # room. A SIGKILL after this period surfaces as a heartbeat-timeout
+  # activity failure, which the session workflow survives by re-dispatching
+  # the turn (bounded), but the graceful path loses less.
+  terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1

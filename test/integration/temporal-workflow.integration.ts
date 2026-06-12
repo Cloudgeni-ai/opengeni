@@ -2,6 +2,32 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { startTestServices, type TestServices, waitFor } from "@opengeni/testing";
+import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+
+// An ungraceful worker death cannot be faked by throwing a TimeoutFailure
+// from the activity (the worker coerces thrown activity errors into
+// ApplicationFailure via ensureApplicationFailure), so the worker-death tests
+// produce the REAL failure shape: the mock turn activity hangs without ever
+// heartbeating and the Temporal server closes it with a heartbeat timeout
+// (the session workflow's proxy sets heartbeatTimeout to 30s), delivering an
+// ActivityFailure whose cause is a TimeoutFailure with timeoutType HEARTBEAT
+// — exactly what a SIGKILLed worker produces. The hang resolves on the
+// worker-shutdown cancellation so the test worker can drain at the end.
+async function hangWithoutHeartbeating(): Promise<{ status: string }> {
+  await new Promise<void>((resolve) => {
+    const signal = currentActivityContext()?.cancellationSignal;
+    if (!signal || signal.aborted) {
+      resolve();
+      return;
+    }
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
+  return { status: "cancelled" };
+}
+
+// Generous bound for the server to detect a missed-heartbeat activity
+// (30s heartbeat window + detection slack) plus the rest of the test.
+const workerDeathTestTimeoutMs = 180_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
 
@@ -168,6 +194,101 @@ describe("Temporal workflow integration", () => {
       await run;
     }
   }, temporalWorkflowTestTimeoutMs);
+
+  test("re-dispatches a turn whose worker died (heartbeat timeout) instead of failing the session", async () => {
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const turn = queuedTurn("event-1");
+    const queuedTurns = [turn];
+    const runs: Array<{ turnId?: string; triggerEventId: string }> = [];
+    const requeues: Array<{ turnId: string; triggerEventId: string }> = [];
+    const failures: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentTurn: async (input: { turnId?: string; triggerEventId: string }) => {
+        runs.push(input);
+        if (runs.length === 1) {
+          // Ungracefully dead worker: never heartbeats, never returns.
+          return await hangWithoutHeartbeating();
+        }
+        return { status: "idle" };
+      },
+      requeueTurnAfterWorkerDeath: async (input: { turnId: string; triggerEventId: string }) => {
+        requeues.push(input);
+        // Mirror the real activity: the same turn goes back on the queue
+        // behind a synthesized worker-death resume trigger.
+        queuedTurns.push({ id: turn.id, triggerEventId: "death-resume-event" });
+        return { action: "requeued", redispatches: 1 };
+      },
+      failSession: async (input: unknown) => {
+        failures.push(input);
+      },
+      interruptActiveTurn: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({ turnId: turn.id, triggerEventId: "event-1" });
+      expect(runs[1]).toMatchObject({ turnId: turn.id, triggerEventId: "death-resume-event" });
+      expect(requeues).toEqual([expect.objectContaining({ turnId: turn.id, triggerEventId: "event-1" })]);
+      expect(failures).toHaveLength(0);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, workerDeathTestTimeoutMs);
+
+  test("fails the session for real once worker-death re-dispatches exceed the ceiling", async () => {
+    // The counter mechanics (persisted per-turn counter, ceiling, stale
+    // detection) are proven against the real requeueTurnAfterWorkerDeath
+    // activity in worker-activity.integration.ts; this proves the workflow
+    // honors the activity's "exceeded" verdict on a real heartbeat-timeout
+    // failure by failing the session with a clear error.
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const turn = queuedTurn("event-1");
+    const queuedTurns = [turn];
+    const runs: unknown[] = [];
+    const failures: Array<{ error?: string }> = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => queuedTurns.shift() ?? null,
+      markSessionIdle: async () => undefined,
+      runAgentTurn: async (input: unknown) => {
+        runs.push(input);
+        // Crash-looping turn: every dispatch takes its worker down.
+        return await hangWithoutHeartbeating();
+      },
+      requeueTurnAfterWorkerDeath: async () => ({ action: "exceeded", redispatches: 3 }),
+      failSession: async (input: { error?: string }) => {
+        failures.push(input);
+      },
+      interruptActiveTurn: async () => undefined,
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      const handle = await client.workflow.start("sessionWorkflow", {
+        taskQueue,
+        workflowId: `wf-${crypto.randomUUID()}`,
+        args: [{ ...scope, sessionId: crypto.randomUUID(), initialEventId: "event-1" }],
+      });
+      await handle.result();
+      expect(runs).toHaveLength(1);
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.error).toContain("giving up after 3 re-dispatches");
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, workerDeathTestTimeoutMs);
 
   test("idle interrupt marks the session idle without cancelling a turn", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;

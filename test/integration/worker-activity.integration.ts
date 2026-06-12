@@ -11,6 +11,7 @@ import type { ObjectStorage } from "../../packages/storage/src/index";
 import {
   appendSessionEvents,
   appendSessionEventsAndUpdateSession,
+  appendSessionHistoryItems,
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
@@ -49,7 +50,8 @@ import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
+import { PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
+import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
@@ -2205,6 +2207,100 @@ describe("worker activities integration", () => {
     expect((completions[1]!.payload as { output?: string }).output).toBe("continued work");
     // The continuation reused the saved run state from the first turn.
     expect(JSON.stringify(model.requests[1])).toContain("initial work");
+  });
+
+  test("requeueTurnAfterWorkerDeath requeues from dual-written truth and bounds crash loops", async () => {
+    const grant = await testGrant(dbClient.db);
+    const settings = testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" });
+    const activities = createActivities({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "unused" }]) }),
+    });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "long job",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "long job" } },
+    ]);
+    const workflowId = `session-${session.id}`;
+    await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      temporalWorkflowId: workflowId,
+      source: "user",
+      prompt: "long job",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: settings.openaiReasoningEffort,
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const claimScope = { workspaceId: grant.workspaceId, sessionId: session.id, workflowId };
+    const claimed = await activities.claimNextQueuedTurn(claimScope);
+    expect(claimed).not.toBeNull();
+    const turnId = claimed!.id;
+    const requeueInput = (triggerEventId: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId,
+      workflowId,
+      turnId,
+    });
+
+    // Death before any checkpoint: the original trigger replays cleanly.
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({ action: "requeued", redispatches: 1 });
+    let turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns.map((turn) => turn.status)).toEqual(["queued"]);
+    expect(turns[0]?.triggerEventId).toBe(trigger!.id);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
+    let events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    let preemptions = events.filter((event) => event.type === "turn.preempted");
+    expect(preemptions).toHaveLength(1);
+    expect(preemptions[0]!.payload as Record<string, unknown>).toMatchObject({ reason: "worker_death", resumeWithNotice: false });
+
+    // Death after the turn checkpointed conversation truth: the rerun enters
+    // through a synthesized resume notice instead of replaying input the
+    // model has already seen.
+    await activities.claimNextQueuedTurn(claimScope);
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId,
+      items: [{ position: 0, item: { type: "message", role: "user", content: "long job" } }],
+    });
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(trigger!.id))).toEqual({ action: "requeued", redispatches: 2 });
+    events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    preemptions = events.filter((event) => event.type === "turn.preempted");
+    expect(preemptions).toHaveLength(2);
+    const notice = preemptions[1]!;
+    expect(notice.payload as Record<string, unknown>).toMatchObject({ reason: "worker_death", resumeWithNotice: true, text: WORKER_DEATH_RESUME_TEXT });
+    turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns[0]?.status).toBe("queued");
+    expect(turns[0]?.triggerEventId).toBe(notice.id);
+
+    // Crash-loop guard: the counter persists on the turn row; past the
+    // ceiling the activity refuses so the workflow fails the session for real.
+    await activities.claimNextQueuedTurn(claimScope);
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "requeued", redispatches: WORKER_DEATH_MAX_REDISPATCHES });
+    await activities.claimNextQueuedTurn(claimScope);
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "exceeded", redispatches: WORKER_DEATH_MAX_REDISPATCHES });
+
+    // A settled turn (the timed-out attempt was a zombie that actually
+    // finished) is left untouched.
+    await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
+    expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "stale" });
   });
 });
 

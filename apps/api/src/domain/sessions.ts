@@ -194,12 +194,19 @@ export async function postUserMessageTurn(input: {
   const requestedModel = input.model ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
   const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, (lockedSession) => {
-    if (lockedSession.status === "failed" || lockedSession.status === "cancelled") {
+    // Cancelled is the one terminal state: an explicit user act. A FAILED
+    // session stays revivable by talking to it — conversation truth lives in
+    // session_history_items, so a failed turn does not invalidate history,
+    // and the manager channel of record must always answer when spoken to.
+    // The new message transitions failed -> queued (clearing the stale
+    // activeTurnId) and the signalWithStart below starts a fresh workflow
+    // run for the completed (failed) one, exactly as for idle sessions.
+    if (lockedSession.status === "cancelled") {
       throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
     }
     const nextResources = mergeResourceRefs(lockedSession.resources, input.resources);
     const nextTools = mergeToolRefs(lockedSession.tools, input.tools);
-    const shouldQueueSession = lockedSession.status === "idle";
+    const shouldQueueSession = lockedSession.status === "idle" || lockedSession.status === "failed";
     return {
       events: [
         {

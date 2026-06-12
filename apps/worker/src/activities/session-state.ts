@@ -1,18 +1,31 @@
 import {
   claimNextQueuedTurn as claimNextQueuedTurnDb,
+  countTurnSessionHistoryItems,
   finishTurn,
   getSessionEvent,
+  getSessionTurn,
+  incrementTurnWorkerDeathRedispatches,
+  requeuePreemptedTurn,
   requireSession,
   setSessionStatus,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
+import { WORKER_DEATH_RESUME_TEXT } from "./agent-turn";
 import { pauseActiveGoalOnInterrupt } from "./goals";
 import type {
   ActivityServices,
   ClaimNextQueuedTurnInput,
   MarkSessionIdleInput,
+  RequeueTurnAfterWorkerDeathInput,
+  RequeueTurnAfterWorkerDeathResult,
   RunAgentTurnInput,
 } from "./types";
+
+// Crash-loop guard for worker-death re-dispatch: a turn that takes a worker
+// down this many times in a row is assumed to be the cause, not the victim,
+// and the session fails for real on the next death. A plain constant by
+// design — this is a pathology bound, not a run-length limit.
+export const WORKER_DEATH_MAX_REDISPATCHES = 3;
 
 export function createSessionStateActivities(services: () => Promise<ActivityServices>) {
   async function failSession(input: RunAgentTurnInput & { error?: string }): Promise<void> {
@@ -69,6 +82,67 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
   }
 
+  /**
+   * Put a turn whose hosting worker died WITHOUT the graceful-preempt
+   * checkpoint (heartbeat-timeout activity failure: SIGKILL, OOM, node loss)
+   * back on the session queue, so the workflow re-dispatches it instead of
+   * failing the session. The degraded-resume contract: conversation truth is
+   * dual-written after every model response during the turn, so re-running
+   * from the trigger event plus stored items loses at most the work since the
+   * last reconcile. When the dead attempt persisted items for this turn, the
+   * rerun enters through a synthesized `turn.preempted` resume notice (its
+   * partial progress is already conversation truth; replaying the original
+   * trigger would duplicate input the model has seen). When nothing was
+   * persisted — checkpoint absent — the original trigger replays cleanly.
+   * Approval reruns always replay their original trigger: the decision is
+   * applied through the RunState resume path and a swapped trigger could
+   * drop it. Re-dispatches are bounded per turn by
+   * WORKER_DEATH_MAX_REDISPATCHES, persisted on the turn row.
+   */
+  async function requeueTurnAfterWorkerDeath(input: RequeueTurnAfterWorkerDeathInput): Promise<RequeueTurnAfterWorkerDeathResult> {
+    const { settings, db, bus } = await services();
+    const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
+    if (!turn || (turn.status !== "running" && turn.status !== "requires_action")) {
+      // The timed-out attempt was a zombie that actually settled the turn
+      // (completed/failed/cancelled it) after the server gave up on its
+      // heartbeats. Whatever it recorded is the truth; nothing to redo.
+      return { action: "stale" };
+    }
+    const redispatches = await incrementTurnWorkerDeathRedispatches(db, input.workspaceId, input.turnId);
+    if (redispatches > WORKER_DEATH_MAX_REDISPATCHES) {
+      return { action: "exceeded", redispatches: redispatches - 1 };
+    }
+    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
+    const approvalRerun = trigger?.type === "user.approvalDecision";
+    // Legacy run-state mode has no crash checkpoint (the dying worker never
+    // captured the blob), so it always replays the original trigger against
+    // the previous RunState snapshot — the documented degraded resume.
+    const resumeWithNotice = !approvalRerun
+      && settings.sessionHistorySource === "items"
+      && await countTurnSessionHistoryItems(db, input.workspaceId, input.turnId) > 0;
+    const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+      {
+        turnId: turn.id,
+        type: "turn.preempted",
+        payload: {
+          triggerEventId: input.triggerEventId,
+          reason: "worker_death",
+          redispatches,
+          resumeWithNotice,
+          ...(resumeWithNotice ? { text: WORKER_DEATH_RESUME_TEXT } : {}),
+        },
+      },
+      {
+        turnId: turn.id,
+        type: "session.status.changed",
+        payload: { status: "queued" },
+      },
+    ]);
+    await requeuePreemptedTurn(db, input.workspaceId, turn.id, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+    await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
+    return { action: "requeued", redispatches };
+  }
+
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {
     const { db } = await services();
     return await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
@@ -85,6 +159,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   return {
     failSession,
     interruptActiveTurn,
+    requeueTurnAfterWorkerDeath,
     claimNextQueuedTurn,
     markSessionIdle,
   };
