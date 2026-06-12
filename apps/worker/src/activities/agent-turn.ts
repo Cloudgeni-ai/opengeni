@@ -203,6 +203,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
       activityContext?.heartbeat({ phase: "turn_started", sessionId: input.sessionId, turnId });
 
+      // A shutdown that landed during claim/billing setup preempts before the
+      // turn visibly starts: nothing ran yet, so the requeued turn replays the
+      // original trigger cleanly on a healthy worker.
+      throwIfWorkerShuttingDown();
       await setSessionStatus(db, input.workspaceId, input.sessionId, "running", turnId);
       await publish([
         { type: "session.status.changed", payload: { status: "running" } },
@@ -393,7 +397,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // or through the original trigger when nothing was persisted yet. This
       // is an explicit checkpoint/resume, not a blind activity retry: the
       // resumed attempt sees everything the first attempt did.
-      if (isWorkerShutdownCancellation(error) && publish && turnId && turnStartedPublished) {
+      //
+      // The branch deliberately does NOT require turn.started to have been
+      // published: a shutdown landing during setup (claim/billing, before the
+      // turn visibly started) must also requeue, not fail the session. In
+      // that early case nothing ran and nothing was checkpointed, so the
+      // requeued turn replays the original trigger cleanly. The turn id falls
+      // back to the workflow-claimed turn when the local lookup had not
+      // finished yet.
+      const preemptTurnId = turnId ?? input.turnId;
+      if (isWorkerShutdownCancellation(error) && preemptTurnId) {
         await batcher?.flush().catch(() => undefined);
         await reconcileConversationTruth();
         let resumeWithNotice = settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
@@ -406,7 +419,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
-              turnId,
+              turnId: preemptTurnId,
               serializedRunState: stream.state.toString(),
               pendingApprovals: [],
             });
@@ -417,7 +430,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
         const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
           {
-            turnId,
+            turnId: preemptTurnId,
             type: "turn.preempted",
             payload: {
               triggerEventId: input.triggerEventId,
@@ -427,12 +440,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           },
           {
-            turnId,
+            turnId: preemptTurnId,
             type: "session.status.changed",
             payload: { status: "queued" },
           },
         ]);
-        await requeuePreemptedTurn(db, input.workspaceId, turnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+        await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
         await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
         activityStatus = "preempted";
         return { status: "preempted" };
