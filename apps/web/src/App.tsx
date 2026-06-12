@@ -47,6 +47,7 @@ import {
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react";
+import { Permission } from "@opengeni/contracts";
 import {
   Link,
   Navigate,
@@ -1437,20 +1438,73 @@ function ManagedAuthPanel(props: {
   );
 }
 
-const apiKeyPermissionOptions = [
-  "workspace:read",
-  "sessions:create",
-  "sessions:read",
-  "sessions:control",
-  "files:upload",
-  "files:read",
-  "documents:manage",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "github:use",
-  "api_keys:manage",
-] as const;
+const apiKeyPermissionGroupAssignments: Record<Permission, string> = {
+  "workspace:read": "Workspace",
+  "workspace:create": "Workspace",
+  "sessions:create": "Sessions",
+  "sessions:read": "Sessions",
+  "sessions:control": "Sessions",
+  "files:upload": "Files & documents",
+  "files:read": "Files & documents",
+  "documents:manage": "Files & documents",
+  "documents:search": "Files & documents",
+  "scheduled_tasks:manage": "Scheduled tasks",
+  "scheduled_tasks:run": "Scheduled tasks",
+  "environments:manage": "Environments",
+  "environments:use": "Environments",
+  "github:manage": "GitHub",
+  "github:use": "GitHub",
+  "goals:manage": "Goals",
+  "workspace:admin": "Admin & account",
+  "api_keys:manage": "Admin & account",
+  "members:manage": "Admin & account",
+  "account:read": "Admin & account",
+  "account:admin": "Admin & account",
+  "billing:read": "Admin & account",
+  "billing:manage": "Admin & account",
+};
+
+const apiKeyPermissionGroupOrder = [
+  "Workspace",
+  "Sessions",
+  "Files & documents",
+  "Scheduled tasks",
+  "Environments",
+  "GitHub",
+  "Goals",
+  "Admin & account",
+];
+
+// Derived from the contracts Permission enum so the dialog can never drift
+// from the API again: every enum value lands in exactly one group.
+export function buildApiKeyPermissionGroups(): { label: string; permissions: Permission[] }[] {
+  const groups: { label: string; permissions: Permission[] }[] = [];
+  for (const permission of Permission.options) {
+    const label = apiKeyPermissionGroupAssignments[permission] ?? "Other";
+    const group = groups.find((candidate) => candidate.label === label);
+    if (group) {
+      group.permissions.push(permission);
+    } else {
+      groups.push({ label, permissions: [permission] });
+    }
+  }
+  const rank = (label: string): number => {
+    const index = apiKeyPermissionGroupOrder.indexOf(label);
+    return index === -1 ? apiKeyPermissionGroupOrder.length : index;
+  };
+  return groups.sort((a, b) => rank(a.label) - rank(b.label));
+}
+
+const apiKeyPermissionGroups = buildApiKeyPermissionGroups();
+
+// Mirrors the API's ensureDelegablePermissions: a workspace:admin grant can
+// delegate everything, any other grant only its own permissions.
+export function delegableApiKeyPermissions(grantPermissions: readonly string[]): Set<string> {
+  if (grantPermissions.includes("workspace:admin")) {
+    return new Set<string>(Permission.options);
+  }
+  return new Set<string>(Permission.options.filter((permission) => grantPermissions.includes(permission)));
+}
 
 const defaultApiKeyPermissions = new Set<string>([
   "workspace:read",
@@ -1481,6 +1535,9 @@ function AccountConsole(props: {
   const [busy, setBusy] = useState(false);
   const canManageApiKeys = hasWorkspacePermission(props.accessContext, props.workspaceId, "api_keys:manage");
   const canManageBilling = hasAccountPermission(props.accessContext, props.accountId, "billing:manage");
+  const workspaceGrant = props.accessContext?.workspaceGrants.find((grant) => grant.workspaceId === props.workspaceId) ?? null;
+  const delegablePermissions = delegableApiKeyPermissions(workspaceGrant?.permissions ?? []);
+  const requestedPermissions = [...selectedPermissions].filter((permission) => delegablePermissions.has(permission));
 
   useEffect(() => {
     if (!props.workspaceId) {
@@ -1499,7 +1556,7 @@ function AccountConsole(props: {
   }
 
   async function createKey() {
-    if (!apiKeyName.trim() || selectedPermissions.size === 0) {
+    if (!apiKeyName.trim() || requestedPermissions.length === 0) {
       toast.error("API key name and permissions are required");
       return;
     }
@@ -1507,7 +1564,7 @@ function AccountConsole(props: {
     try {
       const result = await createApiKey(props.workspaceId, {
         name: apiKeyName.trim(),
-        permissions: [...selectedPermissions],
+        permissions: requestedPermissions,
       });
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
@@ -1643,14 +1700,32 @@ function AccountConsole(props: {
                 Create
               </Button>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {apiKeyPermissionOptions.map((permission) => (
-                <label key={permission} className="flex items-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1.5 text-xs">
-                  <input type="checkbox" checked={selectedPermissions.has(permission)} onChange={() => togglePermission(permission)} />
-                  <span>{permission}</span>
-                </label>
-              ))}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-[color:var(--color-fg-subtle)]">A key can only carry permissions your own grant can delegate.</p>
+              <Button type="button" variant="ghost" size="sm" disabled={delegablePermissions.size === 0} onClick={() => setSelectedPermissions(new Set(delegablePermissions))}>
+                Select all delegable
+              </Button>
             </div>
+            {apiKeyPermissionGroups.map((group) => (
+              <div key={group.label} className="grid gap-1.5">
+                <div className="text-xs font-medium text-[color:var(--color-fg-muted)]">{group.label}</div>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {group.permissions.map((permission) => {
+                    const delegable = delegablePermissions.has(permission);
+                    return (
+                      <label
+                        key={permission}
+                        title={delegable ? undefined : "Your grant cannot delegate this permission"}
+                        className={`flex items-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1.5 text-xs ${delegable ? "" : "cursor-not-allowed opacity-50"}`}
+                      >
+                        <input type="checkbox" disabled={!delegable} checked={delegable && selectedPermissions.has(permission)} onChange={() => togglePermission(permission)} />
+                        <span>{permission}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </>
         ) : (
           <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot manage API keys for the selected workspace.</p>

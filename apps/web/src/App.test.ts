@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { Permission } from "@opengeni/contracts";
 import {
   agentConfigFromFormState,
+  buildApiKeyPermissionGroups,
   buildTools,
+  delegableApiKeyPermissions,
   capabilityErrorToast,
   enabledWorkspaceCapabilityMcpServers,
   filterCapabilityCatalogItems,
@@ -26,6 +29,50 @@ describe("workspace route helpers", () => {
 
   test("does not build legacy unscoped session URLs", () => {
     expect(workspaceSessionPath("workspace-1", "session-1")).not.toBe("/sessions/session-1");
+  });
+});
+
+describe("api key permission options", () => {
+  test("groups offer every contracts Permission exactly once", () => {
+    const offered = buildApiKeyPermissionGroups().flatMap((group) => group.permissions);
+    expect(offered.length).toBe(new Set(offered).size);
+    expect([...offered].sort()).toEqual([...Permission.options].sort());
+  });
+
+  test("groups have no catch-all bucket and keep workspace first, admin last", () => {
+    const labels = buildApiKeyPermissionGroups().map((group) => group.label);
+    expect(labels).toEqual([
+      "Workspace",
+      "Sessions",
+      "Files & documents",
+      "Scheduled tasks",
+      "Environments",
+      "GitHub",
+      "Goals",
+      "Admin & account",
+    ]);
+  });
+
+  test("offers the scopes the old hardcoded list omitted", () => {
+    const offered = buildApiKeyPermissionGroups().flatMap((group) => group.permissions);
+    const previouslyMissing: Permission[] = ["environments:manage", "environments:use", "goals:manage", "workspace:admin", "github:manage", "workspace:create", "billing:read", "billing:manage", "members:manage", "account:read", "account:admin"];
+    for (const permission of previouslyMissing) {
+      expect(offered).toContain(permission);
+    }
+  });
+
+  test("workspace:admin grants can delegate every permission", () => {
+    expect(delegableApiKeyPermissions(["workspace:admin"])).toEqual(new Set(Permission.options));
+  });
+
+  test("non-admin grants can only delegate their own permissions", () => {
+    const delegable = delegableApiKeyPermissions(["sessions:read", "files:read", "api_keys:manage"]);
+    expect([...delegable].sort()).toEqual(["api_keys:manage", "files:read", "sessions:read"]);
+    expect(delegable.has("environments:manage")).toBe(false);
+  });
+
+  test("empty grants can delegate nothing", () => {
+    expect(delegableApiKeyPermissions([]).size).toBe(0);
   });
 });
 
