@@ -407,55 +407,68 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // finished yet.
       const preemptTurnId = turnId ?? input.turnId;
       if (isWorkerShutdownCancellation(error) && preemptTurnId) {
-        await batcher?.flush().catch(() => undefined);
-        await reconcileConversationTruth();
-        let resumeWithNotice = settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
-        if (settings.sessionHistorySource !== "items" && stream) {
-          // Legacy run-state mode: the resume reads the RunState blob, so the
-          // checkpoint must be captured there. A failed capture falls back to
-          // the previous snapshot and a clean re-run of the original trigger.
-          try {
-            await saveRunState(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: preemptTurnId,
-              serializedRunState: stream.state.toString(),
-              pendingApprovals: [],
-            });
-            resumeWithNotice = true;
-          } catch {
-            resumeWithNotice = false;
+        try {
+          await batcher?.flush().catch(() => undefined);
+          await reconcileConversationTruth();
+          let resumeWithNotice = settings.sessionHistorySource === "items" && persistedHistoryCount > historyCountAtTurnStart;
+          if (settings.sessionHistorySource !== "items" && stream) {
+            // Legacy run-state mode: the resume reads the RunState blob, so
+            // the checkpoint must be captured there — including any pending
+            // approval interruptions, exactly like the requires_action path,
+            // so a shutdown while approvals wait does not erase them. A
+            // failed capture falls back to the previous snapshot and a clean
+            // re-run of the original trigger.
+            try {
+              await saveRunState(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: preemptTurnId,
+                serializedRunState: stream.state.toString(),
+                pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
+              });
+              resumeWithNotice = true;
+            } catch {
+              resumeWithNotice = false;
+            }
           }
-        }
-        const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-          {
-            turnId: preemptTurnId,
-            type: "turn.preempted",
-            payload: {
-              triggerEventId: input.triggerEventId,
-              reason: "worker_shutdown",
-              resumeWithNotice,
-              ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+          const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+            {
+              turnId: preemptTurnId,
+              type: "turn.preempted",
+              payload: {
+                triggerEventId: input.triggerEventId,
+                reason: "worker_shutdown",
+                resumeWithNotice,
+                ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
+              },
             },
-          },
-          {
-            turnId: preemptTurnId,
-            type: "session.status.changed",
-            payload: { status: "queued" },
-          },
-        ]);
-        await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
-        activityStatus = "preempted";
-        return { status: "preempted" };
+            {
+              turnId: preemptTurnId,
+              type: "session.status.changed",
+              payload: { status: "queued" },
+            },
+          ]);
+          await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
+          activityStatus = "preempted";
+          return { status: "preempted" };
+        } catch (preemptError) {
+          // A failing checkpoint/requeue must not surface as an arbitrary
+          // activity error around a half-applied preemption (the workflow
+          // would fail the session while a requeued turn lingers). Fall
+          // through to the cancellation path below: the turn is marked
+          // cancelled — also resetting a turn this block already requeued —
+          // and the session fails like an uncheckpointed death.
+          console.error("worker-shutdown preemption failed; falling back to cancellation", preemptError);
+        }
       }
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";
         activityError = error;
         await batcher?.flush().catch(() => undefined);
-        if (turnId) {
-          await finishTurn(db, input.workspaceId, turnId, "cancelled").catch(() => undefined);
+        if (preemptTurnId) {
+          await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
         }
         throw error;
       }
