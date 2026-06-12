@@ -3160,6 +3160,27 @@ describe("API component integration", () => {
     // A state minted for one workspace cannot start the flow for another.
     expect((await app.request(`/v1/workspaces/${crypto.randomUUID()}/github/connect${installUrl.search}`)).status).toBe(400);
 
+    // The browser entry stays reachable when deployment-level access-key auth
+    // is enabled (the browser opening the link holds no API credentials), like
+    // the install/OAuth callbacks it feeds; the signed state is the gate.
+    const lockedApp = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        publicBaseUrl: "https://api.opengeni.test",
+        ...configuredGitHub,
+        authRequired: true,
+        accessKey: "test-deployment-access-key",
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      githubStateSecret: stateSecret,
+    });
+    expect((await lockedApp.request(`/v1/workspaces/${grant.workspaceId}/github/repositories`)).status).toBe(401);
+    const lockedRedirect = await lockedApp.request(`${installUrl.pathname}${installUrl.search}`);
+    expect(lockedRedirect.status).toBe(302);
+    expect(lockedRedirect.headers.get("set-cookie")).toContain(`opengeni_github_state=${state}`);
+
     // Unconfigured deployments report what is missing instead of minting links.
     const unconfiguredMcp = buildOpenGeniMcpServer({
       ...mcpDeps,

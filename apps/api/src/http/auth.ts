@@ -1,6 +1,8 @@
 import type { Settings } from "@opengeni/config";
 import type { Context, MiddlewareHandler } from "hono";
 
+const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
+
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
     if (!settings.authRequired || isAuthExempt(c, settings)) {
@@ -35,6 +37,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     path === "/v1/github/oauth/callback" ||
     path === "/v1/github/app-manifest/callback"
   ) {
+    return true;
+  }
+  // Browser entry for MCP-issued GitHub install links: opened in a browser
+  // that holds no API credentials, like the callbacks above. The route itself
+  // verifies the signed workspace-bound state before doing anything.
+  if (githubConnectPathPattern.test(path)) {
     return true;
   }
   if (settings.authAllowHealth && path === "/healthz") {
