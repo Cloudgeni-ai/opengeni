@@ -13,6 +13,7 @@ import {
   getSession,
   getSessionGoal,
   listSessionEvents,
+  listSessions,
   listSessionTurns,
   reorderQueuedSessionTurns,
   requireSession,
@@ -103,6 +104,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
     });
     return c.json(session, 202);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await listSessions(db, workspaceId, boundedLimit(c.req.query("limit"))));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {

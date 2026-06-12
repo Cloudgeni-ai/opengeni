@@ -260,6 +260,11 @@ export function fetchSession(workspaceId: string, sessionId: string): Promise<Se
   return request<Session>(workspacePath(workspaceId, `/sessions/${sessionId}`));
 }
 
+export function fetchSessions(workspaceId: string, limit = 50): Promise<Session[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return request<Session[]>(workspacePath(workspaceId, `/sessions?${params}`));
+}
+
 export async function fetchEvents(workspaceId: string, sessionId: string, after = 0): Promise<SessionEvent[]> {
   const limit = 500;
   const events: SessionEvent[] = [];

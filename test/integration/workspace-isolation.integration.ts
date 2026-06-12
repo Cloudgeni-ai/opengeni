@@ -52,6 +52,14 @@ describe("workspace isolation matrix", () => {
     expect(createdSession.status).toBe(202);
     const session = await createdSession.json() as { id: string };
 
+    const listA = await app.request(workspacePath(a.workspaceId, "/sessions"), { headers: authA });
+    expect(listA.status).toBe(200);
+    expect((await listA.json() as Array<{ id: string }>).some((item) => item.id === session.id)).toBe(true);
+    await expectStatus(app, authA, workspacePath(b.workspaceId, "/sessions"), 403);
+    const listB = await app.request(workspacePath(b.workspaceId, "/sessions"), { headers: authB });
+    expect(listB.status).toBe(200);
+    expect((await listB.json() as Array<{ id: string }>).some((item) => item.id === session.id)).toBe(false);
+
     await expectStatus(app, authA, workspacePath(b.workspaceId, `/sessions/${session.id}`), 403);
     await expectStatus(app, authB, workspacePath(b.workspaceId, `/sessions/${session.id}`), 404);
     await expectStatus(app, authA, legacyRoute("sessions", session.id), 404);

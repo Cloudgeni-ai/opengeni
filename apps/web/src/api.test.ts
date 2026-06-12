@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { authHeadersForAccessKey, resolveApiBaseUrl, sendVerificationEmail, shouldReloadForDeploymentRevision, streamSessionEvents } from "./api";
+import { authHeadersForAccessKey, fetchSessions, resolveApiBaseUrl, sendVerificationEmail, shouldReloadForDeploymentRevision, streamSessionEvents } from "./api";
 import type { SessionEvent } from "./types";
 
 describe("web API auth helpers", () => {
@@ -50,6 +50,26 @@ describe("web API auth helpers", () => {
     expect(request!.init?.method).toBe("POST");
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
+  });
+
+  test("fetches workspace sessions from the canonical workspace route", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    try {
+      await expect(fetchSessions("workspace-id", 25)).resolves.toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const request = requests[0];
+    expect(request).toBeDefined();
+    expect(String(request!.input)).toBe("/v1/workspaces/workspace-id/sessions?limit=25");
+    expect(request!.init?.credentials).toBe("include");
   });
 });
 

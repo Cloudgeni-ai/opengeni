@@ -51,6 +51,7 @@ import {
   type Dispatch,
   type ReactNode,
   type SetStateAction,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -110,6 +111,7 @@ import {
   createBillingCheckout,
   reindexDocument,
   fetchSession,
+  fetchSessions,
   pauseScheduledTask,
   resumeScheduledTask,
   sendApproval,
@@ -570,7 +572,6 @@ function RootRouteComponent() {
         model,
         reasoningEffort,
       });
-      rememberSession(created);
       setSession(created);
       setEvents([]);
       setConnectionState("closed");
@@ -1036,8 +1037,9 @@ function AgentHomeRoute() {
           controlsStart={<AgentControlStrip workspaceId={workspaceId} />}
           onSubmit={(submission) => void submitInitial(submission)}
         />
-        <RecentSessions
+        <WorkspaceSessions
           workspaceId={workspaceId}
+          accessKeyVersion={context.accessKeyVersion}
           onSelect={(id) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: id } })}
         />
       </div>
@@ -1076,9 +1078,6 @@ function SessionRoute() {
         }
         context.setSession(nextSession);
         context.setEvents(nextEvents);
-        if (isTerminalSessionStatus(nextSession.status)) {
-          forgetSession(workspaceId, nextSession.id);
-        }
       } catch (error) {
         if (cancelled) {
           return;
@@ -1087,9 +1086,7 @@ function SessionRoute() {
         context.setEvents([]);
         context.setConnectionState("closed");
         setLoadError(error);
-        if (isApiErrorStatus(error, 404)) {
-          forgetSession(workspaceId, sessionId);
-        } else {
+        if (!isApiErrorStatus(error, 404)) {
           toast.error("Failed to load session", { description: String(error) });
         }
       } finally {
@@ -3906,19 +3903,71 @@ function ConnectionPill({ state }: { state: ConnectionState }) {
   );
 }
 
-function RecentSessions({ workspaceId, onSelect }: { workspaceId: string | null; onSelect: (id: string) => void }) {
-  const sessions = workspaceId ? recentSessions(workspaceId) : [];
-  if (sessions.length === 0) {
-    return null;
-  }
+function WorkspaceSessions({
+  workspaceId,
+  accessKeyVersion,
+  onSelect,
+}: {
+  workspaceId: string;
+  accessKeyVersion: number;
+  onSelect: (id: string) => void;
+}) {
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+
+  const loadSessions = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const nextSessions = await fetchSessions(workspaceId, 50);
+      if (!signal?.aborted) {
+        setSessions(nextSessions);
+      }
+    } catch (nextError) {
+      if (!signal?.aborted) {
+        setError(nextError);
+        setSessions([]);
+      }
+    } finally {
+      if (!signal?.aborted) {
+        setLoading(false);
+      }
+    }
+  }, [workspaceId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadSessions(controller.signal);
+    return () => controller.abort();
+  }, [loadSessions, accessKeyVersion]);
+
   return (
     <section className="mt-12">
-      <h2 className="text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">Recent sessions</h2>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">Workspace sessions</h2>
+        {error ? (
+          <Button type="button" variant="ghost" size="sm" onClick={() => void loadSessions()}>
+            <RefreshCwIcon className="size-4" />
+            Retry
+          </Button>
+        ) : null}
+      </div>
       <div className="mt-3 grid gap-2">
-        {sessions.map((item) => (
+        {loading ? (
+          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">Loading sessions...</div>
+        ) : error ? (
+          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">Session history is unavailable.</div>
+        ) : sessions.length === 0 ? (
+          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">No sessions in this workspace yet.</div>
+        ) : sessions.map((item) => (
           <button key={item.id} type="button" onClick={() => onSelect(item.id)} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-left text-sm hover:bg-[color:var(--color-surface-2)]">
-            <div className="truncate font-medium">{item.prompt}</div>
-            <div className="mt-1 text-xs text-[color:var(--color-fg-subtle)]">{new Date(item.createdAt).toLocaleString()}</div>
+            <div className="truncate font-medium">{item.initialMessage}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[color:var(--color-fg-subtle)]">
+              <span>{new Date(item.createdAt).toLocaleString()}</span>
+              <span>{item.status}</span>
+              <span>{displayModel(item.model)}</span>
+            </div>
           </button>
         ))}
       </div>
@@ -5453,27 +5502,4 @@ function labelEffort(value: IntelligenceEffort): string {
 
 function displayModel(value: string): string {
   return value.startsWith("gpt-") ? value.replace("gpt-", "").toUpperCase() : value;
-}
-
-function rememberSession(session: Session) {
-  const items = [{ id: session.id, prompt: session.initialMessage, createdAt: session.createdAt }, ...recentSessions(session.workspaceId).filter((item) => item.id !== session.id)].slice(0, 8);
-  localStorage.setItem(recentSessionsStorageKey(session.workspaceId), JSON.stringify(items));
-}
-
-function forgetSession(workspaceId: string, sessionId: string) {
-  const items = recentSessions(workspaceId).filter((item) => item.id !== sessionId);
-  localStorage.setItem(recentSessionsStorageKey(workspaceId), JSON.stringify(items));
-}
-
-function recentSessions(workspaceId: string): Array<{ id: string; prompt: string; createdAt: string }> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(recentSessionsStorageKey(workspaceId)) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((item) => item?.id && item?.prompt && item?.createdAt) : [];
-  } catch {
-    return [];
-  }
-}
-
-function recentSessionsStorageKey(workspaceId: string): string {
-  return `opengeni-recent-sessions:${workspaceId}`;
 }

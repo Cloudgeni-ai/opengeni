@@ -52,6 +52,11 @@ describe("API component integration", () => {
     expect(workflow.wakeups).toHaveLength(1);
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+
+    const listed = await app.request(workspacePath(workspaceId, "/sessions?limit=10"));
+    expect(listed.status).toBe(200);
+    const sessions = await listed.json() as Array<{ id: string; workspaceId: string; initialMessage: string }>;
+    expect(sessions.some((item) => item.id === session.id && item.workspaceId === workspaceId && item.initialMessage === "hello")).toBe(true);
   });
 
   test("creates sessions with goals and manages the goal lifecycle over the API", async () => {

@@ -1940,6 +1940,16 @@ export async function getSession(db: Database, workspaceId: string, sessionId: s
   });
 }
 
+export async function listSessions(db: Database, workspaceId: string, limit = 50): Promise<Session[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sessions)
+      .where(eq(schema.sessions.workspaceId, workspaceId))
+      .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
+      .limit(limit);
+    return rows.map(mapSession);
+  });
+}
+
 export async function requireSession(db: Database, workspaceId: string, sessionId: string): Promise<Session> {
   const session = await getSession(db, workspaceId, sessionId);
   if (!session) {
