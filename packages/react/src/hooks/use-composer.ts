@@ -50,7 +50,8 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
 
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {
-      const text = (explicit ?? value).trim();
+      const draftAtSend = value;
+      const text = (explicit ?? draftAtSend).trim();
       if (!text || !sessionId || sending) {
         return false;
       }
@@ -66,7 +67,9 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
         });
         pendingClientEventId.current = null;
         if (explicit === undefined) {
-          setValue("");
+          // Clear only the draft that was sent: edits made while the request
+          // was in flight were never delivered and must survive.
+          setValue((current) => (current === draftAtSend ? "" : current));
         }
         onSent?.(text);
         return true;

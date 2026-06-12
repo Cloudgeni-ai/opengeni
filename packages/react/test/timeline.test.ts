@@ -164,6 +164,20 @@ describe("buildTimeline", () => {
     expect(sandbox.status).toBe("complete");
   });
 
+  test("named output deltas route to their own operation among concurrent ones", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "build", command: "docker build ." }),
+      event("sandbox.operation.started", { name: "test", command: "bun test" }),
+      event("sandbox.command.output.delta", { name: "build", text: "Step 1/4\n" }),
+      event("sandbox.command.output.delta", { name: "test", text: "3 pass\n" }),
+    ]);
+    const build = items.find((item): item is SandboxItem => item.kind === "sandbox" && item.name === "build");
+    const test_ = items.find((item): item is SandboxItem => item.kind === "sandbox" && item.name === "test");
+    expect(build?.output).toBe("Step 1/4\n");
+    expect(test_?.output).toBe("3 pass\n");
+  });
+
   test("failed sandbox operations carry the error message", () => {
     reset();
     const items = buildTimeline([

@@ -327,7 +327,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!text) {
           break;
         }
-        const open = [...items].reverse().find((item): item is SandboxItem => item.kind === "sandbox" && item.status === "running");
+        // Attach to the named operation when the payload carries one;
+        // otherwise the latest running operation is the best available owner.
+        const open =
+          (typeof payload.name === "string" ? findOpenSandbox(items, payload.name) : undefined) ??
+          [...items].reverse().find((item): item is SandboxItem => item.kind === "sandbox" && item.status === "running");
         if (open) {
           open.output += text;
         }
