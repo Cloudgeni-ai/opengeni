@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { authHeadersForAccessKey, fetchSessions, resolveApiBaseUrl, sendVerificationEmail, shouldReloadForDeploymentRevision, streamSessionEvents } from "./api";
-import type { SessionEvent } from "./types";
+import {
+  authHeadersForAccessKey,
+  configureClientAuth,
+  createOpenGeniClient,
+  resolveApiBaseUrl,
+  sendVerificationEmail,
+  setStoredAccessKey,
+  clearStoredAccessKey,
+  shouldReloadForDeploymentRevision,
+} from "./api";
 
 describe("web API auth helpers", () => {
   test("builds access key headers only for configured key modes", () => {
@@ -51,128 +59,83 @@ describe("web API auth helpers", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
   });
+});
 
-  test("fetches workspace sessions from the canonical workspace route", async () => {
+// The streaming/reconnect/replay logic itself lives in @opengeni/sdk and is
+// tested there; here we pin the console-specific wiring (auth headers +
+// cookies on every SDK request, canonical workspace routes).
+describe("createOpenGeniClient", () => {
+  function installTestLocalStorage(): () => void {
+    const store = new Map<string, string>();
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => void store.set(key, value),
+        removeItem: (key: string) => void store.delete(key),
+      },
+    });
+    return () => {
+      if (original) {
+        Object.defineProperty(globalThis, "localStorage", original);
+      } else {
+        delete (globalThis as Record<string, unknown>)["localStorage"];
+      }
+    };
+  }
+
+  test("routes SDK calls through canonical workspace paths with cookies and access-key headers", async () => {
+    const restoreLocalStorage = installTestLocalStorage();
     const originalFetch = globalThis.fetch;
     const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
       return Response.json([]);
     }) as unknown as typeof fetch;
+    configureClientAuth({ mode: "deploymentKey", headerName: "x-opengeni-access-key" });
+    setStoredAccessKey("secret-key");
 
     try {
-      await expect(fetchSessions("workspace-id", 25)).resolves.toEqual([]);
+      const client = createOpenGeniClient();
+      await expect(client.listSessions("workspace-id", { limit: 25 })).resolves.toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
+      clearStoredAccessKey();
+      configureClientAuth({ mode: "none" });
+      restoreLocalStorage();
     }
 
     const request = requests[0];
     expect(request).toBeDefined();
     expect(String(request!.input)).toBe("/v1/workspaces/workspace-id/sessions?limit=25");
     expect(request!.init?.credentials).toBe("include");
+    expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBe("secret-key");
   });
-});
 
-describe("web API SSE helpers", () => {
-  test("reconnects after a clean stream close using the latest event sequence", async () => {
-    const restoreWindow = installTestWindow();
+  test("reads the access key at request time, not at client construction", async () => {
+    const restoreLocalStorage = installTestLocalStorage();
     const originalFetch = globalThis.fetch;
-    const requests: string[] = [];
-    const received: number[] = [];
-    const states: string[] = [];
-    const abort = new AbortController();
-    let fetchCount = 0;
-    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
-      requests.push(requestUrl(input));
-      fetchCount += 1;
-      if (fetchCount === 1) {
-        return sseResponse([event(6)]);
-      }
-      if (fetchCount === 2) {
-        return sseResponse([event(7)]);
-      }
-      throw new Error("unexpected extra reconnect");
+    const seenKeys: Array<string | null> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seenKeys.push(new Headers(init?.headers).get("x-opengeni-access-key"));
+      return Response.json([]);
     }) as unknown as typeof fetch;
+    configureClientAuth({ mode: "deploymentKey", headerName: "x-opengeni-access-key" });
 
     try {
-      await streamSessionEvents("workspace-id", "session-id", 5, (incoming) => {
-        received.push(incoming.sequence);
-        if (incoming.sequence === 7) {
-          abort.abort();
-        }
-      }, {
-        signal: abort.signal,
-        reconnectDelayMs: 0,
-        maxReconnectDelayMs: 0,
-        onState: (state) => states.push(state),
-      });
+      const client = createOpenGeniClient();
+      setStoredAccessKey("first-key");
+      await client.listSessions("workspace-id");
+      setStoredAccessKey("second-key");
+      await client.listSessions("workspace-id");
     } finally {
       globalThis.fetch = originalFetch;
-      restoreWindow();
+      clearStoredAccessKey();
+      configureClientAuth({ mode: "none" });
+      restoreLocalStorage();
     }
 
-    expect(received).toEqual([6, 7]);
-    expect(fetchCount).toBe(2);
-    expect(new URL(requests[0]!).searchParams.get("after")).toBe("5");
-    expect(new URL(requests[1]!).searchParams.get("after")).toBe("6");
-    expect(states).not.toContain("error");
-  });
-
-  test("does not retry terminal authorization failures forever", async () => {
-    const restoreWindow = installTestWindow();
-    const originalFetch = globalThis.fetch;
-    let fetchCount = 0;
-    globalThis.fetch = (async () => {
-      fetchCount += 1;
-      return new Response("missing key", { status: 401 });
-    }) as unknown as typeof fetch;
-
-    try {
-      await expect(streamSessionEvents("workspace-id", "session-id", 5, () => undefined, {
-        reconnectDelayMs: 0,
-        maxReconnectDelayMs: 0,
-      })).rejects.toThrow("API 401: missing key");
-    } finally {
-      globalThis.fetch = originalFetch;
-      restoreWindow();
-    }
-
-    expect(fetchCount).toBe(1);
+    expect(seenKeys).toEqual(["first-key", "second-key"]);
   });
 });
-
-function event(sequence: number): SessionEvent {
-  return {
-    id: `event-${sequence}`,
-    workspaceId: "workspace-id",
-    sessionId: "session-id",
-    sequence,
-    type: "agent.message.delta",
-    payload: { text: `event ${sequence}` },
-    occurredAt: `2026-05-28T00:00:${String(sequence).padStart(2, "0")}.000Z`,
-  };
-}
-
-function sseResponse(events: SessionEvent[]): Response {
-  return new Response(events.map((item) => `event: ${item.type}\ndata: ${JSON.stringify(item)}\n\n`).join(""), {
-    headers: { "content-type": "text/event-stream" },
-  });
-}
-
-function requestUrl(input: Parameters<typeof fetch>[0]): string {
-  return typeof input === "string" || input instanceof URL ? String(input) : input.url;
-}
-
-function installTestWindow(): () => void {
-  const original = globalThis.window;
-  Object.defineProperty(globalThis, "window", {
-    configurable: true,
-    value: { location: { origin: "https://web.test" } },
-  });
-  return () => {
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: original,
-    });
-  };
-}

@@ -4,9 +4,7 @@ import {
   BotIcon,
   CalendarClockIcon,
   CheckIcon,
-  CheckCircle2Icon,
   ChevronDownIcon,
-  CircleDashedIcon,
   CopyIcon,
   DownloadIcon,
   FileJsonIcon,
@@ -27,13 +25,28 @@ import {
   RefreshCwIcon,
   SearchIcon,
   SparkleIcon,
-  SquareIcon,
   TerminalIcon,
   Trash2Icon,
   UserIcon,
   WrenchIcon,
   XIcon,
 } from "lucide-react";
+import type { OpenGeniClient } from "@opengeni/sdk";
+import {
+  buildTimeline,
+  MessageTimeline,
+  SessionStatus as SessionStatusBadge,
+  useComposer,
+  useSession,
+  useSessionEvents,
+  useWorkspaceSessions,
+  OpenGeniProvider,
+  type AgentMessageItem,
+  type ComposerState,
+  type SessionEventsConnectionState,
+  type TimelineItem,
+  type UserMessageItem,
+} from "@opengeni/react";
 import {
   Link,
   Navigate,
@@ -60,7 +73,7 @@ import {
 } from "react";
 import { Toaster, toast } from "sonner";
 
-import { Composer } from "@/components/Composer";
+import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { Button } from "@/components/ui/button";
 import {
   Collapsible,
@@ -83,8 +96,8 @@ import {
   addDocumentToBase,
   fetchAccessContext,
   createCapability,
-  createSession,
   createDocumentBase,
+  createOpenGeniClient,
   createScheduledTask,
   deleteScheduledTask,
   disableCapability,
@@ -95,13 +108,11 @@ import {
   fetchAuthSession,
   fetchDocumentBases,
   fetchDocuments,
-  fetchEvents,
   fetchFileAsset,
   fetchFileDownloadUrl,
   fetchGitHubRepositories,
   fetchGitHubStatus,
   fetchScheduledTaskRuns,
-  fetchScheduledTasks,
   fetchWorkspaces,
   fetchApiKeys,
   fetchBilling,
@@ -110,18 +121,12 @@ import {
   createApiKey,
   createBillingCheckout,
   reindexDocument,
-  fetchSession,
-  fetchSessions,
   pauseScheduledTask,
   resumeScheduledTask,
-  sendApproval,
-  sendInterrupt,
-  sendUserMessage,
   sendVerificationEmail,
   searchDocumentBase,
   setStoredAccessKey,
   startGitHubManifest,
-  streamSessionEvents,
   signInEmail,
   signOutManaged,
   signUpEmail,
@@ -169,55 +174,11 @@ const examples = [
 
 type RepoDraft = { id: number; url: string; ref: string };
 type IntelligenceEffort = Extract<ReasoningEffort, "low" | "medium" | "high" | "xhigh">;
-type ConnectionState = "connecting" | "live" | "closed" | "error";
 type McpServerOption = { id: string; name: string };
 const uiReasoningEffortOrder: IntelligenceEffort[] = ["low", "medium", "high", "xhigh"];
 
-type ConversationTraceKind = "reasoning" | "tool" | "sandbox" | "approval" | "error" | "status";
-type ConversationTraceStatus = "running" | "complete" | "failed" | "waiting";
-
-type ConversationTraceItem = {
-  id: string;
-  key: string;
-  kind: ConversationTraceKind;
-  status: ConversationTraceStatus;
-  title: string;
-  detail?: string;
-  output?: string;
-  occurredAt: string;
-};
-
-type ConversationUserTurn = {
-  kind: "user";
-  id: string;
-  text: string;
-  resources: ResourceRef[];
-  tools: ToolRef[];
-  occurredAt: string;
-};
-
-type ConversationAssistantTurn = {
-  kind: "assistant";
-  id: string;
-  turnId: string | null;
-  text: string;
-  status: "pending" | "running" | "complete" | "requires_action" | "failed" | "cancelled";
-  error?: string;
-  occurredAt: string;
-};
-
-type ConversationActivityTurn = {
-  kind: "activity";
-  id: string;
-  turnId: string | null;
-  status: "running" | "complete" | "requires_action" | "failed" | "cancelled";
-  trace: ConversationTraceItem[];
-  occurredAt: string;
-};
-
-type ConversationTurn = ConversationUserTurn | ConversationAssistantTurn | ConversationActivityTurn;
-
 type AppContextValue = {
+  client: OpenGeniClient;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -232,10 +193,8 @@ type AppContextValue = {
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
-  events: SessionEvent[];
-  setEvents: Dispatch<SetStateAction<SessionEvent[]>>;
-  connectionState: ConnectionState;
-  setConnectionState: Dispatch<SetStateAction<ConnectionState>>;
+  connectionState: SessionEventsConnectionState;
+  setConnectionState: Dispatch<SetStateAction<SessionEventsConnectionState>>;
   manualRepos: RepoDraft[];
   setManualRepos: Dispatch<SetStateAction<RepoDraft[]>>;
   manualReposOpen: boolean;
@@ -271,8 +230,6 @@ type AppContextValue = {
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (workspaceId: string, submission: TurnSubmission) => Promise<Session | null>;
-  submitFollowUp: (workspaceId: string, sessionId: string, submission: TurnSubmission) => Promise<void>;
-  interruptSession: (workspaceId: string, sessionId: string) => Promise<void>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
 };
@@ -362,7 +319,6 @@ export function workspaceSessionPath(workspaceId: string, sessionId: string): st
 
 function RootRouteComponent() {
   const [session, setSession] = useState<Session | null>(null);
-  const [events, setEvents] = useState<SessionEvent[]>([]);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -373,7 +329,7 @@ function RootRouteComponent() {
   const [model, setModel] = useState("gpt-5.5");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
+  const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
@@ -403,6 +359,10 @@ function RootRouteComponent() {
   const authReady = keyAuthReady && managedAuthReady;
   const defaultWorkspaceId = accessContext?.defaultWorkspaceId ?? workspaces[0]?.id ?? accessContext?.workspaceGrants[0]?.workspaceId ?? null;
   const navigate = useNavigate();
+  // The @opengeni/sdk client behind all session APIs and hooks. Auth headers
+  // are read per request; a new identity per key version makes the hooks
+  // re-fetch and the event streams reconnect with the new credentials.
+  const client = useMemo(() => createOpenGeniClient(), [accessKeyVersion]);
 
   useEffect(() => {
     let cancelled = false;
@@ -564,58 +524,20 @@ function RootRouteComponent() {
     setBusy(true);
     try {
       const selectedTools = buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]);
-      const created = await createSession({
-        workspaceId,
+      const created = await client.createSession(workspaceId, {
         initialMessage: submission.text,
         resources: [...currentResources, ...(submission.resources ?? [])],
         tools: selectedTools,
         model,
         reasoningEffort,
+        clientEventId: crypto.randomUUID(),
       });
       setSession(created);
-      setEvents([]);
-      setConnectionState("closed");
+      setConnectionState("idle");
       return created;
     } catch (error) {
       toast.error("Failed to start session", { description: error instanceof Error ? error.message : String(error) });
       return null;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function submitFollowUp(workspaceId: string, sessionId: string, submission: TurnSubmission) {
-    if (!submission.text.trim()) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await sendUserMessage(workspaceId, sessionId, {
-        ...submission,
-        text: submission.text.trim(),
-        tools: buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]),
-        model,
-        reasoningEffort,
-      });
-      setSession(await fetchSession(workspaceId, sessionId));
-    } catch (error) {
-      toast.error("Failed to send follow-up", { description: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function interruptSession(workspaceId: string, sessionId: string) {
-    const current = session?.id === sessionId ? session : null;
-    if (!current || (current.status !== "running" && current.status !== "queued")) {
-      return;
-    }
-    setBusy(true);
-    try {
-      await sendInterrupt(workspaceId, sessionId, "user requested cancellation");
-      setSession(await fetchSession(workspaceId, sessionId));
-    } catch (error) {
-      toast.error("Failed to interrupt session", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setBusy(false);
     }
@@ -674,7 +596,6 @@ function RootRouteComponent() {
     clearStoredAccessKey();
     setHasAccessKey(false);
     setSession(null);
-    setEvents([]);
     setAccessContext(null);
     setWorkspaces([]);
     setAccessError(null);
@@ -701,7 +622,6 @@ function RootRouteComponent() {
     setAccessContext(null);
     setWorkspaces([]);
     setSession(null);
-    setEvents([]);
     setAccessError(null);
     setAccessKeyVersion((version) => version + 1);
     await navigate({ to: "/", replace: true });
@@ -709,8 +629,7 @@ function RootRouteComponent() {
 
   function resetSessionView() {
     setSession(null);
-    setEvents([]);
-    setConnectionState("closed");
+    setConnectionState("idle");
   }
 
   function resetWorkspaceIntegrations() {
@@ -720,6 +639,7 @@ function RootRouteComponent() {
   }
 
   const appContext = clientConfig && accessContext ? {
+    client,
     clientConfig,
     authSession: authSession ?? null,
     accessContext,
@@ -734,8 +654,6 @@ function RootRouteComponent() {
     setInspectorOpen,
     session,
     setSession,
-    events,
-    setEvents,
     connectionState,
     setConnectionState,
     manualRepos,
@@ -773,8 +691,6 @@ function RootRouteComponent() {
     startGitHubAppManifestFlow,
     toggleGitHubRepository,
     startSession,
-    submitFollowUp,
-    interruptSession,
     resetSessionView,
     resetWorkspaceIntegrations,
   } satisfies AppContextValue : null;
@@ -880,10 +796,10 @@ function WorkspaceShellRoute() {
   }
 
   return (
-    <>
+    <OpenGeniProvider client={context.client} workspaceId={workspaceId}>
       <WorkspaceHeader workspaceId={workspaceId} activeWorkspace={activeWorkspace} isSessionRoute={isSessionRoute} onChangeWorkspace={changeWorkspace} />
       <Outlet />
-    </>
+    </OpenGeniProvider>
   );
 
   async function changeWorkspace(nextWorkspaceId: string) {
@@ -954,7 +870,7 @@ function WorkspaceHeader(props: {
           </Button>
         ) : null}
         {context.session && props.isSessionRoute ? <ConnectionPill state={context.connectionState} /> : null}
-        {context.session && props.isSessionRoute ? <StatusBadge status={context.session.status} /> : null}
+        {context.session && props.isSessionRoute ? <SessionStatusBadge status={context.session.status} /> : null}
         {context.session && props.isSessionRoute ? (
           <Button
             type="button"
@@ -1002,17 +918,40 @@ function AgentHomeRoute() {
   const context = useAppContext();
   const navigate = useNavigate();
   const { workspaceId } = workspaceAgentRoute.useParams();
+  const attachments = useDraftAttachments(workspaceId);
+  const [draft, setDraft] = useState("");
 
   useEffect(() => {
     context.resetSessionView();
   }, [workspaceId]);
 
-  async function submitInitial(submission: TurnSubmission) {
-    const created = await context.startSession(workspaceId, submission);
-    if (created) {
+  // The session does not exist yet, so this surface cannot use `useComposer`
+  // (that hook sends to a session). It still renders the package ChatComposer
+  // by implementing the same `ComposerState` contract over session creation.
+  const createComposer: ComposerState = {
+    value: draft,
+    setValue: setDraft,
+    sending: context.busy,
+    canSend: draft.trim().length > 0 && !context.busy && !attachments.uploading,
+    interrupt: async () => {},
+    interrupting: false,
+    error: null,
+    clearError: () => {},
+    send: async () => {
+      const text = draft.trim();
+      if (!text || context.busy || attachments.uploading) {
+        return false;
+      }
+      const created = await context.startSession(workspaceId, { text, resources: attachments.readyResources });
+      if (!created) {
+        return false;
+      }
+      setDraft("");
+      attachments.clear();
       await navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: created.id } });
-    }
-  }
+      return true;
+    },
+  };
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
@@ -1026,20 +965,34 @@ function AgentHomeRoute() {
       </section>
 
       <div className="mt-8">
-        <Composer
-          workspaceId={workspaceId}
+        <ConsoleComposer
+          composer={createComposer}
+          attachments={attachments}
           autoFocus
-          pending={context.busy}
           fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
           placeholder="Describe a task for the agent..."
-          submitLabel={context.busy ? "Starting" : "Send"}
-          examples={examples}
-          controlsStart={<AgentControlStrip workspaceId={workspaceId} />}
-          onSubmit={(submission) => void submitInitial(submission)}
+          controls={<AgentControlStrip workspaceId={workspaceId} />}
         />
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {examples.map((example) => (
+            <button
+              key={example}
+              type="button"
+              onClick={() => setDraft(example)}
+              disabled={context.busy}
+              className={cn(
+                "max-w-full truncate rounded-full border px-3 py-1 text-left text-xs",
+                "border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/60",
+                "text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]",
+                "hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)]",
+                "transition-colors disabled:cursor-not-allowed disabled:opacity-60",
+              )}
+            >
+              {example}
+            </button>
+          ))}
+        </div>
         <WorkspaceSessions
-          workspaceId={workspaceId}
-          accessKeyVersion={context.accessKeyVersion}
           onSelect={(id) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: id } })}
         />
       </div>
@@ -1051,59 +1004,40 @@ function SessionRoute() {
   const context = useAppContext();
   const { workspaceId, sessionId } = workspaceSessionRoute.useParams();
   const navigate = useNavigate();
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(true);
-  const lastSequence = useMemo(() => context.events.reduce((max, event) => Math.max(max, event.sequence), 0), [context.events]);
-  const session = context.session?.workspaceId === workspaceId && context.session.id === sessionId ? context.session : null;
-  const conversation = useMemo(() => session ? projectConversation(session, context.events) : [], [session, context.events]);
-  const approvals = context.events.flatMap((event) => event.type === "session.requiresAction" ? approvalItems(event.payload) : []);
-  const canSendFollowUp = session?.status === "idle";
-  const sessionRunning = session?.status === "running" || session?.status === "queued";
 
+  // Session record + live event log via @opengeni/react. The stream replays
+  // the full durable log (after=0), reconnects with resume-by-sequence, and
+  // carries the live session status.
+  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
+  const { events, sessionStatus, connectionState, error: streamError } = useSessionEvents(sessionId);
+  const session = useMemo(
+    () => fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
+    [fetchedSession, sessionStatus],
+  );
+  const timeline = useMemo(() => session ? projectSessionTimeline(session, events) : [], [session, events]);
+  const approvals = events.flatMap((event) => event.type === "session.requiresAction" ? approvalItems(event.payload) : []);
+
+  // Keep the workspace header (title, status badge, connection pill) in sync.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setLoadError(null);
+    context.setSession(session);
+  }, [session]);
+  useEffect(() => {
+    context.setConnectionState(connectionState);
+  }, [connectionState]);
+  useEffect(() => () => {
     context.setSession(null);
-    context.setEvents([]);
-    context.setConnectionState("closed");
-    void (async () => {
-      try {
-        const [nextSession, nextEvents] = await Promise.all([
-          fetchSession(workspaceId, sessionId),
-          fetchEvents(workspaceId, sessionId),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        context.setSession(nextSession);
-        context.setEvents(nextEvents);
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-        context.setSession(null);
-        context.setEvents([]);
-        context.setConnectionState("closed");
-        setLoadError(error);
-        if (!isApiErrorStatus(error, 404)) {
-          toast.error("Failed to load session", { description: String(error) });
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, sessionId, context.accessKeyVersion]);
-
-  useSessionStream(session ? workspaceId : null, session ? sessionId : null, lastSequence, context.accessKeyVersion, (incoming) => {
-    context.setEvents((current) => mergeEvents(current, incoming));
-    context.setSession((current) => current ? applySessionStatusEvents(current, incoming) : current);
-  }, context.setConnectionState);
+    context.setConnectionState("idle");
+  }, []);
+  useEffect(() => {
+    if (streamError && !isApiErrorStatus(streamError, 404)) {
+      toast.error("Event stream disconnected", { description: streamError.message });
+    }
+  }, [streamError]);
+  useEffect(() => {
+    if (loadError && !isApiErrorStatus(loadError, 404)) {
+      toast.error("Failed to load session", { description: String(loadError) });
+    }
+  }, [loadError]);
 
   if (loading || !session) {
     if (loadError) {
@@ -1127,12 +1061,9 @@ function SessionRoute() {
   return (
     <div className={cn("grid min-h-0 w-full min-w-0 flex-1 grid-cols-1 overflow-hidden", context.inspectorOpen && "lg:grid-cols-[minmax(0,1fr)_minmax(0,390px)]")}>
       <SessionChatPane
-        conversation={conversation}
+        timeline={timeline}
         approvals={approvals}
-        busy={context.busy}
-        canSendFollowUp={canSendFollowUp}
         session={session}
-        sessionRunning={sessionRunning}
         fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
         documentSearchEnabled={context.documentSearchEnabled}
         openGeniToolEnabled={context.openGeniToolEnabled}
@@ -1146,20 +1077,48 @@ function SessionRoute() {
         onCapabilityToolIdsChange={context.setSelectedCapabilityToolIds}
         onModelChange={context.setModel}
         onReasoningEffortChange={context.setReasoningEffort}
-        onSubmit={(submission) => void context.submitFollowUp(workspaceId, session.id, submission)}
-        onInterrupt={() => void context.interruptSession(workspaceId, session.id)}
+        onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
         onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/agent", params: { workspaceId } })}
-        onApprove={(approvalId) => void sendApproval(workspaceId, session.id, approvalId, "approve")}
-        onReject={(approvalId) => void sendApproval(workspaceId, session.id, approvalId, "reject")}
+        onApprove={(approvalId) => void approve(approvalId, "approve")}
+        onReject={(approvalId) => void approve(approvalId, "reject")}
       />
 
       {context.inspectorOpen ? (
         <aside className="min-h-0 w-full min-w-0 overflow-hidden border-t border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 lg:border-t-0 lg:border-l">
-          <SessionInspector session={session} events={context.events} connectionState={context.connectionState} />
+          <SessionInspector session={session} events={events} connectionState={connectionState} />
         </aside>
       ) : null}
     </div>
   );
+
+  async function approve(approvalId: string, decision: "approve" | "reject") {
+    try {
+      await context.client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision });
+    } catch (error) {
+      toast.error("Failed to submit the approval decision", { description: error instanceof Error ? error.message : String(error) });
+    }
+  }
+}
+
+/**
+ * The console's timeline projection: the package's `buildTimeline` over
+ * console-sanitized events (archived/provider-internal failure payloads are
+ * redacted before they reach the timeline). Falls back to the session's
+ * initial message while the event log is still empty.
+ */
+export function projectSessionTimeline(session: Session, events: SessionEvent[]): TimelineItem[] {
+  const items = buildTimeline(events.map((event) => sanitizeEventForDisplay(event, session.status)));
+  if (items.length === 0 && session.initialMessage) {
+    return [{
+      kind: "user-message",
+      id: `user-${session.id}`,
+      text: session.initialMessage,
+      resources: session.resources,
+      tools: session.tools,
+      occurredAt: session.createdAt,
+    }];
+  }
+  return items;
 }
 
 function DocumentsRoute() {
@@ -1737,33 +1696,6 @@ function formatMoneyMicros(amountMicros: number, currency: string): string {
 function validTopupAmount(value: string): boolean {
   const amount = Number(value);
   return Number.isFinite(amount) && amount >= 5 && amount <= 10_000 && Math.abs(amount - Math.round(amount * 100) / 100) < 1e-9;
-}
-
-export function applySessionStatusEvents(session: Session, events: SessionEvent[]): Session {
-  return events.reduce((current, event) => {
-    if (event.type !== "session.status.changed" || event.sessionId !== current.id) {
-      return current;
-    }
-    const status = (event.payload as { status?: unknown }).status;
-    if (!isSessionStatus(status)) {
-      return current;
-    }
-    return {
-      ...current,
-      status,
-      activeTurnId: status === "idle" || status === "failed" || status === "cancelled" ? null : current.activeTurnId,
-      updatedAt: event.occurredAt,
-    };
-  }, session);
-}
-
-function isSessionStatus(value: unknown): value is SessionStatus {
-  return value === "queued" ||
-    value === "running" ||
-    value === "idle" ||
-    value === "requires_action" ||
-    value === "failed" ||
-    value === "cancelled";
 }
 
 function isTerminalSessionStatus(value: SessionStatus): boolean {
@@ -3068,22 +3000,10 @@ function ModelPicker(props: {
   );
 }
 
-function StatusBadge({ status }: { status: SessionStatus }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/60 px-2.5 py-1 text-xs font-medium text-[color:var(--color-fg-muted)]">
-      <span className={cn("size-2 rounded-full", statusTone(status))} />
-      <span>{status}</span>
-    </span>
-  );
-}
-
 function SessionChatPane(props: {
-  conversation: ConversationTurn[];
+  timeline: TimelineItem[];
   approvals: Array<{ id: string; name: string; arguments?: unknown; raw?: unknown }>;
-  busy: boolean;
-  canSendFollowUp: boolean;
   session: Session;
-  sessionRunning: boolean;
   fileUploadsEnabled: boolean;
   documentSearchEnabled: boolean;
   openGeniToolEnabled: boolean;
@@ -3097,175 +3017,162 @@ function SessionChatPane(props: {
   onCapabilityToolIdsChange: (ids: Set<string>) => void;
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (effort: IntelligenceEffort) => void;
-  onSubmit: (submission: TurnSubmission) => void;
-  onInterrupt: () => void;
+  onOpenSession: (sessionId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => void;
   onReject: (approvalId: string) => void;
 }) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const nearBottomRef = useRef(true);
-  const previousTurnCountRef = useRef(props.conversation.length);
-  const lastEventKey = [
-    props.conversation.at(-1)?.id ?? "empty",
-    props.conversation.at(-1)?.kind ?? "none",
-    props.conversation.length,
-    props.approvals.length,
-  ].join(":");
+  const terminal = isTerminalSessionStatus(props.session.status);
+  const attachments = useDraftAttachments(props.session.workspaceId);
+  const { documentSearchEnabled, openGeniToolEnabled, selectedCapabilityToolIds, model, reasoningEffort } = props;
+  const composer = useComposer(props.session.id, {
+    // Evaluated at send time: attachments and tool toggles picked while the
+    // draft was being written ride along with the message.
+    sendExtras: () => ({
+      resources: attachments.readyResources,
+      tools: buildTools(undefined, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]),
+      model,
+      reasoningEffort,
+    }),
+    onSent: () => attachments.clear(),
+  });
 
-  function updateNearBottom() {
-    const element = scrollRef.current;
-    if (!element) {
-      nearBottomRef.current = true;
-      return;
+  const renderMessageText = useCallback((text: string, item: AgentMessageItem | UserMessageItem) => {
+    if (item.kind === "user-message") {
+      return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
     }
-    nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
-  }
-
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element || !nearBottomRef.current) {
-      previousTurnCountRef.current = props.conversation.length;
-      return;
-    }
-    const turnCountChanged = props.conversation.length !== previousTurnCountRef.current;
-    previousTurnCountRef.current = props.conversation.length;
-    const frame = requestAnimationFrame(() => {
-      element.scrollTo({
-        top: element.scrollHeight,
-        behavior: turnCountChanged ? "smooth" : "auto",
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [lastEventKey, props.conversation]);
+    return (
+      <div data-testid="assistant-markdown">
+        <MarkdownText text={text} streaming={item.streaming} />
+      </div>
+    );
+  }, [props.session.workspaceId]);
 
   return (
-    <section className="relative min-h-0 min-w-0 overflow-hidden">
-      <div
-        ref={scrollRef}
-        onScroll={updateNearBottom}
-        className="chat-scroll-mask h-full min-h-0 overflow-y-auto overflow-x-hidden"
-        data-testid="session-chat-scroll"
-      >
-        <div className="mx-auto w-full max-w-3xl px-4 pt-8 pb-56 sm:px-6">
-          {isTerminalSessionStatus(props.session.status) ? (
-            <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
-          ) : null}
-
-          {isTerminalSessionStatus(props.session.status) ? (
-            <TerminalSessionArchive session={props.session} eventCount={props.conversation.length} />
-          ) : props.conversation.length === 0 ? (
-            <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
-              Waiting for session activity
-            </div>
-          ) : (
-            <ConversationStream workspaceId={props.session.workspaceId} turns={props.conversation} />
-          )}
-
-          {props.approvals.length > 0 ? (
-            <div className="mt-6 grid gap-3">
-              {props.approvals.map((approval) => (
-                <div key={approval.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-                  <div className="text-sm font-medium">{approval.name}</div>
-                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-[color:var(--color-bg)] p-3 text-xs text-[color:var(--color-fg-muted)]">
-                    {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
-                  </pre>
-                  <div className="mt-3 flex justify-end gap-2">
-                    <Button size="sm" onClick={() => props.onApprove(approval.id)}>
-                      <CheckIcon className="size-3.5" />
-                      Approve
-                    </Button>
-                    <Button size="sm" variant="destructive" onClick={() => props.onReject(approval.id)}>
-                      <XIcon className="size-3.5" />
-                      Reject
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
+    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+      {terminal ? (
+        <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+          <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
+          <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
         </div>
-      </div>
+      ) : (
+        <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
+          <MessageTimeline
+            className="h-full"
+            items={props.timeline}
+            status={props.session.status}
+            renderMessageText={renderMessageText}
+            onOpenSession={props.onOpenSession}
+            emptyState={(
+              <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
+                Waiting for session activity
+              </div>
+            )}
+          />
+        </div>
+      )}
 
-      <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-[color:var(--color-bg)] to-transparent" />
-      <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-36 bg-gradient-to-t from-[color:var(--color-bg)] via-[color:var(--color-bg)]/80 to-transparent" />
-      <div className="absolute inset-x-0 bottom-0 px-4 pb-4 sm:px-6">
+      {props.approvals.length > 0 && !terminal ? (
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
+          <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
+            {props.approvals.map((approval) => (
+              <div key={approval.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                <div className="text-sm font-medium">{approval.name}</div>
+                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-[color:var(--color-bg)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                  {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
+                </pre>
+                <div className="mt-3 flex justify-end gap-2">
+                  <Button size="sm" onClick={() => props.onApprove(approval.id)}>
+                    <CheckIcon className="size-3.5" />
+                    Approve
+                  </Button>
+                  <Button size="sm" variant="destructive" onClick={() => props.onReject(approval.id)}>
+                    <XIcon className="size-3.5" />
+                    Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
-          <Composer
-            workspaceId={props.session.workspaceId}
-            pending={props.busy}
-            disabled={!props.canSendFollowUp}
-            submitDisabled={props.sessionRunning}
+          <ConsoleComposer
+            composer={composer}
+            attachments={attachments}
+            status={props.session.status}
+            disabled={terminal}
             fileUploadsEnabled={props.fileUploadsEnabled}
-            disabledHint={
-              props.sessionRunning
-                ? "Agent is running. Stop before sending."
-                : props.session.status !== "idle"
-                  ? `Session is ${props.session.status}.`
-                  : undefined
-            }
-            placeholder={props.sessionRunning ? "Agent is running..." : "Send a follow-up..."}
-            submitLabel={props.busy ? "Sending" : "Send"}
-            submitAction={
-              props.sessionRunning ? (
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={props.onInterrupt}
-                  disabled={props.busy}
-                  aria-label="Interrupt"
-                  className="h-8 gap-1.5 px-3"
-                >
-                  {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SquareIcon className="size-3.5" />}
-                  <span className="text-xs font-medium">Stop</span>
-                </Button>
-              ) : isTerminalSessionStatus(props.session.status) ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={props.onNewSession}
-                  className="h-8 gap-1.5 px-3"
-                >
-                  <PlusIcon className="size-3.5" />
-                  <span className="text-xs font-medium">New</span>
-                </Button>
-              ) : undefined
-            }
-            controlsStart={
-                <div className="flex min-w-0 items-center gap-1.5">
+            hint={terminal ? `Session is ${props.session.status}.` : undefined}
+            placeholder={terminal ? `Session is ${props.session.status}.` : "Send a follow-up..."}
+            controls={(
+              <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
                   config={props.clientConfig}
                   model={props.model}
                   effort={props.reasoningEffort}
-                  disabled={props.busy}
+                  disabled={composer.sending}
                   onModelChange={props.onModelChange}
                   onEffortChange={props.onReasoningEffortChange}
                 />
                 <DocumentSearchToolToggle
                   enabled={props.documentSearchEnabled}
-                  disabled={props.busy || !props.canSendFollowUp}
+                  disabled={composer.sending || terminal}
                   onToggle={props.onDocumentSearchToggle}
                 />
                 <OpenGeniToolToggle
                   enabled={props.openGeniToolEnabled}
-                  disabled={props.busy || !props.canSendFollowUp}
+                  disabled={composer.sending || terminal}
                   onToggle={props.onOpenGeniToolToggle}
                 />
                 <EnabledMcpToolPicker
                   servers={props.customMcpServers}
                   selectedIds={props.selectedCapabilityToolIds}
-                  disabled={props.busy || !props.canSendFollowUp}
+                  disabled={composer.sending || terminal}
                   onChange={props.onCapabilityToolIdsChange}
                 />
               </div>
-            }
-            onSubmit={props.onSubmit}
+            )}
           />
         </div>
       </div>
     </section>
+  );
+}
+
+/** Attachment/repository/tool chips + markdown body inside the user bubble. */
+function UserMessageBody({ workspaceId, item }: { workspaceId: string; item: UserMessageItem }) {
+  const fileResources = item.resources.filter((resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file");
+  const repositoryResources = item.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
+  return (
+    <div data-testid="timeline-user">
+      {fileResources.length > 0 || repositoryResources.length > 0 || item.tools.length > 0 ? (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          {fileResources.map((resource) => <MessageFileAttachment key={`${resource.fileId}:${resource.mountPath ?? ""}`} workspaceId={workspaceId} resource={resource} />)}
+          {repositoryResources.map((resource) => (
+            <span
+              key={`${resource.uri}:${resource.ref}:${resource.mountPath ?? ""}`}
+              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+            >
+              <GitBranchIcon className="size-3.5 shrink-0" />
+              <span className="truncate">{repositoryDisplayName(resource)}</span>
+            </span>
+          ))}
+          {item.tools.map((tool) => (
+            <span
+              key={`${tool.kind}:${tool.id}`}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+            >
+              <WrenchIcon className="size-3.5" />
+              <span>{tool.id}</span>
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <MarkdownText text={item.text} compact />
+    </div>
   );
 }
 
@@ -3321,54 +3228,6 @@ function TerminalSessionArchive(props: { session: Session; eventCount: number })
   );
 }
 
-function ConversationStream({ workspaceId, turns }: { workspaceId: string; turns: ConversationTurn[] }) {
-  return (
-    <div className="space-y-3.5" data-testid="session-timeline">
-      {turns.map((turn) => turn.kind === "user"
-        ? <UserMessage key={turn.id} workspaceId={workspaceId} turn={turn} />
-        : turn.kind === "assistant"
-          ? <AssistantMessage key={turn.id} turn={turn} />
-          : <ActivityMessage key={turn.id} turn={turn} />)}
-    </div>
-  );
-}
-
-function UserMessage({ workspaceId, turn }: { workspaceId: string; turn: ConversationUserTurn }) {
-  const fileResources = turn.resources.filter((resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file");
-  const repositoryResources = turn.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
-  return (
-    <article className="message-in flex justify-end gap-2.5" data-testid="timeline-user">
-      <div className="max-w-[82%] rounded-xl rounded-br-sm border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/75 px-3 py-2 text-[14px] leading-6">
-        {fileResources.length > 0 || repositoryResources.length > 0 || turn.tools.length > 0 ? (
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {fileResources.map((resource) => <MessageFileAttachment key={`${resource.fileId}:${resource.mountPath ?? ""}`} workspaceId={workspaceId} resource={resource} />)}
-            {repositoryResources.map((resource) => (
-              <span
-                key={`${resource.uri}:${resource.ref}:${resource.mountPath ?? ""}`}
-                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
-              >
-                <GitBranchIcon className="size-3.5 shrink-0" />
-                <span className="truncate">{repositoryDisplayName(resource)}</span>
-              </span>
-            ))}
-            {turn.tools.map((tool) => (
-              <span
-                key={`${tool.kind}:${tool.id}`}
-                className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
-              >
-                <WrenchIcon className="size-3.5" />
-                <span>{tool.id}</span>
-              </span>
-            ))}
-          </div>
-        ) : null}
-        <MarkdownText text={turn.text} compact />
-      </div>
-      <AvatarBubble variant="user" />
-    </article>
-  );
-}
-
 function MessageFileAttachment({ workspaceId, resource }: { workspaceId: string; resource: Extract<ResourceRef, { kind: "file" }> }) {
   const [file, setFile] = useState<FileAsset | null>(null);
   const [busy, setBusy] = useState(false);
@@ -3409,148 +3268,6 @@ function MessageFileAttachment({ workspaceId, resource }: { workspaceId: string;
       <span className="truncate">{file?.filename ?? resource.fileId}</span>
       <DownloadIcon className="size-3 shrink-0" />
     </button>
-  );
-}
-
-function AssistantMessage({ turn }: { turn: ConversationAssistantTurn }) {
-  const hasText = turn.text.trim().length > 0;
-  return (
-    <article className="message-in flex justify-start gap-2.5" data-testid="timeline-assistant">
-      <AvatarBubble variant="assistant" />
-      <div className="min-w-0 max-w-[88%] pt-0.5 text-[15px] leading-7">
-        {hasText ? (
-          <div className="text-[color:var(--color-fg)]" data-testid="assistant-markdown">
-            <MarkdownText text={turn.text} streaming={turn.status === "running" || turn.status === "pending"} />
-            {(turn.status === "running" || turn.status === "pending") ? <StreamingCursor /> : null}
-          </div>
-        ) : turn.status === "failed" ? (
-          <TerminalNotice kind="failed" message={turn.error ?? "Agent failed"} />
-        ) : turn.status === "cancelled" ? (
-          <TerminalNotice kind="cancelled" message="Interrupted" />
-        ) : turn.status === "requires_action" ? (
-          <TerminalNotice kind="waiting" message="Waiting for approval" />
-        ) : (
-          <PendingBubble />
-        )}
-      </div>
-    </article>
-  );
-}
-
-function ActivityMessage({ turn }: { turn: ConversationActivityTurn }) {
-  return (
-    <article className="message-in flex justify-start gap-2.5" data-testid="timeline-activity" data-activity-status={turn.status}>
-      <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center">
-        <span className="size-1.5 rounded-full bg-[color:var(--color-border-strong)]" />
-      </div>
-      <div className="min-w-0 max-w-[88%]">
-        <TracePanel trace={turn.trace} status={turn.status} />
-      </div>
-    </article>
-  );
-}
-
-function TracePanel(props: {
-  trace: ConversationTraceItem[];
-  status: ConversationActivityTurn["status"];
-}) {
-  const [open, setOpen] = useState(false);
-
-  const failed = props.trace.some((item) => item.status === "failed");
-  const running = props.trace.some((item) => item.status === "running");
-  const summary = traceSummary(props.trace);
-
-  return (
-    <div className="min-w-0">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center gap-2.5 py-1 text-left text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]"
-      >
-        <span className={cn(
-          "flex size-5 shrink-0 items-center justify-center rounded-full border",
-          failed
-            ? "border-red-400/35 bg-red-500/10 text-red-300"
-            : running
-              ? "border-amber-400/35 bg-amber-500/10 text-amber-300"
-              : "border-emerald-400/35 bg-emerald-500/10 text-emerald-300",
-        )}>
-          {failed ? <AlertTriangleIcon className="size-3" /> : running ? <CircleDashedIcon className="size-3 animate-spin" /> : <CheckCircle2Icon className="size-3" />}
-        </span>
-        <span className="min-w-0 flex flex-1 items-baseline gap-2">
-          <span className="shrink-0 text-xs font-medium text-[color:var(--color-fg)]">
-            {running ? "Working" : failed ? "Action failed" : "Agent activity"}
-          </span>
-          <span className="truncate text-[11px] text-[color:var(--color-fg-subtle)]">{summary}</span>
-        </span>
-        <ChevronDownIcon className={cn("size-3.5 shrink-0 text-[color:var(--color-fg-subtle)] transition-transform", open && "rotate-180")} />
-      </button>
-      {open ? (
-        <div className="mt-1.5 space-y-1.5 border-l border-[color:var(--color-border)] pl-3">
-          {props.trace.map((item) => <TraceItemView key={item.id} item={item} />)}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function TraceItemView({ item }: { item: ConversationTraceItem }) {
-  return (
-    <div className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-2">
-      <div className="flex justify-center pt-0.5">
-        <TraceIcon item={item} />
-      </div>
-      <div className="min-w-0 py-0.5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="truncate text-xs font-medium text-[color:var(--color-fg)]">{item.title}</div>
-          <span className={cn("shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium", traceStatusClass(item.status))}>
-            {traceStatusLabel(item.status)}
-          </span>
-        </div>
-        {item.detail ? (
-          <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-[color:var(--color-surface)]/70 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
-            {item.detail}
-          </pre>
-        ) : null}
-        {item.output ? (
-          <pre className="mt-1.5 overflow-x-auto whitespace-pre-wrap break-words rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/45 p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
-            {item.output}
-          </pre>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function TraceIcon({ item }: { item: ConversationTraceItem }) {
-  const iconClass = "size-3.5";
-  const className = cn(
-    "flex size-5 items-center justify-center rounded-full border",
-    item.status === "failed"
-      ? "border-red-400/35 bg-red-500/10 text-red-300"
-      : item.status === "running"
-        ? "border-amber-400/35 bg-amber-500/10 text-amber-300"
-        : "border-[color:var(--color-border)] bg-[color:var(--color-surface)] text-[color:var(--color-fg-muted)]",
-  );
-  const icon =
-    item.kind === "reasoning" ? <SparkleIcon className={iconClass} />
-      : item.kind === "tool" ? <WrenchIcon className={iconClass} />
-      : item.kind === "sandbox" ? <TerminalIcon className={iconClass} />
-        : item.kind === "error" ? <AlertTriangleIcon className={iconClass} />
-          : item.status === "complete" ? <CheckCircle2Icon className={iconClass} />
-            : <CircleDashedIcon className={cn(iconClass, item.status === "running" && "animate-spin")} />;
-  return <span className={className}>{icon}</span>;
-}
-
-function AvatarBubble({ variant }: { variant: "assistant" | "user" }) {
-  return (
-    <div className={cn(
-      "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-surface)]",
-      variant === "assistant" ? "text-[color:var(--color-brand)]" : "text-[color:var(--color-fg-muted)]",
-    )}>
-      {variant === "assistant" ? <BotIcon className="size-3.5" /> : <UserIcon className="size-3.5" />}
-    </div>
   );
 }
 
@@ -3610,52 +3327,10 @@ const markdownComponents: StreamdownComponents = {
   hr: ({ className, ...props }) => <hr className={cn("my-3 border-[color:var(--color-border)]", className)} {...props} />,
 };
 
-function PendingBubble() {
-  return (
-    <div
-      aria-label="Agent is working"
-      role="status"
-      className="inline-flex h-8 items-center gap-1.5 rounded-2xl rounded-bl-sm border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-3"
-    >
-      <PendingDot delay="0s" />
-      <PendingDot delay="0.15s" />
-      <PendingDot delay="0.3s" />
-    </div>
-  );
-}
-
-function PendingDot({ delay }: { delay: string }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="pending-dot inline-block size-1.5 rounded-full bg-[color:var(--color-fg-muted)]"
-      style={{ animationDelay: delay }}
-    />
-  );
-}
-
-function StreamingCursor() {
-  return <span aria-hidden="true" className="ml-1 inline-block h-4 w-1 translate-y-0.5 animate-pulse rounded bg-[color:var(--color-brand)]" />;
-}
-
-function TerminalNotice({ kind, message }: { kind: "failed" | "cancelled" | "waiting"; message: string }) {
-  const className = kind === "failed"
-    ? "border-red-400/35 bg-red-500/10 text-red-200"
-    : kind === "cancelled"
-      ? "border-zinc-400/35 bg-zinc-500/10 text-zinc-200"
-      : "border-amber-400/35 bg-amber-500/10 text-amber-200";
-  return (
-    <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs", className)}>
-      {kind === "failed" ? <AlertTriangleIcon className="size-3.5" /> : <CircleDashedIcon className="size-3.5" />}
-      <span>{message}</span>
-    </div>
-  );
-}
-
 function SessionInspector(props: {
   session: Session;
   events: SessionEvent[];
-  connectionState: ConnectionState;
+  connectionState: SessionEventsConnectionState;
 }) {
   const terminalSession = isTerminalSessionStatus(props.session.status);
   const displayEvents = props.events.map((event) => sanitizeEventForDisplay(event, props.session.status));
@@ -3693,7 +3368,7 @@ function SessionInspector(props: {
             <div className="min-w-0 space-y-4 p-3">
               <InspectorSection title="Session">
                 <InfoRow label="ID" value={<CopyableMono value={props.session.id} />} />
-                <InfoRow label="Status" value={<StatusBadge status={props.session.status} />} />
+                <InfoRow label="Status" value={<SessionStatusBadge status={props.session.status} />} />
                 <InfoRow label="Workflow" value={props.session.temporalWorkflowId ? <CopyableMono value={props.session.temporalWorkflowId} /> : "none"} />
                 <InfoRow label="Active turn" value={props.session.activeTurnId ? <CopyableMono value={props.session.activeTurnId} /> : "none"} />
                 <InfoRow label="Last seq" value={String(props.session.lastSequence)} />
@@ -3888,11 +3563,13 @@ function RawJsonPane({ value }: { value: unknown }) {
   );
 }
 
-function ConnectionPill({ state }: { state: ConnectionState }) {
+function ConnectionPill({ state }: { state: SessionEventsConnectionState }) {
   const tone = {
     connecting: "bg-amber-400",
+    reconnecting: "bg-amber-400",
     live: "bg-emerald-400",
-    closed: "bg-zinc-500",
+    idle: "bg-zinc-500",
+    ended: "bg-zinc-500",
     error: "bg-red-400",
   }[state];
   return (
@@ -3903,51 +3580,17 @@ function ConnectionPill({ state }: { state: ConnectionState }) {
   );
 }
 
-function WorkspaceSessions({
-  workspaceId,
-  accessKeyVersion,
-  onSelect,
-}: {
-  workspaceId: string;
-  accessKeyVersion: number;
-  onSelect: (id: string) => void;
-}) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<unknown>(null);
-
-  const loadSessions = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const nextSessions = await fetchSessions(workspaceId, 50);
-      if (!signal?.aborted) {
-        setSessions(nextSessions);
-      }
-    } catch (nextError) {
-      if (!signal?.aborted) {
-        setError(nextError);
-        setSessions([]);
-      }
-    } finally {
-      if (!signal?.aborted) {
-        setLoading(false);
-      }
-    }
-  }, [workspaceId]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadSessions(controller.signal);
-    return () => controller.abort();
-  }, [loadSessions, accessKeyVersion]);
+function WorkspaceSessions({ onSelect }: { onSelect: (id: string) => void }) {
+  // Workspace + credentials come from <OpenGeniProvider>; a new access key
+  // produces a new client, which re-runs the hook.
+  const { sessions, loading, error, refresh } = useWorkspaceSessions({ limit: 50 });
 
   return (
     <section className="mt-12">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">Workspace sessions</h2>
         {error ? (
-          <Button type="button" variant="ghost" size="sm" onClick={() => void loadSessions()}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()}>
             <RefreshCwIcon className="size-4" />
             Retry
           </Button>
@@ -4074,6 +3717,7 @@ function ScheduledTasksPanel(props: {
   const [open, setOpen] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const { client } = useAppContext();
   const canAttachOpenGeniTool = props.clientConfig?.mcpServers.some((server) => server.id === "opengeni") !== false;
 
   useEffect(() => {
@@ -4081,7 +3725,7 @@ function ScheduledTasksPanel(props: {
   }, [props.workspaceId]);
 
   async function refresh() {
-    const next = await fetchScheduledTasks(props.workspaceId);
+    const next = await client.listScheduledTasks(props.workspaceId);
     setTasks(next);
     const entries = await Promise.all(next.slice(0, 8).map(async (task) => [task.id, await fetchScheduledTaskRuns(props.workspaceId, task.id)] as const));
     setRuns(Object.fromEntries(entries));
@@ -4547,42 +4191,6 @@ function ScheduledTaskRepositoryPicker(props: {
   );
 }
 
-function useSessionStream(
-  workspaceId: string | null,
-  sessionId: string | null,
-  after: number,
-  accessKeyVersion: number,
-  onEvents: (events: SessionEvent[]) => void,
-  onState?: (state: ConnectionState) => void,
-) {
-  const onEventsRef = useRef(onEvents);
-  onEventsRef.current = onEvents;
-  const onStateRef = useRef(onState);
-  onStateRef.current = onState;
-  useEffect(() => {
-    if (!workspaceId || !sessionId) {
-      onStateRef.current?.("closed");
-      return;
-    }
-    const abort = new AbortController();
-    void streamSessionEvents(workspaceId, sessionId, after, (event) => {
-      onEventsRef.current([event]);
-    }, {
-      signal: abort.signal,
-      onState: (state) => onStateRef.current?.(state),
-    }).catch((error) => {
-      if (!abort.signal.aborted) {
-        onStateRef.current?.("error");
-        toast.error("Event stream disconnected", { description: error instanceof Error ? error.message : String(error) });
-      }
-    });
-    return () => {
-      abort.abort();
-      onStateRef.current?.("closed");
-    };
-  }, [workspaceId, sessionId, accessKeyVersion]);
-}
-
 type CapabilityFormState = {
   kind: Exclude<CapabilityKind, "pack">;
   name: string;
@@ -4951,32 +4559,6 @@ export function buildTools(existing: ToolRef[] | undefined, documentSearchEnable
   return out;
 }
 
-function isResourceRefArray(value: unknown): value is ResourceRef[] {
-  return Array.isArray(value) && value.every((item) => {
-    if (!item || typeof item !== "object") {
-      return false;
-    }
-    const resource = item as Partial<ResourceRef>;
-    if (resource.kind === "file") {
-      return typeof resource.fileId === "string";
-    }
-    if (resource.kind === "repository") {
-      return typeof resource.uri === "string" && typeof resource.ref === "string";
-    }
-    return false;
-  });
-}
-
-function isToolRefArray(value: unknown): value is ToolRef[] {
-  return Array.isArray(value) && value.every((item) => {
-    if (!item || typeof item !== "object") {
-      return false;
-    }
-    const tool = item as Partial<ToolRef>;
-    return tool.kind === "mcp" && typeof tool.id === "string";
-  });
-}
-
 function repositoryDisplayName(resource: Extract<ResourceRef, { kind: "repository" }>): string {
   try {
     return new URL(resource.uri).pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
@@ -4998,258 +4580,6 @@ function normalizeRepositoryUrl(value: string): { host: string; repo: string } {
   return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
 }
 
-export function projectConversation(session: Session, events: SessionEvent[]): ConversationTurn[] {
-  const out: ConversationTurn[] = [];
-  let currentMessage: ConversationAssistantTurn | null = null;
-  let currentActivity: ConversationActivityTurn | null = null;
-  const displayEvents = events.map((event) => sanitizeEventForDisplay(event, session.status));
-
-  const lastMessage = (): ConversationAssistantTurn | null => {
-    const item = out[out.length - 1];
-    return item?.kind === "assistant" ? item : null;
-  };
-
-  const lastActivity = (): ConversationActivityTurn | null => {
-    const item = out[out.length - 1];
-    return item?.kind === "activity" ? item : null;
-  };
-
-  const startMessage = (event: SessionEvent): ConversationAssistantTurn => {
-    const existing = lastMessage();
-    if (existing) {
-      currentMessage = existing;
-      return existing;
-    }
-    const activity = lastActivity();
-    if (activity?.status === "running") {
-      activity.status = "complete";
-      completeRunningActivity(activity);
-    }
-    currentActivity = null;
-    currentMessage = {
-      kind: "assistant",
-      id: `assistant-message-${event.id}`,
-      turnId: event.turnId ?? null,
-      text: "",
-      status: "running",
-      occurredAt: event.occurredAt,
-    };
-    out.push(currentMessage);
-    return currentMessage;
-  };
-
-  const startActivity = (event: SessionEvent): ConversationActivityTurn => {
-    const existing = lastActivity();
-    if (existing) {
-      currentActivity = existing;
-      return existing;
-    }
-    const message = lastMessage();
-    if (message?.status === "running") {
-      message.status = "complete";
-    }
-    currentMessage = null;
-    currentActivity = {
-      kind: "activity",
-      id: `activity-${event.id}`,
-      turnId: event.turnId ?? null,
-      status: "running",
-      trace: [],
-      occurredAt: event.occurredAt,
-    };
-    out.push(currentActivity);
-    return currentActivity;
-  };
-
-  for (const event of [...displayEvents].sort((a, b) => a.sequence - b.sequence)) {
-    const payload = event.payload as Record<string, unknown>;
-    if (event.type === "user.message") {
-      currentMessage = null;
-      currentActivity = null;
-      out.push({
-        kind: "user",
-        id: event.id,
-        text: String(payload.text ?? ""),
-        resources: isResourceRefArray(payload.resources) ? payload.resources : [],
-        tools: isToolRefArray(payload.tools) ? payload.tools : [],
-        occurredAt: event.occurredAt,
-      });
-    } else if (event.type === "agent.message.delta") {
-      const text = String(payload.text ?? "");
-      if (!text) {
-        continue;
-      }
-      const assistant = startMessage(event);
-      assistant.status = "running";
-      assistant.text += text;
-    } else if (event.type === "agent.message.completed") {
-      const text = String(payload.text ?? "");
-      const assistant = lastMessage() ?? startMessage(event);
-      if (!assistant.text || text.startsWith(assistant.text)) {
-        assistant.text = text || assistant.text;
-      }
-      assistant.status = "complete";
-      currentMessage = null;
-    } else if (event.type === "agent.reasoning.delta") {
-      const text = reasoningSummaryText(payload) || "Reasoning summary received.";
-      const activity = startActivity(event);
-      activity.status = "running";
-      const existing = findTrace(activity, `reasoning:${activity.id}`, "reasoning");
-      if (existing) {
-        existing.status = "running";
-        existing.detail = existing.detail ? `${existing.detail}${text}` : text;
-      } else {
-        activity.trace.push({
-          id: event.id,
-          key: `reasoning:${activity.id}`,
-          kind: "reasoning",
-          status: "running",
-          title: "Reasoning summary",
-          detail: text,
-          occurredAt: event.occurredAt,
-        });
-      }
-    } else if (event.type === "agent.toolCall.created") {
-      const activity = startActivity(event);
-      activity.status = "running";
-      activity.trace.push({
-        id: event.id,
-        key: traceKey(event),
-        kind: "tool",
-        status: "running",
-        title: toolTitle(payload),
-        detail: prettyJson(payload.arguments ?? payload.raw ?? payload),
-        occurredAt: event.occurredAt,
-      });
-    } else if (event.type === "agent.toolCall.output") {
-      const activity = startActivity(event);
-      const key = traceKey(event);
-      const existing = findTrace(activity, key, "tool");
-      const output = stringifyPayload(payload.output ?? payload);
-      if (existing) {
-        existing.status = "complete";
-        existing.output = output;
-      } else {
-        activity.trace.push({
-          id: event.id,
-          key,
-          kind: "tool",
-          status: "complete",
-          title: "Tool output",
-          output,
-          occurredAt: event.occurredAt,
-        });
-      }
-    } else if (event.type === "sandbox.operation.started" || event.type === "sandbox.operation.completed" || event.type === "sandbox.operation.failed") {
-      const activity = startActivity(event);
-      const key = `sandbox:${String(payload.name ?? event.id)}`;
-      const existing = findTrace(activity, key, "sandbox");
-      const status = event.type.endsWith(".failed") ? "failed" : event.type.endsWith(".completed") ? "complete" : "running";
-      const errorMessage = failurePayloadMessage(payload);
-      if (existing) {
-        existing.status = status;
-        if (errorMessage) {
-          existing.output = errorMessage;
-        }
-      } else {
-        activity.trace.push({
-          id: event.id,
-          key,
-          kind: "sandbox",
-          status,
-          title: sandboxTitle(payload),
-          detail: typeof payload.command === "string" ? payload.command : undefined,
-          output: errorMessage,
-          occurredAt: event.occurredAt,
-        });
-      }
-      activity.status = status === "failed" ? "failed" : status === "complete" ? "complete" : "running";
-    } else if (event.type === "session.requiresAction") {
-      const activity = startActivity(event);
-      activity.status = "requires_action";
-      activity.trace.push({
-        id: event.id,
-        key: event.id,
-        kind: "approval",
-        status: "waiting",
-        title: "Approval required",
-        detail: prettyJson(payload.approvals ?? payload),
-        occurredAt: event.occurredAt,
-      });
-    } else if (event.type === "turn.failed") {
-      const activity = startActivity(event);
-      activity.status = "failed";
-      completeRunningActivity(activity);
-      activity.trace.push({
-        id: event.id,
-        key: event.id,
-        kind: "error",
-        status: "failed",
-        title: "Turn failed",
-        output: failurePayloadMessage(payload) ?? "Unknown error",
-        occurredAt: event.occurredAt,
-      });
-    } else if (event.type === "turn.cancelled") {
-      const message = lastMessage();
-      if (message) {
-        message.status = "cancelled";
-      } else {
-        const activity = startActivity(event);
-        activity.status = "cancelled";
-        completeRunningActivity(activity);
-      }
-    } else if (event.type === "turn.started") {
-      currentMessage = null;
-      currentActivity = null;
-    } else if (event.type === "turn.completed") {
-      const message = lastMessage();
-      if (message) {
-        if (!message.text && typeof payload.output === "string") {
-          message.text = payload.output;
-        }
-        message.status = "complete";
-        currentMessage = null;
-      }
-      for (const activity of out) {
-        if (activity.kind !== "activity" || activity.status !== "running") {
-          continue;
-        }
-        if (event.turnId && activity.turnId && activity.turnId !== event.turnId) {
-          continue;
-        }
-        activity.status = "complete";
-        completeRunningActivity(activity);
-      }
-      currentActivity = null;
-    }
-  }
-  if (out.length === 0 && session.initialMessage) {
-    out.push({
-      kind: "user",
-      id: `user-${session.id}`,
-      text: session.initialMessage,
-      resources: session.resources,
-      tools: session.tools,
-      occurredAt: session.createdAt,
-    });
-  }
-  return out;
-}
-
-function completeRunningActivity(activity: ConversationActivityTurn): void {
-  for (const item of activity.trace) {
-    if (item.status === "running") {
-      item.status = "complete";
-    }
-  }
-}
-
-function findTrace(activity: ConversationActivityTurn, key: string, kind: ConversationTraceKind): ConversationTraceItem | undefined {
-  const trace = [...activity.trace].reverse();
-  return trace.find((item) => item.key === key)
-    ?? trace.find((item) => item.kind === kind && item.status === "running");
-}
-
 function reasoningSummaryText(payload: unknown): string {
   if (!payload || typeof payload !== "object") {
     return "";
@@ -5268,11 +4598,6 @@ function reasoningSummaryText(payload: unknown): string {
     .map((part) => part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "")
     .filter(Boolean)
     .join("");
-}
-
-function traceKey(event: SessionEvent): string {
-  const payload = event.payload as Record<string, unknown>;
-  return String(payload.id ?? payload.callId ?? event.turnId ?? event.id);
 }
 
 function failurePayloadMessage(payload: Record<string, unknown>): string | undefined {
@@ -5306,36 +4631,6 @@ function providerInternalFailureDisplayMessage(message: string): string {
     return "Sandbox setup failed because the execution provider reported a temporary capacity limit. Start a new session.";
   }
   return "Sandbox setup failed while preparing the execution environment. Start a new session.";
-}
-
-function toolTitle(payload: Record<string, unknown>): string {
-  const name = String(payload.name ?? "tool");
-  if (name === "shell_call" || name.includes("shell")) {
-    return "Shell command";
-  }
-  return `Tool: ${name}`;
-}
-
-function sandboxTitle(payload: Record<string, unknown>): string {
-  const name = String(payload.name ?? "sandbox");
-  return name === "azure-cli-login" ? "Azure CLI login" : `Sandbox: ${name}`;
-}
-
-function prettyJson(value: unknown): string | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value, null, 2);
-}
-
-function stringifyPayload(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  return JSON.stringify(value, null, 2);
 }
 
 function approvalItems(payload: unknown): Array<{ id: string; name: string; arguments?: unknown; raw?: unknown }> {
@@ -5374,51 +4669,6 @@ function groupRepositories(repositories: GitHubRepository[]) {
 
 function repoCountLabel(count: number): string {
   return `${count} ${count === 1 ? "repo" : "repos"}`;
-}
-
-function mergeEvents(current: SessionEvent[], incoming: SessionEvent[]): SessionEvent[] {
-  const byId = new Map(current.map((event) => [event.id, event]));
-  for (const event of incoming) {
-    byId.set(event.id, event);
-  }
-  return [...byId.values()].sort((a, b) => a.sequence - b.sequence);
-}
-
-function statusTone(status: SessionStatus): string {
-  if (status === "running" || status === "queued") return "bg-[color:var(--color-status-running)]";
-  if (status === "idle") return "bg-[color:var(--color-status-success)]";
-  if (status === "failed") return "bg-[color:var(--color-status-failed)]";
-  if (status === "cancelled") return "bg-[color:var(--color-status-cancelled)]";
-  return "bg-[color:var(--color-status-waiting)]";
-}
-
-function traceSummary(trace: ConversationTraceItem[]): string {
-  const counts = trace.reduce<Record<ConversationTraceKind, number>>((acc, item) => {
-    acc[item.kind] = (acc[item.kind] ?? 0) + 1;
-    return acc;
-  }, {} as Record<ConversationTraceKind, number>);
-  const parts = [
-    counts.reasoning ? "reasoning" : "",
-    counts.tool ? `${counts.tool} tools` : "",
-    counts.sandbox ? `${counts.sandbox} sandbox` : "",
-    counts.approval ? `${counts.approval} approvals` : "",
-    counts.error ? `${counts.error} errors` : "",
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : `${trace.length} events`;
-}
-
-function traceStatusClass(status: ConversationTraceStatus): string {
-  if (status === "running") return "bg-amber-500/10 text-amber-200";
-  if (status === "failed") return "bg-red-500/10 text-red-200";
-  if (status === "waiting") return "bg-blue-500/10 text-blue-200";
-  return "bg-emerald-500/10 text-emerald-200";
-}
-
-function traceStatusLabel(status: ConversationTraceStatus): string {
-  if (status === "running") return "running";
-  if (status === "failed") return "failed";
-  if (status === "waiting") return "waiting";
-  return "done";
 }
 
 function eventLabel(type: string): string {

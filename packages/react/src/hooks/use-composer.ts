@@ -1,9 +1,18 @@
+import type { SendMessageInput } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+
+export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
 export type UseComposerOptions = ClientOverride & {
   /** Called with the accepted text after a successful send. */
   onSent?: ((text: string) => void) | undefined;
+  /**
+   * Extra message fields (resources, tools, model, reasoningEffort) merged
+   * into every send. A function is evaluated at send time so it can read the
+   * surrounding UI state (attachment pickers, model selectors, ...).
+   */
+  sendExtras?: ComposerSendExtras | (() => ComposerSendExtras) | undefined;
 };
 
 export type ComposerState = {
@@ -34,6 +43,10 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
   const [error, setError] = useState<Error | null>(null);
   const pendingClientEventId = useRef<string | null>(null);
   const onSent = options.onSent;
+  // Read through a ref so a new extras closure (created every render by
+  // callers passing inline functions) does not invalidate `send`.
+  const sendExtrasRef = useRef(options.sendExtras);
+  sendExtrasRef.current = options.sendExtras;
 
   // A composer is bound to one session: switching targets must not leak the
   // previous session's draft, error, or retry idempotency key.
@@ -61,10 +74,11 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
       setSending(true);
       setError(null);
       try {
-        await client.sendMessage(workspaceId, sessionId, {
-          text,
-          clientEventId: pendingClientEventId.current,
-        });
+        await client.sendMessage(
+          workspaceId,
+          sessionId,
+          composeSendInput(text, pendingClientEventId.current, sendExtrasRef.current),
+        );
         pendingClientEventId.current = null;
         if (explicit === undefined) {
           // Clear only the draft that was sent: edits made while the request
@@ -117,6 +131,19 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     error,
     clearError: useCallback(() => setError(null), []),
   };
+}
+
+/**
+ * Merge the draft text + idempotency key with caller-provided extras. The
+ * text and clientEventId always win over extras. Exported for tests.
+ */
+export function composeSendInput(
+  text: string,
+  clientEventId: string,
+  extras: ComposerSendExtras | (() => ComposerSendExtras) | undefined,
+): SendMessageInput {
+  const resolved = typeof extras === "function" ? extras() : extras;
+  return { ...resolved, text, clientEventId };
 }
 
 /** Submit on plain Enter; Shift+Enter inserts a newline. Exported for tests. */

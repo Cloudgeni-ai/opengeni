@@ -13,6 +13,7 @@
         "@opengeni/events": "workspace:*",
         "@opengeni/github": "workspace:*",
         "@opengeni/observability": "workspace:*",
+        "@opengeni/react": "workspace:*",
         "@opengeni/runtime": "workspace:*",
         "@opengeni/sdk": "workspace:*",
         "@opengeni/testing": "workspace:*",

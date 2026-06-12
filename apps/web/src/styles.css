@@ -2,8 +2,10 @@
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "@opengeni/react/styles.css";
 
 @source "../node_modules/streamdown/dist/*.js";
+@source "../../../packages/react/src";
 
 @custom-variant dark (&:where(.dark, .dark *));
 

@@ -1,7 +1,7 @@
 import type { SessionStatus } from "@opengeni/sdk";
 import { ArrowUpIcon, LoaderCircleIcon, SquareIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useRef, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSubmitOnKey } from "../hooks/use-composer";
 import { cn } from "../lib/cn";
@@ -15,6 +15,12 @@ export type ChatComposerProps = {
   autoFocus?: boolean | undefined;
   /** Replaces the default keyboard hint under the field. */
   hint?: string | undefined;
+  /** App controls (model picker, attach button, ...) in the footer row, replacing the hint. */
+  controlsStart?: ReactNode | undefined;
+  /** Content rendered above the textarea, inside the field chrome (e.g. attachment chips). */
+  header?: ReactNode | undefined;
+  /** Paste hook on the textarea (e.g. paste-image-to-attach). */
+  onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
   className?: string | undefined;
 };
 
@@ -26,7 +32,7 @@ const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["queued", "running"
  * line, and the stop control appears while a turn is running (sending while
  * running is legitimate steering, so send stays available too).
  */
-export function ChatComposer({ composer, status, placeholder, disabled, autoFocus, hint, className }: ChatComposerProps) {
+export function ChatComposer({ composer, status, placeholder, disabled, autoFocus, hint, controlsStart, header, onPaste, className }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const active = status != null && ACTIVE_STATUSES.has(status);
 
@@ -59,12 +65,14 @@ export function ChatComposer({ composer, status, placeholder, disabled, autoFocu
           "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
         )}
       >
+        {header}
         <textarea
           ref={textareaRef}
           rows={1}
           value={composer.value}
           onChange={(event) => composer.setValue(event.target.value)}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           placeholder={placeholder ?? "Message the agent…"}
           disabled={disabled}
           autoFocus={autoFocus}
@@ -76,9 +84,13 @@ export function ChatComposer({ composer, status, placeholder, disabled, autoFocu
           )}
         />
         <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
-          <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
-            {hint ?? "Enter to send · Shift+Enter for a new line"}
-          </span>
+          {controlsStart ? (
+            <span className="flex min-w-0 items-center gap-1.5">{controlsStart}</span>
+          ) : (
+            <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
+              {hint ?? "Enter to send · Shift+Enter for a new line"}
+            </span>
+          )}
           <span className="flex items-center gap-1.5">
             <AnimatePresence initial={false}>
               {active ? (

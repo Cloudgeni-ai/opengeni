@@ -8,6 +8,7 @@ import {
   type AgentMessageItem,
   type SandboxItem,
   type ToolCallItem,
+  type UserMessageItem,
   type WorkerItem,
 } from "../src/timeline";
 
@@ -79,6 +80,37 @@ describe("buildTimeline", () => {
     ]);
     expect((items[0] as ToolCallItem).status).toBe("running");
     expect(items[1]?.kind).toBe("user-message");
+  });
+
+  test("user messages carry their attached resources and requested tools", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", {
+        text: "Review the repo",
+        resources: [
+          { kind: "repository", uri: "https://github.com/org/repo.git", ref: "main" },
+          { kind: "file", fileId: "file-1" },
+          { kind: "file" }, // malformed: dropped
+          "garbage",
+        ],
+        tools: [{ kind: "mcp", id: "opengeni" }, { kind: "other", id: "x" }],
+      }),
+    ]);
+    expect(items[0]?.kind).toBe("user-message");
+    const message = items[0] as UserMessageItem;
+    expect(message.resources).toEqual([
+      { kind: "repository", uri: "https://github.com/org/repo.git", ref: "main" },
+      { kind: "file", fileId: "file-1" },
+    ]);
+    expect(message.tools).toEqual([{ kind: "mcp", id: "opengeni" }]);
+  });
+
+  test("user messages without payload extras get empty resource and tool lists", () => {
+    reset();
+    const items = buildTimeline([event("user.message", { text: "hi" })]);
+    const message = items[0] as UserMessageItem;
+    expect(message.resources).toEqual([]);
+    expect(message.tools).toEqual([]);
   });
 
   test("a delta after a tool call starts a new message instead of appending", () => {

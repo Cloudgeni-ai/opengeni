@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   agentConfigFromFormState,
-  applySessionStatusEvents,
   buildTools,
   capabilityErrorToast,
   enabledWorkspaceCapabilityMcpServers,
@@ -9,7 +8,7 @@ import {
   formStateFromScheduledTask,
   gitHubRepositoryResource,
   mergeMcpServerOptions,
-  projectConversation,
+  projectSessionTimeline,
   sanitizeEventForDisplay,
   scheduleFromFormState,
   selectedAvailableCapabilityToolIds,
@@ -30,8 +29,12 @@ describe("workspace route helpers", () => {
   });
 });
 
-describe("projectConversation", () => {
-  test("keeps assistant messages and activity groups in event order", () => {
+describe("projectSessionTimeline", () => {
+  // Timeline projection itself (deltas, tool matching, grouping, ...) is
+  // @opengeni/react's `buildTimeline`, tested in packages/react. These tests
+  // cover the console-specific layer: event sanitization composed under it
+  // and the initial-message fallback.
+  test("keeps messages and activity in event order through the package projection", () => {
     const events = [
       event(1, "user.message", { text: "Inspect the repo" }),
       event(2, "turn.started", {}),
@@ -42,30 +45,28 @@ describe("projectConversation", () => {
       event(7, "agent.message.delta", { text: "The repo is ready." }),
     ];
 
-    const turns = projectConversation(session(), events);
+    const items = projectSessionTimeline(session(), events);
 
-    expect(turns.map((turn) => turn.kind)).toEqual(["user", "assistant", "activity", "assistant"]);
-    expect(turns[1]).toMatchObject({ kind: "assistant", text: "I will inspect first.", status: "complete" });
-    expect(turns[2]).toMatchObject({ kind: "activity", status: "complete" });
-    expect(turns[3]).toMatchObject({ kind: "assistant", text: "The repo is ready.", status: "running" });
+    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message", "reasoning", "tool-call", "agent-message"]);
+    expect(items[1]).toMatchObject({ kind: "agent-message", text: "I will inspect first.", streaming: false });
+    expect(items[3]).toMatchObject({ kind: "tool-call", status: "complete" });
+    expect(items[4]).toMatchObject({ kind: "agent-message", text: "The repo is ready.", streaming: true });
   });
 
   test("renders reasoning summary text", () => {
-    const turns = projectConversation(session(), [
+    const items = projectSessionTimeline(session(), [
       event(1, "user.message", { text: "Think" }),
       event(2, "agent.reasoning.delta", { text: "Checking credentials" }),
       event(3, "agent.reasoning.delta", { text: " and repository state." }),
     ]);
 
-    const activity = turns.find((turn) => turn.kind === "activity");
-    expect(activity).toBeDefined();
-    expect(JSON.stringify(activity)).toContain("Reasoning summary");
-    expect(JSON.stringify(activity)).toContain("Checking credentials and repository state.");
-    expect(JSON.stringify(activity)).not.toContain("Internal reasoning is hidden.");
+    const reasoning = items.find((item) => item.kind === "reasoning");
+    expect(reasoning).toBeDefined();
+    expect(JSON.stringify(reasoning)).toContain("Checking credentials and repository state.");
   });
 
   test("renders legacy reasoning item payloads safely", () => {
-    const turns = projectConversation(session(), [
+    const items = projectSessionTimeline(session(), [
       event(1, "user.message", { text: "Think" }),
       event(2, "agent.reasoning.delta", {
         item: {
@@ -76,27 +77,26 @@ describe("projectConversation", () => {
       }),
     ]);
 
-    const activity = turns.find((turn) => turn.kind === "activity");
-    expect(JSON.stringify(activity)).toContain("Legacy summary text.");
-    expect(JSON.stringify(activity)).not.toContain("rawItem");
+    const reasoning = items.find((item) => item.kind === "reasoning");
+    expect(JSON.stringify(reasoning)).toContain("Legacy summary text.");
+    expect(JSON.stringify(reasoning)).not.toContain("rawItem");
   });
 
-  test("turn completion completes earlier running activity groups", () => {
-    const turns = projectConversation(session(), [
+  test("turn completion finalizes running items", () => {
+    const items = projectSessionTimeline(session(), [
       event(1, "user.message", { text: "Check auth" }),
       event(2, "agent.reasoning.delta", { text: "Checking auth." }),
       event(3, "agent.message.completed", { text: "Done." }),
       event(4, "turn.completed", { output: "Done." }),
     ]);
 
-    const activity = turns.find((turn) => turn.kind === "activity");
-    expect(activity).toMatchObject({ kind: "activity", status: "complete" });
-    expect(JSON.stringify(activity)).not.toContain("running");
+    expect(items.find((item) => item.kind === "reasoning")).toMatchObject({ streaming: false });
+    expect(JSON.stringify(items)).not.toContain("\"running\"");
   });
 
   test("keeps per-turn attachments on user messages", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
-    const turns = projectConversation(session(), [
+    const items = projectSessionTimeline(session(), [
       event(1, "user.message", {
         text: "Use this file",
         resources: [{ kind: "file", fileId, mountPath: `files/${fileId}` }],
@@ -104,15 +104,21 @@ describe("projectConversation", () => {
       }),
     ]);
 
-    expect(turns[0]).toMatchObject({
-      kind: "user",
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
       resources: [{ kind: "file", fileId, mountPath: `files/${fileId}` }],
       tools: [{ kind: "mcp", id: "docs" }],
     });
   });
 
+  test("falls back to the initial message while the event log is empty", () => {
+    const items = projectSessionTimeline(session({ initialMessage: "Bootstrap the cluster" }), []);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "user-message", text: "Bootstrap the cluster" });
+  });
+
   test("hides archived terminal failure payloads in the main timeline projection", () => {
-    const turns = projectConversation(session({ status: "failed" }), [
+    const items = projectSessionTimeline(session({ status: "failed" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
         error: "Failed to apply a Modal sandbox manifest: RESOURCE_EXHAUSTED",
@@ -122,28 +128,28 @@ describe("projectConversation", () => {
       }),
     ]);
 
-    expect(JSON.stringify(turns)).not.toContain("RESOURCE_EXHAUSTED");
-    expect(JSON.stringify(turns)).toContain("Historical failure payload hidden in the web console.");
+    expect(JSON.stringify(items)).not.toContain("RESOURCE_EXHAUSTED");
+    expect(JSON.stringify(items)).toContain("Historical failure payload hidden in the web console.");
   });
 
   test("keeps active failure payloads visible in the main timeline projection", () => {
-    const turns = projectConversation(session({ status: "running" }), [
+    const items = projectSessionTimeline(session({ status: "running" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", { error: "Current run failed" }),
     ]);
 
-    expect(JSON.stringify(turns)).toContain("Current run failed");
+    expect(JSON.stringify(items)).toContain("Current run failed");
   });
 
   test("redacts active provider-internal sandbox failures in the main timeline projection", () => {
-    const turns = projectConversation(session({ status: "running" }), [
+    const items = projectSessionTimeline(session({ status: "running" }), [
       event(1, "user.message", { text: "Inspect" }),
       event(2, "turn.failed", {
         error: "Failed to apply a Modal sandbox manifest and close the sandbox. Manifest error: /modal.client.ModalClient/ContainerFilesystemExec RESOURCE_EXHAUSTED: Bandwidth exhausted or memory limit exceeded",
       }),
     ]);
 
-    const json = JSON.stringify(turns);
+    const json = JSON.stringify(items);
     expect(json).not.toContain("RESOURCE_EXHAUSTED");
     expect(json).not.toContain("ModalClient");
     expect(json).toContain("temporary capacity limit");
@@ -411,24 +417,6 @@ describe("GitHub repository resources", () => {
   });
 });
 
-describe("applySessionStatusEvents", () => {
-  test("trusts terminal status events without requiring a session refetch", () => {
-    const next = applySessionStatusEvents(session(), [
-      event(1, "session.status.changed", { status: "idle" }),
-    ]);
-
-    expect(next.status).toBe("idle");
-    expect(next.activeTurnId).toBeNull();
-  });
-
-  test("ignores invalid status payloads", () => {
-    const current = session();
-    expect(applySessionStatusEvents(current, [
-      event(1, "session.status.changed", { status: "done" }),
-    ])).toBe(current);
-  });
-});
-
 describe("sanitizeEventForDisplay", () => {
   test("hides historical terminal failure payloads in the web console", () => {
     const sanitized = sanitizeEventForDisplay(event(7, "turn.failed", {
@@ -477,6 +465,8 @@ function session(patch: Partial<Session> = {}): Session {
     metadata: {},
     model: "scripted-model",
     sandboxBackend: "none",
+    environmentId: null,
+    firstPartyMcpPermissions: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",
     lastSequence: 0,
@@ -510,6 +500,7 @@ function scheduledTask(schedule: ScheduledTaskScheduleSpec, patch: Partial<Sched
     overlapPolicy: "allow_concurrent",
     agentConfig: scheduledTaskAgentConfig(),
     reusableSessionId: null,
+    environmentId: null,
     metadata: {},
     createdAt: "2026-05-12T00:00:00.000Z",
     updatedAt: "2026-05-12T00:00:00.000Z",

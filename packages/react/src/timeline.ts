@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import type { ResourceRef, SessionEvent, SessionStatus, ToolRef } from "@opengeni/sdk";
 import { stringifyPayload, tryParseJson } from "./lib/format";
 
 /* ----------------------------------------------------------------------------
@@ -19,6 +19,10 @@ export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
+  /** Resources attached to this message (file uploads, repositories). */
+  resources: ResourceRef[];
+  /** Tools requested for the turn this message starts. */
+  tools: ToolRef[];
   occurredAt: string;
 };
 
@@ -165,6 +169,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "user-message",
           id: event.id,
           text: typeof payload.text === "string" ? payload.text : "",
+          resources: resourceRefs(payload.resources),
+          tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
         });
         break;
@@ -467,6 +473,30 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
+
+/** Keep only entries that match the wire shapes; user payloads are untyped. */
+function resourceRefs(value: unknown): ResourceRef[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is ResourceRef => {
+    const record = asRecord(entry);
+    if (record.kind === "repository") {
+      return typeof record.uri === "string" && typeof record.ref === "string";
+    }
+    return record.kind === "file" && typeof record.fileId === "string";
+  });
+}
+
+function toolRefs(value: unknown): ToolRef[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is ToolRef => {
+    const record = asRecord(entry);
+    return record.kind === "mcp" && typeof record.id === "string";
+  });
+}
 
 function isSessionStatus(value: unknown): value is SessionStatus {
   return typeof value === "string" && (SESSION_STATUSES as readonly string[]).includes(value);

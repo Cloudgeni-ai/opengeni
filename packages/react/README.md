@@ -69,10 +69,13 @@ export function App() {
   exactly-once/ordered event delivery; returns the raw `events`, the projected
   `timeline`, the latest `sessionStatus`, and the connection state. Updates are
   batched per animation-frame-ish window so long replays stay smooth.
-- `useComposer(sessionId)` — draft/send/interrupt state. Drafts survive failed
-  sends; each draft reuses one `clientEventId` across retries so the server
-  dedupes. Chat is the only human→agent input surface by design — there are no
-  approval or decision widgets.
+- `useComposer(sessionId, { sendExtras })` — draft/send/interrupt state. Drafts
+  survive failed sends; each draft reuses one `clientEventId` across retries so
+  the server dedupes. `sendExtras` (object or function evaluated at send time)
+  merges resources/tools/model/reasoningEffort into every message — attachment
+  pickers and model selectors plug in without leaving the hook. Chat is the
+  only human→agent input surface by design — there are no approval or decision
+  widgets.
 - `useSession(sessionId)` — fetch one session (optional polling).
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
   fleet/manager views (optional polling).
@@ -88,13 +91,18 @@ unchanged.
 renderable items (user/agent messages with streaming flags, tool calls matched
 to outputs, `session_create`/`session_send_message` calls promoted to worker
 items, sandbox operations with command output, goal markers, status changes,
-notices). `groupTimeline` clusters consecutive activity for collapsed display.
-Use them directly if you want custom rendering with the same semantics.
+notices). User messages carry their attached `resources` and requested `tools`
+so consumers can render attachment chips. `groupTimeline` clusters consecutive
+activity for collapsed display. Use them directly if you want custom rendering
+with the same semantics.
 
 ## Components
 
 - `ChatComposer` — auto-growing textarea, Enter-to-send (IME-safe), stop
-  control while a turn runs, inline error recovery.
+  control while a turn runs, inline error recovery. Slots for app chrome:
+  `controlsStart` (footer controls like model pickers / attach buttons),
+  `header` (e.g. attachment chips above the field), and `onPaste`
+  (paste-image-to-attach).
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
