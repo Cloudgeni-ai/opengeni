@@ -38,6 +38,7 @@ import {
 } from "./common";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
 import { resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
+import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { turnInput } from "./run-input";
 import {
@@ -94,7 +95,7 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
-    const { settings, db, bus, runtime, objectStorage, observability } = await services();
+    const { settings, db, bus, runtime, objectStorage, observability, wakeSessionWorkflow } = await services();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
@@ -642,6 +643,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ], true);
       await finishTurn(db, input.workspaceId, turnId, "failed");
       await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
+      // The common failure path ends here: runAgentTurn marks the session
+      // failed and returns "failed", and the session workflow then exits
+      // WITHOUT calling failSession/markSessionIdle. Wake a spawned worker's
+      // parent here too, so a manager learns of a worker that died inside its
+      // turn (not just one failed by the workflow's failSession path). Deduped
+      // per terminal episode by the child's lastSequence, so it never
+      // double-fires with the workflow-level wake.
+      await notifyParentOfChildTerminal({ db, bus, settings, observability, wakeSessionWorkflow }, input.workspaceId, input.sessionId, "failed");
       return { status: "failed" };
     } finally {
       const durationSeconds = (performance.now() - activityStarted) / 1000;

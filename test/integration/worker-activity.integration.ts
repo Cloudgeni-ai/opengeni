@@ -2615,6 +2615,52 @@ describe("worker activities integration", () => {
     await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: lonely.id });
     expect(wakes).toHaveLength(wakesBefore);
   });
+
+  test("waking the parent: a worker that dies INSIDE its turn (not via failSession) still wakes the manager", async () => {
+    // The common failure path: runAgentTurn marks the session failed and
+    // returns "failed", and the session workflow exits WITHOUT calling
+    // failSession/markSessionIdle. The wake must fire from runAgentTurn too.
+    const grant = await testGrant(dbClient.db);
+    const manager = await makeManagerIdle(grant);
+    const worker = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "do the work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: manager.id,
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, worker.id, [
+      { type: "user.message", payload: { text: "do the work" } },
+    ]);
+    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ error: new Error("worker exploded mid-turn") }]) }),
+      wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
+        wakes.push({ sessionId, workflowId });
+      },
+    });
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: worker.id,
+      triggerEventId: trigger!.id,
+      workflowId: `session-${worker.id}`,
+    });
+    expect(result.status).toBe("failed");
+    expect((await getSession(dbClient.db, grant.workspaceId, worker.id))?.status).toBe("failed");
+    // The manager was woken with a FAILED wake even though failSession never ran.
+    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
+    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const wake = managerEvents.find((event) => event.type === "user.message");
+    expect(JSON.stringify(wake?.payload)).toContain("FAILED");
+    expect(JSON.stringify(wake?.payload)).toContain(worker.id);
+    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
+    expect(managerTurns).toHaveLength(1);
+  });
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];
