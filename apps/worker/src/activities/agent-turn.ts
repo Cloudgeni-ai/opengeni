@@ -26,6 +26,7 @@ import {
   maxTurnsExceededRunState,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
+  sanitizeHistoryItemsForModel,
   type SandboxFileDownload,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -93,6 +94,45 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
 }
 
+/**
+ * Compute the conversation-truth rows a reconcile pass should append, given the
+ * SDK's current `state.history` and the count already persisted.
+ *
+ * `state.history` is a computed getter that runs the SDK's orphan-tool-call
+ * pruning on every access, so it is non-monotonic: a `function_call` with no
+ * settling result yet is transiently absent and a later access yields a
+ * different, possibly shorter/reordered list. The old code sliced this list by
+ * a blind length watermark and appended at fixed positions with
+ * onConflictDoNothing, which could freeze a position with one shape and later
+ * persist a `function_call_result` whose `function_call` had been pruned away in
+ * an earlier slice — the orphaned tool output that 400s the Responses API and
+ * bricks the session on every replay.
+ *
+ * Defending: sanitize the full current history into an API-valid sequence (the
+ * same pure rules the read path uses), then append only the new tail beyond the
+ * watermark. A trailing dangling call is dropped here and re-evaluated next
+ * pass once its result lands, so a call and its result are written together at
+ * consecutive positions and a result is never persisted without its call. The
+ * watermark advances to the sanitized length — never past anything unwritten —
+ * so a non-monotonic history can never desync it. When previously-persisted
+ * rows already exceed the sanitized length (e.g. legacy orphans written before
+ * this fix), nothing new is appended and the watermark holds steady.
+ */
+export function historyRowsToAppend(
+  rawHistory: Array<Record<string, unknown>>,
+  persistedHistoryCount: number,
+): { rows: Array<{ position: number; item: Record<string, unknown> }>; nextWatermark: number } {
+  const sanitized = sanitizeHistoryItemsForModel(rawHistory);
+  if (sanitized.length <= persistedHistoryCount) {
+    return { rows: [], nextWatermark: persistedHistoryCount };
+  }
+  const rows = sanitized.slice(persistedHistoryCount).map((item, offset) => ({
+    position: persistedHistoryCount + offset,
+    item: item as Record<string, unknown>,
+  }));
+  return { rows, nextWatermark: sanitized.length };
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const { settings, db, bus, runtime, objectStorage, observability, wakeSessionWorkflow } = await services();
@@ -113,9 +153,26 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
     // Dual-write of conversation truth (issue #35): completed items are
     // reconciled into session_history_items after every model response and at
-    // every turn-end path (idempotent on position, watermark-sliced), and the
-    // sandbox recovery envelope is upserted alongside. Best-effort by design:
-    // persistence problems must never fail the run.
+    // every turn-end path (idempotent on position), and the sandbox recovery
+    // envelope is upserted alongside. Best-effort by design: persistence
+    // problems must never fail the run.
+    //
+    // Orphaned-tool-output guard: `stream.state.history` is NOT a plain
+    // append-only array — it is a computed getter
+    // (`getTurnInput(originalInput, generatedItems)`) that runs the SDK's
+    // `dropOrphanToolCalls` on every access, so a `function_call` with no
+    // settling result yet is transiently ABSENT from history and a later
+    // reconcile sees a DIFFERENT, shorter/reordered list. A blind length
+    // watermark with onConflictDoNothing-on-position then freezes the first
+    // shape of a position and can persist a `function_call_result` at a tail
+    // position while its `function_call` was pruned away in an earlier slice
+    // and never written — the orphan that bricks the session. We defend against
+    // it by sanitizing the current history into an API-valid sequence (the same
+    // pure function the read path uses) before persisting: a dangling call is
+    // never persisted (it is deferred until its result exists, when the pair is
+    // written together at consecutive positions), and a result is never
+    // persisted without its preceding call. The watermark counts only items we
+    // actually persisted, so a non-monotonic history can never desync it.
     let persistedHistoryCount = 0;
     let historyCountAtTurnStart = 0;
     const reconcileConversationTruth = async () => {
@@ -123,20 +180,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return;
       }
       try {
-        const history = (stream.state as { history?: unknown[] }).history;
-        if (Array.isArray(history) && history.length > persistedHistoryCount) {
-          const rows = history.slice(persistedHistoryCount).map((item, offset) => ({
-            position: persistedHistoryCount + offset,
-            item: item as Record<string, unknown>,
-          }));
-          await appendSessionHistoryItems(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            items: rows,
-          });
-          persistedHistoryCount = history.length;
+        const rawHistory = (stream.state as { history?: unknown[] }).history;
+        if (Array.isArray(rawHistory)) {
+          const { rows, nextWatermark } = historyRowsToAppend(
+            rawHistory as Array<Record<string, unknown>>,
+            persistedHistoryCount,
+          );
+          if (rows.length > 0) {
+            await appendSessionHistoryItems(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              items: rows,
+            });
+          }
+          persistedHistoryCount = nextWatermark;
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
