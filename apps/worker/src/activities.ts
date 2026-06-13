@@ -41,6 +41,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability: dependencies.observability ?? createObservability(settings, { component: "worker" }),
+        wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
       };
     })();
     return servicesPromise;

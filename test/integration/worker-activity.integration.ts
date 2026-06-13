@@ -33,6 +33,7 @@ import {
   getBillingBalance,
   getLatestRunState,
   getSessionHistoryItems,
+  listSessions,
   listSessionTurns,
   listUsageEvents,
   listSessionEvents,
@@ -188,6 +189,80 @@ describe("worker activities integration", () => {
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
       expect(events.some((event) => event.type === "turn.completed")).toBe(true);
       expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("session_create links the spawned worker to the manager via the caller's session claim", async () => {
+    // A manager session calls session_create through its OWN first-party MCP
+    // token. That token carries the manager's session id as a worker-signed
+    // claim, so the spawned worker records parent_session_id = manager — no
+    // explicit parameter, no way for the agent to forge a different parent.
+    const noopWorkflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      signalApprovalDecision: async () => undefined,
+      signalInterrupt: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const grant = await testGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const apiSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+    });
+    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    try {
+      const settings = {
+        ...apiSettings,
+        mcpServers: [{
+          id: "opengeni",
+          name: "OpenGeni",
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          timeoutMs: undefined,
+          cacheToolsList: false,
+        }],
+      };
+      const model = new ScriptedModel([
+        { id: "spawn-1", output: [functionCall("opengeni__session_create", { initialMessage: "worker: reply ready then goal_complete", sandboxBackend: "none" }, "call-spawn-1")] },
+        { id: "spawn-2", outputText: "worker spawned", chunks: ["worker ", "spawned"] },
+      ]);
+      const manager = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "spawn a worker",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read", "sessions:create"],
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, manager.id, [
+        { type: "user.message", payload: { text: "spawn a worker" } },
+      ]);
+      const activities = createActivities({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+      await activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: manager.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-spawn-link",
+      });
+      // The manager created exactly one other session: the spawned worker.
+      const allSessions = await listSessions(dbClient.db, grant.workspaceId, 50);
+      const worker = allSessions.find((candidate) => candidate.id !== manager.id);
+      expect(worker).toBeDefined();
+      expect(worker?.parentSessionId).toBe(manager.id);
     } finally {
       server.stop(true);
     }
@@ -2380,6 +2455,165 @@ describe("worker activities integration", () => {
     // finished) is left untouched.
     await finishTurn(dbClient.db, grant.workspaceId, turnId, "idle");
     expect(await activities.requeueTurnAfterWorkerDeath(requeueInput(notice.id))).toEqual({ action: "stale" });
+  });
+
+  // Parent wakeup: a spawned worker reaching a terminal-for-now state must
+  // wake its manager (parent) session exactly once so the manager can resume,
+  // read the worker's output, and continue — no busy-polling, no stall.
+  function wakeActivities(wakes: Array<{ sessionId: string; workflowId: string }>) {
+    return createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async ({ sessionId, workflowId }) => {
+        wakes.push({ sessionId, workflowId });
+      },
+    });
+  }
+
+  async function makeManagerIdle(grant: AccessGrant) {
+    const manager = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "orchestrate",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // A manager that spawned a worker and is now idle awaiting it.
+    await setSessionStatus(dbClient.db, grant.workspaceId, manager.id, "idle", null);
+    return manager;
+  }
+
+  test("waking the parent: a worker that goes idle queues exactly one manager turn", async () => {
+    const grant = await testGrant(dbClient.db);
+    const manager = await makeManagerIdle(grant);
+    const worker = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "do the work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: manager.id,
+    });
+    // Simulate the worker having done a turn: it produced events and is running
+    // when the workflow decides to idle it.
+    await appendOwnedEvents(dbClient.db, grant, worker.id, [
+      { type: "user.message", payload: { text: "do the work" } },
+      { type: "turn.completed", payload: { output: "done" } },
+    ]);
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
+
+    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
+    const activities = wakeActivities(wakes);
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
+
+    // The manager was woken: it has a queued turn and is back to queued.
+    const managerAfter = await getSession(dbClient.db, grant.workspaceId, manager.id);
+    expect(managerAfter?.status).toBe("queued");
+    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
+    expect(managerTurns).toHaveLength(1);
+    expect(managerTurns[0]?.status).toBe("queued");
+    // The wake message names the worker and reuses the user.message path.
+    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const wake = managerEvents.find((event) => event.type === "user.message");
+    expect(wake).toBeDefined();
+    expect(JSON.stringify(wake?.payload)).toContain(worker.id);
+    expect(JSON.stringify(wake?.payload)).toContain("gone idle");
+    // The parent workflow was signalled (signalWithStart) so an already-drained
+    // manager run gets restarted to claim the queued turn.
+    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
+
+    // Idempotent: re-running the SAME terminal transition (activity retry, the
+    // workflow's idle re-check) does not enqueue a second manager turn.
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
+    const managerTurnsAfterRetry = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
+    expect(managerTurnsAfterRetry).toHaveLength(1);
+    expect(wakes).toHaveLength(1);
+  });
+
+  test("waking the parent: a genuinely new idle-after-work episode notifies again, churn does not", async () => {
+    const grant = await testGrant(dbClient.db);
+    const manager = await makeManagerIdle(grant);
+    const worker = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "do the work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: manager.id,
+    });
+    await appendOwnedEvents(dbClient.db, grant, worker.id, [{ type: "turn.completed", payload: { output: "batch 1" } }]);
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
+
+    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
+    const activities = wakeActivities(wakes);
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
+    expect(wakes).toHaveLength(1);
+
+    // idle -> queued -> idle with NO intervening work (same lastSequence) does
+    // not spam: the worker is re-queued and idled again without new events.
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "queued", null);
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
+    expect(wakes).toHaveLength(1);
+
+    // A genuinely new work episode (new events advance lastSequence) before the
+    // next idle DOES notify the manager again — managers expect to be woken on
+    // each batch of worker progress, which is correct re-entrant behavior.
+    await appendOwnedEvents(dbClient.db, grant, worker.id, [{ type: "turn.completed", payload: { output: "batch 2" } }]);
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: worker.id });
+    expect(wakes).toHaveLength(2);
+
+    const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
+    expect(managerTurns).toHaveLength(2);
+  });
+
+  test("waking the parent: a failed worker wakes the manager, and a parentless session never notifies", async () => {
+    const grant = await testGrant(dbClient.db);
+    const manager = await makeManagerIdle(grant);
+    const worker = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "do the work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: manager.id,
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, worker.id, [
+      { type: "user.message", payload: { text: "do the work" } },
+    ]);
+    await setSessionStatus(dbClient.db, grant.workspaceId, worker.id, "running", null);
+
+    const wakes: Array<{ sessionId: string; workflowId: string }> = [];
+    const activities = wakeActivities(wakes);
+    await activities.failSession({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: worker.id,
+      triggerEventId: trigger!.id,
+      workflowId: `session-${worker.id}`,
+      error: "boom",
+    });
+    expect(wakes).toEqual([{ sessionId: manager.id, workflowId: `session-${manager.id}` }]);
+    const managerEvents = await listSessionEvents(dbClient.db, grant.workspaceId, manager.id, 0, 50);
+    const wake = managerEvents.find((event) => event.type === "user.message");
+    expect(JSON.stringify(wake?.payload)).toContain("FAILED");
+
+    // A parentless session (a top-level session, a scheduled run) never wakes
+    // anyone: no parent_session_id, no notification, no spurious turns.
+    const lonely = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "standalone",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, lonely.id, [{ type: "turn.completed", payload: { output: "done" } }]);
+    await setSessionStatus(dbClient.db, grant.workspaceId, lonely.id, "running", null);
+    const wakesBefore = wakes.length;
+    await activities.markSessionIdle({ workspaceId: grant.workspaceId, sessionId: lonely.id });
+    expect(wakes).toHaveLength(wakesBefore);
   });
 });
 

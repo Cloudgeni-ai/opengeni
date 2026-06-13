@@ -58,6 +58,10 @@ export async function createAndStartSession(input: {
   goal?: GoalSpec | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
+  // The manager session spawning this worker (a worker-signed sessionId claim
+  // on the creating grant); null for direct API creates and scheduled runs.
+  // When set, the worker's terminal-for-now transitions wake this parent.
+  parentSessionId?: string | null;
 }) {
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -74,6 +78,7 @@ export async function createAndStartSession(input: {
     sandboxBackend: input.sandboxBackend,
     environmentId: input.environment?.id ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+    parentSessionId: input.parentSessionId ?? null,
   });
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
@@ -326,6 +331,15 @@ export async function createSessionForRequest(
   if (payload.goal && firstPartyMcpPermissions && !firstPartyMcpPermissions.includes("goals:manage")) {
     firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
   }
+  // Parent linkage: when the creating grant carries a worker-signed sessionId
+  // claim, the caller IS a session (a manager spawning a worker), so the new
+  // worker records that manager as its parent and its completion wakes the
+  // manager. The claim is signed into the delegated token by the worker and
+  // is never agent-controlled, so it cannot be spoofed. An explicit
+  // payload.parentSessionId is honored only on trusted direct-API creates that
+  // carry no claim; it never overrides a present claim with a different id.
+  const claimedSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  const parentSessionId = claimedSessionId ?? payload.parentSessionId ?? null;
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
   const session = await createAndStartSession({
     db,
@@ -344,6 +358,7 @@ export async function createSessionForRequest(
     environment: environment ? { id: environment.id, name: environment.name } : null,
     goal: payload.goal ?? null,
     firstPartyMcpPermissions,
+    parentSessionId,
   });
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,

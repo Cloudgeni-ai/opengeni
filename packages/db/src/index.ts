@@ -49,6 +49,7 @@ import type {
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
+import { reasoningEffortForMetadata } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -1970,6 +1971,7 @@ export async function createSession(db: Database, input: {
   sandboxBackend: SandboxBackend;
   environmentId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
+  parentSessionId?: string | null;
 }): Promise<Session> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.sessions).values({
@@ -1983,6 +1985,7 @@ export async function createSession(db: Database, input: {
       sandboxBackend: input.sandboxBackend,
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
       status: "queued",
     }).returning();
     if (!row) {
@@ -2635,6 +2638,143 @@ export async function setSessionStatus(db: Database, workspaceId: string, sessio
   });
 }
 
+export type WakeParentForChildCompletionInput = {
+  workspaceId: string;
+  parentSessionId: string;
+  // Stable per terminal episode, unique across episodes: the idempotency key
+  // for exactly-once delivery (a unique session_events.client_event_id).
+  clientEventId: string;
+  // System-authored wake text rendered to the manager as its next turn input.
+  text: string;
+  // Structured payload describing the completed child (id, status, goal).
+  childCompletion: Record<string, unknown>;
+  reasoningEffortFallback: ReasoningEffort;
+};
+
+export type WakeParentForChildCompletionResult =
+  | { delivered: false; reason: "already_delivered" | "parent_cancelled" }
+  | { delivered: true; turn: SessionTurn; triggerEvent: SessionEvent; events: SessionEvent[]; temporalWorkflowId: string };
+
+/**
+ * Deliver a one-shot completion wake from a spawned worker into its parent
+ * (manager) session: append a system-authored `user.message`, transition the
+ * parent idle/failed -> queued (a queued/running parent already has a turn in
+ * flight and keeps it), and enqueue the resulting turn. The whole thing runs
+ * under the parent's row lock in one transaction, and is idempotent on
+ * `clientEventId`: a duplicate call for the same terminal episode (activity
+ * retry, the workflow's idle re-check) is a no-op that enqueues no second
+ * turn. The caller publishes the returned events and signals the parent's
+ * Temporal workflow (signalWithStart) only when `delivered` is true.
+ *
+ * Mirrors `acceptSessionUserMessage`/`postUserMessageTurn` in the API domain:
+ * cancelled is the one parent state that refuses the wake (an explicit stop);
+ * failed stays revivable, matching the revivable-failed-sessions contract.
+ */
+export async function wakeParentSessionForChildCompletion(
+  db: Database,
+  input: WakeParentForChildCompletionInput,
+): Promise<WakeParentForChildCompletionResult> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const [parent] = await tx.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.parentSessionId)))
+      .for("update")
+      .limit(1);
+    if (!parent) {
+      throw new Error(`Parent session not found: ${input.parentSessionId}`);
+    }
+    if (parent.status === "cancelled") {
+      // Cancelled is the one terminal state that refuses new input; a manager a
+      // human explicitly stopped is not revived by a worker finishing.
+      return { delivered: false, reason: "parent_cancelled" as const };
+    }
+    // Idempotency gate: a wake for this terminal episode was already delivered.
+    const [existing] = await tx.select({ id: schema.sessionEvents.id }).from(schema.sessionEvents)
+      .where(and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.parentSessionId),
+        eq(schema.sessionEvents.clientEventId, input.clientEventId),
+      ))
+      .limit(1);
+    if (existing) {
+      return { delivered: false, reason: "already_delivered" as const };
+    }
+
+    const shouldQueue = parent.status === "idle" || parent.status === "failed";
+    const workflowId = parent.temporalWorkflowId ?? `session-${parent.id}`;
+    let sequence = parent.lastSequence;
+    const now = new Date();
+    const eventRows = [
+      {
+        type: "user.message",
+        payload: { text: input.text, childCompletion: input.childCompletion },
+        clientEventId: input.clientEventId,
+      },
+      ...(shouldQueue ? [{ type: "session.status.changed", payload: { status: "queued" }, clientEventId: null as string | null }] : []),
+    ].map((event) => ({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      sequence: ++sequence,
+      type: event.type,
+      payload: event.payload,
+      clientEventId: event.clientEventId ?? null,
+      turnId: null,
+      producerId: null,
+      producerSeq: null,
+      occurredAt: now,
+    }));
+    const inserted = (await tx.insert(schema.sessionEvents).values(eventRows).returning()).map(mapEvent);
+    const triggerEvent = inserted[0]!;
+
+    const position = await nextTurnPosition(tx as unknown as Database, input.workspaceId, parent.id);
+    const [turnRow] = await tx.insert(schema.sessionTurns).values({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      triggerEventId: triggerEvent.id,
+      temporalWorkflowId: workflowId,
+      status: "queued",
+      source: "user",
+      position,
+      prompt: input.text,
+      resources: [],
+      tools: parent.tools as ToolRef[],
+      model: parent.model,
+      reasoningEffort: reasoningEffortForMetadata(parent.metadata, input.reasoningEffortFallback),
+      sandboxBackend: parent.sandboxBackend as SandboxBackend,
+      metadata: { childCompletion: input.childCompletion },
+    }).returning();
+    if (!turnRow) {
+      throw new Error("Failed to enqueue parent wake turn");
+    }
+    const turn = mapSessionTurn(turnRow);
+
+    sequence += 1;
+    const [queuedEventRow] = await tx.insert(schema.sessionEvents).values({
+      accountId: parent.accountId,
+      workspaceId: parent.workspaceId,
+      sessionId: parent.id,
+      sequence,
+      type: "turn.queued",
+      payload: { turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source },
+      clientEventId: null,
+      turnId: turn.id,
+      producerId: null,
+      producerSeq: null,
+      occurredAt: now,
+    }).returning();
+    const events = [...inserted, ...(queuedEventRow ? [mapEvent(queuedEventRow)] : [])];
+
+    await tx.update(schema.sessions).set({
+      lastSequence: sequence,
+      ...(shouldQueue ? { status: "queued" as const, activeTurnId: null } : {}),
+      updatedAt: now,
+    }).where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, parent.id)));
+
+    return { delivered: true as const, turn, triggerEvent, events, temporalWorkflowId: workflowId };
+  }));
+}
+
 export async function setTemporalWorkflowId(db: Database, workspaceId: string, sessionId: string, workflowId: string): Promise<void> {
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.update(schema.sessions).set({
@@ -2932,6 +3072,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     environmentId: row.environmentId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
+    parentSessionId: row.parentSessionId ?? null,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
     lastSequence: row.lastSequence,

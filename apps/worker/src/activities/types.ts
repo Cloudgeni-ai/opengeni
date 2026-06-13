@@ -7,6 +7,16 @@ import type { Observability } from "@opengeni/observability";
 import type { OpenGeniRuntime } from "@opengeni/runtime";
 import type { ObjectStorage } from "@opengeni/storage";
 
+// Signal (start-if-needed) a session's Temporal workflow so a queued turn it
+// cannot otherwise observe gets claimed. Used to wake a PARENT session's
+// workflow when a spawned worker completes: the parent may have idled and let
+// its workflow run complete, so a plain signal would not start one — this must
+// signalWithStart. Injected (not built from the worker's NativeConnection)
+// because the worker package owns only the worker runtime, not a client; an
+// undefined signaler degrades to "DB wake recorded, no workflow nudge" (the
+// turn is still claimed on the parent's next natural wake).
+export type WakeSessionWorkflowSignal = (input: { accountId: string; workspaceId: string; sessionId: string; workflowId: string }) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -15,6 +25,7 @@ export type ActivityServices = {
   objectStorage: ObjectStorage | null;
   documentServices: DocumentServices;
   observability: Observability;
+  wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
 };
 
 export type ActivityDependencies = Partial<ActivityServices>;

@@ -1154,6 +1154,11 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // The manager session that spawned this one via session_create (set only
+  // when the creating grant carried a worker-signed sessionId claim); null for
+  // direct API creates and scheduled-task runs. When set, this session's
+  // terminal-for-now transitions wake the parent.
+  parentSessionId: z.string().uuid().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
   lastSequence: z.number().int().nonnegative(),
@@ -1227,6 +1232,12 @@ export const CreateSessionRequest = z.object({
   // the orchestration/environment/github tools. Capped at creation: every
   // requested permission must be held by the creating grant (no escalation).
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Explicit parent (manager) session this create is a worker of. Normally
+  // omitted: session_create auto-infers the parent from the caller's
+  // worker-signed sessionId claim, which cannot be spoofed by the agent. An
+  // explicit value is honored only on the trusted server path; it never
+  // overrides a present claim with a different session.
+  parentSessionId: z.string().uuid().optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 

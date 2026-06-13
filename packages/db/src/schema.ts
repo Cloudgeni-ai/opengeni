@@ -116,6 +116,13 @@ export const sessions = pgTable("sessions", {
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.
   firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
+  // The manager session that spawned this one via session_create. Set only
+  // when the creating grant carried a worker-signed sessionId claim (a session
+  // spawning a worker); null for direct API creates and scheduled-task runs.
+  // When set, this worker's terminal-for-now transitions wake the parent so a
+  // manager can orchestrate workers without busy-polling. Self-referencing FK,
+  // ON DELETE SET NULL so deleting a manager never cascades into its workers.
+  parentSessionId: uuid("parent_session_id"),
   temporalWorkflowId: text("temporal_workflow_id"),
   activeTurnId: uuid("active_turn_id"),
   lastSequence: integer("last_sequence").notNull().default(0),
@@ -124,6 +131,7 @@ export const sessions = pgTable("sessions", {
 }, (table) => ({
   workspaceCreated: index("sessions_workspace_created_idx").on(table.workspaceId, table.createdAt),
   environment: index("sessions_environment_idx").on(table.workspaceId, table.environmentId),
+  parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
 }));
 
 export const files = pgTable("files", {
