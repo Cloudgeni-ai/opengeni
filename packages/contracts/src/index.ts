@@ -1232,12 +1232,6 @@ export const CreateSessionRequest = z.object({
   // the orchestration/environment/github tools. Capped at creation: every
   // requested permission must be held by the creating grant (no escalation).
   firstPartyMcpPermissions: z.array(Permission).optional(),
-  // Explicit parent (manager) session this create is a worker of. Normally
-  // omitted: session_create auto-infers the parent from the caller's
-  // worker-signed sessionId claim, which cannot be spoofed by the agent. An
-  // explicit value is honored only on the trusted server path; it never
-  // overrides a present claim with a different session.
-  parentSessionId: z.string().uuid().optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
