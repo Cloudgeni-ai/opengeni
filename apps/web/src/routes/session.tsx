@@ -44,6 +44,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
+import { isMidTurn } from "@/lib/queue";
 import { buildTools } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
@@ -191,6 +192,14 @@ function SessionChatPane(props: {
     onSent: () => attachments.clear(),
   });
 
+  // Steering needs something to interrupt: when the turn ends, fall back to
+  // the queue default so a stale steer toggle cannot surprise a later send.
+  useEffect(() => {
+    if (!isMidTurn(props.session.status) && composer.mode !== "queue") {
+      composer.setMode("queue");
+    }
+  }, [props.session.status, composer.mode, composer.setMode]);
+
   const renderMessageText = useCallback((text: string, item: AgentMessageItem | UserMessageItem) => {
     if (item.kind === "user-message") {
       return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
@@ -272,7 +281,6 @@ function SessionChatPane(props: {
             disabled={terminal}
             showDeliveryMode
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            hint={terminal ? `Session is ${props.session.status}.` : undefined}
             placeholder={terminal
               ? `Session is ${props.session.status}.`
               : props.session.status === "failed"

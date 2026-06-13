@@ -542,7 +542,9 @@ describe("Temporal workflow integration", () => {
       await handle.signal("interrupt", "interrupt-event");
       await handle.result();
       expect(order).toEqual(["pause", "idle"]);
-      expect(pauses).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+      // The trigger event rides along so the activity can recognize (and
+      // skip pausing for) steer-tagged interrupts.
+      expect(pauses).toEqual([{ workspaceId: scope.workspaceId, sessionId, triggerEventId: "interrupt-event" }]);
     } finally {
       worker.shutdown();
       await run;

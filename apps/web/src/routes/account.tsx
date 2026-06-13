@@ -254,6 +254,7 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
         <UsageSection
           enabled={canReadBilling && Boolean(accountId)}
           loading={usage.loading}
+          error={usage.error}
           usage={usage.usage}
           onRefresh={() => void usage.refresh()}
         />
@@ -387,6 +388,7 @@ function EntitlementsSection(props: {
 function UsageSection(props: {
   enabled: boolean;
   loading: boolean;
+  error: Error | null;
   usage: UsageEvent[];
   onRefresh: () => void;
 }) {
@@ -409,6 +411,10 @@ function UsageSection(props: {
 
       {!props.enabled ? (
         <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot read billing usage for the account.</p>
+      ) : props.error && props.usage.length === 0 ? (
+        // Honest failed-load state: a failed usage read must never render as
+        // "No usage recorded yet." (usage already on screen keeps rendering).
+        <LoadErrorState title="Couldn't load usage" error={props.error} onRetry={props.onRefresh} />
       ) : props.loading && props.usage.length === 0 ? (
         <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
           <Loader2Icon className="size-3.5 animate-spin" />

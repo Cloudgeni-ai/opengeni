@@ -89,10 +89,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenWakeups = wakeups;
       const woke = await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, "5s");
       if (interruptedEventId) {
+        const idleInterruptEventId = interruptedEventId;
         interruptedEventId = null;
         // An idle interrupt is an explicit stop: pause an active goal before
-        // shutting down so a later wake does not auto-continue it.
-        await activity.pauseGoalForInterrupt({ workspaceId: input.workspaceId, sessionId: input.sessionId });
+        // shutting down so a later wake does not auto-continue it. The
+        // activity inspects the trigger and skips the pause for steer-tagged
+        // interrupts (steering redirects work, it does not stop it).
+        await activity.pauseGoalForInterrupt({ workspaceId: input.workspaceId, sessionId: input.sessionId, triggerEventId: idleInterruptEventId });
         await activity.markSessionIdle({ workspaceId: input.workspaceId, sessionId: input.sessionId });
         return;
       }

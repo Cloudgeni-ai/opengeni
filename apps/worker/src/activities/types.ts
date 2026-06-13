@@ -78,6 +78,10 @@ export type MaybeContinueGoalResult = {
 export type PauseGoalForInterruptInput = {
   workspaceId: string;
   sessionId: string;
+  // The `user.interrupt` event that triggered the pause, when there is one.
+  // A steer-tagged interrupt (reason "steer") must NOT pause the goal:
+  // steering redirects the work, it does not stop it.
+  triggerEventId?: string;
 };
 
 export type DispatchScheduledTaskRunInput = {

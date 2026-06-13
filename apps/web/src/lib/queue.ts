@@ -91,12 +91,23 @@ export function turnSourceLabel(source: SessionTurn["source"]): string {
 }
 
 /**
+ * Session statuses during which steering has something to act on (interrupt
+ * a turn, or jump a queue). Outside these the composer falls back to the
+ * queue default so a stale steer toggle cannot surprise a later send.
+ */
+export function isMidTurn(status: SessionStatus | null | undefined): boolean {
+  return status === "running" || status === "queued" || status === "requires_action";
+}
+
+/**
  * Honest one-liner for the compose-time delivery choice, aligned with what
  * `OpenGeniClient.steerMessage` actually does per status: it interrupts only
  * `running` and `requires_action` sessions (steering a session paused on an
  * approval abandons that approval); on a `queued` session it promotes the
  * message to the queue front without interrupting anything; with nothing
- * active it degrades to a plain send.
+ * active it degrades to a plain send. A steer interrupt is tagged
+ * `reason: "steer"` and the worker keeps an active goal running through it
+ * (redirection, not a stop), so the hints stay silent about goals.
  */
 export function deliveryModeExplanation(mode: ComposerMode, status: SessionStatus | null | undefined): string {
   if (mode === "steer") {

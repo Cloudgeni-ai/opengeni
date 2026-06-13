@@ -4,10 +4,11 @@ import { CheckIcon, FileSearchIcon, FilesIcon, Loader2Icon, PlusIcon, RefreshCwI
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
+import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { DocumentBase, DocumentSearchResult, IndexedDocument } from "@/types";
 
@@ -16,8 +17,12 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const client = context.client;
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
+  const [basesLoading, setBasesLoading] = useState(true);
+  const [basesError, setBasesError] = useState<Error | null>(null);
   const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<IndexedDocument[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
+  const [documentsError, setDocumentsError] = useState<Error | null>(null);
   const [results, setResults] = useState<DocumentSearchResult[]>([]);
   const [name, setName] = useState("");
   const [query, setQuery] = useState("");
@@ -29,6 +34,11 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
   const failedDocuments = documents.filter((document) => document.status === "failed");
+  // Honest list states: an initial fetch renders as loading and a failed load
+  // as an error with retry — never as "Create a document base to start." or
+  // "Upload files to index this base."
+  const basesView = listViewState({ loading: basesLoading, error: basesError, count: bases.length });
+  const documentsView = listViewState({ loading: documentsLoading, error: documentsError, count: documents.length });
 
   useEffect(() => {
     void refreshBases();
@@ -37,12 +47,11 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (!selectedBaseId) {
       setDocuments([]);
+      setDocumentsError(null);
       setResults([]);
       return;
     }
-    void client.listDocuments(workspaceId, selectedBaseId).then(setDocuments).catch((error) => {
-      toast.error("Failed to load documents", { description: String(error) });
-    });
+    void refreshDocuments(selectedBaseId);
   }, [workspaceId, selectedBaseId]);
 
   useEffect(() => {
@@ -56,12 +65,30 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId, selectedBaseId, documents]);
 
   async function refreshBases() {
+    setBasesLoading(true);
     try {
       const next = await client.listDocumentBases(workspaceId);
       setBases(next);
+      setBasesError(null);
       setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
     } catch (error) {
+      setBasesError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Failed to load document bases", { description: String(error) });
+    } finally {
+      setBasesLoading(false);
+    }
+  }
+
+  async function refreshDocuments(baseId: string) {
+    setDocumentsLoading(true);
+    try {
+      setDocuments(await client.listDocuments(workspaceId, baseId));
+      setDocumentsError(null);
+    } catch (error) {
+      setDocumentsError(error instanceof Error ? error : new Error(String(error)));
+      toast.error("Failed to load documents", { description: String(error) });
+    } finally {
+      setDocumentsLoading(false);
     }
   }
 
@@ -188,7 +215,14 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
               <div className="text-[11px] text-[color:var(--color-fg-subtle)]">{bases.length}</div>
             </div>
             <div className="space-y-1">
-              {bases.length === 0 ? (
+              {basesView === "loading" ? (
+                <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                  Loading bases
+                </div>
+              ) : basesView === "error" ? (
+                <LoadErrorState title="Couldn't load document bases" error={basesError} onRetry={() => void refreshBases()} />
+              ) : basesView === "empty" ? (
                 <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
                   Create a document base to start.
                 </div>
@@ -254,7 +288,14 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 </div>
 
                 <div className="mt-4 space-y-2">
-                  {documents.length === 0 ? (
+                  {documentsView === "loading" ? (
+                    <div className="flex items-center justify-center gap-2 rounded-lg border border-[color:var(--color-border)] p-6 text-xs text-[color:var(--color-fg-muted)]">
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                      Loading documents
+                    </div>
+                  ) : documentsView === "error" ? (
+                    <LoadErrorState title="Couldn't load documents" error={documentsError} onRetry={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined} />
+                  ) : documentsView === "empty" ? (
                     <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-xs text-[color:var(--color-fg-muted)]">
                       Upload files to index this base.
                     </div>

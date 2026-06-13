@@ -11,6 +11,7 @@ import {
   deliveryModeExplanation,
   editedTurnFate,
   finishedTurns,
+  isMidTurn,
   moveTurnInQueue,
   reorderQueueByDrag,
   turnElapsedSeconds,
@@ -149,6 +150,24 @@ describe("deliveryModeExplanation", () => {
   test("unknown/null status reads as a plain send", () => {
     expect(deliveryModeExplanation("steer", null)).toContain("Nothing is running");
     expect(deliveryModeExplanation("queue", undefined)).toContain("starts immediately");
+  });
+});
+
+describe("isMidTurn", () => {
+  // Drives the steer-mode reset: an armed steer toggle falls back to queue
+  // once there is nothing left to steer, never across a live turn or queue.
+  test("running, queued, and requires_action keep steer armed", () => {
+    expect(isMidTurn("running")).toBe(true);
+    expect(isMidTurn("queued")).toBe(true);
+    expect(isMidTurn("requires_action")).toBe(true);
+  });
+
+  test("idle, terminal, and unknown statuses reset steer to the queue default", () => {
+    expect(isMidTurn("idle")).toBe(false);
+    expect(isMidTurn("failed")).toBe(false);
+    expect(isMidTurn("cancelled")).toBe(false);
+    expect(isMidTurn(null)).toBe(false);
+    expect(isMidTurn(undefined)).toBe(false);
   });
 });
 

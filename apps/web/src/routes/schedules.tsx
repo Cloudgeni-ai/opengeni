@@ -17,13 +17,14 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, PageHeader } from "@/components/common";
+import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ScheduledTaskRepositoryPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
+import { listViewState } from "@/lib/load-state";
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
@@ -41,28 +42,40 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
   const client = context.client;
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<Error | null>(null);
   const [runs, setRuns] = useState<Record<string, ScheduledTaskRun[]>>({});
   const [open, setOpen] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some((server) => server.id === "opengeni");
+  // Honest list state: the initial fetch renders as loading and a failed load
+  // as an error with retry — never as the "No scheduled tasks." empty state.
+  const tasksView = listViewState({ loading, error: loadError, count: tasks.length });
 
   useEffect(() => {
     void refresh();
   }, [workspaceId]);
 
-  // Handles its own failures (toast) so a post-mutation reload error can
-  // never masquerade as a failed mutation in the callers' catch blocks.
+  // Handles its own failures (error state + toast) so a post-mutation reload
+  // error can never masquerade as a failed mutation in the callers' catch
+  // blocks. The toast still fires because a failed refresh with tasks already
+  // on screen keeps rendering the stale list.
   async function refresh() {
+    setLoading(true);
     try {
       const next = await client.listScheduledTasks(workspaceId);
       setTasks(next);
+      setLoadError(null);
       const entries = await Promise.all(next.slice(0, 12).map(async (task) =>
         [task.id, await client.listScheduledTaskRuns(workspaceId, task.id).catch(() => [] as ScheduledTaskRun[])] as const));
       setRuns(Object.fromEntries(entries));
     } catch (error) {
+      setLoadError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Failed to load scheduled tasks", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -182,7 +195,14 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       ) : null}
 
       <div className="mt-4 grid gap-2">
-        {tasks.length === 0 ? (
+        {tasksView === "loading" ? (
+          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
+            <Loader2Icon className="size-4 animate-spin" />
+            Loading scheduled tasks
+          </div>
+        ) : tasksView === "error" ? (
+          <LoadErrorState title="Couldn't load scheduled tasks" error={loadError} onRetry={() => void refresh()} />
+        ) : tasksView === "empty" ? (
           <EmptyState>No scheduled tasks.</EmptyState>
         ) : tasks.map((task) => {
           const taskRuns = runs[task.id] ?? [];

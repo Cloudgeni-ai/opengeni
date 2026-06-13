@@ -114,7 +114,6 @@ export function ConsoleComposer(props: {
   placeholder?: string;
   autoFocus?: boolean;
   disabled?: boolean;
-  hint?: string;
   fileUploadsEnabled: boolean;
   /** Console controls (model picker, tool toggles, ...) in the footer row. */
   controls?: ReactNode;
@@ -159,7 +158,6 @@ export function ConsoleComposer(props: {
         placeholder={props.placeholder}
         autoFocus={props.autoFocus}
         disabled={props.disabled}
-        hint={props.hint}
         onPaste={handlePaste}
         header={attachments.attachments.length > 0 ? (
           <AttachmentChips attachments={attachments.attachments} onRemove={attachments.removeAttachment} />

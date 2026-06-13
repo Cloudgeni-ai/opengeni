@@ -11,7 +11,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { WORKER_DEATH_RESUME_TEXT } from "./agent-turn";
-import { pauseActiveGoalOnInterrupt } from "./goals";
+import { isSteerInterrupt, pauseActiveGoalOnInterrupt } from "./goals";
 import type {
   ActivityServices,
   ClaimNextQueuedTurnInput,
@@ -58,14 +58,19 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function interruptActiveTurn(input: RunAgentTurnInput): Promise<void> {
     const { db, bus } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     // Pause an active goal before the early return below: an interrupt can
     // land after the turn already cleared activeTurnId, and skipping the pause
     // there would let the loop auto-continue the goal the user just stopped.
-    await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
+    // Steer interrupts are the exception: steering cancels the running turn
+    // only to deliver the steered message next — redirection, not a stop —
+    // so the goal loop stays active.
+    if (!isSteerInterrupt(trigger)) {
+      await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
+    }
     if (!session.activeTurnId) {
       return;
     }
-    const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
       {
         turnId: session.activeTurnId,

@@ -2082,6 +2082,85 @@ describe("worker activities integration", () => {
     })).action).toBe("none");
   });
 
+  test("steer interrupts cancel the active turn without pausing the goal", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "steer me",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "long objective",
+      createdBy: "api",
+    });
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const workflowId = `session-${session.id}`;
+    const [messageTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "steer me" } },
+    ]);
+    await enqueueSessionTurn(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: messageTrigger!.id,
+      temporalWorkflowId: workflowId,
+      source: "user",
+      prompt: "steer me",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "low",
+      sandboxBackend: "none",
+      metadata: {},
+    });
+    const claimed = await activities.claimNextQueuedTurn({ workspaceId: grant.workspaceId, sessionId: session.id, workflowId });
+    expect(claimed).not.toBeNull();
+
+    // A steer interrupt (`reason: "steer"`, sent by steerMessage) cancels the
+    // running turn to deliver the steered message next — redirection, not a
+    // stop — so the goal loop must stay active.
+    const [steerEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.interrupt", payload: { reason: "steer" } },
+    ]);
+    await activities.interruptActiveTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: steerEvent!.id,
+      workflowId,
+    });
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns.find((turn) => turn.id === claimed!.id)?.status).toBe("cancelled");
+    const goal = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
+    expect(goal?.status).toBe("active");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.filter((event) => event.type === "goal.paused")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "turn.cancelled")).toHaveLength(1);
+
+    // The idle-path pause activity also recognizes the steer tag.
+    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id, triggerEventId: steerEvent!.id });
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe("active");
+
+    // A plain stop (no steer tag) still pauses the goal.
+    const [stopEvent] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.interrupt", payload: {} },
+    ]);
+    await activities.pauseGoalForInterrupt({ workspaceId: grant.workspaceId, sessionId: session.id, triggerEventId: stopEvent!.id });
+    const paused = await getSessionGoal(dbClient.db, grant.workspaceId, session.id);
+    expect(paused?.status).toBe("paused");
+    expect(paused?.pausedReason).toBe("user_interrupt");
+  });
+
   test("scheduled tasks with goals arm and re-arm session goals on dispatch", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {

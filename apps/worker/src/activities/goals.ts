@@ -9,6 +9,7 @@ import {
   enqueueSessionTurn,
   evaluateGoalContinuation,
   getBillingBalance,
+  getSessionEvent,
   getSessionGoal,
   recordUsageEvent,
   requireSession,
@@ -126,6 +127,12 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
 
   async function pauseGoalForInterrupt(input: PauseGoalForInterruptInput): Promise<void> {
     const { db, bus } = await services();
+    if (input.triggerEventId) {
+      const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
+      if (isSteerInterrupt(trigger)) {
+        return;
+      }
+    }
     await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
   }
 
@@ -136,10 +143,27 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
 }
 
 /**
+ * True when an interrupt's trigger event is a STEER: `user.interrupt` tagged
+ * `reason: "steer"`, sent by `OpenGeniClient.steerMessage`. Steering cancels
+ * the running turn only to deliver the steered message next — it redirects
+ * the work rather than stopping it, so an active goal keeps going. Every
+ * other user interrupt (the stop button, a plain `interrupt()` call) is the
+ * explicit act of stopping and pauses the goal.
+ */
+export function isSteerInterrupt(trigger: { type: string; payload: unknown } | null | undefined): boolean {
+  if (!trigger || trigger.type !== "user.interrupt") {
+    return false;
+  }
+  const payload = trigger.payload;
+  return typeof payload === "object" && payload !== null && (payload as { reason?: unknown }).reason === "steer";
+}
+
+/**
  * A user interrupt is the explicit act of stopping, so it pauses an active
  * goal. Shared by the idle-interrupt activity and `interruptActiveTurn` so the
- * loop never auto-continues a goal the user just stopped. No-op when the
- * session has no goal or it is not active.
+ * loop never auto-continues a goal the user just stopped. Callers gate this
+ * on `isSteerInterrupt` first: steer interrupts must NOT pause the goal.
+ * No-op when the session has no goal or it is not active.
  */
 export async function pauseActiveGoalOnInterrupt(db: Database, bus: EventBus, workspaceId: string, sessionId: string): Promise<void> {
   const goal = await getSessionGoal(db, workspaceId, sessionId);

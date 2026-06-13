@@ -86,7 +86,11 @@ export type SendMessageInput = {
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
   accepted: SessionEvent;
-  /** The queued turn created for the message, when it could be located. */
+  /**
+   * The turn created for the message, when it could be located — usually
+   * still queued, but already claimed (running/requires_action or even
+   * finished) when the worker picked it up mid-call.
+   */
   turn: SessionTurn | null;
   /** True when the running turn was interrupted to make way for the message. */
   interrupted: boolean;
@@ -283,14 +287,15 @@ export class OpenGeniClient {
    * running turn so the session picks the steer turn up next. On a session
    * that is not running this degrades gracefully to a plain queued message.
    *
-   * The queued turn is located by `triggerEventId` (retried briefly in case
-   * the server is still materializing it). If it cannot be found while other
-   * turns are queued, the interrupt is skipped — stopping the running turn
-   * would otherwise promote someone else's queued work over this message —
-   * and the call degrades to a plain queued send (`interrupted: false`).
-   * The interrupt is also skipped when the session has already claimed the
-   * steer turn itself (the running turn finished mid-call): the message is
-   * being delivered, so interrupting would cancel the steer turn.
+   * The steer turn is located by `triggerEventId` across ALL turns (retried
+   * briefly in case the server is still materializing it) — not just the
+   * queued ones, because the worker can claim the steer turn before it is
+   * ever observed queued, and a claimed steer turn means the message is
+   * already being delivered: interrupting then would cancel the very message
+   * being steered. If the turn cannot be found while other turns are queued,
+   * the interrupt is also skipped — stopping the running turn would otherwise
+   * promote someone else's queued work over this message — and the call
+   * degrades to a plain queued send (`interrupted: false`).
    */
   async steerMessage(
     workspaceId: string,
@@ -308,21 +313,27 @@ export class OpenGeniClient {
       queued = turns
         .filter((turn) => turn.status === "queued")
         .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
-      steerTurn = queued.find((turn) => turn.triggerEventId === accepted.id) ?? null;
+      // Match against every turn, whatever its status: a steer turn that is
+      // already running/requires_action (or even finished) was claimed before
+      // this listing — that is delivery, not grounds for an interrupt.
+      steerTurn = turns.find((turn) => turn.triggerEventId === accepted.id) ?? null;
       if (steerTurn) {
         break;
       }
     }
-    if (steerTurn && queued.length > 1) {
+    const steerTurnQueued = steerTurn?.status === "queued";
+    if (steerTurn && steerTurnQueued && queued.length > 1) {
       const front = steerTurn;
       await this.reorderQueuedTurns(workspaceId, sessionId, [
         front.id,
         ...queued.filter((turn) => turn.id !== front.id).map((turn) => turn.id),
       ]);
     }
-    // Without the steer turn at the queue front, an interrupt would hand the
-    // session to whatever else is queued — only safe when nothing else is.
-    const canDeliverNext = steerTurn !== null || queued.length === 0;
+    // Interrupting is only safe when the next claim is provably this message:
+    // either the steer turn sits queued (now at the front), or no turn
+    // materialized yet AND nothing else is queued. A steer turn observed in
+    // any non-queued state was already claimed — skip the interrupt.
+    const canDeliverNext = steerTurnQueued || (steerTurn === null && queued.length === 0);
     const session = await this.getSession(workspaceId, sessionId);
     // If the previously running turn already finished and the session claimed
     // the steer turn itself, interrupting now would cancel the very message

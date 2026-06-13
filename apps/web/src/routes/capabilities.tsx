@@ -17,7 +17,7 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
@@ -34,6 +34,7 @@ import {
   type CapabilityFormState,
   type PackContentsSummary,
 } from "@/lib/capabilities";
+import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -43,6 +44,7 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
   const onRuntimeChanged = () => void context.refreshWorkspaceMcpServers(workspaceId);
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [filter, setFilter] = useState<CapabilityFilter>("all");
   const [query, setQuery] = useState("");
@@ -52,6 +54,10 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
   const [addForm, setAddForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
   const visibleItems = useMemo(() => filterCapabilityCatalogItems(items, filter, query), [items, filter, query]);
   const counts = useMemo(() => capabilityCounts(items), [items]);
+  // Honest list state: a failed catalog load renders as an error with retry,
+  // never as "No capabilities match this filter."; a catalog already on
+  // screen keeps rendering through a background refresh.
+  const catalogView = listViewState({ loading, error: loadError, count: items.length });
 
   useEffect(() => {
     void refresh();
@@ -65,7 +71,9 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
     try {
       const catalog = await client.listCapabilities(workspaceId);
       setItems(catalog.items);
+      setLoadError(null);
     } catch (error) {
+      setLoadError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Failed to load capabilities", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setLoading(false);
@@ -194,14 +202,16 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
 
         <div className="mt-5 grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
           <div className="min-w-0">
-            {loading ? (
+            {catalogView === "loading" ? (
               <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
                 <Loader2Icon className="size-4 animate-spin" />
                 Loading capabilities
               </div>
+            ) : catalogView === "error" ? (
+              <LoadErrorState title="Couldn't load capabilities" error={loadError} onRetry={() => void refresh()} />
             ) : visibleItems.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-sm text-[color:var(--color-fg-muted)]">
-                No capabilities match this filter.
+                {catalogView === "empty" ? "No capabilities in this workspace yet." : "No capabilities match this filter."}
               </div>
             ) : (
               <div className="grid gap-2">
