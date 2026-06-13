@@ -32,6 +32,15 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   async function failSession(input: RunAgentTurnInput & { error?: string }): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // Already terminal: runAgentTurn settled this turn as failed (status failed,
+    // activeTurnId cleared, turn finished) and already woke any parent, then the
+    // workflow still routed here because the activity's finally threw after the
+    // failed return. Re-failing would append a second turn.failed/status.changed
+    // and a second parent wake (a different lastSequence dodges the idle dedupe).
+    // The session is already where this activity would put it, so stop.
+    if (session.status === "failed") {
+      return;
+    }
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     const turnId = session.activeTurnId ?? null;
     await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [

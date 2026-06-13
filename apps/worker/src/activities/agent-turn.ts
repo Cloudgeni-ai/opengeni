@@ -650,7 +650,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // turn (not just one failed by the workflow's failSession path). Deduped
       // per terminal episode by the child's lastSequence, so it never
       // double-fires with the workflow-level wake.
-      await notifyParentOfChildTerminal({ db, bus, settings, observability, wakeSessionWorkflow }, input.workspaceId, input.sessionId, "failed");
+      await notifyParentOfChildTerminal({ db, bus, settings, observability, wakeSessionWorkflow }, input.workspaceId, input.sessionId, "failed", `turn:${turnId}`);
       return { status: "failed" };
     } finally {
       const durationSeconds = (performance.now() - activityStarted) / 1000;

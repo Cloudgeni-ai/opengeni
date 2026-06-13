@@ -2660,6 +2660,24 @@ describe("worker activities integration", () => {
     expect(JSON.stringify(wake?.payload)).toContain(worker.id);
     const managerTurns = await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10);
     expect(managerTurns).toHaveLength(1);
+
+    // If the activity's finally throws after the failed return, Temporal fails
+    // the activity and the workflow calls failSession on the already-failed
+    // session. That must NOT wake the manager a second time nor re-append
+    // terminal events: failSession no-ops on an already-failed session.
+    const workerEventsBefore = (await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)).length;
+    await activities.failSession({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: worker.id,
+      triggerEventId: trigger!.id,
+      workflowId: `session-${worker.id}`,
+      error: "redundant failSession after in-turn failure",
+    });
+    expect(wakes).toHaveLength(1);
+    expect((await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10))).toHaveLength(1);
+    const workerEventsAfter = (await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)).length;
+    expect(workerEventsAfter).toBe(workerEventsBefore);
   });
 });
 

@@ -35,6 +35,15 @@ export async function notifyParentOfChildTerminal(
   workspaceId: string,
   childSessionId: string,
   terminalStatus: "idle" | "failed",
+  // Stable identifier for the terminal episode, used as the idempotency key so
+  // the same completion never wakes the parent twice. A FAILURE passes the
+  // failed turn's id: both the in-turn wake (runAgentTurn) and the
+  // workflow-level wake (failSession, after it appends more events that would
+  // shift lastSequence) key on the same turn, so a finally-throw that turns one
+  // failure into both paths still dedupes. An idle episode has no single
+  // owning turn, so it falls back to the child's lastSequence — which advances
+  // per work batch and is stable across retries of that same idle transition.
+  episodeKey?: string | null,
 ): Promise<void> {
   try {
     const child = await getSession(svc.db, workspaceId, childSessionId);
@@ -42,8 +51,7 @@ export async function notifyParentOfChildTerminal(
       return;
     }
     const goal = await getSessionGoal(svc.db, workspaceId, childSessionId);
-    // lastSequence after the terminal transition's events is the episode key.
-    const clientEventId = `child-completion:${childSessionId}:${child.lastSequence}`;
+    const clientEventId = `child-completion:${childSessionId}:${episodeKey ?? child.lastSequence}`;
     const result = await wakeParentSessionForChildCompletion(svc.db, {
       workspaceId,
       parentSessionId: child.parentSessionId,
