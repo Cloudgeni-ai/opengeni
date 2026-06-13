@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent } from "@openai/agents";
+import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
+import { getSettings } from "@opengeni/config";
 import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
@@ -861,6 +862,67 @@ describe("runtime event normalization", () => {
         }],
       }), [{ kind: "mcp", id: "cap-secure" }])).rejects.toThrow();
     } finally {
+      mcp.close();
+    }
+  });
+
+  test("does not bleed the permission-scoped first-party tools-list across sessions", async () => {
+    // The Agents SDK caches tools/list in a process-global map keyed by MCP
+    // server name. The built-in `opengeni` server has the same name for every
+    // session in a worker process, and its tools/list is permission-scoped
+    // (a manager session is granted tools a worker session is not). If that
+    // server were cached, the first session to warm the cache would dictate
+    // every later session's tool visibility regardless of permissions. This
+    // test connects a worker-permission session FIRST (the ordering that
+    // previously poisoned the cache) and then a manager-permission session,
+    // and asserts the manager still sees its grant-only tool.
+    const managerAuthorization = "Bearer manager-grant";
+    const mcp = startTestMcpServer({
+      // Mirror the production first-party server: the manager grant unlocks an
+      // extra tool a worker grant never sees.
+      toolsForAuthorization: (authorization) =>
+        authorization === managerAuthorization ? ["session_create"] : [],
+    });
+
+    // Use the real config default for the opengeni server so a regression that
+    // flips cacheToolsList back to true is caught here too.
+    const opengeniDefault = getSettings().mcpServers.find((server) => server.id === "opengeni");
+    expect(opengeniDefault).toBeDefined();
+
+    const settingsForAuthorization = (authorization: string) => testSettings({
+      mcpServers: [{
+        id: "opengeni",
+        name: opengeniDefault!.name,
+        url: mcp.url,
+        headers: { authorization },
+        cacheToolsList: opengeniDefault!.cacheToolsList,
+      }],
+    });
+
+    const toolNamesFor = async (authorization: string): Promise<string[]> => {
+      const prepared = await prepareAgentTools(settingsForAuthorization(authorization), [{ kind: "mcp", id: "opengeni" }]);
+      try {
+        // Drive the exact code path the agent runner uses (getAllMcpTools),
+        // which is what populates the process-global cache.
+        const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+        return tools.map((tool) => tool.name).sort();
+      } finally {
+        await prepared.close();
+      }
+    };
+
+    // Start from a clean process-global cache: other tests in this process may
+    // have warmed the `opengeni` cache key.
+    await invalidateServerToolsCache("opengeni");
+
+    try {
+      const workerTools = await toolNamesFor("Bearer worker-grant");
+      expect(workerTools).not.toContain("opengeni__session_create");
+
+      const managerTools = await toolNamesFor(managerAuthorization);
+      expect(managerTools).toContain("opengeni__session_create");
+    } finally {
+      await invalidateServerToolsCache("opengeni");
       mcp.close();
     }
   });

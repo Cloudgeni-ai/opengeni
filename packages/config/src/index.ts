@@ -723,7 +723,18 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       id: "opengeni",
       name: "OpenGeni",
       url: firstPartyMcpUrl,
-      cacheToolsList: true,
+      // The opengeni server's tools/list response is permission-scoped: it
+      // varies by the calling session's delegated grant (e.g. a manager
+      // session sees sessions_*/environment_* tools that a worker session
+      // does not). The OpenAI Agents SDK caches tools/list in a process-global
+      // map keyed only by the MCP server name, which is identical for every
+      // session in the worker process. Caching here would let the first
+      // session to warm the cache dictate what every later session sees,
+      // regardless of permissions. tools/list is a cheap per-turn call, so we
+      // never cache it. (The files server pins allowedTools to a single
+      // permission-invariant tool and docs is already uncached, so both stay
+      // safe to cache / leave as-is.)
+      cacheToolsList: false,
     },
     ...(hasFiles ? [] : [{
       id: "files",

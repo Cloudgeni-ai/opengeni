@@ -16,6 +16,11 @@ export type TestMcpServer = {
 export function startTestMcpServer(options: {
   requiredAuthorization?: string;
   requiredHeaders?: Record<string, string>;
+  // Permission-scoped tool registration: returns the extra tool names that the
+  // calling request's bearer token is authorized to see, in addition to the
+  // always-present base tools. Mirrors the production first-party MCP server,
+  // whose tools/list response varies by the delegated token's grant.
+  toolsForAuthorization?: (authorization: string | null) => string[];
 } = {}): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
@@ -43,7 +48,10 @@ export function startTestMcpServer(options: {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
-      const mcp = buildServer(calls);
+      const scopedTools = options.toolsForAuthorization
+        ? options.toolsForAuthorization(request.headers.get("authorization"))
+        : undefined;
+      const mcp = buildServer(calls, scopedTools);
       await mcp.connect(transport);
       return await transport.handleRequest(request);
     },
@@ -55,7 +63,7 @@ export function startTestMcpServer(options: {
   };
 }
 
-function buildServer(calls: TestMcpToolCall[]): McpServer {
+function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServer {
   const server = new McpServer({
     name: "test-document-search",
     version: "1.0.0",
@@ -82,5 +90,19 @@ function buildServer(calls: TestMcpToolCall[]): McpServer {
       content: [{ type: "text", text: `document ${id}` }],
     };
   });
+  // Permission-scoped tools, registered only when the caller's grant includes
+  // them. The base tools above are always present, mirroring tools that every
+  // grant can see.
+  for (const toolName of scopedTools ?? []) {
+    server.registerTool(toolName, {
+      description: `Scoped tool ${toolName}.`,
+      inputSchema: {},
+    }, async () => {
+      calls.push({ tool: toolName, args: {} });
+      return {
+        content: [{ type: "text", text: `ran ${toolName}` }],
+      };
+    });
+  }
   return server;
 }

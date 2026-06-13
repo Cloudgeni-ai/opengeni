@@ -253,10 +253,18 @@ describe("sandbox preparation profiles", () => {
     expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
       name: "OpenGeni",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`,
+      // The opengeni server's tools/list is permission-scoped (varies by the
+      // caller's delegated grant). The Agents SDK caches tools/list in a
+      // process-global map keyed by server name, so caching here would let one
+      // session's grant dictate every later session's tool visibility. Must
+      // stay uncached.
+      cacheToolsList: false,
     });
     expect(settings.mcpServers.find((server) => server.id === "files")).toMatchObject({
       name: "Files",
       url: `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`,
+      // Safe to cache: allowedTools pins it to a single tool that every grant
+      // can see, so its effective tool list is permission-invariant.
       allowedTools: ["files_get_download_url"],
     });
     expect(settings.mcpServers.find((server) => server.id === "docs")).toMatchObject({
