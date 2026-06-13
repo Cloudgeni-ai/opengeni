@@ -1213,6 +1213,76 @@ describe("worker activities integration", () => {
     expect(blobAfterTurn2?.id).toBe(blobAfterTurn1?.id);
   });
 
+  test("runs a turn whose stored history carries an orphaned tool output instead of 400ing", async () => {
+    // A session whose session_history_items contains an orphaned
+    // function_call_result (a tool output whose function_call is absent — the
+    // corruption that 400s the Responses API and bricks the session on every
+    // replay) must still run a turn: the read path sanitizes the in-memory copy
+    // before it reaches the model, and the stored audit trail is left intact.
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "earlier work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const turn = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      temporalWorkflowId: "workflow-orphan-seed",
+      triggerEventId: crypto.randomUUID(),
+    });
+    // Seed a stored history that is corrupt exactly the way the live incidents
+    // were: a valid user turn, then a function_call_result with NO matching
+    // function_call anywhere in the items.
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: turn,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
+        { position: 1, item: { type: "function_call_result", callId: "call_orphaned", status: "completed", output: { type: "text", text: "stale result" } } },
+        { position: 2, item: { type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ack" }] } },
+      ],
+    });
+
+    const model = new ScriptedModel([
+      { id: "orphan-recover", outputText: "recovered", chunks: ["recovered"] },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items" }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "continue please" } },
+    ]);
+
+    // The turn SUCCEEDS instead of failing the session with a 400.
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-orphan-recover",
+    })).resolves.toEqual({ status: "idle" });
+
+    // The orphan never reached the model: the sanitized request omits it while
+    // keeping the surrounding valid items and the new user turn.
+    const lastRequestInput = JSON.stringify((model.requests.at(-1) as { input?: unknown })?.input ?? "");
+    expect(lastRequestInput).not.toContain("call_orphaned");
+    expect(lastRequestInput).not.toContain("stale result");
+    expect(lastRequestInput).toContain("earlier work");
+    expect(lastRequestInput).toContain("continue please");
+
+    // The stored audit trail is untouched — the orphan row still exists.
+    const storedItems = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(storedItems.some((row) => JSON.stringify(row.item).includes("call_orphaned"))).toBe(true);
+  });
+
   test("blocks async document embeddings when managed credits are empty", async () => {
     const grant = await testGrant(dbClient.db);
     const upload = await createOwnedFileUpload(dbClient.db, grant, {

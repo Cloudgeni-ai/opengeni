@@ -1,6 +1,107 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
-import { isWorkerShutdownCancellation, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { historyRowsToAppend, isWorkerShutdownCancellation, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+
+// Item shapes mirror the SDK history representation persisted into
+// session_history_items (type discriminator, camelCase callId).
+function userMessage(text: string) {
+  return { type: "message", role: "user", content: text };
+}
+function functionCall(callId: string) {
+  return { type: "function_call", callId, name: "tool", arguments: "{}", status: "completed" };
+}
+function functionResult(callId: string) {
+  return { type: "function_call_result", callId, status: "completed", output: { type: "text", text: "ok" } };
+}
+
+/**
+ * Drive a sequence of reconcile passes the way the live worker does: each
+ * element is the SDK's computed `state.history` at one reconcile point, and the
+ * watermark carries forward. Returns every row that would have been persisted,
+ * in position order, after onConflictDoNothing-on-position is applied (a
+ * position is frozen by the first row written to it).
+ */
+function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>>) {
+  const persistedByPosition = new Map<number, Record<string, unknown>>();
+  let watermark = 0;
+  for (const snapshot of snapshots) {
+    const { rows, nextWatermark } = historyRowsToAppend(snapshot, watermark);
+    for (const row of rows) {
+      if (!persistedByPosition.has(row.position)) {
+        persistedByPosition.set(row.position, row.item);
+      }
+    }
+    watermark = nextWatermark;
+  }
+  return [...persistedByPosition.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, item]) => item);
+}
+
+describe("conversation-truth reconcile (orphaned tool output guard)", () => {
+  test("never persists a function_call_result whose function_call was pruned mid-batch", () => {
+    // Reproduces the live orphan: a parallel tool-call batch where the SDK's
+    // computed history is non-monotonic across reconciles, then an abnormal
+    // turn end (goal-pause / interrupt) settles only part of the batch. The old
+    // blind length watermark could freeze a position and later persist a result
+    // whose call had been pruned away in an earlier slice.
+    //
+    // Snapshot 1: model emitted two parallel calls; neither has a result yet,
+    // so the SDK's dropOrphanToolCalls prunes BOTH from state.history.
+    const snap1 = [userMessage("do A and B")];
+    // Snapshot 2: tool A settled; A's call+result are now present, B still
+    // pending and pruned. History grew but at DIFFERENT positions than a naive
+    // append-only view assumed.
+    const snap2 = [userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")];
+    // Snapshot 3 (abnormal end): the goal paused; B was cancelled mid-batch and
+    // never produced a result, so B stays pruned. Final history is A's settled
+    // pair only.
+    const snap3 = [userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")];
+
+    const persisted = persistAcrossReconciles([snap1, snap2, snap3]);
+
+    // Every persisted result has its call earlier in the persisted rows.
+    const callIds = new Set(
+      persisted.filter((item) => item.type === "function_call").map((item) => item.callId),
+    );
+    for (const item of persisted) {
+      if (item.type === "function_call_result") {
+        expect(callIds.has(item.callId)).toBe(true);
+      }
+    }
+    // No trace of the cancelled call B leaked through (neither orphaned result
+    // nor dangling call).
+    expect(persisted.some((item) => item.callId === "call_b")).toBe(false);
+    // The settled A pair is intact and ordered.
+    expect(persisted).toEqual([userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")]);
+  });
+
+  test("defers a dangling call until its result lands, then persists the pair together", () => {
+    // A trailing call with no result yet must NOT be persisted alone (it would
+    // dangle and 400). It is deferred and the next reconcile writes call+result.
+    const snapWithDanglingCall = [userMessage("go"), functionCall("call_x")];
+    // The SDK prunes the dangling call, so the reconcile persists only the user
+    // message and the watermark stays at 1.
+    const first = historyRowsToAppend(snapWithDanglingCall, 0);
+    expect(first.rows.map((row) => row.item)).toEqual([userMessage("go")]);
+    expect(first.nextWatermark).toBe(1);
+    // Next reconcile: the result arrived; call and result persist together.
+    const snapSettled = [userMessage("go"), functionCall("call_x"), functionResult("call_x")];
+    const second = historyRowsToAppend(snapSettled, first.nextWatermark);
+    expect(second.rows.map((row) => row.item)).toEqual([functionCall("call_x"), functionResult("call_x")]);
+    expect(second.nextWatermark).toBe(3);
+  });
+
+  test("holds steady when prior rows already exceed the sanitized length (legacy orphans)", () => {
+    // A session already carrying orphan rows from before the fix: the watermark
+    // (DB row count) can exceed the sanitized history length. Nothing new is
+    // appended and the watermark does not move backward or rewrite rows.
+    const sanitizedShorter = [userMessage("hi")];
+    const result = historyRowsToAppend(sanitizedShorter, 5);
+    expect(result.rows).toEqual([]);
+    expect(result.nextWatermark).toBe(5);
+  });
+});
 
 describe("worker shutdown preemption", () => {
   test("classifies only WORKER_SHUTDOWN cancellations as graceful preemption", () => {

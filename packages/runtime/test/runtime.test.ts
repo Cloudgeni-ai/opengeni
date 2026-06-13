@@ -269,6 +269,32 @@ describe("runtime event normalization", () => {
     expect(prepared.input).toBe("hello");
   });
 
+  test("sanitizes an orphaned tool output out of replayed items-mode history", async () => {
+    // A session whose stored history carries an orphaned function_call_result
+    // (its function_call lost to a write-path desync) must still produce a
+    // valid model input instead of one the Responses API 400s on. The read
+    // path sanitizes the in-memory copy; the orphan never reaches the model.
+    const orphan = { type: "function_call_result", callId: "call_orphan", output: { type: "text", text: "stale" } };
+    const validCall = { type: "function_call", callId: "call_ok", name: "tool", arguments: "{}" };
+    const validResult = { type: "function_call_result", callId: "call_ok", output: { type: "text", text: "ok" } };
+    const prepared = await prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
+      kind: "message",
+      text: "continue",
+      historyItems: [
+        { type: "message", role: "user", content: "earlier" } as any,
+        orphan as any,
+        validCall as any,
+        validResult as any,
+      ],
+    });
+    const input = prepared.input as Array<Record<string, unknown>>;
+    expect(Array.isArray(input)).toBe(true);
+    // The orphan is gone; the valid pair and the new user turn remain in order.
+    expect(input.filter((item) => item.type === "function_call_result")).toEqual([validResult]);
+    expect(input.some((item) => item.type === "function_call_result" && item.callId === "call_orphan")).toBe(false);
+    expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
+  });
+
   test("builds agents without MCP servers by default", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(agent.mcpServers).toEqual([]);

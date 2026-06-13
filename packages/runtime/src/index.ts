@@ -52,6 +52,11 @@ import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+
+export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+export type { HistoryItem } from "./history-sanitizer";
+
 ensureReadableStreamFrom();
 
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
@@ -649,9 +654,19 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
       const sandboxSessionState = input.sandboxEnvelope
         ? await restoredSandboxSessionStateFromEntry(input.sandboxEnvelope, options.sandboxClient)
         : undefined;
+      // Replayed conversation truth is reloaded verbatim from the database, so
+      // it can contain a tool-call pairing the Responses API rejects (most
+      // destructively an orphaned function_call_result with no matching
+      // function_call — which 400s every turn and bricks the session until the
+      // row is hand-deleted). Sanitize the in-memory copy before it reaches the
+      // model so existing corruption self-heals and a future write-path race is
+      // non-fatal; the stored rows are never touched.
+      const sanitizedHistory = sanitizeHistoryItemsForModel(
+        input.historyItems as unknown as Array<Record<string, unknown>>,
+      ) as unknown as AgentInputItem[];
       return {
         input: [
-          ...input.historyItems,
+          ...sanitizedHistory,
           {
             type: "message",
             role: "user",
@@ -666,9 +681,15 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
     const sandboxSessionState = await restoredSandboxSessionState(state, options.sandboxClient);
+    // state.history already runs the SDK's own orphan-tool-call pruning, but
+    // applying the same sanitizer keeps the legacy run-state resume path under
+    // one invariant with the items path and is defensive against a corrupt blob.
+    const sanitizedHistory = sanitizeHistoryItemsForModel(
+      state.history as unknown as Array<Record<string, unknown>>,
+    ) as unknown as AgentInputItem[];
     return {
       input: [
-        ...state.history,
+        ...sanitizedHistory,
         {
           type: "message",
           role: "user",
