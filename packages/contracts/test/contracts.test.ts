@@ -17,6 +17,9 @@ import {
   MarketingDailyAnalysisTaskRequest,
   ResourceRef,
   SessionBusMessage,
+  CLEARED_RUN_STATE_BLOB,
+  CLEARED_RUN_STATE_MARKER,
+  isClearedRunStateBlob,
 } from "../src";
 
 describe("contracts", () => {
@@ -318,5 +321,24 @@ describe("capability pack runtime manifest fields", () => {
       ...baseManifest,
       skills: [{ name: "infra-ops", files: [{ path: "SKILL.md", content: "a" }, { path: "SKILL.md", content: "b" }] }],
     })).toThrow();
+  });
+});
+
+describe("cleared run-state sentinel", () => {
+  test("the canonical blob is recognized as cleared", () => {
+    expect(isClearedRunStateBlob(CLEARED_RUN_STATE_BLOB)).toBe(true);
+    // Tolerant of extra fields so a future sentinel addition can't resurrect context.
+    expect(isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: true, note: "x" }))).toBe(true);
+  });
+
+  test("real run-state blobs and junk are NOT treated as cleared", () => {
+    // A real Agents-SDK serialized run state (carries $schemaVersion/history).
+    expect(isClearedRunStateBlob(JSON.stringify({ $schemaVersion: "1.11", currentTurn: 1, generatedItems: [] }))).toBe(false);
+    expect(isClearedRunStateBlob(null)).toBe(false);
+    expect(isClearedRunStateBlob(undefined)).toBe(false);
+    expect(isClearedRunStateBlob("")).toBe(false);
+    expect(isClearedRunStateBlob("not json")).toBe(false);
+    expect(isClearedRunStateBlob(JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: false }))).toBe(false);
+    expect(isClearedRunStateBlob("null")).toBe(false);
   });
 });

@@ -17,7 +17,7 @@ import {
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -65,7 +65,32 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
-  const timeline = useMemo(() => session ? projectSessionTimeline(session, events) : [], [session, events]);
+  // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
+  // every event at or before the sequence seen when the operator ran it; the
+  // server log is untouched and newer events (higher sequence) keep streaming
+  // in. Reset when the session identity changes so a new session starts clean.
+  const [viewClearedAfter, setViewClearedAfter] = useState(0);
+  useEffect(() => {
+    setViewClearedAfter(0);
+  }, [sessionId]);
+  const clearView = useCallback(() => {
+    const latestSequence = events.reduce((max, event) => Math.max(max, event.sequence), 0);
+    setViewClearedAfter(latestSequence);
+  }, [events]);
+  const visibleEvents = useMemo(
+    () => viewClearedAfter > 0 ? events.filter((event) => event.sequence > viewClearedAfter) : events,
+    [events, viewClearedAfter],
+  );
+  const timeline = useMemo(() => {
+    if (!session) {
+      return [];
+    }
+    const projected = projectSessionTimeline(session, visibleEvents);
+    // projectSessionTimeline falls back to the session's initial message when
+    // the projection is empty; after a clear-view that fallback would resurrect
+    // the very first message, so suppress it once the view has been cleared.
+    return viewClearedAfter > 0 && visibleEvents.length === 0 ? [] : projected;
+  }, [session, visibleEvents, viewClearedAfter]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -124,6 +149,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
         approvals={approvals}
         failure={failure}
         goal={goal}
+        onClearView={clearView}
         onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
         onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
         onApprove={(approvalId) => void approve(approvalId, "approve")}
@@ -171,6 +197,8 @@ function SessionChatPane(props: {
   approvals: PendingApproval[];
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   goal: ReturnType<typeof useGoal>;
+  /** Reset the local timeline view (the /clear-view command target). */
+  onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => void;
@@ -299,6 +327,7 @@ function SessionChatPane(props: {
             disabled={terminal}
             showDeliveryMode
             commandContext={commandContext}
+            onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder={terminal
               ? `Session is ${props.session.status}.`

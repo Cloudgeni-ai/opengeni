@@ -101,7 +101,15 @@ export function ChatComposer({
         composer.clearError();
       },
       openHelp: () => setHelpOpen(true),
-      clearView: () => onClearView?.(),
+      // Report whether a view-reset was actually wired by the host: with no
+      // onClearView the command is a no-op and must say so (not a false success).
+      clearView: () => {
+        if (!onClearView) {
+          return false;
+        }
+        onClearView();
+        return true;
+      },
       confirm: () =>
         new Promise<boolean>((resolve) => {
           setConfirmState({

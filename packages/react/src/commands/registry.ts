@@ -133,7 +133,14 @@ export const defaultCommands: readonly SlashCommand[] = [
     name: "clear-view",
     description: "Clear the local timeline view (this device only; no server change).",
     run: (_args, ctx) => {
-      ctx.clearView();
+      // clearView() reports whether the host actually wired a view-reset. If it
+      // didn't (the console surface has no resettable local timeline), reporting
+      // "Local view cleared." would be a false success — return an honest error
+      // instead so the operator isn't told something happened when nothing did.
+      const cleared = ctx.clearView();
+      if (!cleared) {
+        return { status: "error", message: "This view can't be cleared here (no local timeline to reset)." };
+      }
       return { status: "ok", message: "Local view cleared." };
     },
   },

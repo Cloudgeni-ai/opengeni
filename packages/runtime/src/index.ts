@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
-import { signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
+import { isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -810,7 +810,13 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
         ...(sandboxSessionState ? { sandboxSessionState } : {}),
       };
     }
-    if (!input.serializedRunState) {
+    // No prior state, or a cleared sentinel: start fresh. The clear sentinel
+    // ({@link CLEARED_RUN_STATE_BLOB}) is not a real serialized run state — it
+    // carries no $schemaVersion, so RunState.fromString would throw on it. In
+    // run_state history mode this message path is the one that reads the blob
+    // after a /clear, so recognizing the sentinel here is what keeps the next
+    // turn working (a fresh, empty context) instead of bricking on deserialize.
+    if (!input.serializedRunState || isClearedRunStateBlob(input.serializedRunState)) {
       return { input: input.text };
     }
     const state = await RunState.fromString(agent, input.serializedRunState);
@@ -833,6 +839,13 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
     };
+  }
+  // An approval can only be resumed against a real saved run state. If the
+  // latest blob is the cleared sentinel the awaiting turn was wiped (the API
+  // refuses clear in requires_action, so this is a defensive guard) — fail with
+  // an honest message instead of the cryptic SDK "missing schema version".
+  if (isClearedRunStateBlob(input.serializedRunState)) {
+    throw new Error("Cannot resume an approval: the session context was cleared, so the awaiting run state no longer exists.");
   }
   const state = await RunState.fromString(agent, input.serializedRunState);
   const interruptions = state.getInterruptions();

@@ -118,7 +118,7 @@ function makeCtx(overrides: Partial<CommandContext> & { client: CommandContext["
     permissions: ALL_PERMS as never,
     notice: (n) => notices.push(n),
     openHelp: () => {},
-    clearView: () => {},
+    clearView: () => true,
     confirm: async () => true,
     ...overrides,
   };
@@ -202,11 +202,31 @@ describe("default command handlers", () => {
   test("/help and /clear-view are client-only (no client calls)", async () => {
     let helped = false;
     let cleared = false;
-    const ctx = makeCtx({ client: fakeClient({}), openHelp: () => { helped = true; }, clearView: () => { cleared = true; } });
+    const ctx = makeCtx({ client: fakeClient({}), openHelp: () => { helped = true; }, clearView: () => { cleared = true; return true; } });
     expect((await run(help, [], ctx)).status).toBe("ok");
     expect((await run(clearView, [], ctx)).status).toBe("ok");
     expect(helped).toBe(true);
     expect(cleared).toBe(true);
+  });
+
+  // Regression (adversarial review): /clear-view must not report a false
+  // "Local view cleared." success when the host wired no view-reset affordance.
+  // clearView() returns false in that case, so the command must surface an
+  // honest error instead of a green success notice on a silent no-op.
+  test("/clear-view reports an error (not false success) when no view-reset is wired", async () => {
+    let invoked = false;
+    const ctx = makeCtx({ client: fakeClient({}), clearView: () => { invoked = true; return false; } });
+    const result = await run(clearView, [], ctx);
+    expect(invoked).toBe(true);
+    expect(result.status).toBe("error");
+    expect(result.message).toMatch(/can't be cleared/i);
+  });
+
+  test("/clear-view reports success only when clearView actually had an effect", async () => {
+    const ctx = makeCtx({ client: fakeClient({}), clearView: () => true });
+    const result = await run(clearView, [], ctx);
+    expect(result.status).toBe("ok");
+    expect(result.message).toMatch(/local view cleared/i);
   });
 
   test("extensibility: a new command is one object literal the registry renders from", () => {

@@ -45,7 +45,7 @@ function setup(options: {
     const handlers: SlashCommandHandlers = {
       notice: (n) => setNotices((cur) => [...cur, n]),
       openHelp: () => setHelpOpened((n) => n + 1),
-      clearView: () => setViewCleared((n) => n + 1),
+      clearView: () => { setViewCleared((n) => n + 1); return true; },
       confirm: async () => options.confirmAnswer ?? true,
     };
     const command = useSlashCommands({
