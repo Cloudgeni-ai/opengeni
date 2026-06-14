@@ -1,4 +1,5 @@
 import type { Settings } from "@opengeni/config";
+import { contextInputBudgetTokens, resolveContextCompactionMode } from "@opengeni/config";
 import type { FileAsset, ResourceRef } from "@opengeni/contracts";
 import {
   getActiveSessionHistoryItems,
@@ -91,6 +92,11 @@ async function messageInput(
   text: string,
   settings?: Settings,
 ) {
+  // Read-path budget guard (the last-resort backstop behind best-effort pre-turn
+  // compaction): supply B only when the client-side compaction path is active
+  // (Azure). On the OpenAI server path the SDK manages the window, so we leave
+  // the guard off and never crudely trim. Undefined = guard disabled.
+  const inputBudgetTokens = readPathBudgetTokens(settings);
   if (settings?.sessionHistorySource === "items") {
     // Active rows only: after a client-side context compaction this is
     // [active summary, ...active recent tail]; superseded (summarized-away)
@@ -98,20 +104,42 @@ async function messageInput(
     const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
     if (stored.length > 0) {
       const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
-      return await runtime.prepareInput(agent, {
-        kind: "message",
-        text,
-        historyItems: stored.map((row) => row.item) as any,
-        sandboxEnvelope: envelope,
-      });
+      return await runtime.prepareInput(
+        agent,
+        {
+          kind: "message",
+          text,
+          historyItems: stored.map((row) => row.item) as any,
+          sandboxEnvelope: envelope,
+        },
+        inputBudgetTokens ? { inputBudgetTokens } : {},
+      );
     }
   }
   const latestState = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
-  return await runtime.prepareInput(agent, {
-    kind: "message",
-    text,
-    serializedRunState: latestState?.serializedRunState ?? null,
-  });
+  return await runtime.prepareInput(
+    agent,
+    {
+      kind: "message",
+      text,
+      serializedRunState: latestState?.serializedRunState ?? null,
+    },
+    inputBudgetTokens ? { inputBudgetTokens } : {},
+  );
+}
+
+/**
+ * The usable input-token budget B to hand the read-path guard, or undefined
+ * when the guard should stay off. Active only when the resolved compaction mode
+ * is "client" (the Azure path that runs our own compaction); on the server path
+ * the SDK enforces the window, and with no settings we can't compute B.
+ */
+function readPathBudgetTokens(settings?: Settings): number | undefined {
+  if (!settings || resolveContextCompactionMode(settings) !== "client") {
+    return undefined;
+  }
+  const budget = contextInputBudgetTokens(settings);
+  return budget > 0 ? budget : undefined;
 }
 
 export async function userMessageTextWithAttachments(

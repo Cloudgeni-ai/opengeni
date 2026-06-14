@@ -18,7 +18,7 @@ import {
 
 export type MaybeCompactResult =
   | { compacted: false; reason: string }
-  | { compacted: true; supersededFrom: number; summaryPosition: number };
+  | { compacted: true; supersededFrom: number; summaryPosition: number; hardForced: boolean };
 
 /**
  * Pre-turn client-side context compaction (the Azure path).
@@ -78,6 +78,15 @@ export async function maybeCompactContext(
   if (!plan.shouldCompact) {
     return { compacted: false, reason: plan.reason };
   }
+  if (plan.hardForced) {
+    // At/over the hard ceiling (hardFraction*B): the session is past the soft
+    // trigger by a wide margin (often because last_input_tokens was stale-low
+    // and the actual history overflowed). Logged distinctly so the hard-force
+    // backstop firing is observable in production.
+    console.warn(
+      `context compaction HARD-FORCED for session ${scope.sessionId}: signal ${plan.signalTokens} tokens at/over hard ceiling`,
+    );
+  }
 
   const messages = buildCompactionMessages(plan);
   const summaryBody = await summarize(settings, messages);
@@ -112,5 +121,5 @@ export async function maybeCompactContext(
     summaryItem: buildSummaryItem(summaryBody),
   });
 
-  return { compacted: true, supersededFrom: boundaryPosition, summaryPosition };
+  return { compacted: true, supersededFrom: boundaryPosition, summaryPosition, hardForced: plan.hardForced };
 }

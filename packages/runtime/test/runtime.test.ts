@@ -327,6 +327,53 @@ describe("runtime event normalization", () => {
     expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
   });
 
+  test("read-path budget guard trims an over-budget items-mode input before it is sent", async () => {
+    // Even after the orphan sanitizer, an assembled input can exceed the model
+    // window (pre-turn compaction is best-effort and can no-op). With a budget
+    // supplied, the guard drops the oldest turn at a clean boundary so the
+    // request that reaches the model fits — the over-budget input is never sent.
+    const huge = "x".repeat(4_000_000); // ~1M token estimate, over a small test budget
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          { type: "message", role: "user", content: "old turn" } as any,
+          { type: "message", role: "assistant", content: huge } as any,
+          { type: "message", role: "user", content: "recent turn" } as any,
+          { type: "message", role: "assistant", content: "kept" } as any,
+        ],
+      },
+      { inputBudgetTokens: 200_000 },
+    );
+    const input = prepared.input as Array<Record<string, unknown>>;
+    expect(Array.isArray(input)).toBe(true);
+    // The bloated old turn was dropped; the recent turn and the new user message
+    // survive, in order.
+    expect(input.some((item) => item.content === huge)).toBe(false);
+    expect(input.some((item) => item.content === "recent turn")).toBe(true);
+    expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
+  });
+
+  test("read-path budget guard is OFF when no budget is supplied (no behaviour change for non-opted callers)", async () => {
+    const huge = "x".repeat(4_000_000);
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          { type: "message", role: "user", content: "old turn" } as any,
+          { type: "message", role: "assistant", content: huge } as any,
+        ],
+      },
+      // no inputBudgetTokens -> guard disabled, history passes through untrimmed.
+    );
+    const input = prepared.input as Array<Record<string, unknown>>;
+    expect(input.some((item) => item.content === huge)).toBe(true);
+  });
+
   test("builds agents without MCP servers by default", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
     expect(agent.mcpServers).toEqual([]);

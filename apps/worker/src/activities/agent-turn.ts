@@ -386,7 +386,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {
-            await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, ...(forced ? { trigger: "operator" } : {}) } }]);
+            // trigger precedence: an explicit operator /compact wins for the
+            // event label; otherwise a hard-forced (at/over hardFraction*B)
+            // compaction is surfaced as "hard" so the backstop firing is
+            // observable downstream, and the default soft trigger is implicit.
+            const trigger = forced ? "operator" : outcome.hardForced ? "hard" : undefined;
+            await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, ...(trigger ? { trigger } : {}) } }]);
           }
         } catch (compactError) {
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);

@@ -57,12 +57,14 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 
 export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
 
 export {
   planCompaction,
+  enforceInputBudget,
   buildSummaryItem,
   buildCompactionMessages,
   isCompactionSummary,
@@ -777,7 +779,43 @@ async function connectDockerNetwork(network: string, containerId: string): Promi
 
 export type PrepareInputOptions = {
   sandboxClient?: unknown;
+  /**
+   * Usable input-token budget B (window - reserved output). When set, the
+   * assembled history is passed through `enforceInputBudget` so a single
+   * over-budget input can never be sent — the last-resort backstop behind the
+   * best-effort pre-turn compaction. Omitted (undefined) disables the guard
+   * (no behaviour change for callers that don't opt in).
+   */
+  inputBudgetTokens?: number;
 };
+
+/**
+ * Apply the read-path budget guard to an assembled model input: drop the oldest
+ * history at a clean turn boundary until the request fits B. Orphan-safe (only
+ * cuts at user-message boundaries) and only active when a budget is supplied.
+ * The trailing user message is counted against the budget but never dropped.
+ */
+function guardAssembledInput(
+  history: AgentInputItem[],
+  trailing: AgentInputItem,
+  inputBudgetTokens: number | undefined,
+): AgentInputItem[] {
+  if (typeof inputBudgetTokens !== "number" || inputBudgetTokens <= 0) {
+    return [...history, trailing];
+  }
+  const trailingTokens = estimateItemTokens(trailing as unknown as Record<string, unknown>);
+  const guarded = enforceInputBudget(
+    history as unknown as Array<Record<string, unknown>>,
+    inputBudgetTokens,
+    trailingTokens,
+  );
+  if (guarded.trimmed) {
+    console.warn(
+      `read-path budget guard trimmed ${guarded.droppedCount} oldest history item(s) to fit input budget (${inputBudgetTokens} tokens); the over-budget input was NOT sent`,
+    );
+  }
+  return [...(guarded.items as unknown as AgentInputItem[]), trailing];
+}
 
 export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmentInput, options: PrepareInputOptions = {}): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
@@ -799,14 +837,19 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
         input.historyItems as unknown as Array<Record<string, unknown>>,
       ) as unknown as AgentInputItem[];
       return {
-        input: [
-          ...sanitizedHistory,
+        // Read-path budget guard: even after the orphan sanitizer, an assembled
+        // input can exceed the model window (pre-turn compaction is best-effort
+        // and can no-op). Trim the oldest history at a clean turn boundary so an
+        // over-budget request is never sent. No-op when no budget is supplied.
+        input: guardAssembledInput(
+          sanitizedHistory,
           {
             type: "message",
             role: "user",
             content: input.text,
           } as AgentInputItem,
-        ],
+          options.inputBudgetTokens,
+        ),
         ...(sandboxSessionState ? { sandboxSessionState } : {}),
       };
     }
@@ -828,14 +871,18 @@ export async function prepareRunInput(agent: Agent<any, any>, input: AgentSegmen
       state.history as unknown as Array<Record<string, unknown>>,
     ) as unknown as AgentInputItem[];
     return {
-      input: [
-        ...sanitizedHistory,
+      // Read-path budget guard (see the items path above): keep an over-budget
+      // resumed history off the wire by trimming the oldest turns when a budget
+      // is supplied.
+      input: guardAssembledInput(
+        sanitizedHistory,
         {
           type: "message",
           role: "user",
           content: input.text,
         } as AgentInputItem,
-      ],
+        options.inputBudgetTokens,
+      ),
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       serializedRunStateForSandbox: input.serializedRunState,
     };

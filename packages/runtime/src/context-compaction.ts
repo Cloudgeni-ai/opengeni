@@ -153,11 +153,78 @@ export function findKeepBoundary(items: readonly CompactionItem[], keepRecentTok
   return boundaries[boundaries.length - 1]!;
 }
 
+/**
+ * READ-PATH BUDGET GUARD (last-resort backstop).
+ *
+ * Pre-turn compaction is best-effort: it can no-op (summarizer model call
+ * fails, "client" mode off, a fresh user message arrives after a turn already
+ * ballooned the history) and STILL leave an assembled input that exceeds the
+ * model context window. The #61 orphan sanitizer is purely structural — it has
+ * NO size awareness — so without this guard an over-budget input is sent and
+ * 400s every turn, re-bricking the session.
+ *
+ * `enforceInputBudget` drops the OLDEST history at a clean turn boundary until
+ * the estimated input fits `maxTokens`, ALWAYS keeping the most recent turn(s).
+ * It is orphan-safe by construction: it only ever cuts at the start of a user
+ * message (via `findKeepBoundary`), so no tool-call pair is split. It is a
+ * crude data-loss fallback (no summary is generated) that exists solely so a
+ * single over-budget assembled input is never put on the wire — real context
+ * preservation is the summarizing pre-turn path; this is the airbag.
+ *
+ * Pure: returns a new array (same item references, in order) with an oldest
+ * prefix omitted, or the input unchanged when it already fits. The provided
+ * `trailingTokens` accounts for the un-stored part of the assembled input (the
+ * new user/continuation message + fixed system/tool overhead) so the cap is
+ * measured against the WHOLE request, not just the stored history.
+ */
+export function enforceInputBudget<T extends CompactionItem>(
+  items: readonly T[],
+  maxTokens: number,
+  trailingTokens = 0,
+): { items: T[]; trimmed: boolean; droppedCount: number; estimatedTokens: number } {
+  const total = estimateTokens(items) + Math.max(0, trailingTokens);
+  if (items.length === 0 || total <= maxTokens) {
+    return { items: items.slice(), trimmed: false, droppedCount: 0, estimatedTokens: total };
+  }
+  // Budget left for the stored history once the fixed trailing cost is paid.
+  const historyBudget = Math.max(0, maxTokens - Math.max(0, trailingTokens));
+  // Find the EARLIEST user-message boundary whose tail fits historyBudget; that
+  // boundary's prefix is the oldest history we drop. findKeepBoundary already
+  // returns a clean turn boundary (start of a user message), so the cut is
+  // orphan-safe. A boundary of 0 means nothing could be dropped safely (no
+  // earlier boundary) — we leave the input as-is rather than orphan a pair.
+  const boundary = findKeepBoundary(items, historyBudget);
+  if (boundary <= 0) {
+    return { items: items.slice(), trimmed: false, droppedCount: 0, estimatedTokens: total };
+  }
+  const kept = items.slice(boundary);
+  return {
+    items: kept,
+    trimmed: true,
+    droppedCount: boundary,
+    estimatedTokens: estimateTokens(kept) + Math.max(0, trailingTokens),
+  };
+}
+
 export type CompactionPlan = {
   /** Whether a compaction should run this turn. */
   shouldCompact: boolean;
   /** Why not, when shouldCompact is false (for logs/tests). */
   reason: "below_threshold" | "no_boundary" | "nothing_to_summarize" | "compact";
+  /**
+   * The signal-token count the trigger decision was made on:
+   * max(actual last-turn input tokens, char/4 estimate of the active items).
+   * Recorded for logging / metrics and so a caller can reason about pressure.
+   */
+  signalTokens: number;
+  /**
+   * True when the signal reached hardFraction*B — the session is at/over the
+   * hard ceiling and compaction was forced even if the recorded last-turn count
+   * was stale-low. The boundary walk is run with a SHRUNK keep-recent budget in
+   * this case so an over-budget history always yields a non-empty prefix to
+   * summarize (the everything-is-"recent" deadlock can't strand it un-compacted).
+   */
+  hardForced: boolean;
   /** Index (into the active items) where the kept tail begins. */
   boundaryIndex: number;
   /**
@@ -196,37 +263,74 @@ export type PlanCompactionInput = {
 /**
  * Decide whether and where to compact. Pure.
  *
- * Trigger: signal tokens >= softFraction*B (or hardFraction*B as the hard
- * force; both are above-threshold here, the caller may distinguish for logging
- * but the action is the same). Signal = actual last-turn input tokens when
- * available, else char/4 estimate of the active items.
+ * Trigger: signal tokens >= softFraction*B (soft) or hardFraction*B (hard).
+ * Signal = MAX(actual last-turn input tokens, char/4 estimate of the active
+ * items). The max — not "trust the recorded count, estimate only when it's
+ * null" — is the self-heal fix: `sessions.last_input_tokens` is written ONLY
+ * when a model response reports usage, so a turn that OVERFLOWS on its first
+ * model call records NOTHING and the column keeps a STALE-POSITIVE value from
+ * the last good turn (e.g. ~600k). Trusting that stale-low number let an
+ * actually-over-budget history (>1.05M) slip under the soft limit and overflow
+ * again, re-bricking with no self-heal. Taking the max means a bloated history
+ * triggers compaction regardless of a stale recorded count.
  *
- * Boundary: the latest user-message boundary whose kept tail fits
- * keepRecentTokens. The prefix before it (minus any prior summary, which is
- * folded forward) is what gets summarized.
+ * Hard force (hardFraction*B): at/over the hard ceiling we compact even if the
+ * recorded count was stale-low, AND we run the boundary walk with a shrunk
+ * keep-recent budget so an over-budget history always yields a non-empty prefix
+ * — otherwise a history where the whole thing reads as "recent" (tail within
+ * keepRecentTokens) would find no prefix and strand the session over budget.
+ *
+ * Boundary: the earliest user-message boundary whose kept tail fits the
+ * (possibly shrunk) keep-recent budget. The prefix before it (minus any prior
+ * summary, which is folded forward) is what gets summarized.
  */
 export function planCompaction(input: PlanCompactionInput): CompactionPlan {
+  const softLimit = Math.floor(input.inputBudgetTokens * input.softFraction);
+  const hardLimit = Math.floor(input.inputBudgetTokens * input.hardFraction);
+  // Signal = MAX(recorded last-turn input tokens, estimate of the actual
+  // history). See the doc comment: the max is what defeats the stale-positive
+  // re-brick — a bloated history wins over a stale-low recorded count.
+  const recorded =
+    typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
+      ? input.lastInputTokens
+      : 0;
+  const signalTokens = Math.max(recorded, estimateTokens(input.items));
+  const hardForced = signalTokens >= hardLimit;
+
   const empty: CompactionPlan = {
     shouldCompact: false,
     reason: "below_threshold",
+    signalTokens,
+    hardForced,
     boundaryIndex: input.items.length,
     prefixItems: [],
     priorSummaryItem: null,
     tailItems: [...input.items],
   };
 
-  const softLimit = Math.floor(input.inputBudgetTokens * input.softFraction);
-  const signalTokens =
-    typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
-      ? input.lastInputTokens
-      : estimateTokens(input.items);
-  // force bypasses the budget trigger only; the structural guards below still
-  // run, so a forced compaction with nothing to summarize is still a no-op.
+  // force (operator /compact) bypasses the budget trigger; the structural
+  // guards below still run, so a forced compaction with nothing to summarize is
+  // still a no-op. A hard-forced compaction is, like soft, gated by those
+  // guards but additionally shrinks the keep-recent budget (below) so it can
+  // actually find a prefix when the whole history is over budget.
   if (!input.force && signalTokens < softLimit) {
     return empty;
   }
 
-  const boundaryIndex = findKeepBoundary(input.items, input.keepRecentTokens);
+  // Under hard pressure, cap the verbatim tail well below B so the boundary walk
+  // is forced to leave a summarizable prefix even when last_input_tokens was
+  // stale-low and the history exceeds the window. We keep at most HALF the
+  // configured keep-recent budget (and never more than a quarter of B) — enough
+  // recent context to stay coherent, little enough that a real prefix always
+  // remains to compact. Soft compactions keep the full configured budget.
+  const effectiveKeepRecent = hardForced
+    ? Math.min(
+        Math.floor(input.keepRecentTokens / 2),
+        Math.floor(input.inputBudgetTokens / 4),
+      )
+    : input.keepRecentTokens;
+
+  const boundaryIndex = findKeepBoundary(input.items, effectiveKeepRecent);
   if (boundaryIndex <= 0) {
     // No prefix to summarize (cut at the very start) — nothing to do.
     return { ...empty, reason: "no_boundary", boundaryIndex };
@@ -261,6 +365,8 @@ export function planCompaction(input: PlanCompactionInput): CompactionPlan {
   return {
     shouldCompact: true,
     reason: "compact",
+    signalTokens,
+    hardForced,
     boundaryIndex,
     prefixItems,
     priorSummaryItem,
