@@ -1,10 +1,10 @@
 import type { Settings } from "@opengeni/config";
 import type { FileAsset, ResourceRef } from "@opengeni/contracts";
 import {
+  getActiveSessionHistoryItems,
   getLatestRunState,
   getSandboxSessionEnvelope,
   getSessionEvent,
-  getSessionHistoryItems,
   requireFile,
   type Database,
 } from "@opengeni/db";
@@ -92,7 +92,10 @@ async function messageInput(
   settings?: Settings,
 ) {
   if (settings?.sessionHistorySource === "items") {
-    const stored = await getSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
+    // Active rows only: after a client-side context compaction this is
+    // [active summary, ...active recent tail]; superseded (summarized-away)
+    // prefix rows stay in the table as an audit trail but never reach the model.
+    const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
     if (stored.length > 0) {
       const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
       return await runtime.prepareInput(agent, {

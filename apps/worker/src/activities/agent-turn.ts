@@ -16,6 +16,7 @@ import {
   saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionStatus,
+  setSessionLastInputTokens,
   sumUsageQuantity,
   type AppendEventInput,
 } from "@opengeni/db";
@@ -37,6 +38,7 @@ import {
   mergeResourceRefs,
   mergeToolRefs,
 } from "./common";
+import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
 import { resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
@@ -340,10 +342,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           : {}),
       });
+      // Pre-turn client-side context compaction (Azure path). When the
+      // resolved mode is "client" and the last turn's input tokens crossed the
+      // soft budget, this summarizes the orphan-safe old prefix into one user
+      // message and supersedes the summarized rows BEFORE the history is read
+      // for this turn, so the model sees [summary, ...recent tail] + new input.
+      // Best-effort: a no-op or failure leaves the un-compacted history intact.
+      // Skipped on approval/preempt resumes (no fresh user turn; the frozen
+      // RunState or in-flight tail must replay verbatim).
+      if (triggerType === "user.message" || triggerType === "goal.continuation") {
+        try {
+          const outcome = await maybeCompactContext(
+            db,
+            runSettings,
+            { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId },
+            session.lastInputTokens,
+          );
+          if (outcome.compacted) {
+            await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition } }]);
+          }
+        } catch (compactError) {
+          console.error("context compaction failed (turn proceeds un-compacted)", compactError);
+        }
+      }
       const runInput = await turnInput(db, runtime, agent, trigger, runSettings);
       persistedHistoryCount = await countSessionHistoryItems(db, input.workspaceId, input.sessionId);
       historyCountAtTurnStart = persistedHistoryCount;
       let responseUsageCount = 0;
+      // Actual input tokens of the most recent model response this turn; the
+      // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
+      let lastInputTokensObserved: number | null = null;
       throwIfWorkerShuttingDown();
       stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
@@ -367,6 +395,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const responseUsage = modelResponseUsageFromSdkEvent(next.value);
           if (responseUsage) {
             responseUsageCount += 1;
+            const observed = responseUsage.usage?.inputTokens;
+            if (typeof observed === "number" && observed > 0) {
+              lastInputTokensObserved = observed;
+            }
             await recordModelUsageAndDebitCredits(settings, db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -408,6 +440,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await batcher.flush();
       await stream.completed.catch(() => undefined);
       if (responseUsageCount === 0) {
+        const aggregateInput = (stream.state.usage as { inputTokens?: unknown } | undefined)?.inputTokens;
+        if (typeof aggregateInput === "number" && aggregateInput > 0) {
+          lastInputTokensObserved = aggregateInput;
+        }
         await recordModelUsageAndDebitCredits(settings, db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -417,6 +453,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           usage: stream.state.usage,
           sourceKey: "aggregate",
         });
+      }
+      if (lastInputTokensObserved !== null) {
+        await setSessionLastInputTokens(db, input.workspaceId, input.sessionId, lastInputTokensObserved)
+          .catch((error) => console.error("persist last_input_tokens failed (non-fatal)", error));
       }
 
       if (stream.interruptions.length > 0) {

@@ -1161,6 +1161,10 @@ export const Session = z.object({
   parentSessionId: z.string().uuid().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
+  // Actual input tokens of the last model call of the most recent turn; the
+  // pre-turn client-side context-compaction trigger reads it as its budget
+  // signal. Null until a turn with usage has completed.
+  lastInputTokens: z.number().int().nonnegative().nullable(),
   lastSequence: z.number().int().nonnegative(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -1171,6 +1175,7 @@ export const SessionEventType = z.enum([
   "session.created",
   "session.status.changed",
   "session.requiresAction",
+  "session.context.compacted",
   "user.message",
   "user.interrupt",
   "user.approvalDecision",

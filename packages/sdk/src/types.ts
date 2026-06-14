@@ -100,6 +100,7 @@ export const SESSION_EVENT_TYPES = [
   "session.created",
   "session.status.changed",
   "session.requiresAction",
+  "session.context.compacted",
   "user.message",
   "user.interrupt",
   "user.approvalDecision",

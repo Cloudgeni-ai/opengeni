@@ -102,6 +102,39 @@ const SettingsSchema = z.object({
   // unconditionally; this flag governs the read path only, so flipping back to
   // "run_state" remains a safe rollback at any time.
   sessionHistorySource: z.enum(["run_state", "items"]).default("items"),
+  // Provider-aware conversation context management (long-lived sessions
+  // otherwise grow unbounded until they overflow the model context window and
+  // hard-fail every turn). Resolution (see resolveContextCompactionMode):
+  //   "auto" (default) -> "server" when openaiProvider === "openai" (the
+  //     OpenAI platform Responses API honors server-side context_management),
+  //     else "client" (Azure rejects context_management with a 400, so we run
+  //     our own client-side compaction).
+  //   "server" / "client" -> force that path regardless of provider.
+  //   "off" -> neither path (legacy unbounded growth; escape hatch only).
+  contextCompactionMode: z.enum(["auto", "server", "client", "off"]).default("auto"),
+  // The model's real context window in tokens. gpt-5.5's true window is
+  // 1,050,000; it is absent from the SDK's hardcoded compaction window map (it
+  // knows only up to gpt-5.4), so the SDK's DynamicCompactionPolicy would fall
+  // back to a wrong 240k. We pass an explicit StaticCompactionPolicy threshold
+  // derived from these settings on the server path, and use the same numbers to
+  // budget the client path.
+  contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
+  // Tokens reserved for model output; subtracted from the window to get the
+  // usable input budget B = contextWindowTokens - contextReservedOutputTokens.
+  contextReservedOutputTokens: z.coerce.number().int().nonnegative().default(128_000),
+  // Server path only: explicit compact_threshold (tokens) handed to the SDK's
+  // StaticCompactionPolicy. Defaults to floor(B * contextCompactSoftFraction)
+  // when unset.
+  contextServerCompactThresholdTokens: z.coerce.number().int().positive().optional(),
+  // Client path: compact pre-turn when the last turn's actual input tokens
+  // reach softFraction*B; hard-force at hardFraction*B.
+  contextCompactSoftFraction: z.coerce.number().positive().max(1).default(0.70),
+  contextCompactHardFraction: z.coerce.number().positive().max(1).default(0.85),
+  // Client path: tokens of the most recent FULL turns kept verbatim after a
+  // compaction (the live working set: recent tool results, not just messages).
+  contextKeepRecentTokens: z.coerce.number().int().positive().default(32_000),
+  // Client path: token ceiling on the generated summary body.
+  contextSummaryMaxTokens: z.coerce.number().int().positive().default(20_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),
   authAllowHealth: EnvBoolean.default(true),
@@ -343,6 +376,14 @@ export function getSettings(): Settings {
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     sessionHistorySource: optional("OPENGENI_SESSION_HISTORY_SOURCE"),
+    contextCompactionMode: optional("OPENGENI_CONTEXT_COMPACTION_MODE"),
+    contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
+    contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
+    contextServerCompactThresholdTokens: optional("OPENGENI_CONTEXT_SERVER_COMPACT_THRESHOLD_TOKENS"),
+    contextCompactSoftFraction: optional("OPENGENI_CONTEXT_COMPACT_SOFT_FRACTION"),
+    contextCompactHardFraction: optional("OPENGENI_CONTEXT_COMPACT_HARD_FRACTION"),
+    contextKeepRecentTokens: optional("OPENGENI_CONTEXT_KEEP_RECENT_TOKENS"),
+    contextSummaryMaxTokens: optional("OPENGENI_CONTEXT_SUMMARY_MAX_TOKENS"),
     authRequired: optional("OPENGENI_AUTH_REQUIRED"),
     accessKey: optional("OPENGENI_ACCESS_KEY"),
     authAllowHealth: optional("OPENGENI_AUTH_ALLOW_HEALTH"),
@@ -461,6 +502,52 @@ export function configuredModelPricing(settings: Settings): Record<string, Model
     ...defaultModelPricing,
     ...configured,
   };
+}
+
+/**
+ * Resolved conversation-context compaction path for a run.
+ *  - "server": let the OpenAI platform Responses API compact server-side (the
+ *    SDK emits context_management; we pass the correct gpt-5.5 threshold).
+ *  - "client": run OpenGeni's own client-side compaction (Azure and any other
+ *    backend that rejects/ignores context_management).
+ *  - "off": neither (legacy unbounded growth; escape hatch).
+ *
+ * "auto" maps to "server" on the OpenAI platform provider and "client"
+ * otherwise — Azure's Responses API returns 400 unsupported_parameter for
+ * context_management, so it must never take the server path.
+ */
+export type ContextCompactionMode = "server" | "client" | "off";
+
+export function resolveContextCompactionMode(settings: Pick<Settings, "contextCompactionMode" | "openaiProvider">): ContextCompactionMode {
+  switch (settings.contextCompactionMode) {
+    case "server":
+      return "server";
+    case "client":
+      return "client";
+    case "off":
+      return "off";
+    case "auto":
+    default:
+      return settings.openaiProvider === "openai" ? "server" : "client";
+  }
+}
+
+/** Usable input-token budget B = window - reserved output. */
+export function contextInputBudgetTokens(settings: Pick<Settings, "contextWindowTokens" | "contextReservedOutputTokens">): number {
+  return Math.max(0, settings.contextWindowTokens - settings.contextReservedOutputTokens);
+}
+
+/**
+ * Server-path compact_threshold (tokens) handed to the SDK's
+ * StaticCompactionPolicy: the explicit override when set, else
+ * floor(B * softFraction). This is what sidesteps the SDK's wrong 240k
+ * fallback for gpt-5.5 (which is absent from its hardcoded window map).
+ */
+export function contextServerCompactThreshold(settings: Pick<Settings, "contextWindowTokens" | "contextReservedOutputTokens" | "contextServerCompactThresholdTokens" | "contextCompactSoftFraction">): number {
+  if (settings.contextServerCompactThresholdTokens) {
+    return settings.contextServerCompactThresholdTokens;
+  }
+  return Math.floor(contextInputBudgetTokens(settings) * settings.contextCompactSoftFraction);
 }
 
 export function configuredStaticUsageLimits(settings: Settings): StaticUsageLimitsConfig {

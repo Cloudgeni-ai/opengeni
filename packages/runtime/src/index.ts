@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { collectSandboxEnvironment, parseExposedPorts, sandboxLifecycleHookIds } from "@opengeni/config";
+import { collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
@@ -28,13 +28,17 @@ import {
   Capabilities,
   Manifest,
   SandboxAgent,
+  StaticCompactionPolicy,
   azureBlobMount,
+  compaction,
   dir,
   file,
+  filesystem,
   gitRepo,
   inContainerMountStrategy,
   localDir,
   s3Mount,
+  shell,
   skills,
   type Dir,
   type Entry,
@@ -56,6 +60,23 @@ import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 
 export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
+
+export {
+  planCompaction,
+  buildSummaryItem,
+  buildCompactionMessages,
+  isCompactionSummary,
+  isUserMessage,
+  findKeepBoundary,
+  estimateTokens,
+  estimateItemTokens,
+  compactionSummaryText,
+  renderPrefixTranscript,
+  COMPACTION_SUMMARY_MARKER,
+  SUMMARY_PREFIX,
+  SUMMARY_INSTRUCTIONS,
+} from "./context-compaction";
+export type { CompactionItem, CompactionPlan, PlanCompactionInput } from "./context-compaction";
 
 ensureReadableStreamFrom();
 
@@ -169,12 +190,18 @@ export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrid
   };
 }
 
-export function configureOpenAI(settings: Settings): void {
-  setOpenAIResponsesTransport(settings.openaiResponsesTransport);
+/**
+ * Build an OpenAI client from settings for the configured provider. Mirrors the
+ * client construction in configureOpenAI so a direct API call (the compaction
+ * summarizer) uses the same Azure/OpenAI auth and base URL. Returns null when
+ * the OpenAI-platform path has only a key (the SDK default client is used via
+ * setDefaultOpenAIKey there); the caller then constructs a key-only client.
+ */
+export function buildOpenAIClientFromSettings(settings: Settings): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
-    setDefaultOpenAIClient(new OpenAI({
+    return new OpenAI({
       apiKey,
       baseURL,
       maxRetries: settings.openaiMaxRetries,
@@ -182,19 +209,95 @@ export function configureOpenAI(settings: Settings): void {
       defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
         ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
         : undefined,
-    }));
+    });
+  }
+  return new OpenAI({
+    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
+    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
+    maxRetries: settings.openaiMaxRetries,
+  });
+}
+
+export function configureOpenAI(settings: Settings): void {
+  setOpenAIResponsesTransport(settings.openaiResponsesTransport);
+  if (settings.openaiProvider === "azure") {
+    setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
     return;
   }
   if (settings.openaiApiKey) {
     setDefaultOpenAIKey(settings.openaiApiKey);
   }
   if (settings.openaiBaseUrl) {
-    setDefaultOpenAIClient(new OpenAI({
-      apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
-      baseURL: settings.openaiBaseUrl,
-      maxRetries: settings.openaiMaxRetries,
-    }));
+    setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
   }
+}
+
+/**
+ * Run the compaction summarizer as one plain, tool-less, non-streaming model
+ * call against the configured provider. `system`/`user` come from
+ * buildCompactionMessages. Returns the trimmed summary text, or null on any
+ * failure (the caller treats a failed summarize as "skip compaction this turn"
+ * — never fatal). The call deliberately does NOT request reasoning encryption,
+ * tools, or server-side compaction; it is a self-contained summarize.
+ */
+export async function summarizeForCompaction(
+  settings: Settings,
+  messages: { system: string; user: string },
+  options: { client?: OpenAI; maxOutputTokens?: number; model?: string } = {},
+): Promise<string | null> {
+  const client = options.client ?? buildOpenAIClientFromSettings(settings);
+  const model = options.model ?? settings.openaiModel;
+  try {
+    const response = await client.responses.create({
+      model,
+      ...(settings.openaiProvider === "azure" ? {} : { store: false }),
+      max_output_tokens: options.maxOutputTokens ?? settings.contextSummaryMaxTokens,
+      input: [
+        { role: "system", content: messages.system },
+        { role: "user", content: messages.user },
+      ],
+    } as any);
+    const text = extractResponseOutputText(response);
+    const trimmed = text.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch (error) {
+    console.error("context compaction summarize failed (compaction skipped this turn)", error);
+    return null;
+  }
+}
+
+/** Pull the assistant text out of a Responses API result, shape-tolerant. */
+export function extractResponseOutputText(response: unknown): string {
+  if (!response || typeof response !== "object") {
+    return "";
+  }
+  const direct = (response as { output_text?: unknown }).output_text;
+  if (typeof direct === "string") {
+    return direct;
+  }
+  const output = (response as { output?: unknown }).output;
+  if (!Array.isArray(output)) {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const item of output) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    if ((item as { type?: unknown }).type !== "message") {
+      continue;
+    }
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) {
+      continue;
+    }
+    for (const part of content) {
+      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
+        parts.push((part as { text: string }).text);
+      }
+    }
+  }
+  return parts.join("");
 }
 
 export type BuildAgentOptions = {
@@ -276,6 +379,13 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ].join(" "),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
+      // Server-side compaction (OpenAI platform) requires store=false: the
+      // server emits an opaque ENCRYPTED 'compaction' item that round-trips in
+      // the request rather than being anchored to a stored response. OpenGeni
+      // already runs storeless (provider item ids stripped, encrypted reasoning
+      // round-tripped), so this is consistent with the existing design and
+      // only set where the server compaction capability is attached.
+      ...(resolveContextCompactionMode(settings) === "server" ? { store: false } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
@@ -298,14 +408,38 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ...baseConfig,
     defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
     ...(runAs ? { runAs } : {}),
-    capabilities: [
-      ...Capabilities.default(),
-      skills({ lazyFrom: lazySkillSourceWithPackSkills(options.packSkills ?? []) }),
-    ],
+    capabilities: buildAgentCapabilities(settings, options.packSkills ?? []),
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
   agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources));
   return agent;
+}
+
+/**
+ * Build the SandboxAgent capability set provider-aware.
+ *
+ * The SDK's `Capabilities.default()` force-includes `compaction()`, whose
+ * sampling params emit `context_management:[{type:'compaction', …}]` to the
+ * Responses transport. The OpenAI platform honors that (server-side compaction);
+ * AZURE rejects it with `400 unsupported_parameter` — which is exactly the live
+ * production failure on Azure today. So we MUST NOT attach the compaction
+ * capability on the Azure / client / off paths.
+ *
+ * We rebuild the base set explicitly (`filesystem()`, `shell()`, the same
+ * factories the SDK default uses) and add `compaction()` ONLY on the server
+ * path, with an explicit `StaticCompactionPolicy(threshold)` so gpt-5.5 — which
+ * is absent from the SDK's hardcoded context-window map and would otherwise hit
+ * the wrong 240k fallback — gets the correct threshold. The SDK has no
+ * window-registration API, so an explicit threshold is the only way to fix it.
+ */
+export function buildAgentCapabilities(settings: Settings, packSkills: PackSkill[]): ReturnType<typeof Capabilities.default> {
+  const mode = resolveContextCompactionMode(settings);
+  const caps: ReturnType<typeof Capabilities.default> = [filesystem(), shell()];
+  if (mode === "server") {
+    caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold(settings)) }));
+  }
+  caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
+  return caps;
 }
 
 export function sandboxRunAs(settings: Settings): string | undefined {

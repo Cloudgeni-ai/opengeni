@@ -50,7 +50,7 @@ import type {
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import { reasoningEffortForMetadata } from "@opengeni/contracts";
-import { and, asc, desc, eq, gt, gte, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
@@ -2097,6 +2097,94 @@ export async function getSessionHistoryItems(db: Database, workspaceId: string, 
   });
 }
 
+/**
+ * The LIVE conversation-truth read path: only active rows, position-ordered.
+ * After a client-side context compaction this returns [active summary,
+ * ...active recent tail]; with no compaction yet it equals
+ * getSessionHistoryItems. The model-facing read path uses this so superseded
+ * (summarized-away) prefix rows are excluded while the full transcript stays in
+ * the table as an audit trail.
+ */
+export async function getActiveSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown> }>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select({
+      position: schema.sessionHistoryItems.position,
+      item: schema.sessionHistoryItems.item,
+    }).from(schema.sessionHistoryItems)
+      .where(and(
+        eq(schema.sessionHistoryItems.workspaceId, workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, sessionId),
+        eq(schema.sessionHistoryItems.active, true),
+      ))
+      .orderBy(schema.sessionHistoryItems.position);
+    return rows;
+  });
+}
+
+/**
+ * Apply a client-side context compaction as an atomic, audit-preserving write:
+ *
+ *  - supersede (set active=false) every active row whose position lies in
+ *    [0, boundaryPosition) — i.e. the summarized prefix — EXCLUDING the tail.
+ *    Rows are never deleted.
+ *  - insert ONE active synthetic summary row at `summaryPosition` (a freed
+ *    prefix position that sorts immediately before the kept tail). Idempotent
+ *    on position: a retry that finds the row already there does not duplicate.
+ *
+ * The caller computes the boundary from the orphan-safe planner so no tool-call
+ * pair straddles the cut. `summaryPosition` must be < boundaryPosition (a
+ * position inside the just-superseded prefix), guaranteeing it is free and
+ * sorts before the tail.
+ */
+export async function applyContextCompaction(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  /** Active prefix rows with position < boundaryPosition get superseded. */
+  boundaryPosition: number;
+  /** Position for the new summary row (must be < boundaryPosition). */
+  summaryPosition: number;
+  summaryItem: Record<string, unknown>;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.transaction(async (tx) => {
+      await tx.update(schema.sessionHistoryItems)
+        .set({ active: false })
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          eq(schema.sessionHistoryItems.active, true),
+          lt(schema.sessionHistoryItems.position, input.boundaryPosition),
+        ));
+      await tx.insert(schema.sessionHistoryItems).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId ?? null,
+        position: input.summaryPosition,
+        item: input.summaryItem,
+        active: true,
+      }).onConflictDoUpdate({
+        target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+        set: { item: input.summaryItem, active: true },
+      });
+    });
+  });
+}
+
+/**
+ * Record the actual input-token count of the most recent turn's final model
+ * call, for the next turn's pre-read compaction trigger.
+ */
+export async function setSessionLastInputTokens(db: Database, workspaceId: string, sessionId: string, lastInputTokens: number): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessions)
+      .set({ lastInputTokens, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
 export async function countSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select({
@@ -3075,6 +3163,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     parentSessionId: row.parentSessionId ?? null,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
+    lastInputTokens: row.lastInputTokens ?? null,
     lastSequence: row.lastSequence,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

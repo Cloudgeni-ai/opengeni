@@ -1,9 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   appendSessionEvents,
+  appendSessionHistoryItems,
+  applyContextCompaction,
   bootstrapWorkspace,
   claimNextQueuedTurn,
+  countSessionHistoryItems,
   createDb,
+  getActiveSessionHistoryItems,
+  getSessionHistoryItems,
+  setSessionLastInputTokens,
   createScheduledTask,
   createScheduledTaskRun,
   createApiKey,
@@ -859,6 +865,106 @@ describe("DB integration", () => {
       metadata: { mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 } },
     });
     expect((await listEnabledMcpCapabilityServers(dbClient.db, grant.workspaceId)).some((server) => server.capabilityId === gatedCapabilityId)).toBe(false);
+  });
+
+  test("applyContextCompaction supersedes the prefix, inserts one active summary, and keeps the audit trail", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "compaction",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // 6 items: two old turns [0..3] and a recent turn [4..5]. Boundary at the
+    // recent user message (position 4); summary goes at the freed position 3.
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "old turn 2" } },
+        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        { position: 4, item: { type: "message", role: "user", content: "recent turn" } },
+        { position: 5, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a3" }] } },
+      ],
+    });
+
+    await applyContextCompaction(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      boundaryPosition: 4,
+      summaryPosition: 3,
+      summaryItem: { type: "message", role: "user", content: "[CONTEXT CHECKPOINT] SUMMARY:folded", opengeni_context_summary: true },
+    });
+
+    // Active read = [summary @3, recent user @4, assistant @5].
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active.map((row) => row.position)).toEqual([3, 4, 5]);
+    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
+    expect(active[1]!.item).toMatchObject({ role: "user", content: "recent turn" });
+
+    // Audit trail preserved: superseded prefix rows still exist (positions 0..2)
+    // and total row count grew by exactly one (the summary).
+    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(await countSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toBe(6);
+  });
+
+  test("applyContextCompaction is idempotent on a retry (same summary position)", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "compaction-retry",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "recent" } },
+      ],
+    });
+    const apply = () => applyContextCompaction(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      boundaryPosition: 2,
+      summaryPosition: 1,
+      summaryItem: { type: "message", role: "user", content: "SUMMARY:s", opengeni_context_summary: true },
+    });
+    await apply();
+    await apply(); // retry must not duplicate or throw
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active.map((row) => row.position)).toEqual([1, 2]);
+  });
+
+  test("setSessionLastInputTokens persists the pre-turn compaction signal", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "tokens",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBeNull();
+    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 654_321);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(654_321);
   });
 });
 

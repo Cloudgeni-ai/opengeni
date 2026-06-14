@@ -31,8 +31,10 @@ import {
   getSession,
   getSessionGoal,
   getBillingBalance,
+  getActiveSessionHistoryItems,
   getLatestRunState,
   getSessionHistoryItems,
+  setSessionLastInputTokens,
   listSessions,
   listSessionTurns,
   listUsageEvents,
@@ -54,6 +56,7 @@ import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
 import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
+import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
 describe("worker activities integration", () => {
@@ -2748,6 +2751,148 @@ describe("worker activities integration", () => {
     expect((await listSessionTurns(dbClient.db, grant.workspaceId, manager.id, 10))).toHaveLength(1);
     const workerEventsAfter = (await listSessionEvents(dbClient.db, grant.workspaceId, worker.id, 0, 200)).length;
     expect(workerEventsAfter).toBe(workerEventsBefore);
+  });
+
+  test("maybeCompactContext compacts an over-budget Azure session into [summary, ...recent tail]", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "long session",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // Two old turns with a tool-call pair each, then one recent turn. Positions
+    // are absolute and contiguous.
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
+        { position: 1, item: { type: "function_call", callId: "c0", name: "shell", arguments: "{}" } },
+        { position: 2, item: { type: "function_call_result", callId: "c0", status: "completed", output: "ok0" } },
+        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 4, item: { type: "message", role: "user", content: "old turn 2" } },
+        { position: 5, item: { type: "function_call", callId: "c1", name: "shell", arguments: "{}" } },
+        { position: 6, item: { type: "function_call_result", callId: "c1", status: "completed", output: "ok1" } },
+        { position: 7, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        { position: 8, item: { type: "message", role: "user", content: "recent turn" } },
+        { position: 9, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a3" }] } },
+      ],
+    });
+
+    // Azure provider -> client mode. Force a tiny keep budget so only the recent
+    // turn (positions 8..9) is kept verbatim, and a last-turn token count above
+    // the soft threshold so the trigger fires.
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      sessionHistorySource: "items",
+      openaiProvider: "azure",
+      contextCompactionMode: "auto",
+      contextWindowTokens: 1000,
+      contextReservedOutputTokens: 0,
+      contextCompactSoftFraction: 0.5,
+      contextKeepRecentTokens: 40,
+    });
+
+    let summarizerCalls = 0;
+    const result = await maybeCompactContext(
+      dbClient.db,
+      settings,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+      900, // last-turn input tokens, well above soft = 500
+      async (_s, messages) => {
+        summarizerCalls += 1;
+        // The summarizer sees the OLD prefix, not the recent tail.
+        expect(messages.user).toContain("old turn 1");
+        expect(messages.user).toContain("old turn 2");
+        expect(messages.user).not.toContain("recent turn");
+        return "objective: ship; blocker: none; next: continue. Durable facts are in the notebook (pointers only).";
+      },
+    );
+
+    expect(summarizerCalls).toBe(1);
+    expect(result.compacted).toBe(true);
+
+    // Active read path now returns [summary, recent user, recent assistant], and
+    // it is orphan-clean (no stray tool result without its call).
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    const types = active.map((row) => (row.item as Record<string, unknown>).type);
+    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
+    expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c0")).toBe(false);
+    expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c1")).toBe(false);
+    expect(active.at(-1)!.item).toMatchObject({ role: "assistant" });
+    expect(types).not.toContain("function_call_result");
+
+    // Audit trail intact: superseded rows still present.
+    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(all.length).toBeGreaterThanOrEqual(10);
+  });
+
+  test("maybeCompactContext is a no-op on the OpenAI platform (server path owns compaction there)", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "server-mode",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "u" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a" }] } },
+      ],
+    });
+    let called = false;
+    const result = await maybeCompactContext(
+      dbClient.db,
+      testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", openaiProvider: "openai", contextCompactionMode: "auto" }),
+      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+      9_000_000,
+      async () => { called = true; return "x"; },
+    );
+    expect(result).toEqual({ compacted: false, reason: "mode_not_client" });
+    expect(called).toBe(false);
+  });
+
+  test("maybeCompactContext skips (no write) when the summarizer fails", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "summarize-fail",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "recent" } },
+        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+      ],
+    });
+    const result = await maybeCompactContext(
+      dbClient.db,
+      testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", openaiProvider: "azure", contextCompactionMode: "client", contextWindowTokens: 1000, contextReservedOutputTokens: 0, contextCompactSoftFraction: 0.5, contextKeepRecentTokens: 30 }),
+      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+      900,
+      async () => null, // model call failed
+    );
+    expect(result).toEqual({ compacted: false, reason: "summarize_failed" });
+    // No summary row written; all original rows stay active.
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active.map((row) => row.position)).toEqual([0, 1, 2, 3]);
+    expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary)).toBe(false);
   });
 });
 
