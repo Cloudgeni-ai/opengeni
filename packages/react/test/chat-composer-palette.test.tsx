@@ -161,4 +161,55 @@ describe("ChatComposer slash palette", () => {
     expect(cleared).toBe(1);
     expect(container.textContent ?? "").toMatch(/local view cleared/i);
   });
+
+  // Regression (adversarial review): typing the canonical `/clear` (no trailing
+  // space) + Enter resolves to the DESTRUCTIVE server-side `clear` command
+  // (runHighlighted prefers the exact name match over the highlighted near-
+  // match). The confirm bar previously re-derived its command from
+  // palette.items[palette.highlight], which is `clear-view` (it prefix-matches
+  // "clear" and sorts first) — so it reassured the operator "this device only;
+  // no server change" right before wiping the server context. The bar must name
+  // the command actually about to run.
+  function ClearConfirmHarness() {
+    const [value, setValue] = useState("/clear");
+    return <ChatComposer composer={makeComposer(value, setValue)} commandContext={ctx} />;
+  }
+
+  test("/clear + Enter shows a confirm bar for the destructive /clear, not /clear-view", async () => {
+    const container = await mount(<ClearConfirmHarness />);
+    // Sanity: before Enter the palette lists clear-view FIRST (the near-match
+    // that used to leak into the confirm bar) — clear-view prefix-matches
+    // "clear" and is declared earlier than the destructive clear.
+    const optionText = [...container.querySelectorAll('[role="option"]')].map((el) => el.textContent ?? "");
+    expect(optionText[0]).toContain("/clear-view");
+    expect(optionText.some((t) => t.includes("/clear") && t.toLowerCase().includes("danger"))).toBe(true);
+
+    await pressEnterOnTextarea(container);
+
+    // runHighlighted resolves the typed "/clear" to the DESTRUCTIVE clear (exact
+    // name match beats the highlighted clear-view), so the danger confirm bar
+    // must render from THAT command. Scope assertions to the confirm bar itself
+    // (the palette listbox may still be animating out and would otherwise leak
+    // its clear-view copy into a whole-container textContent check).
+    const confirmBar = container.querySelector('[data-testid="danger-confirm"]');
+    expect(confirmBar).not.toBeNull();
+    const barText = confirmBar?.textContent ?? "";
+    // Names the destructive command and its real (destructive) description...
+    expect(barText).toContain("/clear?");
+    expect(barText.toLowerCase()).toContain("destructive");
+    // ...and never the harmless clear-view copy that mislabeled it.
+    expect(barText).not.toContain("/clear-view");
+    expect(barText.toLowerCase()).not.toContain("this device only");
+    expect(barText.toLowerCase()).not.toContain("no server change");
+    expect(confirmBar?.getAttribute("aria-label")).toBe("Confirm /clear");
+
+    // Cancel to settle the pending confirm() promise (clear.run awaits it), so
+    // unmount in afterEach is clean and no run is left dangling.
+    const cancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel");
+    await act(async () => {
+      cancel?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
 });
