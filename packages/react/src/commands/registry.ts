@@ -189,7 +189,9 @@ export const defaultCommands: readonly SlashCommand[] = [
       const sessionId = requireSession(ctx);
       const confirmed = await ctx.confirm();
       if (!confirmed) {
-        return { status: "ok" };
+        // Canceled: no error, but keep the "/clear" draft so the operator who
+        // backed out doesn't silently lose what they typed.
+        return { status: "ok", keepDraft: true };
       }
       try {
         await ctx.client.clearSessionContext(ctx.workspaceId, sessionId);

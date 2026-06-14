@@ -146,6 +146,12 @@ export function ChatComposer({
 
   const paletteEnabled = commandContext !== undefined;
 
+  // A slash-command draft must never be delivered to the agent as chat — it is
+  // an operator control, not a message. The palette consumes Enter while open,
+  // but after Escape the popover is closed yet the draft still matches a command;
+  // block the send path (here and on the send button) so "/clear" can't be sent.
+  const commandDraftBlocked = paletteEnabled && palette.isCommandDraft;
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     // Palette key handling runs FIRST and only when the palette is open; when
     // closed it returns false and the existing send path is untouched.
@@ -154,6 +160,12 @@ export function ChatComposer({
     }
     if (shouldSubmitOnKey(event)) {
       event.preventDefault();
+      if (commandDraftBlocked) {
+        // Dismissed palette + a "/command" draft: don't send it as chat. Nudge
+        // the operator to re-open the palette (any edit re-opens it) or clear it.
+        setNotice({ tone: "error", message: "That's a slash command — press Enter in the command list to run it, or edit the line to send a message." });
+        return;
+      }
       void composer.send();
     }
   };
@@ -269,7 +281,7 @@ export function ChatComposer({
                 <button
                   type="button"
                   onClick={() => void composer.send()}
-                  disabled={!composer.canSend || disabled === true}
+                  disabled={!composer.canSend || disabled === true || commandDraftBlocked}
                   aria-label="Send message"
                   className={cn(
                     "inline-flex size-8 items-center justify-center rounded-og-md",

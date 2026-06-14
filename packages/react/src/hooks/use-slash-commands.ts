@@ -48,6 +48,12 @@ export type UseSlashCommandsOptions = {
 export type UseSlashCommandsResult = {
   /** Whether the palette is open (a command token is being typed). */
   open: boolean;
+  /**
+   * Whether the draft is a slash-command attempt (matches a registered command)
+   * — true even after Escape dismisses the popover. The composer blocks its send
+   * path while this holds so a command can't be delivered to the agent as chat.
+   */
+  isCommandDraft: boolean;
   /** Commands shown for the current token + context, in display order. */
   items: SlashCommand[];
   /** Index into `items` of the highlighted row. */
@@ -125,6 +131,13 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
 
   const open = parsed !== null && items.length > 0 && !dismissed;
 
+  // Whether the current draft is a slash-command ATTEMPT that should be run via
+  // the palette, never delivered to the agent as plain chat. True even when the
+  // palette is dismissed (Escape) — the draft still starts with "/" and matches
+  // a command, so the composer must block its send path (button + Enter) to keep
+  // commands from leaking into the conversation as messages the model reads.
+  const isCommandDraft = parsed !== null && items.length > 0;
+
   // Keep highlight in range as items change.
   const clampedHighlight = items.length === 0 ? 0 : Math.min(highlight, items.length - 1);
 
@@ -156,7 +169,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
         if (result.message) {
           ctx.notice({ tone: result.status === "ok" ? "ok" : "error", message: result.message });
         }
-        if (result.status === "ok") {
+        if (result.status === "ok" && !result.keepDraft) {
           setValue("");
         }
       } catch (cause) {
@@ -192,19 +205,25 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
         return;
       }
       const explicit = options?.explicit ?? false;
+      // Token-vs-command equality is case-insensitive (matching the registry's
+      // matchCommand/filterCommands), so a fully-typed "/Clear" counts as having
+      // named `clear` and runs rather than autocompleting.
+      const nameMatchesToken =
+        command.name === parsed.name.toLowerCase() ||
+        (command.aliases?.includes(parsed.name.toLowerCase()) ?? false);
       // A name-only token whose name doesn't yet equal the resolved command (e.g.
       // "/cl" -> clear) first autocompletes so the operator sees the full name.
       // An EXPLICIT pointer click skips this: the operator already chose the row,
       // so clicking "/clear-view" (while the token is "clear") runs it outright
       // rather than merely filling the name and waiting for a second Enter.
-      if (!explicit && !activeCommand && command.name !== parsed.name && !parsed.hasTrailingSpace) {
+      if (!explicit && !activeCommand && !nameMatchesToken && !parsed.hasTrailingSpace) {
         autocomplete(command);
         return;
       }
       // When the click resolves a different command than the typed token, the
       // typed token's tail isn't this command's args — run with no positional
       // args and let the required-arg guard below prompt for them via autocomplete.
-      const args = command.name === parsed.name || parsed.hasTrailingSpace ? parsed.args : [];
+      const args = nameMatchesToken || parsed.hasTrailingSpace ? parsed.args : [];
       const missing = firstMissingRequiredArg(command, args);
       if (missing) {
         // A required arg is absent: keep the palette open at the arg hint rather
@@ -239,7 +258,11 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     // the filtered list), Enter should run THAT command, not autocomplete the
     // highlighted near-match. Exact match wins over the highlight; otherwise use
     // the highlighted row. A pointer click goes through runAt, never here.
-    const exact = items.find((item) => item.name === parsed.name || item.aliases?.includes(parsed.name));
+    // Compare case-insensitively, matching filterCommands/matchCommand, so a
+    // fully-typed "/Clear" still resolves to the exact (destructive) clear
+    // rather than the highlighted prefix near-match.
+    const token = parsed.name.toLowerCase();
+    const exact = items.find((item) => item.name === token || item.aliases?.includes(token));
     const command = activeCommand ?? exact ?? items[clampedHighlight];
     if (!command) {
       return;
@@ -322,6 +345,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
 
   return {
     open,
+    isCommandDraft,
     items,
     highlight: clampedHighlight,
     setHighlight,

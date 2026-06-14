@@ -294,4 +294,64 @@ describe("ChatComposer slash palette", () => {
       await Promise.resolve();
     });
   });
+
+  // Regression (adversarial review): a slash-command draft must never reach the
+  // agent as chat. After the palette is dismissed (Escape) the popover is gone
+  // but the draft still matches a command, so the composer must block the Enter
+  // send path and nudge instead of delivering "/help" as a message. Uses /help
+  // (no danger confirm) so the dismissed-then-Enter path has nothing pending.
+  test("Enter on a dismissed /command draft is blocked from sending (nudges instead)", async () => {
+    let sent = 0;
+    const SendBlockHarness = () => {
+      const [value, setValue] = useState("/help");
+      return (
+        <ChatComposer
+          composer={makeComposer(value, setValue, { send: async () => { sent += 1; return true; } })}
+          commandContext={ctx}
+        />
+      );
+    };
+    const container = await mount(<SendBlockHarness />);
+    const textarea = container.querySelector("textarea")!;
+    // Dismiss the palette with Escape (palette consumes the key), then Enter.
+    await act(async () => {
+      textarea.focus();
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The "/help" draft was NOT delivered to the agent; a nudge explains why.
+    expect(sent).toBe(0);
+    expect((container.textContent ?? "").toLowerCase()).toContain("slash command");
+  });
+
+  test("the send button is disabled while the draft is a slash command", async () => {
+    const container = await mount(
+      <ChatComposer composer={makeComposer("/clear", () => {})} commandContext={ctx} />,
+    );
+    const sendButton = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === "Send message",
+    ) as HTMLButtonElement | undefined;
+    expect(sendButton).toBeTruthy();
+    expect(sendButton!.disabled).toBe(true);
+  });
+
+  test("plain chat still sends (the command-draft guard doesn't block messages)", async () => {
+    let sent = 0;
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer("hello there", () => {}, { send: async () => { sent += 1; return true; } })}
+        commandContext={ctx}
+      />,
+    );
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      textarea.focus();
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(sent).toBe(1);
+  });
 });

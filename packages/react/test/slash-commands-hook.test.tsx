@@ -279,6 +279,65 @@ describe("useSlashCommands", () => {
     await h.unmount();
   });
 
+  test("a fully-typed /Clear (mixed case) Enter resolves to the exact destructive clear", async () => {
+    // The exact-match override lowercases the token (like matchCommand), so the
+    // canonical destructive command wins over the highlighted prefix near-match
+    // even when the operator typed it with different casing.
+    let cleared = false;
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+    };
+    const h = await setup({ initialValue: "/Clear", context: ctx, confirmAnswer: true });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+    expect(cleared).toBe(true);
+    await h.unmount();
+  });
+
+  test("canceling the /clear confirm keeps the draft (does not wipe '/clear')", async () => {
+    let cleared = false;
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+    };
+    const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: false });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+    expect(cleared).toBe(false);
+    // The draft survives the cancel — the operator didn't lose what they typed.
+    expect(h.result.current.value).toBe("/clear");
+    await h.unmount();
+  });
+
+  test("isCommandDraft stays true after Escape dismisses the palette", async () => {
+    const h = await setup({ initialValue: "/clear", context: sessionCtx });
+    expect(h.result.current.command.isCommandDraft).toBe(true);
+    expect(h.result.current.command.open).toBe(true);
+    h.result.current.command.onKeyDown(keyEvent({ key: "Escape" }));
+    await h.rerender();
+    // Popover closed, but the draft is still a command — the composer uses this
+    // to keep "/clear" from being sent to the agent as chat.
+    expect(h.result.current.command.open).toBe(false);
+    expect(h.result.current.command.isCommandDraft).toBe(true);
+    await h.unmount();
+  });
+
+  test("isCommandDraft is false for plain chat and for an unrecognized slash token", async () => {
+    const chat = await setup({ initialValue: "hello", context: sessionCtx });
+    expect(chat.result.current.command.isCommandDraft).toBe(false);
+    await chat.unmount();
+    const unknown = await setup({ initialValue: "/zzzznotacommand", context: sessionCtx });
+    expect(unknown.result.current.command.isCommandDraft).toBe(false);
+    await unknown.unmount();
+  });
+
   test("runAt out of range is a no-op", async () => {
     const h = await setup({ initialValue: "/clear", context: sessionCtx });
     await h.result.current.command.runAt(999);
