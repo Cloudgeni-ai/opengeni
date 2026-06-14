@@ -439,9 +439,17 @@ export class OpenGeniClient {
     return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/resume`);
   }
 
-  /** Fire the task immediately (manual trigger), independent of its schedule. */
-  async triggerScheduledTask(workspaceId: string, taskId: string): Promise<ScheduledTask> {
-    return await this.requestJson<ScheduledTask>("POST", `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/trigger`);
+  /**
+   * Fire the task immediately (manual trigger), independent of its schedule.
+   * Pass a stable `triggerId` to make a retried trigger idempotent — the same
+   * token charges once and starts one run. Omit it and each call is distinct.
+   */
+  async triggerScheduledTask(workspaceId: string, taskId: string, options: { triggerId?: string } = {}): Promise<ScheduledTask> {
+    return await this.requestJson<ScheduledTask>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/trigger`,
+      options.triggerId ? { triggerId: options.triggerId } : undefined,
+    );
   }
 
   async deleteScheduledTask(workspaceId: string, taskId: string): Promise<void> {

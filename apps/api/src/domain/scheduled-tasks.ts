@@ -219,6 +219,47 @@ export function scheduledTaskTemporalScheduleId(taskId: string): string {
   return `scheduled-task-${taskId}`;
 }
 
+/**
+ * Stable token that identifies a single logical manual trigger. A client that
+ * retries a `/trigger` POST (network blip, lambda re-invocation) passes the
+ * SAME token so the retry is idempotent — one usage charge, one workflow run.
+ * When the client supplies nothing we mint one UUID PER REQUEST and reuse it
+ * for both the idempotency key and the workflowId, so a single request stays
+ * internally consistent while two genuinely-distinct manual triggers (no token,
+ * fired a second apart) still each get their own run. The token is sanitized to
+ * the Temporal workflow-id-safe charset so a client value cannot smuggle a
+ * collision into a different task's id space.
+ */
+export function scheduledTaskTriggerToken(clientTriggerId?: string | null): string {
+  const trimmed = (clientTriggerId ?? "").trim();
+  if (!trimmed) {
+    return crypto.randomUUID();
+  }
+  const safe = trimmed.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
+  // A value that sanitizes to empty (only disallowed chars) is unusable as a
+  // stable id; fall back to a fresh token rather than collapse to a constant.
+  return safe.length > 0 ? safe : crypto.randomUUID();
+}
+
+/**
+ * Deterministic Temporal workflow id for a manual trigger. Derived purely from
+ * the task id and the stable trigger token, so a retry with the same token maps
+ * to the same id and `workflowIdReusePolicy: "REJECT_DUPLICATE"` collapses the
+ * second start into a no-op instead of spawning a second run.
+ */
+export function manualScheduledTaskTriggerWorkflowId(taskId: string, triggerToken: string): string {
+  return `scheduled-task-${taskId}-manual-${triggerToken}`;
+}
+
+/**
+ * Deterministic usage idempotency key for a manual trigger's agent_run.created
+ * charge. Shares the stable trigger token with the workflow id so the charge
+ * and the run dedupe together under retry.
+ */
+export function manualScheduledTaskTriggerUsageKey(workspaceId: string, taskId: string, triggerToken: string): string {
+  return `agent_run.created:scheduled-trigger:${workspaceId}:${taskId}:${triggerToken}`;
+}
+
 async function validateScheduledTaskAgentConfig(input: {
   settings: Settings;
   db: Database;

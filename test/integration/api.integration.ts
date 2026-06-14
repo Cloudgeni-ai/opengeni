@@ -1728,6 +1728,100 @@ describe("API component integration", () => {
     expect((await listed.json() as Array<{ id: string }>).some((item) => item.id === task.id)).toBe(true);
   });
 
+  test("a retried manual trigger (same triggerId) charges once and starts one run", async () => {
+    const workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        name: "idempotent",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "inspect", resources: [], tools: [] },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(created.status).toBe(201);
+    const task = await created.json() as { id: string };
+
+    const triggerWith = async (triggerId: string) =>
+      await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), {
+        method: "POST",
+        body: JSON.stringify({ triggerId }),
+        headers: { "content-type": "application/json" },
+      });
+
+    // The client retries the SAME logical trigger (a network blip re-POSTs with
+    // the same idempotency token). Both reach the handler.
+    const first = await triggerWith("retry-token-1");
+    const second = await triggerWith("retry-token-1");
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+
+    // Both calls derive the SAME usage idempotency key AND the SAME workflowId
+    // from the shared token, so the charge dedupes and the duplicate workflow
+    // start collapses (deterministic id + REJECT_DUPLICATE at the worker).
+    const triggers = workflow.triggers as Array<{ agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }>;
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0]?.agentRunUsageIdempotencyKey).toBe(triggers[1]?.agentRunUsageIdempotencyKey);
+    expect(triggers[0]?.triggerWorkflowId).toBe(triggers[1]?.triggerWorkflowId);
+    expect(triggers[0]?.agentRunUsageIdempotencyKey).toContain("retry-token-1");
+    expect(triggers[0]?.triggerWorkflowId).toContain("retry-token-1");
+
+    // Exactly ONE agent_run.created usage row exists for this token despite two
+    // POSTs (idempotency-key dedup in recordWorkspaceUsage).
+    const usage = await listUsageEvents(dbClient.db, { accountId: (await getScheduledTask(dbClient.db, workspaceId, task.id))!.accountId, workspaceId });
+    const charged = usage.filter((event) => event.idempotencyKey === triggers[0]?.agentRunUsageIdempotencyKey);
+    expect(charged).toHaveLength(1);
+
+    // A DIFFERENT token is a genuinely distinct trigger: new key, new run, a
+    // second charge.
+    const third = await triggerWith("retry-token-2");
+    expect(third.status).toBe(202);
+    const allTriggers = workflow.triggers as Array<{ agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }>;
+    expect(allTriggers[2]?.agentRunUsageIdempotencyKey).not.toBe(triggers[0]?.agentRunUsageIdempotencyKey);
+    expect(allTriggers[2]?.triggerWorkflowId).not.toBe(triggers[0]?.triggerWorkflowId);
+  });
+
+  test("a manual trigger without a triggerId stays a distinct run each time", async () => {
+    const workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      body: JSON.stringify({
+        name: "anon-trigger",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: { prompt: "inspect", resources: [], tools: [] },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const task = await created.json() as { id: string };
+
+    // A bare POST (no body) is still a valid, distinct trigger.
+    const a = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
+    const b = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`), { method: "POST" });
+    expect(a.status).toBe(202);
+    expect(b.status).toBe(202);
+    const triggers = workflow.triggers as Array<{ agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }>;
+    expect(triggers[0]?.agentRunUsageIdempotencyKey).not.toBe(triggers[1]?.agentRunUsageIdempotencyKey);
+    expect(triggers[0]?.triggerWorkflowId).not.toBe(triggers[1]?.triggerWorkflowId);
+  });
+
   test("does not record manual scheduled trigger usage when workflow start fails", async () => {
     workflow = new FakeWorkflowClient();
     workflow.triggerError = new Error("temporal trigger unavailable");

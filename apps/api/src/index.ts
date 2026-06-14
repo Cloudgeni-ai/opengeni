@@ -3,9 +3,19 @@ import type { ScheduledTask, ScheduledTaskOverlapPolicy, ScheduledTaskScheduleSp
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
-import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
+import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+
+/**
+ * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
+ * same manual trigger token fires twice. Temporal surfaces that as
+ * WorkflowExecutionAlreadyStartedError; the caller treats it as an idempotent
+ * no-op rather than a failure.
+ */
+function isWorkflowAlreadyStarted(error: unknown): boolean {
+  return error instanceof WorkflowExecutionAlreadyStartedError;
+}
 
 const TEMPORAL_MONTHS = [
   "JANUARY",
@@ -80,18 +90,33 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
       await temporal.schedule.getHandle(temporalScheduleId).delete().catch(() => undefined);
     },
-	    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey }) => {
-	      await temporal.workflow.start("scheduledTaskFireWorkflow", {
-        taskQueue: settings.temporalTaskQueue,
-        workflowId: `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`,
-        args: [{
-          accountId: task.accountId,
-	          workspaceId: task.workspaceId,
-	          taskId: task.id,
-	          triggerType: "manual",
-	          agentRunUsageIdempotencyKey,
-	        }],
-	      });
+	    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
+	      // Deterministic workflowId (derived from the trigger token by the
+	      // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
+	      // the second start collides on the id and is rejected instead of
+	      // spawning a second run. The shared idempotency key dedupes the charge.
+	      const workflowId = triggerWorkflowId ?? `scheduled-task-${task.id}-manual-${crypto.randomUUID()}`;
+	      try {
+	        await temporal.workflow.start("scheduledTaskFireWorkflow", {
+	          taskQueue: settings.temporalTaskQueue,
+	          workflowId,
+	          workflowIdReusePolicy: "REJECT_DUPLICATE",
+	          args: [{
+	            accountId: task.accountId,
+	            workspaceId: task.workspaceId,
+	            taskId: task.id,
+	            triggerType: "manual",
+	            agentRunUsageIdempotencyKey,
+	          }],
+	        });
+	      } catch (error) {
+	        // A duplicate trigger token started this run already; treat the retry
+	        // as a no-op so the (idempotent) usage charge stays the only effect.
+	        if (isWorkflowAlreadyStarted(error)) {
+	          return;
+	        }
+	        throw error;
+	      }
 	    },
   };
   const documentIndexer: DocumentIndexClient = {

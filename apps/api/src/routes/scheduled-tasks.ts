@@ -1,4 +1,4 @@
-import { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/contracts";
+import { CreateScheduledTaskRequest, TriggerScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/contracts";
 import {
   deleteScheduledTask,
   listScheduledTaskRuns,
@@ -11,7 +11,10 @@ import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   createValidatedScheduledTask,
+  manualScheduledTaskTriggerUsageKey,
+  manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
+  scheduledTaskTriggerToken,
   requireScheduledTaskForApi,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
@@ -81,8 +84,14 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
     await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
-    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${workspaceId}:${task.id}:${crypto.randomUUID()}`;
-    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
+    // Body is optional (a bare POST is still a valid trigger); only a present,
+    // non-empty body must parse against the contract.
+    const body = await c.req.json().catch(() => ({}));
+    const { triggerId } = TriggerScheduledTaskRequest.parse(body ?? {});
+    const triggerToken = scheduledTaskTriggerToken(triggerId);
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(workspaceId, task.id, triggerToken);
+    const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
+    await workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey, triggerWorkflowId });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,
       workspaceId,
