@@ -132,16 +132,91 @@ That is the entire platform path. No DB writes, no synthetic summary, no
 This is the substantive new machinery. It runs **pre-turn**, before the model
 call, when the resolved mode is `client`.
 
-### Trigger
+### Trigger (self-heal: `max(recorded, estimate)`)
 
-The signal is the **last turn's actual `inputTokens`** (recorded on
-`sessions.last_input_tokens` at the end of each turn from the response usage —
-see `agent-turn.ts` `setSessionLastInputTokens`). When that is unavailable (a
-brand-new session), the planner falls back to a char/4 estimate over the active
-items. Compaction fires when the signal reaches `softFraction × B`
-(≈ 645k with defaults); `hardFraction × B` (≈ 784k) is the hard-force point.
-Both are config-driven; in the current planner both simply mean "compact now"
-(the distinction exists for logging/tuning headroom).
+The trigger signal is
+**`signalTokens = max(recorded last-turn input tokens, char/4 estimate of the
+active items)`** — see `planCompaction` in `context-compaction.ts`. Compaction
+fires when `signalTokens ≥ softFraction × B` (≈ 645,400 with defaults);
+`hardFraction × B` (≈ 783,700 = `floor(922,000 × 0.85)`) is the hard-force point
+(see below — it now has distinct behavior).
+
+The **`max`** matters and is a deliberate self-heal fix. `sessions.last_input_tokens`
+is written **only** when a model response reports usage (`agent-turn.ts`,
+guarded by `lastInputTokensObserved !== null` at the end of a turn). A turn that
+**overflows on its first model call observes no usage at all**, so the column
+keeps a **stale-positive** value from the last good turn (e.g. ~600k). The old
+planner *trusted* that recorded count whenever it was positive and only
+estimated from the real history when it was null — so a stale-low 600k slipped
+under the 645k soft limit, no compaction ran, the actually-over-budget history
+(>1.05M) was sent, and the turn overflowed **again**: a permanent re-brick with
+no self-heal. Reachable in practice (e.g. a manager paging a worker's large
+event stream balloons the history in one turn). Taking the **max** of the
+recorded count and a fresh estimate of the *actual* active items means a bloated
+history triggers compaction **regardless** of a stale recorded count, so the
+session self-heals on the very next turn.
+
+A brand-new session (no recorded count, small history) simply has a small
+estimate and does not compact — same outcome as before.
+
+### Hard-force backstop (`hardFraction × B`)
+
+`hardFraction` is **no longer informational** — it drives a distinct, more
+aggressive path. When `signalTokens ≥ hardFraction × B` the plan is marked
+`hardForced` and the boundary walk runs with a **shrunk keep-recent budget**:
+
+```
+effectiveKeepRecent = hardForced
+  ? min( floor(keepRecentTokens / 2), floor(B / 4) )
+  : keepRecentTokens
+```
+
+Why: the soft path keeps the full `contextKeepRecentTokens` (32k) tail verbatim.
+But under hard pressure — especially when the recorded count was stale-low and
+the *history itself* is over the window — a history whose entire tail still
+reads as "recent" (fits within `keepRecentTokens`) would find **no prefix to
+summarize** and strand the session over budget (the everything-is-recent
+deadlock). Shrinking the tail under hard pressure forces the boundary walk to
+leave a non-empty, summarizable prefix, so an over-budget history **always**
+yields a real compaction. The structural guards still apply: a hard-force never
+invents a cut that orphans a tool-call pair or summarizes an empty prefix.
+
+`maybeCompactContext` logs a `context compaction HARD-FORCED …` line and the
+emitted `session.context.compacted` event carries `trigger: "hard"` (vs
+`"operator"` for a `/compact`, vs unset for a normal soft compaction), so the
+hard path is observable.
+
+### Read-path budget guard (the airbag — last-resort backstop)
+
+Pre-turn compaction is **best-effort**: it can no-op (the summarizer model call
+fails, `client` mode is off, or a fresh user message arrives *after* a turn
+already ballooned the history) and still leave an assembled input that exceeds
+the window. The #61 orphan sanitizer is purely **structural** — it has no size
+awareness — so without a size backstop an over-budget input would be put on the
+wire and 400 every turn, re-bricking the session.
+
+`enforceInputBudget` (in `context-compaction.ts`) is that backstop. It runs at
+**input-assembly time** in `prepareRunInput` (`packages/runtime/src/index.ts`,
+via `guardAssembledInput`) and drops the **oldest** history at a clean turn
+boundary until the estimated request fits `B`, **always** keeping the most
+recent turn(s). It is:
+
+- **Orphan-safe by construction** — it only ever cuts at the start of a user
+  message (via `findKeepBoundary`), so no tool-call pair is split; a boundary of
+  0 (no earlier safe cut) leaves the input unchanged rather than orphaning a pair.
+- **Whole-request aware** — the trailing user/continuation message and fixed
+  system/tool overhead are counted (`trailingTokens`) so the cap is measured
+  against the *whole* request, not just the stored history.
+- **A crude data-loss fallback** — it generates **no** summary; real context
+  preservation is the summarizing pre-turn path. This is the airbag, not the
+  seatbelt. When it trims it logs
+  `read-path budget guard trimmed N oldest history item(s) … the over-budget
+  input was NOT sent`.
+
+It is wired **only on the Azure client path** (`readPathBudgetTokens` returns a
+budget only when `resolveContextCompactionMode(settings) === "client"`); on the
+server path the SDK enforces the window. So in production (Azure) a single
+over-budget assembled input can never reach the model.
 
 ### Boundary rule (orphan safety — critical)
 
@@ -309,12 +384,26 @@ SELECT id, last_input_tokens FROM sessions WHERE last_input_tokens IS NOT NULL;
   summarized prefix is **superseded not deleted** (the audit rows remain), that
   exactly one summary row exists, that no real row is overwritten, and that the
   summary is recorded under the current turn so per-turn counts stay correct.
-- **Deploy state (re-read live):** staging `/healthz` reports
-  `deploymentRevision = 0b8f8c08…`, `ok: true`. Staging and production AKS
-  `opengeni-api`/`-web`/`-worker` deployments all run the
-  `…-0b8f8c08a61b9cb3bff950effdb0a1e7c360bdce-…` image. The schema migration is
-  applied on the staging DB (verified live: `session_history_items.position` is
-  `numeric`, `.active` is `boolean`, `sessions.last_input_tokens` exists).
+- **Self-heal + hard-force (PR #69):** the `max(recorded, estimate)` trigger and
+  the hard-force / read-path-guard backstops were added in PR #69
+  (`cc17837`). Their unit coverage lives in
+  `packages/runtime/test/context-compaction.test.ts` and proves the two
+  regressions this doc calls out: a **stale-positive `last_input_tokens` + an
+  over-budget history MUST compact** (the `max` defeats the stale-low count), and
+  a **post-overflow session self-heals on the next turn**; plus the hard-force
+  shrunk-tail prefix guarantee and `enforceInputBudget`'s orphan-safe oldest-drop.
+- **Deploy state (re-read live 2026-06-14):** staging **and** production
+  `/healthz` both report
+  `deploymentRevision = 21315832b6cd92ec78ea6da677eb3b766a943d66`, `ok: true` —
+  the HEAD of `origin/main`, which includes PR #69 (self-heal + hard-force), #68
+  (session-read byte cap), and #70 (interrupt fix). The full ops pipeline
+  (Build Staging Artifacts → Deploy Staging → Promote Production Artifacts →
+  Deploy Production) ran green at 12:39–12:57Z on 2026-06-14, all after the
+  merges. (The staging DB is a **private** Azure endpoint not reachable from the
+  authoring environment, and no AKS/Azure credentials were available to spin up
+  an in-cluster probe pod, so a direct readback of `session_history_items`
+  column types / live summary rows was **not** re-performed in this pass — see
+  residual gaps.)
 - **Earlier live proof (point-in-time, from the shipping run):** a real Azure
   staging session exercised the deployed client-side path and cut model input
   ~377k → ~29k tokens (~92%), creating a summary, superseding (not deleting) the
@@ -323,22 +412,25 @@ SELECT id, last_input_tokens FROM sessions WHERE last_input_tokens IS NOT NULL;
 
 ## Residual gaps and caveats (read this)
 
-- **No live compaction event is currently re-confirmable on staging.** At the
-  time of writing, a fresh staging DB read shows **0** superseded rows, **0**
-  summary items, **0** fractional positions, and **0** sessions with
-  `last_input_tokens` set — because the latest session activity on staging
-  (≈ 07:22Z) predates the #62 deploy (≈ 08:31Z): **no agent turn has run through
-  the new code path on staging since it went live**, and the earlier 377k→29k
-  test session's rows are no longer present (cleaned). The schema is live and the
-  logic is proven by the integration test against a real DB, but the specific
-  "it fired in production traffic" claim rests on the earlier point-in-time run,
-  not on a current readback. The first long staging/prod session to cross the
-  soft threshold will be the live confirmation; watch for `session.context.compacted`
-  events and superseded rows.
-- **`hardFraction` is currently informational.** Soft and hard thresholds both
-  resolve to "compact now" in the planner; there is no distinct hard-force
-  behavior (e.g. a more aggressive tail trim) yet. If a single turn's growth ever
-  outpaces the soft trigger, this is where to add it.
+- **No live compaction *firing* has been re-confirmed by a current DB readback.**
+  The deployed revision is confirmed live (staging+prod `/healthz` = `21315832`),
+  the trigger column `sessions.last_input_tokens` is written by the deployed
+  worker, and the `session.context.compacted` event type is in the contract and
+  emitted by `agent-turn.ts`. But the staging DB is a **private Azure endpoint**
+  and this authoring pass had **no AKS/Azure credentials** to open an in-cluster
+  `psql` probe, so the "a real session crossed the soft threshold and produced a
+  summary row" claim still rests on the **earlier point-in-time shipping run**
+  (377k→29k), not on a fresh readback. The compaction logic is proven by the
+  real-Postgres integration test and the unit suite. The first long staging/prod
+  session to cross ~645k tokens is the live confirmation; watch for
+  `session.context.compacted` events (now carrying `trigger`) and superseded
+  (`active = false`) rows.
+- **~~`hardFraction` is currently informational.~~ FIXED (PR #69).** Hard force
+  now shrinks the keep-recent tail so an over-budget history always yields a
+  summarizable prefix, and the read-path `enforceInputBudget` guard ensures a
+  single over-budget assembled input is never sent. The stale-positive
+  `last_input_tokens` re-brick is closed by the `max(recorded, estimate)`
+  trigger. See "Hard-force backstop" and "Read-path budget guard" above.
 - **Summarizer cost/latency.** Each client-side compaction is an extra model
   call (≤ `contextSummaryMaxTokens` output). On a busy long session this recurs;
   it is bounded by the single-live-summary fold-forward but is not free. Monitor
@@ -361,11 +453,22 @@ capability (so no more 400s), and a pre-turn client-side compaction summarizes
 the old prefix into a single plain user message at an orphan-safe turn boundary,
 supersedes (never deletes) the prefix, and assembles a bounded
 `[summary, …recent tail]` read path — so history can no longer grow without
-bound. Server-side compaction is **preserved and used** automatically on the
+bound. **The two self-heal holes are closed (PR #69):** the
+`max(recorded, estimate)` trigger defeats the stale-positive `last_input_tokens`
+re-brick, the hard-force path shrinks the keep-recent tail so an over-budget
+history always yields a summarizable prefix, and the `enforceInputBudget`
+read-path guard guarantees a single over-budget assembled input is never put on
+the wire. Server-side compaction is **preserved and used** automatically on the
 OpenAI platform (correct 645,400 threshold, `store: false`), with no
-client-side double-compaction. The code is merged (`0b8f8c0`, PR #62, with the
-audit-trail fix #63 folded in), deployed to staging and production, and
-schema-migrated live. The one honest caveat is that **the live firing has not
-been re-confirmed by a current readback** (no post-deploy traffic has crossed
-the threshold on staging yet); the mechanism itself is proven by the
-real-database integration test and the earlier point-in-time live run.
+client-side double-compaction. The code is merged (PR #62 + audit-trail fix #63
++ self-heal/hard-force #69), deployed to staging **and** production
+(`/healthz` = `21315832`, re-read live 2026-06-14), and schema-migrated. The one
+honest caveat is that **the live compaction *firing* has not been re-confirmed
+by a current DB readback** this pass (the staging DB is a private endpoint and no
+in-cluster probe was available); the mechanism is proven by the real-database
+integration test, the unit suite, and the earlier point-in-time live run.
+
+> The compaction self-heal is one of four manager-session robustness fixes.
+> For the whole picture — session-read byte caps, the don't-poll doctrine, and
+> the `user.interrupt` fix — and the cross-cutting executive verdict, see
+> [`manager-session-robustness.md`](./manager-session-robustness.md).
