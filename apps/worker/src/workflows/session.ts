@@ -82,23 +82,38 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   while (true) {
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
-    // new iteration completed or re-queued its turn first), the approval queue
-    // is drained inside runTurn before it returns, and a pending interrupt is
-    // unbacked in-memory state that the new run could not reconstruct — so we
-    // refuse to continueAsNew while one is set and let the loop handle it
-    // first. A buffered userMessage/queueChanged signal only bumps `wakeups`,
-    // and its turn was written to Postgres BEFORE the signal was sent, so the
-    // fresh run re-claims it on its first claimNextQueuedTurn — losing the
-    // counter strands nothing. The queue living in Postgres is the safety net:
-    // continueAsNew carries only the self-contained SessionWorkflowInput (no
-    // initialEventId — the new run claims from the queue, it does not replay a
-    // seed event). patched() keeps in-flight histories (recorded before this
-    // branch existed) deterministic: they never see the new command.
+    // new iteration completed or re-queued its turn first), and a pending
+    // interrupt is unbacked in-memory state that the new run could not
+    // reconstruct — so we refuse to continueAsNew while one is set and let the
+    // loop handle it first. A buffered userMessage/queueChanged signal only
+    // bumps `wakeups`, and its turn was written to Postgres BEFORE the signal
+    // was sent, so the fresh run re-claims it on its first claimNextQueuedTurn
+    // — losing the counter strands nothing. The queue living in Postgres is the
+    // safety net: continueAsNew carries only the self-contained
+    // SessionWorkflowInput (no initialEventId — the new run claims from the
+    // queue, it does not replay a seed event). patched() keeps in-flight
+    // histories (recorded before this branch existed) deterministic: they never
+    // see the new command.
+    //
+    // The approval queue is NOT a boundary condition, and is cleared here. A
+    // genuinely-pending approval keeps the workflow blocked INSIDE runTurn (the
+    // `await condition(...)` in the requires_action branch), so it never
+    // reaches the top of the loop — meaning every approvalQueue entry observed
+    // here is necessarily STALE (an approvalDecision signal for a turn that
+    // already settled; the API guard only checks status==='requires_action', so
+    // two decisions submitted while requires_action both land in the queue and
+    // the surplus is left behind once the turn completes without re-blocking).
+    // Coupling continueAsNew to `approvalQueue.length === 0` would let one such
+    // stale entry wedge the guard forever, re-introducing the exact
+    // history-overflow termination this branch prevents. Dropping the surplus
+    // is safe: a real pending approval also leaves the session in
+    // requires_action with the turn re-dispatchable from Postgres.
     if (patched("session-continue-as-new")) {
       const info = workflowInfo();
       const maxTurnsPerRun = input.maxTurnsPerRun ?? TURNS_PER_RUN_BACKSTOP;
       const shouldContinue = info.continueAsNewSuggested || turnsThisRun >= maxTurnsPerRun;
-      if (shouldContinue && interruptedEventId === null && approvalQueue.length === 0) {
+      if (shouldContinue && interruptedEventId === null) {
+        approvalQueue.length = 0;
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
