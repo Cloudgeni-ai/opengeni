@@ -212,4 +212,86 @@ describe("ChatComposer slash palette", () => {
       await Promise.resolve();
     });
   });
+
+  // Regression (adversarial review): clicking a palette row is an EXPLICIT
+  // selection and must run THAT row — not whatever the exact-match token
+  // heuristic resolves to. With the draft "/clear", the palette lists the
+  // harmless `/clear-view` (index 0) and the destructive `/clear`. The click
+  // path used to route through runHighlighted, whose exact-name match for
+  // "/clear" hijacked the click and popped the DESTRUCTIVE confirm bar even
+  // though the operator clicked the SAFE row. Clicking /clear-view must invoke
+  // clearView (here: its honest no-op error, since onClearView is unwired) and
+  // must NEVER raise the /clear confirm bar.
+  test("clicking the /clear-view row while the draft is /clear runs clear-view, never /clear", async () => {
+    let cleared = 0;
+    const ClearViewClickHarness = () => {
+      const [value, setValue] = useState("/clear");
+      return (
+        <ChatComposer
+          composer={makeComposer(value, setValue)}
+          commandContext={ctx}
+          onClearView={() => { cleared += 1; }}
+        />
+      );
+    };
+    const container = await mount(<ClearViewClickHarness />);
+
+    // Find the /clear-view row (the harmless one the operator points at).
+    const options = [...container.querySelectorAll('[role="option"]')];
+    const clearViewRow = options.find((el) => (el.textContent ?? "").includes("/clear-view"));
+    expect(clearViewRow).toBeTruthy();
+    // Sanity: the destructive /clear is also present (the pair this guards).
+    expect(options.some((el) => {
+      const t = el.textContent ?? "";
+      return t.includes("/clear") && !t.includes("/clear-view") && t.toLowerCase().includes("danger");
+    })).toBe(true);
+
+    await act(async () => {
+      // The palette runs on mousedown (keeps textarea focus); this is the click.
+      clearViewRow!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // clear-view actually ran: onClearView was invoked, success notice shown.
+    expect(cleared).toBe(1);
+    expect(container.textContent ?? "").toMatch(/local view cleared/i);
+    // The destructive /clear confirm bar must NOT have appeared.
+    expect(container.querySelector('[data-testid="danger-confirm"]')).toBeNull();
+  });
+
+  // Companion: clicking the destructive /clear row (with the same "/clear"
+  // draft) still routes to the destructive command and shows its confirm bar —
+  // the fix narrows the click to the chosen row, it doesn't disable /clear.
+  test("clicking the destructive /clear row raises the /clear confirm bar", async () => {
+    const ClearClickHarness = () => {
+      const [value, setValue] = useState("/clear");
+      return <ChatComposer composer={makeComposer(value, setValue)} commandContext={ctx} />;
+    };
+    const container = await mount(<ClearClickHarness />);
+    const options = [...container.querySelectorAll('[role="option"]')];
+    const clearRow = options.find((el) => {
+      const t = el.textContent ?? "";
+      return t.includes("/clear") && !t.includes("/clear-view");
+    });
+    expect(clearRow).toBeTruthy();
+
+    await act(async () => {
+      clearRow!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const confirmBar = container.querySelector('[data-testid="danger-confirm"]');
+    expect(confirmBar).not.toBeNull();
+    expect(confirmBar?.getAttribute("aria-label")).toBe("Confirm /clear");
+
+    // Settle the pending confirm() promise for a clean unmount.
+    const cancel = [...container.querySelectorAll("button")].find((b) => b.textContent === "Cancel");
+    await act(async () => {
+      cancel?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
 });

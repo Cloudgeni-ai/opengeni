@@ -64,6 +64,12 @@ export type UseSlashCommandsResult = {
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => boolean;
   /** Run the highlighted command (or the active command in arg-hint mode). */
   runHighlighted: () => Promise<void>;
+  /**
+   * Run the command at an explicitly chosen index (a pointer click on a row).
+   * Bypasses the exact-match token heuristic that runHighlighted uses for
+   * keyboard Enter, so an explicit click always runs the clicked command.
+   */
+  runAt: (index: number) => Promise<void>;
   /** Autocomplete the highlighted command name + a trailing space. */
   autocompleteHighlighted: () => void;
 };
@@ -163,6 +169,44 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     }
   }, [items, clampedHighlight, autocomplete]);
 
+  // Resolve a SPECIFIC, already-chosen command against the current draft, then
+  // either autocomplete (name-only / required arg missing) or execute. This is
+  // the shared core for both Enter (which first resolves WHICH command via the
+  // exact-match heuristic) and a pointer click (which has ALREADY chosen the
+  // command — the clicked row — and must not re-resolve to a near-match).
+  const runResolved = useCallback(
+    async (command: SlashCommand, options?: { explicit?: boolean }): Promise<void> => {
+      if (!parsed) {
+        return;
+      }
+      const explicit = options?.explicit ?? false;
+      // A name-only token whose name doesn't yet equal the resolved command (e.g.
+      // "/cl" -> clear) first autocompletes so the operator sees the full name.
+      // An EXPLICIT pointer click skips this: the operator already chose the row,
+      // so clicking "/clear-view" (while the token is "clear") runs it outright
+      // rather than merely filling the name and waiting for a second Enter.
+      if (!explicit && !activeCommand && command.name !== parsed.name && !parsed.hasTrailingSpace) {
+        autocomplete(command);
+        return;
+      }
+      // When the click resolves a different command than the typed token, the
+      // typed token's tail isn't this command's args — run with no positional
+      // args and let the required-arg guard below prompt for them via autocomplete.
+      const args = command.name === parsed.name || parsed.hasTrailingSpace ? parsed.args : [];
+      const missing = firstMissingRequiredArg(command, args);
+      if (missing) {
+        // A required arg is absent: keep the palette open at the arg hint rather
+        // than firing a half-formed command.
+        if (!parsed.hasTrailingSpace) {
+          autocomplete(command);
+        }
+        return;
+      }
+      await execute(command, args);
+    },
+    [parsed, activeCommand, autocomplete, execute],
+  );
+
   const runHighlighted = useCallback(async (): Promise<void> => {
     if (!parsed) {
       return;
@@ -170,29 +214,32 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     // When the typed token is an exact command name (e.g. "/clear" while the
     // longer "/clear-view" sits first in the filtered list), Enter should run
     // THAT command, not autocomplete the highlighted near-match. Exact match
-    // wins over the highlight; otherwise use the highlighted row.
+    // wins over the highlight; otherwise use the highlighted row. This heuristic
+    // is reserved for KEYBOARD Enter, where the user has not explicitly pointed
+    // at a row — a pointer click goes through runAt and bypasses it entirely.
     const exact = items.find((item) => item.name === parsed.name || item.aliases?.includes(parsed.name));
     const command = activeCommand ?? exact ?? items[clampedHighlight];
     if (!command) {
       return;
     }
-    // Enter on a name-only token first autocompletes (so "/cl"+Enter fills the
-    // name); on a fully-typed command with a satisfied arg list it runs.
-    if (!activeCommand && command.name !== parsed.name && !parsed.hasTrailingSpace) {
-      autocomplete(command);
-      return;
-    }
-    const missing = firstMissingRequiredArg(command, parsed.args);
-    if (missing) {
-      // A required arg is absent: keep the palette open at the arg hint rather
-      // than firing a half-formed command.
-      if (!parsed.hasTrailingSpace) {
-        autocomplete(command);
+    await runResolved(command);
+  }, [parsed, activeCommand, items, clampedHighlight, runResolved]);
+
+  // Run the command at an EXPLICITLY chosen index (a pointer click on a palette
+  // row). Unlike runHighlighted this does NOT apply the exact-match override:
+  // clicking the harmless `/clear-view` row while the draft is "/clear" must run
+  // clear-view, never the destructive `/clear` that exact-matches the token. The
+  // operator's pointer is the selection; token-resolution heuristics don't apply.
+  const runAt = useCallback(
+    async (index: number): Promise<void> => {
+      const command = items[index];
+      if (!command) {
+        return;
       }
-      return;
-    }
-    await execute(command, parsed.args);
-  }, [parsed, activeCommand, items, clampedHighlight, autocomplete, execute]);
+      await runResolved(command, { explicit: true });
+    },
+    [items, runResolved],
+  );
 
   // Track an in-flight run so Enter can't double-fire.
   const runningRef = useRef(false);
@@ -258,6 +305,7 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     activeArgHint,
     onKeyDown,
     runHighlighted,
+    runAt,
     autocompleteHighlighted,
   };
 }

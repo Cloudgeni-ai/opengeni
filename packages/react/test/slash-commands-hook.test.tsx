@@ -172,6 +172,56 @@ describe("useSlashCommands", () => {
     await h.unmount();
   });
 
+  test("runAt runs the explicitly chosen row, bypassing the exact-match override", async () => {
+    // Draft "/clear": items[0] is the harmless clear-view, and the destructive
+    // clear exact-matches the token. runHighlighted would resolve to clear;
+    // runAt(0) must run clear-view instead (the explicitly clicked row).
+    let cleared = false;
+    let viewClears = 0;
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+    };
+    const h = await renderHook<Harness, void>(() => {
+      const [value, setValue] = useState("/clear");
+      const [notices, setNotices] = useState<Notice[]>([]);
+      const handlers: SlashCommandHandlers = {
+        notice: (n) => setNotices((cur) => [...cur, n]),
+        openHelp: () => {},
+        clearView: () => { viewClears += 1; return true; },
+        confirm: async () => true,
+      };
+      const command = useSlashCommands({ commands: defaultCommands, context: ctx, handlers, value, setValue });
+      return { value, setValue, notices, helpOpened: 0, viewCleared: 0, confirmAnswer: true, command };
+    }, undefined);
+
+    const items = h.result.current.command.items;
+    const clearViewIndex = items.findIndex((c) => c.name === "clear-view");
+    expect(clearViewIndex).toBeGreaterThanOrEqual(0);
+    // The destructive clear is present too (the exact-match the override would pick).
+    expect(items.some((c) => c.name === "clear")).toBe(true);
+
+    await h.result.current.command.runAt(clearViewIndex);
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+
+    // clear-view ran; the destructive clear did NOT touch the server.
+    expect(viewClears).toBe(1);
+    expect(cleared).toBe(false);
+    expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Local view cleared." });
+    await h.unmount();
+  });
+
+  test("runAt out of range is a no-op", async () => {
+    const h = await setup({ initialValue: "/clear", context: sessionCtx });
+    await h.result.current.command.runAt(999);
+    await h.rerender();
+    expect(h.result.current.notices).toHaveLength(0);
+    await h.unmount();
+  });
+
   test("the palette is inert without a command context", async () => {
     const h = await setup({ initialValue: "/clear", context: undefined });
     // open still derives from value (commands have no perm gate for help), but

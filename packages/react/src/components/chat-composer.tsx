@@ -182,8 +182,12 @@ export function ChatComposer({
             highlight={palette.highlight}
             onHighlight={palette.setHighlight}
             onRun={(index) => {
+              // Run the CLICKED row directly. We must not route a pointer click
+              // through runHighlighted: its exact-match override would re-resolve
+              // "/clear" to the destructive clear even when the operator clicked
+              // the harmless clear-view row. runAt honors the explicit selection.
               palette.setHighlight(index);
-              void palette.runHighlighted();
+              void palette.runAt(index);
             }}
             argHintText={palette.activeArgHint}
             listboxId={listboxId}
