@@ -61,6 +61,7 @@ import {
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
 import { acceptSessionUserMessage, createSessionForRequest } from "../domain/sessions";
+import { capEventPage, capSessionDetail } from "./session-view";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route; last-resort base
@@ -479,18 +480,18 @@ function registerWorkspaceOrchestrationTools(
     }, async ({ limit }) => json({ sessions: await listSessions(deps.db, grant.workspaceId, boundedMcpLimit(limit)) }));
 
     server.registerTool("session_get", {
-      description: "Get one session: status, goal-bearing metadata, resources, tools, and environment attachment (names/ids only, never variable values).",
+      description: "Get one session: status, goal-bearing metadata, resources, tools, and environment attachment (names/ids only, never variable values). Unbounded agent-set fields (metadata, initial message) are clamped so monitoring another session cannot flood this context.",
       inputSchema: { sessionId: z4.string().uuid() },
     }, async ({ sessionId }) => {
       const session = await getSession(deps.db, grant.workspaceId, sessionId);
       if (!session) {
         throw new Error("session not found");
       }
-      return json(session);
+      return json(capSessionDetail(session));
     });
 
     server.registerTool("session_events", {
-      description: "Read a session's event timeline (oldest first). Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. Use it to monitor another session's progress.",
+      description: "Read a session's event timeline (oldest first), to monitor another session's progress. Pass `after` = the highest event `sequence` already seen to page forward; the response's `nextAfter` is that cursor. The response is BYTE-CAPPED for a monitoring glance: fat per-event payloads (a worker's verbatim tool outputs, message/reasoning bodies) are clamped, and an over-budget page is reduced to its head + tail with a marker — page the gap with `after`/`limit`, or read the worker's session notebook, if you need omitted content verbatim. `nextAfter` always advances past every event the page covered, so paging never skips real events.",
       inputSchema: {
         sessionId: z4.string().uuid(),
         after: z4.number().int().nonnegative().optional(),
@@ -499,8 +500,12 @@ function registerWorkspaceOrchestrationTools(
     }, async ({ sessionId, after, limit }) => {
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const events = await listSessionEvents(deps.db, grant.workspaceId, sessionId, after ?? 0, boundedMcpLimit(limit));
-      const last = events[events.length - 1];
-      return json({ events, nextAfter: last ? last.sequence : after ?? 0 });
+      const capped = capEventPage(events);
+      return json({
+        events: capped.events,
+        nextAfter: capped.nextAfter ?? after ?? 0,
+        ...(capped.truncated ? { truncated: true } : {}),
+      });
     });
   }
 
