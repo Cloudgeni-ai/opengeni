@@ -15,6 +15,7 @@ import {
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
+  countTurnSessionHistoryItems,
   createTurn,
   createDb,
   createFileUpload,
@@ -2826,9 +2827,88 @@ describe("worker activities integration", () => {
     expect(active.at(-1)!.item).toMatchObject({ role: "assistant" });
     expect(types).not.toContain("function_call_result");
 
-    // Audit trail intact: superseded rows still present.
+    // Audit trail intact: ALL ten seeded rows still present (none overwritten),
+    // plus the one summary row => eleven total. The earlier integer placement
+    // overwrote one real row, leaving ten.
     const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.length).toBeGreaterThanOrEqual(10);
+    expect(all.length).toBe(11);
+    expect(all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toHaveLength(1);
+    // Every original seeded position (0..9) survives verbatim — in particular the
+    // assistant 'a2' at position 7 that the half-step before the boundary used to
+    // overwrite is untouched.
+    for (let position = 0; position <= 9; position += 1) {
+      expect(all.some((row) => row.position === position)).toBe(true);
+    }
+    const seededAssistant = all.find((row) => row.position === 7);
+    expect(seededAssistant!.item).toMatchObject({ role: "assistant", content: [{ type: "output_text", text: "a2" }] });
+  });
+
+  test("maybeCompactContext records the summary under the current turn (per-turn count stays correct)", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "turn-count session",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // Prefix rows belong to an OLD turn; the summary must NOT inherit that turn's
+    // id. The overwrite bug (onConflictDoUpdate set only {item, active}) left the
+    // summary stranded under the prefix row's turn_id, so the compaction turn's
+    // per-turn count (the worker-death resume-with-notice signal) miscounted.
+    const oldTurnId = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      temporalWorkflowId: `wf-old-${crypto.randomUUID()}`,
+      triggerEventId: crypto.randomUUID(),
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      turnId: oldTurnId,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "old turn 2" } },
+        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+        { position: 4, item: { type: "message", role: "user", content: "recent turn" } },
+        { position: 5, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a3" }] } },
+      ],
+    });
+    const compactionTurnId = await createTurn(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      temporalWorkflowId: `wf-new-${crypto.randomUUID()}`,
+      triggerEventId: crypto.randomUUID(),
+    });
+
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      sessionHistorySource: "items",
+      openaiProvider: "azure",
+      contextCompactionMode: "auto",
+      contextWindowTokens: 1000,
+      contextReservedOutputTokens: 0,
+      contextCompactSoftFraction: 0.5,
+      contextKeepRecentTokens: 40,
+    });
+
+    const result = await maybeCompactContext(
+      dbClient.db,
+      settings,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id, turnId: compactionTurnId },
+      900,
+      async () => "objective: ship; durable facts in the notebook (pointers only).",
+    );
+    expect(result.compacted).toBe(true);
+
+    // The summary is attributed to the compaction turn, not the prefix's old
+    // turn — so the per-turn count used by the worker-death resume decision sees
+    // exactly the one row this turn wrote.
+    expect(await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, compactionTurnId)).toBe(1);
+    expect(await countTurnSessionHistoryItems(dbClient.db, grant.workspaceId, oldTurnId)).toBe(6);
   });
 
   test("maybeCompactContext is a no-op on the OpenAI platform (server path owns compaction there)", async () => {

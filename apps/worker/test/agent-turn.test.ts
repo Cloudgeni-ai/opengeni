@@ -101,6 +101,42 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(result.rows).toEqual([]);
     expect(result.nextWatermark).toBe(5);
   });
+
+  test("appends at fresh absolute positions after a compaction (slice index decoupled from position)", () => {
+    // Post-compaction, the in-memory history is the SHORT active set
+    // [summary, ...tail] whose slice index (2) is far below the next free
+    // absolute position. The summary sits at a fractional position (e.g. 5.5)
+    // and the last superseded prefix tops out at 9, so the next whole-number
+    // position is 10 — NOT the slice index. New items must land at 10, 11, ...
+    // (never colliding with superseded prefix rows nor the fractional summary).
+    const sanitized = [
+      userMessage("[summary] folded prefix"), // slice idx 0 — already persisted at 5.5
+      userMessage("recent turn"),             // slice idx 1 — already persisted at 6
+      userMessage("brand new turn"),          // slice idx 2 — NEW
+      functionCall("call_z"),                 // slice idx 3 — NEW
+      functionResult("call_z"),               // slice idx 4 — NEW
+    ];
+    const result = historyRowsToAppend(sanitized, /* persistedHistoryCount */ 2, /* nextPosition */ 10);
+    expect(result.rows.map((row) => row.position)).toEqual([10, 11, 12]);
+    expect(result.rows.map((row) => row.item)).toEqual([
+      userMessage("brand new turn"),
+      functionCall("call_z"),
+      functionResult("call_z"),
+    ]);
+    // Slice watermark advances to the in-memory length; the next absolute
+    // position advances past the rows just written.
+    expect(result.nextWatermark).toBe(5);
+    expect(result.nextPosition).toBe(13);
+  });
+
+  test("default nextPosition preserves contiguous-from-zero appends (uncompacted path)", () => {
+    // When callers omit nextPosition (the common, never-compacted path) the
+    // absolute position equals the slice index, exactly as before this change.
+    const sanitized = [userMessage("a"), userMessage("b"), userMessage("c")];
+    const result = historyRowsToAppend(sanitized, 1);
+    expect(result.rows.map((row) => row.position)).toEqual([1, 2]);
+    expect(result.nextPosition).toBe(3);
+  });
 });
 
 describe("worker shutdown preemption", () => {

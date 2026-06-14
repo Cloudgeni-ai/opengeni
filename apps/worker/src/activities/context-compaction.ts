@@ -34,9 +34,11 @@ export type MaybeCompactResult =
  * the un-compacted history. The read path's existing sanitizer keeps that safe.
  *
  * The boundary the planner picks is the start of a kept user-message turn, so
- * no tool-call pair straddles the cut. The summary row is inserted at the
- * position immediately before the kept tail (a freed prefix position), so the
- * active read path returns [summary, ...recent tail] in order.
+ * no tool-call pair straddles the cut. The summary row is inserted at a
+ * fractional position a half-step before the kept tail (boundaryPosition - 0.5),
+ * which sorts ahead of the tail without overwriting any real prefix row, so the
+ * active read path returns [summary, ...recent tail] in order and the full
+ * superseded prefix survives untouched as an audit trail.
  */
 export type CompactionSummarizer = (
   settings: Settings,
@@ -80,18 +82,21 @@ export async function maybeCompactContext(
   }
 
   // Boundary is an index into the active rows; map to absolute positions. The
-  // kept tail starts at the boundary row's position; the summary takes the
-  // position immediately before it (a position inside the just-superseded
-  // prefix, guaranteed free and sorting before the tail).
+  // kept tail starts at the boundary row's position; the summary takes a
+  // FRACTIONAL position a half-step before it. Positions are whole numbers, so
+  // boundaryPosition - 0.5 sorts immediately ahead of the kept tail and behind
+  // the last superseded prefix row while colliding with NO real row — the
+  // earlier `boundaryPosition - 1` always landed on (and overwrote) the real
+  // prefix row there.
   const boundaryRow = active[plan.boundaryIndex];
   if (!boundaryRow) {
     return { compacted: false, reason: "boundary_out_of_range" };
   }
   const boundaryPosition = boundaryRow.position;
-  const summaryPosition = boundaryPosition - 1;
-  if (summaryPosition < 0) {
+  if (boundaryPosition <= 0) {
     return { compacted: false, reason: "boundary_at_origin" };
   }
+  const summaryPosition = boundaryPosition - 0.5;
 
   await applyContextCompaction(db, {
     accountId: scope.accountId,

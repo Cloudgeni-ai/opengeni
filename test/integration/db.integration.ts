@@ -899,21 +899,32 @@ describe("DB integration", () => {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       boundaryPosition: 4,
-      summaryPosition: 3,
+      // Fractional: a half-step before the kept tail. Collides with NO real row,
+      // so the real prefix row at position 3 is never overwritten.
+      summaryPosition: 3.5,
       summaryItem: { type: "message", role: "user", content: "[CONTEXT CHECKPOINT] SUMMARY:folded", opengeni_context_summary: true },
     });
 
-    // Active read = [summary @3, recent user @4, assistant @5].
+    // Active read = [summary @3.5, recent user @4, assistant @5].
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.map((row) => row.position)).toEqual([3, 4, 5]);
+    expect(active.map((row) => row.position)).toEqual([3.5, 4, 5]);
     expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
     expect(active[1]!.item).toMatchObject({ role: "user", content: "recent turn" });
 
-    // Audit trail preserved: superseded prefix rows still exist (positions 0..2)
-    // and total row count grew by exactly one (the summary).
+    // Audit trail preserved: every original prefix row STILL EXISTS — including
+    // position 3, the row the old (boundaryPosition - 1) placement overwrote.
+    // The summary is an ADDITIONAL row, so total count grew by exactly one.
     const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
-    expect(await countSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toBe(6);
+    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 3.5, 4, 5]);
+    expect(await countSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).toBe(7);
+
+    // The exact audit-loss regression: the original assistant 'a2' at position 3
+    // must still be retrievable verbatim after compaction (the bug overwrote it
+    // with the summary). Assert the real item survives untouched.
+    const positionThree = all.find((row) => row.position === 3);
+    expect(positionThree).toBeDefined();
+    expect(positionThree!.item).toMatchObject({ role: "assistant", content: [{ type: "output_text", text: "a2" }] });
+    expect((positionThree!.item as Record<string, unknown>).opengeni_context_summary).toBeUndefined();
   });
 
   test("applyContextCompaction is idempotent on a retry (same summary position)", async () => {
@@ -942,13 +953,21 @@ describe("DB integration", () => {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       boundaryPosition: 2,
-      summaryPosition: 1,
+      summaryPosition: 1.5,
       summaryItem: { type: "message", role: "user", content: "SUMMARY:s", opengeni_context_summary: true },
     });
     await apply();
-    await apply(); // retry must not duplicate or throw
+    await apply(); // retry must not duplicate, throw, or overwrite the real row
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.map((row) => row.position)).toEqual([1, 2]);
+    expect(active.map((row) => row.position)).toEqual([1.5, 2]);
+    // The retry-idempotent insert (onConflictDoNothing) must not have touched the
+    // real superseded row at position 1: it survives verbatim, exactly once.
+    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    const positionOne = all.filter((row) => row.position === 1);
+    expect(positionOne).toHaveLength(1);
+    expect(positionOne[0]!.item).toMatchObject({ role: "assistant", content: [{ type: "output_text", text: "a1" }] });
+    // Exactly one summary row total (no duplicate from the retry).
+    expect(all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toHaveLength(1);
   });
 
   test("setSessionLastInputTokens persists the pre-turn compaction signal", async () => {

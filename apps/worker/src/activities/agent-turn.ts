@@ -11,7 +11,8 @@ import {
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
-  countSessionHistoryItems,
+  countActiveSessionHistoryItems,
+  nextSessionHistoryPosition,
   requeuePreemptedTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
@@ -122,17 +123,28 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
  */
 export function historyRowsToAppend(
   rawHistory: Array<Record<string, unknown>>,
+  // How many items of the CURRENT in-memory history are already persisted (the
+  // slice index into `sanitized`). This is the in-memory history length, NOT the
+  // total persisted-row count: after a compaction the in-memory history is the
+  // short [summary, ...tail, ...new] list, far shorter than the total rows in
+  // the table (which still hold the superseded prefix).
   persistedHistoryCount: number,
-): { rows: Array<{ position: number; item: Record<string, unknown> }>; nextWatermark: number } {
+  // Next free WHOLE-NUMBER absolute position to write at. Decoupled from the
+  // slice index because compaction inserts a fractional summary position, so the
+  // total-row count no longer equals max(position)+1. Defaults to
+  // persistedHistoryCount to preserve the pre-compaction behaviour (contiguous
+  // positions from 0) when callers do not pass an explicit next position.
+  nextPosition: number = persistedHistoryCount,
+): { rows: Array<{ position: number; item: Record<string, unknown> }>; nextWatermark: number; nextPosition: number } {
   const sanitized = sanitizeHistoryItemsForModel(rawHistory);
   if (sanitized.length <= persistedHistoryCount) {
-    return { rows: [], nextWatermark: persistedHistoryCount };
+    return { rows: [], nextWatermark: persistedHistoryCount, nextPosition };
   }
   const rows = sanitized.slice(persistedHistoryCount).map((item, offset) => ({
-    position: persistedHistoryCount + offset,
+    position: nextPosition + offset,
     item: item as Record<string, unknown>,
   }));
-  return { rows, nextWatermark: sanitized.length };
+  return { rows, nextWatermark: sanitized.length, nextPosition: nextPosition + rows.length };
 }
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
@@ -177,6 +189,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // actually persisted, so a non-monotonic history can never desync it.
     let persistedHistoryCount = 0;
     let historyCountAtTurnStart = 0;
+    // Next free WHOLE-NUMBER absolute position to append at. Tracked separately
+    // from persistedHistoryCount (the in-memory slice index) because a compaction
+    // inserts a fractional summary position, so total rows no longer equal
+    // max(position)+1 and the slice index can no longer double as the position.
+    let nextHistoryPosition = 0;
     const reconcileConversationTruth = async () => {
       if (!stream || !turnId) {
         return;
@@ -184,9 +201,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
-          const { rows, nextWatermark } = historyRowsToAppend(
+          const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
             rawHistory as Array<Record<string, unknown>>,
             persistedHistoryCount,
+            nextHistoryPosition,
           );
           if (rows.length > 0) {
             await appendSessionHistoryItems(db, {
@@ -198,6 +216,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
           }
           persistedHistoryCount = nextWatermark;
+          nextHistoryPosition = nextPosition;
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
@@ -366,8 +385,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
       const runInput = await turnInput(db, runtime, agent, trigger, runSettings);
-      persistedHistoryCount = await countSessionHistoryItems(db, input.workspaceId, input.sessionId);
+      // Slice index = the length of the model-facing (active) history this turn
+      // is seeded from; new items beyond it (the trigger message + this turn's
+      // generated items) are the ones to persist. After a compaction this is the
+      // short [summary, ...tail] active set, NOT the total row count. The
+      // absolute write position is tracked separately (next whole number past
+      // the max existing position) because the fractional summary row means
+      // total rows no longer equal max(position)+1. Pre-compaction both reduce to
+      // the old total-count value, so the common path is unchanged.
+      persistedHistoryCount = await countActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
       historyCountAtTurnStart = persistedHistoryCount;
+      nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
       let responseUsageCount = 0;
       // Actual input tokens of the most recent model response this turn; the
       // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
