@@ -8,6 +8,12 @@ single place that explains the four failure modes that could brick or stall such
 a session and how each is now fixed — with how each fix is verified, honestly,
 including what was **not** re-confirmed.
 
+A separate set of reliability fixes — bounded Temporal history
+(`continueAsNew`), the reconciler watermark + orphan repair, and scheduled-task
++ billing integrity — is documented in
+[`reliability-fixes.md`](./reliability-fixes.md); the two documents do not
+overlap.
+
 Code and the per-area docs win over this summary. Cross-references:
 
 - Compaction internals: [`context-compaction.md`](./context-compaction.md).
