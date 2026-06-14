@@ -110,12 +110,14 @@ export function ChatComposer({
         onClearView();
         return true;
       },
-      confirm: () =>
+      // The hook binds the command actually being run into confirm() (see
+      // use-slash-commands buildContext), so the confirm bar renders from THAT
+      // command — never a near-match highlighted in the palette. This is what
+      // keeps the destructive /clear from being mislabeled as /clear-view.
+      confirm: (command: SlashCommand) =>
         new Promise<boolean>((resolve) => {
           setConfirmState({
-            // The confirm bar is rendered from the highlighted/active command;
-            // the command itself is supplied by the hook at run time.
-            command: { name: "clear", description: "", danger: true, run: () => ({ status: "ok" }) },
+            command,
             resolve: (confirmed) => {
               setConfirmState(null);
               resolve(confirmed);
@@ -134,11 +136,13 @@ export function ChatComposer({
     setValue: composer.setValue,
   });
 
-  // The confirm bar reflects the command currently awaiting confirmation; the
-  // hook drives execution, so we render the active/highlighted danger command.
-  const pendingDangerCommand = confirmState
-    ? palette.activeCommand ?? palette.items[palette.highlight] ?? confirmState.command
-    : null;
+  // The confirm bar renders from the command the hook is actually running —
+  // carried into confirmState by handlers.confirm — NOT a near-match that
+  // happens to be highlighted/active in the palette. (Re-deriving it from
+  // palette.items[palette.highlight] mislabeled the destructive /clear as the
+  // harmless /clear-view, since clear-view prefix-matches "clear" and sorts
+  // first.)
+  const pendingDangerCommand = confirmState ? confirmState.command : null;
 
   const paletteEnabled = commandContext !== undefined;
 
@@ -312,7 +316,12 @@ export function ChatComposer({
 /** The danger confirm bar — reuses og-status-failed tokens (like the stop control). */
 function ConfirmBar({ command, onCancel, onConfirm }: { command: SlashCommand; onCancel: () => void; onConfirm: () => void }) {
   return (
-    <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+    <div
+      role="alertdialog"
+      aria-label={`Confirm /${command.name}`}
+      data-testid="danger-confirm"
+      className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1"
+    >
       <span className="px-1.5 text-[12px] text-og-status-failed">
         Run <span className="font-mono">/{command.name}</span>? {command.description}
       </span>

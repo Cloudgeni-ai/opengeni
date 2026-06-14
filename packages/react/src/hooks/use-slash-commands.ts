@@ -19,7 +19,15 @@ export type SlashCommandContext = Pick<
   "client" | "workspaceId" | "sessionId" | "status" | "permissions"
 >;
 
-export type SlashCommandHandlers = Pick<CommandContext, "notice" | "openHelp" | "clearView" | "confirm">;
+/**
+ * UI affordances the composer supplies. `confirm` differs from the registry-
+ * facing {@link CommandContext.confirm} (which takes no args): the composer's
+ * confirm receives the command being run so the confirm bar renders from that
+ * exact command's identity. The hook bridges the two in {@link buildContext}.
+ */
+export type SlashCommandHandlers = Pick<CommandContext, "notice" | "openHelp" | "clearView"> & {
+  confirm: (command: SlashCommand) => Promise<boolean>;
+};
 
 export type ConfirmState = {
   command: SlashCommand;
@@ -104,19 +112,24 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
 
   const activeArgHint = activeCommand ? argHint(activeCommand.args) : "";
 
+  // Build the context for a SPECIFIC command. The danger confirm() is bound to
+  // that command so the confirm bar names the command actually about to run —
+  // not whatever near-match happens to sit highlighted in the palette (e.g.
+  // typing "/clear"+Enter runs the destructive `clear`, but `clear-view` sorts
+  // first and would otherwise mislabel the bar as a harmless local-view reset).
   const buildContext = useCallback(
-    (): CommandContext | null => {
+    (command: SlashCommand): CommandContext | null => {
       if (!context) {
         return null;
       }
-      return { ...context, ...handlers };
+      return { ...context, ...handlers, confirm: () => handlers.confirm(command) };
     },
     [context, handlers],
   );
 
   const execute = useCallback(
     async (command: SlashCommand, args: string[]): Promise<void> => {
-      const ctx = buildContext();
+      const ctx = buildContext(command);
       if (!ctx) {
         return;
       }
