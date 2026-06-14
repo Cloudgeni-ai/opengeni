@@ -1,6 +1,21 @@
-import { ActivityFailure, CancellationScope, condition, defineSignal, isCancellation, patched, setHandler, TimeoutFailure, workflowInfo } from "@temporalio/workflow";
+import { ActivityFailure, CancellationScope, condition, continueAsNew, defineSignal, isCancellation, patched, setHandler, TimeoutFailure, workflowInfo } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import { activity, workflowFailureMessage } from "./activities";
+
+/**
+ * Deterministic backstop for continueAsNew. A session workflow is long-lived
+ * by design (weeks-long manager goals), so its Temporal EVENT HISTORY grows
+ * without bound — every signal, activity schedule/complete and timer adds
+ * events, and the server force-terminates a run at its hard history limit
+ * (~51,200 events / 50MB), killing the session. The server's
+ * `continueAsNewSuggested` flag is the primary trigger (it fires well before
+ * the hard cap), but a turn-counter backstop guarantees a continueAsNew even
+ * if the suggestion never arrives (e.g. a deployment that never raises it).
+ * Conservatively low relative to the event budget: a single turn schedules a
+ * handful of history events, so a few thousand turns stays far under the cap
+ * while keeping continueAsNew rare enough that it is not a per-turn cost.
+ */
+const TURNS_PER_RUN_BACKSTOP = 2_000;
 
 /**
  * True when an agent-turn activity failure means "the worker hosting the
@@ -35,12 +50,21 @@ export type SessionWorkflowInput = {
   workspaceId: string;
   sessionId: string;
   initialEventId?: string;
+  // Per-run continueAsNew backstop, propagated across continueAsNew. Production
+  // omits it (defaults to TURNS_PER_RUN_BACKSTOP); tests set it low to exercise
+  // the boundary without simulating thousands of turns. Never gates correctness
+  // — continueAsNewSuggested is the real-world trigger.
+  maxTurnsPerRun?: number;
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
   const approvalQueue: string[] = [];
   let interruptedEventId: string | null = null;
   let wakeups = 0;
+  // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
+  // for the history-overflow guard below; bounded growth is what makes a
+  // weeks-long session survivable.
+  let turnsThisRun = 0;
 
   setHandler(userMessage, () => {
     wakeups += 1;
@@ -56,6 +80,33 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   });
 
   while (true) {
+    // History-overflow guard. The top of the loop is the only safe
+    // continueAsNew boundary: no turn is mid-flight (every path that reaches a
+    // new iteration completed or re-queued its turn first), the approval queue
+    // is drained inside runTurn before it returns, and a pending interrupt is
+    // unbacked in-memory state that the new run could not reconstruct — so we
+    // refuse to continueAsNew while one is set and let the loop handle it
+    // first. A buffered userMessage/queueChanged signal only bumps `wakeups`,
+    // and its turn was written to Postgres BEFORE the signal was sent, so the
+    // fresh run re-claims it on its first claimNextQueuedTurn — losing the
+    // counter strands nothing. The queue living in Postgres is the safety net:
+    // continueAsNew carries only the self-contained SessionWorkflowInput (no
+    // initialEventId — the new run claims from the queue, it does not replay a
+    // seed event). patched() keeps in-flight histories (recorded before this
+    // branch existed) deterministic: they never see the new command.
+    if (patched("session-continue-as-new")) {
+      const info = workflowInfo();
+      const maxTurnsPerRun = input.maxTurnsPerRun ?? TURNS_PER_RUN_BACKSTOP;
+      const shouldContinue = info.continueAsNewSuggested || turnsThisRun >= maxTurnsPerRun;
+      if (shouldContinue && interruptedEventId === null && approvalQueue.length === 0) {
+        await continueAsNew<typeof sessionWorkflow>({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          ...(input.maxTurnsPerRun !== undefined ? { maxTurnsPerRun: input.maxTurnsPerRun } : {}),
+        });
+      }
+    }
     const workflowId = workflowInfo().workflowId;
     const turn = await activity.claimNextQueuedTurn({ workspaceId: input.workspaceId, sessionId: input.sessionId, workflowId });
     if (!turn) {
@@ -114,11 +165,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         }
         return;
       }
+      turnsThisRun += 1;
       if (!await runTurn(input.accountId, input.workspaceId, input.sessionId, finalTurn.id, finalTurn.triggerEventId)) {
         return;
       }
       continue;
     }
+    turnsThisRun += 1;
     if (!await runTurn(input.accountId, input.workspaceId, input.sessionId, turn.id, turn.triggerEventId)) {
       return;
     }
