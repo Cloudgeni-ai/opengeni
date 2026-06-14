@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, customType } from "drizzle-orm/pg-core";
+import { bigint, boolean, index, integer, jsonb, numeric, pgTable, text, timestamp, uniqueIndex, uuid, customType } from "drizzle-orm/pg-core";
 
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
@@ -316,7 +316,13 @@ export const sessionHistoryItems = pgTable("session_history_items", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
   turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
-  position: integer("position").notNull(),
+  // Numeric (not integer) so the synthetic compaction-summary row can be
+  // inserted at a FRACTIONAL position (boundaryPosition - 0.5) that sorts ahead
+  // of the kept tail without colliding with — and thus overwriting — the real
+  // prefix row at boundaryPosition - 1. Normally-appended rows keep whole-number
+  // positions; only the summary uses the half-step. `mode: "number"` maps the
+  // postgres.js string back to a JS number so every reader stays numeric.
+  position: numeric("position", { mode: "number" }).notNull(),
   item: jsonb("item").$type<Record<string, unknown>>().notNull(),
   // Live-row flag for client-side context compaction. The read path selects
   // only active rows; a compaction supersedes the summarized prefix (sets this
