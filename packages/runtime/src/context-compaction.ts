@@ -238,7 +238,14 @@ export function planCompaction(input: PlanCompactionInput): CompactionPlan {
     prefixItems.push(item);
   }
 
-  if (prefixItems.length === 0 && !priorSummaryItem) {
+  // Nothing real to summarize. This fires both when the prefix is genuinely
+  // empty AND when the prefix contains ONLY a prior summary (boundary landed
+  // immediately after it): folding a summary forward over zero new items would
+  // burn a summarizer call to re-wrap identical content, emit a spurious
+  // compaction event, and — if the next turn is still above the soft threshold
+  // — loop. The single live summary already sits at the boundary, so leaving it
+  // in place is correct.
+  if (prefixItems.length === 0) {
     return { ...empty, reason: "nothing_to_summarize", boundaryIndex };
   }
 

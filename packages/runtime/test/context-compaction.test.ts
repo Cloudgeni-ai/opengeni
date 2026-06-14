@@ -216,6 +216,32 @@ describe("planCompaction fold-forward (single live summary)", () => {
     expect(messages.user).toContain("PRIOR FACTS");
     expect(messages.user).toContain("PRIOR CHECKPOINT SUMMARY");
   });
+
+  test("a boundary landing immediately after a prior summary does NOT compact (no empty re-wrap / loop)", () => {
+    // prefix = [prior summary only]; kept tail = the recent turn. There is
+    // nothing NEW to fold in, so re-summarizing would just re-wrap the existing
+    // summary, emit a spurious event, and risk looping turn after turn.
+    const prior = buildSummaryItem("PRIOR FACTS");
+    const items: CompactionItem[] = [
+      prior,
+      user("recent"), assistant("a-recent"),
+    ];
+    const plan = planCompaction({
+      items,
+      // Above the soft threshold so the trigger fires and we reach the boundary
+      // logic (the signal includes system/tool overhead the items don't show).
+      lastInputTokens: Math.floor(BUDGET * SOFT),
+      inputBudgetTokens: BUDGET,
+      softFraction: SOFT,
+      hardFraction: HARD,
+      // Keep only the recent turn verbatim, so the boundary lands at index 1
+      // (right after the prior summary at index 0).
+      keepRecentTokens: estimateTokens(items.slice(1)),
+    });
+    expect(plan.boundaryIndex).toBe(1);
+    expect(plan.shouldCompact).toBe(false);
+    expect(plan.reason).toBe("nothing_to_summarize");
+  });
 });
 
 describe("buildCompactionMessages", () => {
