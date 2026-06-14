@@ -22,7 +22,7 @@ export type SessionWorkflowClient = {
   signalInterrupt: (input: { accountId: string; workspaceId: string; sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
-  triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string }) => Promise<void>;
+  triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }) => Promise<void>;
 };
 
 export type DocumentIndexClient = {

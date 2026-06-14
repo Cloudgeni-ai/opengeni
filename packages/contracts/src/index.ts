@@ -862,6 +862,16 @@ export const UpdateScheduledTaskRequest = z.object({
 });
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
+/**
+ * Manual-trigger body. `triggerId` is a client-supplied idempotency token: a
+ * retried trigger that reuses the same token charges once and starts one run.
+ * Omitting it makes each call a distinct trigger (the server mints a token).
+ */
+export const TriggerScheduledTaskRequest = z.object({
+  triggerId: z.string().min(1).max(128).optional(),
+});
+export type TriggerScheduledTaskRequest = z.infer<typeof TriggerScheduledTaskRequest>;
+
 export const CapabilityPackConnectorAuthModel = z.enum([
   "oauth2_authorization_code_pkce",
   "oauth2_authorization_code",

@@ -55,7 +55,10 @@ import {
 } from "../domain/environments";
 import {
   createValidatedScheduledTask,
+  manualScheduledTaskTriggerUsageKey,
+  manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
+  scheduledTaskTriggerToken,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
@@ -296,13 +299,15 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   });
 
   server.registerTool("scheduled_tasks_trigger", {
-    description: "Trigger a scheduled task immediately.",
-    inputSchema: { id: z4.string().uuid() },
-  }, async ({ id }) => {
+    description: "Trigger a scheduled task immediately. Pass a stable triggerId to make a retried trigger idempotent (one charge, one run).",
+    inputSchema: { id: z4.string().uuid(), triggerId: z4.string().min(1).max(128).optional() },
+  }, async ({ id, triggerId }) => {
     const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
     await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
-    const agentRunUsageIdempotencyKey = `agent_run.created:scheduled-trigger:${grant.workspaceId}:${task.id}:${crypto.randomUUID()}`;
-    await deps.workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey });
+    const triggerToken = scheduledTaskTriggerToken(triggerId);
+    const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken);
+    const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);
+    await deps.workflowClient.triggerScheduledTask({ task, agentRunUsageIdempotencyKey, triggerWorkflowId });
     await recordWorkspaceUsage(deps, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,

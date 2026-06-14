@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { historyRowsToAppend, isWorkerShutdownCancellation, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -237,6 +237,53 @@ describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count
       functionResult("c1"),
     ];
     expect(sanitizedSeed(activeRows)).toBe(activeRows.length);
+  });
+});
+
+describe("model usage source key (re-dispatch charge stability)", () => {
+  test("uses the provider responseId verbatim when present (stable + unique)", () => {
+    expect(modelUsageSourceKey({ responseId: "resp_abc", dispatchId: "act-1", positionalKey: "response-1" }))
+      .toBe("resp_abc");
+    // The responseId path ignores the dispatch id, so a true activity retry
+    // that re-emits the SAME responseId produces the SAME key and dedupes the
+    // charge (no double-bill).
+    expect(modelUsageSourceKey({ responseId: "resp_abc", dispatchId: "act-2", positionalKey: "response-1" }))
+      .toBe("resp_abc");
+  });
+
+  test("positional fallback is unique per dispatch so a re-dispatch does not collide", () => {
+    // The bug: without a responseId the old key was purely positional, so the
+    // first model call of dispatch A and of dispatch B both keyed "response-1"
+    // -> the second charge deduped away (undercharge). Folding the per-execution
+    // dispatch id in keeps them distinct.
+    const dispatchAFirst = modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" });
+    const dispatchBFirst = modelUsageSourceKey({ responseId: null, dispatchId: "act-B", positionalKey: "response-1" });
+    expect(dispatchAFirst).not.toBe(dispatchBFirst);
+    expect(dispatchAFirst).toBe("act-A:response-1");
+    expect(dispatchBFirst).toBe("act-B:response-1");
+
+    // The aggregate fallback (no per-response usage at all) has the same hazard
+    // and the same fix.
+    const aggA = modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "aggregate" });
+    const aggB = modelUsageSourceKey({ responseId: null, dispatchId: "act-B", positionalKey: "aggregate" });
+    expect(aggA).not.toBe(aggB);
+  });
+
+  test("within one dispatch the positional fallback stays stable per call (in-dispatch dedupe)", () => {
+    // Same dispatch id + same positional slot -> same key, so a retried record
+    // within the one execution still dedupes (idempotent), while distinct calls
+    // (response-1 vs response-2) stay distinct.
+    expect(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }))
+      .toBe(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }));
+    expect(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-1" }))
+      .not.toBe(modelUsageSourceKey({ responseId: null, dispatchId: "act-A", positionalKey: "response-2" }));
+  });
+
+  test("degrades to the bare positional key when no dispatch id is available", () => {
+    // Outside a Temporal activity context (local/test) there is no activityId;
+    // the key falls back to the positional value rather than throwing.
+    expect(modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }))
+      .toBe("aggregate");
   });
 });
 

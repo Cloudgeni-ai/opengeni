@@ -18,6 +18,7 @@ import {
 import { appendAndPublishEvents } from "@opengeni/events";
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
+  assertReusableSessionRevivable,
   mergeResourceRefs,
   mergeToolRefs,
   scheduledUserMessagePayload,
@@ -173,6 +174,11 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           };
         } else {
           const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          // A user-cancelled (terminal) reusable session must not be revived and
+          // re-billed on the next fire. Early check avoids the pre-lock goal
+          // upsert side-effect; the locked-callback check below is the
+          // authoritative atomic guard. Mirrors apps/api/src/domain/sessions.ts.
+          assertReusableSessionRevivable(session.status);
           // Defensive backstop for the API-level 409: a reusable session keeps
           // its creation-time attachment, so a diverged task attachment must
           // fail the run instead of silently running with the wrong secrets.
@@ -192,29 +198,36 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               createdBy: "scheduled_task",
             })
             : null;
-          const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => ({
-            events: [
-              ...(reusableGoal ? [{
-                type: "goal.set" as const,
-                payload: {
-                  goalId: reusableGoal.goal.id,
-                  text: reusableGoal.goal.text,
-                  ...(reusableGoal.goal.successCriteria ? { successCriteria: reusableGoal.goal.successCriteria } : {}),
-                  version: reusableGoal.goal.version,
-                  actor: "scheduled_task",
-                  replaced: reusableGoal.replaced,
+          const events = await appendSessionEventsWithLockedSessionUpdate(db, task.workspaceId, session.id, (locked) => {
+            // Authoritative guard under the FOR UPDATE row lock: re-check the
+            // current status to close the TOCTOU between the early read and the
+            // lock (a cancel could land in between). Throwing aborts the whole
+            // append+update transaction, so no user.message is persisted.
+            assertReusableSessionRevivable(locked.status);
+            return {
+              events: [
+                ...(reusableGoal ? [{
+                  type: "goal.set" as const,
+                  payload: {
+                    goalId: reusableGoal.goal.id,
+                    text: reusableGoal.goal.text,
+                    ...(reusableGoal.goal.successCriteria ? { successCriteria: reusableGoal.goal.successCriteria } : {}),
+                    version: reusableGoal.goal.version,
+                    actor: "scheduled_task",
+                    replaced: reusableGoal.replaced,
+                  },
+                }] : []),
+                {
+                  type: "user.message",
+                  payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
                 },
-              }] : []),
-              {
-                type: "user.message",
-                payload: scheduledUserMessagePayload(task.agentConfig.prompt, task.agentConfig.resources, taskTools, task.id, run.id),
+              ],
+              update: {
+                resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
+                tools: mergeToolRefs(locked.tools, taskTools),
               },
-            ],
-            update: {
-              resources: mergeResourceRefs(locked.resources, task.agentConfig.resources),
-              tools: mergeToolRefs(locked.tools, taskTools),
-            },
-          }));
+            };
+          });
           await bus.publish(task.workspaceId, session.id, events);
           const trigger = events.find((event) => event.type === "user.message");
           if (!trigger) {

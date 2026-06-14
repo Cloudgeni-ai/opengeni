@@ -2046,6 +2046,58 @@ describe("worker activities integration", () => {
     expect(runs[0]?.status).toBe("failed");
   });
 
+  test("refuses to revive a cancelled reusable session on the next fire", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "reusable",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // The user explicitly cancelled this reusable session (the one terminal
+    // state). The next scheduled fire must NOT resurrect and re-bill it.
+    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "cancelled", null);
+    const beforeEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "cancelled reusable",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "follow up", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { reusableSessionId: session.id });
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+
+    await expect(activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+    })).rejects.toThrow(/cancelled/i);
+
+    // Nothing was appended to the cancelled session: no new user.message, no
+    // turn queued, and the session stays cancelled (not revived to queued).
+    const afterEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(afterEvents.length).toBe(beforeEvents.length);
+    expect(afterEvents.filter((event) => event.type === "user.message")).toHaveLength(0);
+    expect(afterEvents.filter((event) => event.type === "turn.queued")).toHaveLength(0);
+    const revived = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(revived?.status).toBe("cancelled");
+    const queuedTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 50);
+    expect(queuedTurns.filter((turn) => turn.status === "queued")).toHaveLength(0);
+    // The run is recorded as failed, not dispatched.
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs[0]?.status).toBe("failed");
+  });
+
   test("synthesizes billed goal continuation turns and auto-pauses on no progress", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {

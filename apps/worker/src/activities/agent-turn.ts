@@ -122,6 +122,34 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
  * rows already exceed the sanitized length (e.g. legacy orphans written before
  * this fix), nothing new is appended and the watermark holds steady.
  */
+/**
+ * Stable+unique usage source key for one model call, used to build the per-call
+ * idempotency key (`usage:model.tokens:${turnId}:${sourceKey}`). The turnId is
+ * shared across a re-dispatch of the SAME turn (preemption resume, approval
+ * rerun, activity retry), so the sourceKey alone must distinguish calls.
+ *
+ * - A provider responseId is globally stable+unique, so reuse it verbatim: a
+ *   true activity retry that re-emits the same responseId correctly DEDUPES
+ *   (one charge), while two distinct calls get distinct ids.
+ * - Without a responseId the only fallback was POSITIONAL ("response-1",
+ *   "aggregate"), which collides across a re-dispatch — dispatch B's first
+ *   call reuses dispatch A's "response-1" key and its charge is silently
+ *   dropped (undercharge). Qualifying the positional fallback with the
+ *   per-execution dispatch id (the Temporal activityId, unique per scheduled
+ *   execution) makes re-dispatched calls distinct while still deduping a
+ *   same-execution retry.
+ */
+export function modelUsageSourceKey(input: {
+  responseId?: string | null | undefined;
+  dispatchId: string | null;
+  positionalKey: string;
+}): string {
+  if (input.responseId) {
+    return input.responseId;
+  }
+  return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
 export function historyRowsToAppend(
   rawHistory: Array<Record<string, unknown>>,
   // How many items of the CURRENT in-memory history are already persisted (the
@@ -287,6 +315,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // trip the per-producer uniqueness constraint on the event log. The
       // Temporal activity id is unique per scheduled execution.
       const producerId = `${input.workflowId}:${turnId}${activityContext ? `:${activityContext.info.activityId}` : ""}`;
+      // Unique per scheduled activity execution (Temporal activityId). Folded
+      // into positional usage source keys so a re-dispatch of this turn does
+      // not collide its model-call charges with the prior dispatch's. A genuine
+      // activity retry reuses the same activityId, so its re-emitted calls keep
+      // deduping (no double charge).
+      const dispatchId = activityContext?.info.activityId ?? null;
       publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
         const inputs = events.map((event) => ({
           ...event,
@@ -463,7 +497,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnId,
               model: turn.model,
               usage: responseUsage.usage,
-              sourceKey: responseUsage.responseId ?? `response-${responseUsageCount}`,
+              sourceKey: modelUsageSourceKey({
+                responseId: responseUsage.responseId,
+                dispatchId,
+                positionalKey: `response-${responseUsageCount}`,
+              }),
             });
             await reconcileConversationTruth();
             try {
@@ -508,7 +546,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId,
           model: turn.model,
           usage: stream.state.usage,
-          sourceKey: "aggregate",
+          sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
         });
       }
       if (lastInputTokensObserved !== null) {
