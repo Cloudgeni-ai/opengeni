@@ -214,6 +214,71 @@ describe("useSlashCommands", () => {
     await h.unmount();
   });
 
+  test("ArrowDown to /clear-view + Enter runs clear-view, not the exact-match /clear", async () => {
+    // Draft "/clear": items[0] is clear-view, and clear exact-matches the token.
+    // Without navigation Enter resolves to the destructive clear (exact match).
+    // After ArrowDown lands the highlight on clear-view, Enter must run THAT row.
+    let cleared = false;
+    let viewClears = 0;
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+    };
+    const h = await renderHook<Harness, void>(() => {
+      const [value, setValue] = useState("/clear");
+      const [notices, setNotices] = useState<Notice[]>([]);
+      const handlers: SlashCommandHandlers = {
+        notice: (n) => setNotices((cur) => [...cur, n]),
+        openHelp: () => {},
+        clearView: () => { viewClears += 1; return true; },
+        confirm: async () => true,
+      };
+      const command = useSlashCommands({ commands: defaultCommands, context: ctx, handlers, value, setValue });
+      return { value, setValue, notices, helpOpened: 0, viewCleared: 0, confirmAnswer: true, command };
+    }, undefined);
+
+    // clear-view sorts first, so highlight 0 is already clear-view; arrow-navigate
+    // explicitly (down then up returns to 0) to mark the selection as deliberate.
+    expect(h.result.current.command.items[0]?.name).toBe("clear-view");
+    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+    await h.rerender();
+    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowUp" }));
+    await h.rerender();
+    expect(h.result.current.command.highlight).toBe(0);
+
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+
+    expect(viewClears).toBe(1);
+    expect(cleared).toBe(false);
+    expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Local view cleared." });
+    await h.unmount();
+  });
+
+  test("without navigation, Enter on a fully-typed /clear still resolves to the exact /clear", async () => {
+    // The exact-match override is preserved for the no-navigation case: typing
+    // the full "/clear" and pressing Enter (no arrows) runs the destructive
+    // clear, not the highlighted clear-view.
+    let cleared = false;
+    const ctx: SlashCommandContext = {
+      ...sessionCtx,
+      client: fakeClient({ clearSessionContext: async () => { cleared = true; } }),
+    };
+    const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
+    // No arrow keys — straight Enter.
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+    expect(cleared).toBe(true);
+    expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Context cleared." });
+    await h.unmount();
+  });
+
   test("runAt out of range is a no-op", async () => {
     const h = await setup({ initialValue: "/clear", context: sessionCtx });
     await h.result.current.command.runAt(999);

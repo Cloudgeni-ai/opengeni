@@ -82,6 +82,18 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
   const [dismissedValue, setDismissedValue] = useState<string | null>(null);
   const dismissed = dismissedValue !== null && dismissedValue === value;
 
+  // Whether the operator has explicitly arrow-navigated the highlight for the
+  // CURRENT draft. When they have, Enter is an explicit choice of the
+  // highlighted row — the exact-match token override must NOT hijack it (else
+  // ArrowDown to /clear-view + Enter would still fire the destructive /clear,
+  // since "clear" exact-matches the token). Reset whenever the draft changes.
+  const navigatedRef = useRef(false);
+  const navTokenRef = useRef(value);
+  if (navTokenRef.current !== value) {
+    navTokenRef.current = value;
+    navigatedRef.current = false;
+  }
+
   const parsed = useMemo(() => parseCommandLine(value), [value]);
   const filterCtx = useMemo(
     () => ({
@@ -211,12 +223,22 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
     if (!parsed) {
       return;
     }
-    // When the typed token is an exact command name (e.g. "/clear" while the
-    // longer "/clear-view" sits first in the filtered list), Enter should run
-    // THAT command, not autocomplete the highlighted near-match. Exact match
-    // wins over the highlight; otherwise use the highlighted row. This heuristic
-    // is reserved for KEYBOARD Enter, where the user has not explicitly pointed
-    // at a row — a pointer click goes through runAt and bypasses it entirely.
+    // If the operator has arrow-navigated, Enter is an explicit choice of the
+    // highlighted row — run it directly, exactly like a click. This makes
+    // /clear-view reachable via ArrowDown+Enter even when "/clear" is fully
+    // typed (otherwise the exact-match override below would hijack it).
+    if (navigatedRef.current && !activeCommand) {
+      const highlighted = items[clampedHighlight];
+      if (highlighted) {
+        await runResolved(highlighted, { explicit: true });
+      }
+      return;
+    }
+    // Otherwise (no explicit navigation): when the typed token is an exact
+    // command name (e.g. "/clear" while the longer "/clear-view" sits first in
+    // the filtered list), Enter should run THAT command, not autocomplete the
+    // highlighted near-match. Exact match wins over the highlight; otherwise use
+    // the highlighted row. A pointer click goes through runAt, never here.
     const exact = items.find((item) => item.name === parsed.name || item.aliases?.includes(parsed.name));
     const command = activeCommand ?? exact ?? items[clampedHighlight];
     if (!command) {
@@ -252,11 +274,13 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
       switch (event.key) {
         case "ArrowDown": {
           event.preventDefault();
+          navigatedRef.current = true;
           setHighlight((current) => (items.length === 0 ? 0 : (Math.min(current, items.length - 1) + 1) % items.length));
           return true;
         }
         case "ArrowUp": {
           event.preventDefault();
+          navigatedRef.current = true;
           setHighlight((current) => {
             const base = Math.min(current, items.length - 1);
             return items.length === 0 ? 0 : (base - 1 + items.length) % items.length;
