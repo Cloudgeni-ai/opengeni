@@ -58,6 +58,13 @@ export type CommandContext = {
 export type CommandResult = {
   status: "ok" | "error";
   message?: string;
+  /**
+   * Keep the composer draft instead of clearing it on an ok result. Used when a
+   * command resolves to a no-op the operator may want to retry — e.g. canceling
+   * the /clear confirm bar returns ok (no error) but must NOT wipe the typed
+   * "/clear" draft. Default false: a successful command clears the draft.
+   */
+  keepDraft?: boolean;
 };
 
 export type SlashCommand = {

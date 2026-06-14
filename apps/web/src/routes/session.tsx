@@ -69,16 +69,19 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
   // in. Reset when the session identity changes so a new session starts clean.
-  const [viewClearedAfter, setViewClearedAfter] = useState(0);
+  // null = never cleared (distinct from "cleared at sequence 0"): clearing an
+  // empty stream still latches, so the initial-message fallback is suppressed
+  // and any later events stay hidden up to the cleared sequence.
+  const [viewClearedAfter, setViewClearedAfter] = useState<number | null>(null);
   useEffect(() => {
-    setViewClearedAfter(0);
+    setViewClearedAfter(null);
   }, [sessionId]);
   const clearView = useCallback(() => {
     const latestSequence = events.reduce((max, event) => Math.max(max, event.sequence), 0);
     setViewClearedAfter(latestSequence);
   }, [events]);
   const visibleEvents = useMemo(
-    () => viewClearedAfter > 0 ? events.filter((event) => event.sequence > viewClearedAfter) : events,
+    () => viewClearedAfter !== null ? events.filter((event) => event.sequence > viewClearedAfter) : events,
     [events, viewClearedAfter],
   );
   const timeline = useMemo(() => {
@@ -89,7 +92,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
-    return viewClearedAfter > 0 && visibleEvents.length === 0 ? [] : projected;
+    return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
   }, [session, visibleEvents, viewClearedAfter]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
