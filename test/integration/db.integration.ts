@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   appendSessionEvents,
@@ -46,7 +49,7 @@ import {
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import { expectContiguousSequences, startTestServices, type TestServices } from "@opengeni/testing";
+import { applyRawSql, expectContiguousSequences, startTestServices, type TestServices } from "@opengeni/testing";
 
 describe("DB integration", () => {
   let services: TestServices;
@@ -1090,6 +1093,98 @@ describe("DB integration", () => {
     // First consumer wins; a second consumer sees it already cleared.
     expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(true);
     expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(false);
+  });
+
+  test("migration 0014 repair strips a legacy orphaned function_call_result, audits it, and spares valid pairs + dangling calls", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "orphan-repair",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // A second session that must stay completely untouched — proves the repair
+    // is session-scoped and never deletes a result whose call lives elsewhere.
+    const otherSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "orphan-repair-other",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // Legacy corruption: an orphaned function_call_result (no preceding call), a
+    // valid call+result pair, and a trailing dangling call (valid mid-turn).
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "go" } },
+        { position: 1, item: { type: "function_call_result", callId: "orphan_x", output: { type: "text", text: "leaked" } } },
+        { position: 2, item: { type: "function_call", callId: "paired", name: "tool", arguments: "{}" } },
+        { position: 3, item: { type: "function_call_result", callId: "paired", output: { type: "text", text: "ok" } } },
+        // snake_case orphan: a result whose call_id has no earlier call.
+        { position: 4, item: { type: "shell_call_output", call_id: "orphan_snake", output: "leaked2" } },
+        { position: 5, item: { type: "function_call", callId: "dangling", name: "tool", arguments: "{}" } },
+      ],
+    });
+    // The other session holds a call with the SAME id as this session's orphan,
+    // to prove cross-session call presence does NOT spare an orphan (scoping).
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: otherSession.id,
+      items: [
+        { position: 0, item: { type: "function_call", callId: "orphan_x", name: "tool", arguments: "{}" } },
+        { position: 1, item: { type: "function_call_result", callId: "orphan_x", output: { type: "text", text: "ok" } } },
+      ],
+    });
+
+    // Run the ACTUAL shipped migration SQL against the live DB. CREATE TABLE IF
+    // NOT EXISTS and the GRANT block make re-running it (already applied in
+    // beforeAll) idempotent; the CTE DELETE re-evaluates the new orphans.
+    const migrationPath = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "../../packages/db/drizzle/0014_repair_orphaned_function_call_results.sql",
+    );
+    const migrationSql = await readFile(migrationPath, "utf8");
+    await applyRawSql(services.databaseUrl, migrationSql);
+
+    // The two orphans are gone; everything else survives in order.
+    const remaining = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(remaining.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 2, 3, 5]);
+    const remainingTypes = remaining
+      .sort((a, b) => a.position - b.position)
+      .map((row) => (row.item as Record<string, unknown>).type);
+    expect(remainingTypes).toEqual(["message", "function_call", "function_call_result", "function_call"]);
+    // The dangling call (valid mid-turn) was NOT deleted.
+    expect(remaining.some((row) => (row.item as Record<string, unknown>).callId === "dangling")).toBe(true);
+    // Neither orphan survives.
+    expect(remaining.some((row) => (row.item as Record<string, unknown>).callId === "orphan_x")).toBe(false);
+    expect(remaining.some((row) => (row.item as Record<string, unknown>).call_id === "orphan_snake")).toBe(false);
+
+    // The other session is completely untouched (scoping).
+    const otherRemaining = await getSessionHistoryItems(dbClient.db, grant.workspaceId, otherSession.id);
+    expect(otherRemaining.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1]);
+
+    // Both deleted orphans were audited verbatim into the permanent audit table.
+    const audit = await dbClient.db.execute(dbSql`
+      select source_id, position, item, repair_reason
+      from session_history_items_repair_audit
+      where session_id = ${session.id}
+      order by position
+    `);
+    const auditRows = audit as unknown as Array<{ position: number; item: Record<string, unknown>; repair_reason: string }>;
+    expect(auditRows).toHaveLength(2);
+    expect(auditRows.map((r) => Number(r.position)).sort((a, b) => a - b)).toEqual([1, 4]);
+    expect(auditRows.every((r) => r.repair_reason === "orphaned_tool_call_result_no_matching_call")).toBe(true);
+    const auditedCallIds = auditRows.map((r) => r.item.callId ?? r.item.call_id);
+    expect(auditedCallIds.sort()).toEqual(["orphan_snake", "orphan_x"]);
   });
 });
 

@@ -126,6 +126,22 @@ export async function buildSandboxImage(tag = "opengeni-sandbox:local", cwd = pr
   }
 }
 
+/**
+ * Run a raw, possibly multi-statement SQL script (e.g. a migration file's full
+ * text, including DO $$ ... $$ blocks) against a database. Uses the simple
+ * protocol via `unsafe`, the same path the migration runner uses, so a hand-
+ * authored .sql file behaves identically in a test. Intended for exercising
+ * migration files directly; not for app queries.
+ */
+export async function applyRawSql(databaseUrl: string, sqlText: string): Promise<void> {
+  const sql = postgres(databaseUrl, { max: 1 });
+  try {
+    await sql.unsafe(sqlText);
+  } finally {
+    await sql.end().catch(() => undefined);
+  }
+}
+
 async function waitForPostgres(databaseUrl: string): Promise<void> {
   await waitFor(async () => {
     const sql = postgres(databaseUrl, { max: 1 });

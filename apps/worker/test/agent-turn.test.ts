@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
+import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { historyRowsToAppend, isWorkerShutdownCancellation, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
@@ -136,6 +137,106 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     const result = historyRowsToAppend(sanitized, 1);
     expect(result.rows.map((row) => row.position)).toEqual([1, 2]);
     expect(result.nextPosition).toBe(3);
+  });
+});
+
+describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count)", () => {
+  // The seed the live worker computes at turn start. The fix is to seed from the
+  // SANITIZED active length (what prepareRunInput actually puts into
+  // state.history), NOT the raw active-row count.
+  const sanitizedSeed = (activeRows: Array<Record<string, unknown>>) =>
+    sanitizeHistoryItemsForModel(activeRows).length;
+
+  test("a K-orphan legacy active history seeds K-too-high under the raw count and strands a new item", () => {
+    // A legacy-corrupted session: its stored ACTIVE rows carry K=1 orphaned
+    // function_call_result (call_legacy has no preceding function_call). The raw
+    // active-row count is 3; sanitization drops the orphan, so state.history this
+    // turn is seeded from only 2 items.
+    const activeRows = [
+      userMessage("earlier turn"),
+      functionResult("call_legacy"), // K=1 orphan: no matching call. Dropped by sanitizer.
+      userMessage("another earlier turn"),
+    ];
+    const rawActiveCount = activeRows.length; // 3 — the OLD seed
+    const seed = sanitizedSeed(activeRows); // 2 — the FIXED seed
+    expect(rawActiveCount).toBe(3);
+    expect(seed).toBe(2);
+
+    // This turn the model produced a fresh tool-call pair after the trigger. The
+    // SDK's state.history is the sanitized prior history + the new trigger +
+    // generated items (the orphan is already gone from the in-memory copy).
+    const stateHistory = [
+      userMessage("earlier turn"),
+      userMessage("another earlier turn"),
+      userMessage("new trigger"),
+      functionCall("call_new"),
+      functionResult("call_new"),
+    ];
+
+    // OLD behavior (raw seed = 3): the slice starts 1 item too late and skips the
+    // genuinely-new "new trigger" item; worse, on a multi-step turn it can skip a
+    // function_call while later persisting its function_call_result alone.
+    const old = historyRowsToAppend(stateHistory, rawActiveCount);
+    expect(old.rows.map((row) => row.item)).not.toContainEqual(userMessage("new trigger"));
+
+    // FIXED behavior (sanitized seed = 2): the slice starts exactly at the first
+    // genuinely-new item; every new item is persisted and no result is stranded.
+    const fixed = historyRowsToAppend(stateHistory, seed);
+    expect(fixed.rows.map((row) => row.item)).toEqual([
+      userMessage("new trigger"),
+      functionCall("call_new"),
+      functionResult("call_new"),
+    ]);
+  });
+
+  test("raw seed can persist a function_call_result whose function_call was in the skipped region", () => {
+    // The session-bricking variant. K=2 orphans inflate the raw count so the
+    // slice skips the new function_call but NOT its trailing result.
+    const activeRows = [
+      functionResult("orphan_1"), // K orphan
+      functionResult("orphan_2"), // K orphan
+      userMessage("prior turn"),
+    ];
+    const rawActiveCount = activeRows.length; // 4? no — 3
+    const seed = sanitizedSeed(activeRows); // 1 (only the user message survives)
+    expect(seed).toBe(1);
+
+    // state.history seeded from the 1 surviving item, then this turn appended a
+    // new call+result pair.
+    const stateHistory = [
+      userMessage("prior turn"),
+      functionCall("call_new"),
+      functionResult("call_new"),
+    ];
+
+    // OLD (raw seed = 3): slice(3) keeps only the trailing result — the orphan
+    // the API 400s on. historyRowsToAppend re-sanitizes, so a single call here is
+    // dropped as dangling; but had the call sat below the slice boundary in a
+    // longer history its result would persist alone. Assert the FIXED seed never
+    // produces that skip.
+    const oldRows = historyRowsToAppend(stateHistory, rawActiveCount);
+    expect(oldRows.rows).toEqual([]); // raw seed >= sanitized length: nothing new captured, the real new pair is lost
+
+    const fixedRows = historyRowsToAppend(stateHistory, seed);
+    const persisted = fixedRows.rows.map((row) => row.item);
+    const callIds = new Set(
+      persisted.filter((item) => item.type === "function_call").map((item) => item.callId),
+    );
+    for (const item of persisted) {
+      if (item.type === "function_call_result") {
+        expect(callIds.has(item.callId)).toBe(true);
+      }
+    }
+    expect(persisted).toEqual([functionCall("call_new"), functionResult("call_new")]);
+  });
+
+  test("orphan-free active history: sanitized seed equals raw count (common path unchanged)", () => {
+    const activeRows = [
+      userMessage("hi"),
+      functionCall("c1"),
+      functionResult("c1"),
+    ];
+    expect(sanitizedSeed(activeRows)).toBe(activeRows.length);
   });
 });
 

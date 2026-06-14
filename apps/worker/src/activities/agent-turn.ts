@@ -12,7 +12,7 @@ import {
   recordUsageEvent,
   appendSessionHistoryItems,
   consumeSessionCompactionRequest,
-  countActiveSessionHistoryItems,
+  getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   requeuePreemptedTurn,
   saveRunState,
@@ -406,7 +406,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the max existing position) because the fractional summary row means
       // total rows no longer equal max(position)+1. Pre-compaction both reduce to
       // the old total-count value, so the common path is unchanged.
-      persistedHistoryCount = await countActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
+      //
+      // CRITICAL: seed from the SANITIZED active-row length, not the raw active
+      // count. `prepareRunInput` builds `state.history` from
+      // `sanitizeHistoryItemsForModel(activeRows)`, so when sanitization drops K
+      // rows (a legacy orphan/dangling pair), the in-memory history this turn
+      // starts from is K shorter than the raw row count. The reconcile slices the
+      // re-sanitized `state.history` off `persistedHistoryCount`; seeding it from
+      // the raw count (K too high) skips K genuinely-new items, and a
+      // `function_call` left in that skipped region can later have its
+      // `function_call_result` persisted alone — the orphan that 400s on replay
+      // and bricks the session (issue-61). The sanitized seed is already
+      // orphan-free, so it is a stable prefix of the re-sanitized history and the
+      // slice begins exactly at the first genuinely-new item.
+      const activeSeedRows = await getActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
+      persistedHistoryCount = sanitizeHistoryItemsForModel(
+        activeSeedRows.map((row) => row.item),
+      ).length;
       historyCountAtTurnStart = persistedHistoryCount;
       nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
       let responseUsageCount = 0;

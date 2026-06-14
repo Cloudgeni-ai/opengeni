@@ -2142,6 +2142,107 @@ export async function countActiveSessionHistoryItems(db: Database, workspaceId: 
 }
 
 /**
+ * Result-item types and the CALL type that settles each. Kept byte-for-byte in
+ * sync with the runtime sanitizer's RESULT_TYPE_BY_CALL_TYPE and the repair
+ * migration (0014). The repair, the read-path sanitizer, and this spec all share
+ * one definition of a tool-call pair.
+ */
+const REPAIR_CALL_TYPE_BY_RESULT_TYPE: Record<string, string> = {
+  function_call_result: "function_call",
+  computer_call_result: "computer_call",
+  shell_call_output: "shell_call",
+  apply_patch_call_output: "apply_patch_call",
+};
+
+function repairCallIdOf(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") {
+    return undefined;
+  }
+  const record = item as { callId?: unknown; call_id?: unknown };
+  if (typeof record.callId === "string") {
+    return record.callId;
+  }
+  if (typeof record.call_id === "string") {
+    return record.call_id;
+  }
+  return undefined;
+}
+
+function repairItemType(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") {
+    return undefined;
+  }
+  const type = (item as { type?: unknown }).type;
+  return typeof type === "string" ? type : undefined;
+}
+
+/**
+ * Pure TypeScript SPEC for the one-time orphan repair (migration 0014),
+ * mirroring its SQL WHERE clause so the deletion rule is unit-testable without a
+ * database. Given the ACTIVE history rows of a single session in position order,
+ * returns the indices of the orphaned tool-call RESULT rows the repair deletes.
+ *
+ * An orphan is a result-type row (function_call_result / computer_call_result /
+ * shell_call_output / apply_patch_call_output) with no matching CALL of the
+ * paired type, same correlation id (camelCase `callId` OR snake_case `call_id`),
+ * at a STRICTLY EARLIER position in the same session. This is exactly the
+ * session-bricking row the Responses API 400s on ("No tool call found for
+ * function call output").
+ *
+ * DANGLING CALLS (a call with no result yet) are intentionally NOT returned: a
+ * call awaiting a not-yet-settled result is valid, not corruption. Only unpaired
+ * results are removed.
+ *
+ * EXISTENCE, not consumption: like the migration's `NOT EXISTS (... earlier
+ * call ...)`, a result is kept whenever ANY earlier matching call exists. A
+ * second result that re-uses a call_id already settled earlier is therefore NOT
+ * flagged here (a matching call still exists before it) — this conservative
+ * choice matches the SQL exactly and never deletes a row whose call is present;
+ * the read-path sanitizer (which consumes calls one-for-one) still drops such a
+ * rare duplicate in-memory, so the model request stays valid regardless.
+ *
+ * Callers pass rows already ordered by position. The earlier-position test is
+ * by array order (the SQL orders by the numeric position column, which the read
+ * path also orders by), so identical inputs yield identical decisions.
+ */
+export function orphanedResultRowIndicesForRepair(
+  activeRowsInPositionOrder: ReadonlyArray<{ item: Record<string, unknown> }>,
+): number[] {
+  // call_ids of CALLs seen so far, per matching result type. A result is an
+  // orphan unless a call of its paired type with the same id appeared earlier.
+  const seenCallIdsByResultType = new Map<string, Set<string>>();
+  // Pre-index every call type to the result type(s) it can settle.
+  const resultTypeByCallType: Record<string, string> = {};
+  for (const [resultType, callType] of Object.entries(REPAIR_CALL_TYPE_BY_RESULT_TYPE)) {
+    resultTypeByCallType[callType] = resultType;
+  }
+  const orphanIndices: number[] = [];
+  activeRowsInPositionOrder.forEach((row, index) => {
+    const type = repairItemType(row.item);
+    const callId = repairCallIdOf(row.item);
+    if (!type || !callId) {
+      return;
+    }
+    const settlesResultType = resultTypeByCallType[type];
+    if (settlesResultType) {
+      // This row is a CALL: record its id so a later matching result is paired.
+      const seen = seenCallIdsByResultType.get(settlesResultType) ?? new Set<string>();
+      seen.add(callId);
+      seenCallIdsByResultType.set(settlesResultType, seen);
+      return;
+    }
+    if (REPAIR_CALL_TYPE_BY_RESULT_TYPE[type]) {
+      // This row is a RESULT: orphan unless an earlier matching call was seen.
+      const seen = seenCallIdsByResultType.get(type);
+      if (!seen || !seen.has(callId)) {
+        orphanIndices.push(index);
+      }
+    }
+  });
+  return orphanIndices;
+}
+
+/**
  * Apply a client-side context compaction as an atomic, audit-preserving write:
  *
  *  - supersede (set active=false) every active row whose position lies in
