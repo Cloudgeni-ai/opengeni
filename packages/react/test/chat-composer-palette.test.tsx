@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
@@ -114,5 +114,51 @@ describe("ChatComposer slash palette", () => {
     );
     const text = container.textContent ?? "";
     expect(text.toLowerCase()).toContain("danger");
+  });
+
+  // Regression (adversarial review): the composer's internal clearView closure
+  // must report whether a view-reset was actually wired, so /clear-view can't
+  // claim a false success. With no onClearView prop the textbox renders but
+  // running the command must NOT surface "Local view cleared." — and with one
+  // wired it both invokes it and surfaces the ok notice. Driven through the
+  // real component (textarea Enter) so the chat-composer wiring itself is under
+  // test, not just the registry handler.
+  function ClearViewHarness(props: { onClearView?: () => void }) {
+    const [value, setValue] = useState("/clear-view");
+    return (
+      <ChatComposer
+        composer={makeComposer(value, setValue)}
+        commandContext={ctx}
+        {...(props.onClearView ? { onClearView: props.onClearView } : {})}
+      />
+    );
+  }
+
+  async function pressEnterOnTextarea(container: HTMLElement) {
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      textarea.focus();
+      // happy-dom dispatches the native keydown through React's event system on
+      // the focused element; the composer's onKeyDown drives the palette run.
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      // Let the async run() + notice state update settle.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  test("/clear-view surfaces an honest error (not a false success) when onClearView is absent", async () => {
+    const container = await mount(<ClearViewHarness />);
+    await pressEnterOnTextarea(container);
+    expect(container.textContent ?? "").not.toMatch(/local view cleared/i);
+    expect(container.textContent ?? "").toMatch(/can't be cleared/i);
+  });
+
+  test("/clear-view invokes onClearView and reports success when it is wired", async () => {
+    let cleared = 0;
+    const container = await mount(<ClearViewHarness onClearView={() => { cleared += 1; }} />);
+    await pressEnterOnTextarea(container);
+    expect(cleared).toBe(1);
+    expect(container.textContent ?? "").toMatch(/local view cleared/i);
   });
 });

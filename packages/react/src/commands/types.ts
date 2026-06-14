@@ -43,8 +43,14 @@ export type CommandContext = {
   notice: (notice: Notice) => void;
   /** Open the in-composer /help panel (rendered from the registry). */
   openHelp: () => void;
-  /** Reset only the LOCAL timeline view — no server call. */
-  clearView: () => void;
+  /**
+   * Reset only the LOCAL timeline view — no server call. Returns whether a
+   * view-reset affordance was actually wired (and thus had an effect): the host
+   * surface supplies one via the composer's `onClearView` prop, and consoles
+   * that don't (no resettable local timeline) get `false`. The /clear-view
+   * command uses this to avoid reporting a false "cleared" success on a no-op.
+   */
+  clearView: () => boolean;
   /** Show the danger confirm bar; resolves true once the operator confirms. */
   confirm: () => Promise<boolean>;
 };

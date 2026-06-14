@@ -49,7 +49,7 @@ import type {
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata } from "@opengeni/contracts";
+import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -2252,14 +2252,24 @@ export function clearedContextMarkerItem(): Record<string, unknown> {
 }
 
 /**
- * The sentinel serializedRunState written by clearSessionContext. It is
- * audit-honest (carries no prior conversation) and is never deserialized on a
- * cleared session: the message path always takes the items route (the marker
- * above keeps it non-empty) and the approval path is refused for sessions that
- * are mid-turn / awaiting action. Stored so getLatestRunState — the other read
- * path — also reflects the clear instead of the pre-clear blob.
+ * The sentinel serializedRunState written by clearSessionContext, re-exported
+ * from @opengeni/contracts so the writer (here) and the readers (run-input /
+ * runtime) share one definition. It is audit-honest (carries no prior
+ * conversation) and is NOT a real Agents-SDK run state — it has no
+ * `$schemaVersion`/history, so `RunState.fromString` throws on it.
+ *
+ * Both run-state read paths therefore guard against it explicitly via
+ * {@link isClearedRunStateBlob}:
+ *  - the message path (run-input messageInput) honors it in BOTH items and
+ *    run_state history modes — in items mode the boundary marker keeps the
+ *    active read non-empty so the blob is never reached, and in run_state mode
+ *    the sentinel is recognized and treated as a fresh empty start;
+ *  - the approval path is additionally refused by the API for mid-turn /
+ *    requires_action sessions, so it never sees the sentinel.
+ * Stored so getLatestRunState (the run_state-source read path) reflects the
+ * clear instead of resurrecting the pre-clear blob.
  */
-export const CLEARED_RUN_STATE = JSON.stringify({ $opengeniCleared: true });
+export const CLEARED_RUN_STATE = CLEARED_RUN_STATE_BLOB;
 
 export type ClearSessionContextResult = {
   /** Active history rows superseded (active=true -> false). */

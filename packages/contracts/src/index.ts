@@ -618,6 +618,42 @@ export const ClearSessionContextRequest = z.object({
 });
 export type ClearSessionContextRequest = z.infer<typeof ClearSessionContextRequest>;
 
+/**
+ * The marker key on the sentinel run-state blob written by a context clear. The
+ * blob ({@link CLEARED_RUN_STATE_BLOB}) is NOT a real Agents-SDK serialized run
+ * state — it carries no `$schemaVersion`/history, so `RunState.fromString` would
+ * throw on it. Every read path that deserializes a run-state blob MUST first
+ * check {@link isClearedRunStateBlob} and treat a match as "no prior state"
+ * (a fresh, empty start), which is exactly what a clear means. This is the
+ * shared contract that keeps the db (writer) and the runtime (reader) in sync.
+ */
+export const CLEARED_RUN_STATE_MARKER = "$opengeniCleared" as const;
+
+/** The canonical sentinel serializedRunState value a context clear stores. */
+export const CLEARED_RUN_STATE_BLOB = JSON.stringify({ [CLEARED_RUN_STATE_MARKER]: true });
+
+/**
+ * True when a serialized run-state blob is the cleared sentinel rather than a
+ * real Agents-SDK run state. Recognized leniently (any object carrying the
+ * marker key set truthy) so a future field addition to the sentinel does not
+ * resurrect the pre-clear context. Anything that is not the sentinel — including
+ * malformed JSON — returns false so genuine blobs/corruption are handled by the
+ * normal deserialize path.
+ */
+export function isClearedRunStateBlob(serialized: string | null | undefined): boolean {
+  if (!serialized) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(serialized) as unknown;
+    return typeof parsed === "object"
+      && parsed !== null
+      && (parsed as Record<string, unknown>)[CLEARED_RUN_STATE_MARKER] === true;
+  } catch {
+    return false;
+  }
+}
+
 /** Trigger conversation compaction now. No body fields today (forward-room). */
 export const CompactSessionContextRequest = z.object({}).strict();
 export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextRequest>;

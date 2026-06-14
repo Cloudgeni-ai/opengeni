@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { getSettings } from "@opengeni/config";
+import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
@@ -267,6 +268,37 @@ describe("runtime event normalization", () => {
       serializedRunState: null,
     });
     expect(prepared.input).toBe("hello");
+  });
+
+  test("treats the cleared run-state sentinel as a fresh start (run_state mode /clear)", async () => {
+    // Regression (adversarial review): after /clear, in run_state history mode
+    // the message path reads the cleared sentinel blob (not a real serialized
+    // run state — it has no $schemaVersion). RunState.fromString would throw
+    // "Run state is missing schema version" and break the next turn. The reader
+    // must recognize the sentinel and start clean instead, returning the bare
+    // text exactly as a null state would.
+    const prepared = await prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
+      kind: "message",
+      text: "first message after clear",
+      serializedRunState: CLEARED_RUN_STATE_BLOB,
+    });
+    expect(prepared.input).toBe("first message after clear");
+    // And critically it carries no resurrected sandbox-resume descriptor.
+    expect(prepared.serializedRunStateForSandbox).toBeUndefined();
+  });
+
+  test("refuses an approval resume against a cleared sentinel with an honest error", async () => {
+    // The API refuses /clear in requires_action, so this is a defensive guard:
+    // if the approval path ever sees the cleared sentinel it must fail with a
+    // clear message, never the cryptic SDK "missing schema version" throw.
+    await expect(
+      prepareRunInput(buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []), {
+        kind: "approval",
+        serializedRunState: CLEARED_RUN_STATE_BLOB,
+        approvalId: "appr_1",
+        decision: "approve",
+      }),
+    ).rejects.toThrow(/context was cleared/i);
   });
 
   test("sanitizes an orphaned tool output out of replayed items-mode history", async () => {
