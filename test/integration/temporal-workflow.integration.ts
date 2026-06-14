@@ -325,6 +325,62 @@ describe("Temporal workflow integration", () => {
     }
   }, temporalWorkflowTestTimeoutMs);
 
+  test("interrupt start-or-signals an idle session with no running workflow (the production 500 fix)", async () => {
+    // Reproduces the operator-can't-stop bug: a long-lived session that has gone
+    // idle has NO running workflow execution. The OLD API client did
+    // getHandle(workflowId).signal("interrupt", …), which throws
+    // WorkflowNotFoundError -> a 500. The FIXED client uses signalWithStart
+    // exactly as wired below; it must start a fresh sessionWorkflow that
+    // immediately honors the buffered interrupt via the idle-interrupt path
+    // (pause goal for the trigger event + mark idle), with no active turn to
+    // cancel.
+    const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+    const scope = workflowScope();
+    const sessionId = crypto.randomUUID();
+    const workflowId = `wf-${crypto.randomUUID()}`;
+    const idleMarks: unknown[] = [];
+    const pauses: unknown[] = [];
+    const interrupts: unknown[] = [];
+    const worker = await testWorker(nativeConnection, taskQueue, {
+      claimNextQueuedTurn: async () => null,
+      markSessionIdle: async (input: unknown) => {
+        idleMarks.push(input);
+      },
+      pauseGoalForInterrupt: async (input: unknown) => {
+        pauses.push(input);
+      },
+      runAgentTurn: async () => ({ status: "idle" }),
+      failSession: async () => undefined,
+      interruptActiveTurn: async (input: unknown) => {
+        interrupts.push(input);
+      },
+    });
+    const run = worker.run();
+    try {
+      const client = new Client({ connection });
+      // EXACT production API-client wiring: no prior workflow.start — the only
+      // call is signalWithStart, the start-or-signal path the fixed
+      // signalInterrupt uses. Against a not-running workflow this must START it.
+      const handle = await client.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue,
+        workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [{ ...scope, sessionId }],
+        signal: "interrupt",
+        signalArgs: ["interrupt-event"],
+      });
+      await handle.result();
+      // The idle-interrupt path ran: the goal was paused for the trigger event
+      // and the session was marked idle. No active turn existed to cancel.
+      expect(pauses).toEqual([{ workspaceId: scope.workspaceId, sessionId, triggerEventId: "interrupt-event" }]);
+      expect(idleMarks).toEqual([{ workspaceId: scope.workspaceId, sessionId }]);
+      expect(interrupts).toHaveLength(0);
+    } finally {
+      worker.shutdown();
+      await run;
+    }
+  }, temporalWorkflowTestTimeoutMs);
+
   test("interrupt during an active run cancels the active turn and continues queued work", async () => {
     const taskQueue = `workflow-test-${crypto.randomUUID()}`;
     const scope = workflowScope();

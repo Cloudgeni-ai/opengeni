@@ -2514,6 +2514,29 @@ describe("API component integration", () => {
     });
     expect(interruptAccepted.status).toBe(202);
     expect(workflow.interrupts).toHaveLength(1);
+    // The route must hand signalInterrupt the start-or-signal args (accountId +
+    // workspaceId), not just {sessionId,eventId,workflowId}: a session that has
+    // gone idle has no running workflow execution, so the client must
+    // signalWithStart, which needs the sessionWorkflow args. Without these the
+    // interrupt 500s for any idle session (the operator-can't-stop bug).
+    expect(workflow.interrupts[0]).toMatchObject({
+      workspaceId,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+    });
+    expect((workflow.interrupts[0] as { accountId?: unknown }).accountId).toBeTruthy();
+
+    // An interrupt on an IDLE session (no running workflow) must still be
+    // accepted (202), not 500 — the exact production failure. The route appends
+    // the event and start-or-signals regardless of session status.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const idleInterrupt = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({ type: "user.interrupt", payload: { reason: "stop" } }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(idleInterrupt.status).toBe(202);
+    expect(workflow.interrupts).toHaveLength(2);
 
     const malformed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events`), {
       method: "POST",

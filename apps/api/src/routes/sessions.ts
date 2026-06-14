@@ -330,7 +330,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (event.type === "user.approvalDecision") {
       await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
     } else {
-      await workflowClient.signalInterrupt({ sessionId, eventId: accepted.id, workflowId });
+      await workflowClient.signalInterrupt({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        eventId: accepted.id,
+        workflowId,
+      });
     }
     return c.json(accepted, 202);
   });

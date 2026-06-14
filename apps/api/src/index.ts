@@ -48,8 +48,22 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     signalApprovalDecision: async ({ eventId, workflowId }) => {
       await temporal.workflow.getHandle(workflowId).signal("approvalDecision", eventId);
     },
-    signalInterrupt: async ({ eventId, workflowId }) => {
-      await temporal.workflow.getHandle(workflowId).signal("interrupt", eventId);
+    signalInterrupt: async ({ accountId, workspaceId, sessionId, eventId, workflowId }) => {
+      // Start-or-signal: an interrupt POSTed while the session is idle has no
+      // running workflow execution to signal, and getHandle().signal() would
+      // throw WorkflowNotFoundError -> a 500 (the operator-can't-stop bug). Like
+      // wakeSessionWorkflow, signalWithStart delivers the signal to a live run
+      // when one exists and otherwise starts a fresh sessionWorkflow that picks
+      // the buffered `interrupt` up immediately. ALLOW_DUPLICATE matches the
+      // wake path so a running execution is reused rather than rejected.
+      await temporal.workflow.signalWithStart("sessionWorkflow", {
+        taskQueue: settings.temporalTaskQueue,
+        workflowId,
+        workflowIdReusePolicy: "ALLOW_DUPLICATE",
+        args: [{ accountId, workspaceId, sessionId }],
+        signal: "interrupt",
+        signalArgs: [eventId],
+      });
     },
     syncScheduledTask: async ({ task }) => {
       const schedule = temporal.schedule.getHandle(task.temporalScheduleId);

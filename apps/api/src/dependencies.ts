@@ -11,7 +11,15 @@ export type SessionWorkflowClient = {
   signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   wakeSessionWorkflow: (input: { accountId: string; workspaceId: string; sessionId: string; workflowId: string }) => Promise<void>;
   signalApprovalDecision: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
-  signalInterrupt: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
+  // Interrupt must reach the workflow whether or not an execution is currently
+  // running: a long-lived session that has gone idle (its workflow returned
+  // after markSessionIdle) has NO running execution, so a plain
+  // getHandle().signal() throws WorkflowNotFoundError -> a 500 that leaves an
+  // operator unable to stop a session. signalWithStart start-or-signals, so it
+  // needs the session-workflow args (accountId/workspaceId) to start a fresh
+  // run when none is live; the buffered `interrupt` signal is then honored by
+  // the workflow's idle-interrupt path (pause goal + mark idle).
+  signalInterrupt: (input: { accountId: string; workspaceId: string; sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string }) => Promise<void>;
