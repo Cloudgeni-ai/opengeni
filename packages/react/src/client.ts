@@ -23,6 +23,9 @@ export type SessionClientLike = Pick<
   // Goal
   | "getGoal"
   | "updateGoal"
+  // Operator context controls (/clear, /compact)
+  | "clearSessionContext"
+  | "compactSessionContext"
   // Scheduled tasks
   | "listScheduledTasks"
   // Environments

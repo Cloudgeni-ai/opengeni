@@ -52,6 +52,9 @@ export async function maybeCompactContext(
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
   summarize: CompactionSummarizer = (s, m) => summarizeForCompaction(s, m, { maxOutputTokens: s.contextSummaryMaxTokens }),
+  // Operator-forced (the /compact command): bypass the budget trigger and
+  // compact now if there is anything to summarize. Structural guards still hold.
+  options: { force?: boolean } = {},
 ): Promise<MaybeCompactResult> {
   if (resolveContextCompactionMode(settings) !== "client") {
     return { compacted: false, reason: "mode_not_client" };
@@ -70,6 +73,7 @@ export async function maybeCompactContext(
     softFraction: settings.contextCompactSoftFraction,
     hardFraction: settings.contextCompactHardFraction,
     keepRecentTokens: settings.contextKeepRecentTokens,
+    ...(options.force ? { force: true } : {}),
   });
   if (!plan.shouldCompact) {
     return { compacted: false, reason: plan.reason };

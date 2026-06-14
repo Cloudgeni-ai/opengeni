@@ -101,6 +101,7 @@ export const SESSION_EVENT_TYPES = [
   "session.status.changed",
   "session.requiresAction",
   "session.context.compacted",
+  "session.context.cleared",
   "user.message",
   "user.interrupt",
   "user.approvalDecision",
@@ -390,6 +391,18 @@ export type SessionGoal = {
 export type UpdateSessionGoalRequest = {
   status: "paused" | "active";
   rationale?: string | undefined;
+};
+
+// --- Operator context controls (/clear, /compact) ----------------------------
+
+/** Outcome of a manual /compact trigger. */
+export type CompactSessionContextResult = {
+  /**
+   * queued: a client-side (Azure) compaction will run before the next turn.
+   * noop:   nothing to do (server-managed provider, mode off, or no history).
+   */
+  status: "queued" | "noop";
+  message: string;
 };
 
 // --- Turn queue --------------------------------------------------------------

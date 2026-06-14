@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, applyCreditLedgerEntry, bootstrapWorkspace, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -148,6 +148,114 @@ describe("API component integration", () => {
     const plainSession = await plain.json() as { id: string };
     const missing = await app.request(workspacePath(workspaceId, `/sessions/${plainSession.id}/goal`));
     expect(missing.status).toBe(404);
+  });
+
+  test("POST /context/clear clears context (audit-preserved), 409s mid-turn, and emits the event", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const created = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "clear me", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = await created.json() as { id: string };
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: (await requireSession(dbClient.db, workspaceId, session.id)).accountId,
+      workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "earlier work" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] } },
+      ],
+    });
+
+    // While a turn is in flight, clearing is refused (409) — mid-turn safety.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "running", null);
+    const blocked = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/context/clear`), {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(blocked.status).toBe(409);
+
+    // An explicit confirm is required on the wire.
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+    const noConfirm = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/context/clear`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(noConfirm.status).toBe(400);
+
+    const cleared = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/context/clear`), {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(cleared.status).toBe(204);
+
+    // Active read collapses to the single neutral marker; the cleared event lands.
+    const active = await getActiveSessionHistoryItems(dbClient.db, workspaceId, session.id);
+    expect(active).toHaveLength(1);
+    expect(active[0]!.item).toMatchObject({ content: "[context cleared]" });
+    const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    expect(events.some((event) => event.type === "session.context.cleared")).toBe(true);
+  });
+
+  test("POST /context/compact: queued on the client path, no-op on the server path", async () => {
+    workflow = new FakeWorkflowClient();
+    const workspaceId = await defaultWorkspaceId(createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    }));
+
+    // Server-managed provider (default auto+openai) -> noop, no flag set.
+    const serverApp = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl, contextCompactionMode: "server" }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const created = await serverApp.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "compact me", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    const session = await created.json() as { id: string };
+    await setSessionStatus(dbClient.db, workspaceId, session.id, "idle", null);
+
+    const noop = await serverApp.request(workspacePath(workspaceId, `/sessions/${session.id}/context/compact`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(noop.status).toBe(200);
+    expect((await noop.json() as { status: string }).status).toBe("noop");
+    expect(await consumeSessionCompactionRequest(dbClient.db, workspaceId, session.id)).toBe(false);
+
+    // Client-managed (Azure) provider -> queued, durable flag set for the worker.
+    const clientApp = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl, contextCompactionMode: "client" }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const queued = await clientApp.request(workspacePath(workspaceId, `/sessions/${session.id}/context/compact`), {
+      method: "POST",
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json" },
+    });
+    expect(queued.status).toBe(200);
+    expect((await queued.json() as { status: string }).status).toBe("queued");
+    expect(await consumeSessionCompactionRequest(dbClient.db, workspaceId, session.id)).toBe(true);
   });
 
   test("registers session-scoped goal MCP tools only for session-bound grants", async () => {

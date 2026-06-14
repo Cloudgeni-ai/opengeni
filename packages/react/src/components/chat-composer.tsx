@@ -1,10 +1,15 @@
 import type { SessionStatus } from "@opengeni/sdk";
 import { ArrowUpIcon, LoaderCircleIcon, SquareIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useRef, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
+import { argHint } from "../commands/registry";
+import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSubmitOnKey } from "../hooks/use-composer";
+import { defaultCommands } from "../commands/registry";
+import { useSlashCommands, type ConfirmState, type SlashCommandContext } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
+import { CommandPalette } from "./command-palette";
 
 export type ChatComposerProps = {
   composer: ComposerState;
@@ -22,6 +27,19 @@ export type ChatComposerProps = {
   /** Paste hook on the textarea (e.g. paste-image-to-attach). */
   onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
   className?: string | undefined;
+  /**
+   * Slash-command palette. Defaults to the built-in {@link defaultCommands};
+   * apps concat their own. Backward-compatible: when `commandContext` is absent
+   * the palette is inert and behavior is identical to before.
+   */
+  commands?: readonly SlashCommand[] | undefined;
+  /**
+   * Wiring the palette needs to run server commands and gate visibility. The
+   * composer supplies notice/openHelp/clearView/confirm internally.
+   */
+  commandContext?: SlashCommandContext | undefined;
+  /** Reset the local timeline view (the /clear-view command target). */
+  onClearView?: (() => void) | undefined;
 };
 
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["queued", "running"]);
@@ -31,10 +49,34 @@ const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["queued", "running"
  * everything else is the agent's job. Enter sends, Shift+Enter breaks the
  * line, and the stop control appears while a turn is running (sending while
  * running is legitimate steering, so send stays available too).
+ *
+ * Typing a leading "/" opens the slash-command palette — SESSION/OPERATOR
+ * controls (clear, compact, pause goal, help), never a structured channel to
+ * the agent. The palette is purely additive: with no `commandContext` it is
+ * inert and the composer behaves exactly as before.
  */
-export function ChatComposer({ composer, status, placeholder, disabled, autoFocus, hint, controlsStart, header, onPaste, className }: ChatComposerProps) {
+export function ChatComposer({
+  composer,
+  status,
+  placeholder,
+  disabled,
+  autoFocus,
+  hint,
+  controlsStart,
+  header,
+  onPaste,
+  className,
+  commands = defaultCommands,
+  commandContext,
+  onClearView,
+}: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const active = status != null && ACTIVE_STATUSES.has(status);
+
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [confirmState, setConfirmState] = useState<ConfirmState>(null);
+  const listboxId = useId();
 
   const resize = useCallback(() => {
     const textarea = textareaRef.current;
@@ -49,108 +91,278 @@ export function ChatComposer({ composer, status, placeholder, disabled, autoFocu
     resize();
   }, [composer.value, resize]);
 
+  // The UI affordances commands reach: surface a notice, open the help panel,
+  // reset the local view, and the danger confirm flow (resolves when the
+  // operator confirms/cancels in the confirm bar).
+  const handlers = useMemo(
+    () => ({
+      notice: (next: Notice) => {
+        setNotice(next);
+        composer.clearError();
+      },
+      openHelp: () => setHelpOpen(true),
+      clearView: () => onClearView?.(),
+      confirm: () =>
+        new Promise<boolean>((resolve) => {
+          setConfirmState({
+            // The confirm bar is rendered from the highlighted/active command;
+            // the command itself is supplied by the hook at run time.
+            command: { name: "clear", description: "", danger: true, run: () => ({ status: "ok" }) },
+            resolve: (confirmed) => {
+              setConfirmState(null);
+              resolve(confirmed);
+            },
+          });
+        }),
+    }),
+    [composer, onClearView],
+  );
+
+  const palette = useSlashCommands({
+    commands,
+    context: commandContext,
+    handlers,
+    value: composer.value,
+    setValue: composer.setValue,
+  });
+
+  // The confirm bar reflects the command currently awaiting confirmation; the
+  // hook drives execution, so we render the active/highlighted danger command.
+  const pendingDangerCommand = confirmState
+    ? palette.activeCommand ?? palette.items[palette.highlight] ?? confirmState.command
+    : null;
+
+  const paletteEnabled = commandContext !== undefined;
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Palette key handling runs FIRST and only when the palette is open; when
+    // closed it returns false and the existing send path is untouched.
+    if (paletteEnabled && palette.onKeyDown(event)) {
+      return;
+    }
     if (shouldSubmitOnKey(event)) {
       event.preventDefault();
       void composer.send();
     }
   };
 
+  const helpCommands = useMemo(
+    () =>
+      commands.filter((command) => {
+        if (command.permission && commandContext) {
+          const perms = commandContext.permissions;
+          return perms.includes(command.permission) || perms.includes("workspace:admin");
+        }
+        return true;
+      }),
+    [commands, commandContext],
+  );
+
+  const activeNotice = notice ?? (composer.error ? { tone: "error" as const, message: composer.error.message || "Sending failed — your draft is still here. Try again." } : null);
+
   return (
     <div className={cn("og-root", className)}>
-      <div
-        className={cn(
-          "rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
-          "transition-[border-color,box-shadow] duration-200",
-          "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
-        )}
-      >
-        {header}
-        <textarea
-          ref={textareaRef}
-          rows={1}
-          value={composer.value}
-          onChange={(event) => composer.setValue(event.target.value)}
-          onKeyDown={onKeyDown}
-          onPaste={onPaste}
-          placeholder={placeholder ?? "Message the agent…"}
-          disabled={disabled}
-          autoFocus={autoFocus}
-          aria-label="Message the agent"
+      <div className="relative">
+        {paletteEnabled ? (
+          <CommandPalette
+            open={palette.open && confirmState === null}
+            items={palette.items}
+            highlight={palette.highlight}
+            onHighlight={palette.setHighlight}
+            onRun={(index) => {
+              palette.setHighlight(index);
+              void palette.runHighlighted();
+            }}
+            argHintText={palette.activeArgHint}
+            listboxId={listboxId}
+          />
+        ) : null}
+        <div
           className={cn(
-            "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6",
-            "text-og-fg placeholder:text-og-fg-subtle focus:outline-none",
-            "disabled:cursor-not-allowed disabled:opacity-60",
+            "rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
+            "transition-[border-color,box-shadow] duration-200",
+            "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
           )}
-        />
-        <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
-          {controlsStart ? (
-            <span className="flex min-w-0 items-center gap-1.5">{controlsStart}</span>
+        >
+          {header}
+          <textarea
+            ref={textareaRef}
+            rows={1}
+            value={composer.value}
+            onChange={(event) => composer.setValue(event.target.value)}
+            onKeyDown={onKeyDown}
+            onPaste={onPaste}
+            placeholder={placeholder ?? "Message the agent…"}
+            disabled={disabled}
+            autoFocus={autoFocus}
+            aria-label="Message the agent"
+            role={paletteEnabled && palette.open ? "combobox" : undefined}
+            aria-expanded={paletteEnabled ? palette.open : undefined}
+            aria-controls={paletteEnabled && palette.open ? listboxId : undefined}
+            aria-activedescendant={paletteEnabled && palette.open ? `${listboxId}-option-${palette.highlight}` : undefined}
+            className={cn(
+              "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6",
+              "text-og-fg placeholder:text-og-fg-subtle focus:outline-none",
+              "disabled:cursor-not-allowed disabled:opacity-60",
+            )}
+          />
+          {confirmState && pendingDangerCommand ? (
+            <ConfirmBar
+              command={pendingDangerCommand}
+              onCancel={() => confirmState.resolve(false)}
+              onConfirm={() => confirmState.resolve(true)}
+            />
           ) : (
-            <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
-              {hint ?? "Enter to send · Shift+Enter for a new line"}
-            </span>
-          )}
-          <span className="flex items-center gap-1.5">
-            <AnimatePresence initial={false}>
-              {active ? (
-                <motion.button
-                  key="stop"
+            <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+              {controlsStart ? (
+                <span className="flex min-w-0 items-center gap-1.5">{controlsStart}</span>
+              ) : (
+                <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
+                  {hint ?? "Enter to send · Shift+Enter for a new line · / for commands"}
+                </span>
+              )}
+              <span className="flex items-center gap-1.5">
+                <AnimatePresence initial={false}>
+                  {active ? (
+                    <motion.button
+                      key="stop"
+                      type="button"
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      transition={{ duration: 0.15, ease: "easeOut" }}
+                      onClick={() => void composer.interrupt()}
+                      disabled={composer.interrupting}
+                      aria-label="Stop the current turn"
+                      title="Stop the current turn"
+                      className={cn(
+                        "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border",
+                        "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
+                        "hover:border-og-status-failed/50 hover:text-og-status-failed",
+                        "disabled:opacity-50",
+                      )}
+                    >
+                      {composer.interrupting ? (
+                        <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+                      ) : (
+                        <SquareIcon className="size-3 fill-current" />
+                      )}
+                    </motion.button>
+                  ) : null}
+                </AnimatePresence>
+                <button
                   type="button"
-                  initial={{ opacity: 0, scale: 0.8 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.8 }}
-                  transition={{ duration: 0.15, ease: "easeOut" }}
-                  onClick={() => void composer.interrupt()}
-                  disabled={composer.interrupting}
-                  aria-label="Stop the current turn"
-                  title="Stop the current turn"
+                  onClick={() => void composer.send()}
+                  disabled={!composer.canSend || disabled === true}
+                  aria-label="Send message"
                   className={cn(
-                    "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border",
-                    "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
-                    "hover:border-og-status-failed/50 hover:text-og-status-failed",
-                    "disabled:opacity-50",
+                    "inline-flex size-8 items-center justify-center rounded-og-md",
+                    "bg-og-accent text-og-accent-fg shadow-og-sm",
+                    "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
+                    "hover:bg-og-accent-strong active:scale-95",
+                    "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
                   )}
                 >
-                  {composer.interrupting ? (
-                    <LoaderCircleIcon className="size-3.5 animate-og-spin" />
-                  ) : (
-                    <SquareIcon className="size-3 fill-current" />
-                  )}
-                </motion.button>
-              ) : null}
-            </AnimatePresence>
-            <button
-              type="button"
-              onClick={() => void composer.send()}
-              disabled={!composer.canSend || disabled === true}
-              aria-label="Send message"
-              className={cn(
-                "inline-flex size-8 items-center justify-center rounded-og-md",
-                "bg-og-accent text-og-accent-fg shadow-og-sm",
-                "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
-                "hover:bg-og-accent-strong active:scale-95",
-                "disabled:cursor-not-allowed disabled:bg-og-surface-3 disabled:text-og-fg-subtle disabled:shadow-none",
-              )}
-            >
-              {composer.sending ? <LoaderCircleIcon className="size-4 animate-og-spin" /> : <ArrowUpIcon className="size-4" />}
-            </button>
-          </span>
+                  {composer.sending ? <LoaderCircleIcon className="size-4 animate-og-spin" /> : <ArrowUpIcon className="size-4" />}
+                </button>
+              </span>
+            </div>
+          )}
         </div>
       </div>
       <AnimatePresence>
-        {composer.error ? (
+        {helpOpen ? (
+          <HelpPanel commands={helpCommands} onClose={() => setHelpOpen(false)} />
+        ) : null}
+      </AnimatePresence>
+      <AnimatePresence>
+        {activeNotice ? (
           <motion.p
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden px-1 pt-1.5 text-xs text-og-status-failed"
-            role="alert"
+            className={cn(
+              "overflow-hidden px-1 pt-1.5 text-xs",
+              activeNotice.tone === "ok" ? "text-og-fg-muted" : "text-og-status-failed",
+            )}
+            role={activeNotice.tone === "error" ? "alert" : "status"}
+            onAnimationComplete={() => {
+              if (activeNotice.tone === "ok") {
+                // Auto-dismiss success notices after a beat.
+                window.setTimeout(() => setNotice((current) => (current === activeNotice ? null : current)), 2400);
+              }
+            }}
           >
-            {composer.error.message || "Sending failed — your draft is still here. Try again."}
+            {activeNotice.message}
           </motion.p>
         ) : null}
       </AnimatePresence>
     </div>
+  );
+}
+
+/** The danger confirm bar — reuses og-status-failed tokens (like the stop control). */
+function ConfirmBar({ command, onCancel, onConfirm }: { command: SlashCommand; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+      <span className="px-1.5 text-[12px] text-og-status-failed">
+        Run <span className="font-mono">/{command.name}</span>? {command.description}
+      </span>
+      <span className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-og-md border border-og-border bg-og-surface-2 px-2.5 py-1 text-[12px] text-og-fg-muted hover:bg-og-surface-3"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          autoFocus
+          onClick={onConfirm}
+          className="rounded-og-md border border-og-status-failed/50 bg-og-status-failed/15 px-2.5 py-1 text-[12px] text-og-status-failed hover:bg-og-status-failed/25"
+        >
+          Confirm
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/** The in-composer /help panel, rendered entirely from the registry. */
+function HelpPanel({ commands, onClose }: { commands: readonly SlashCommand[]; onClose: () => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: "auto" }}
+      exit={{ opacity: 0, height: 0 }}
+      className="mt-2 overflow-hidden rounded-og-lg border border-og-border bg-og-surface-2"
+    >
+      <div className="flex items-center justify-between border-b border-og-border px-3 py-1.5">
+        <span className="text-[12px] font-medium text-og-fg">Commands</span>
+        <button type="button" onClick={onClose} className="text-[11px] text-og-fg-subtle hover:text-og-fg">
+          Close
+        </button>
+      </div>
+      <ul className="py-1">
+        {commands.map((command) => {
+          const hint = argHint(command.args);
+          return (
+            <li key={command.name} className="flex items-baseline gap-2 px-3 py-1">
+              <span className="font-mono text-[12px] text-og-accent">
+                /{command.name}
+                {hint ? <span className="ml-1 text-og-fg-subtle">{hint}</span> : null}
+              </span>
+              <span className="text-[12px] text-og-fg-muted">{command.description}</span>
+              {command.danger ? (
+                <span className="ml-auto rounded-og-xs bg-og-status-failed/15 px-1 text-[10px] uppercase tracking-wide text-og-status-failed">
+                  danger
+                </span>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </motion.div>
   );
 }

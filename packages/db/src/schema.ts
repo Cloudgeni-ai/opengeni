@@ -130,6 +130,11 @@ export const sessions = pgTable("sessions", {
   // signal (char/4 estimate is the same-turn fallback). Null until a turn with
   // usage has completed.
   lastInputTokens: integer("last_input_tokens"),
+  // Operator /compact request flag (client-side compaction path). The API sets
+  // it true; the worker honors it BEFORE the next turn's model call by forcing
+  // a compaction, then clears it. A durable flag (not a transient signal) so
+  // the trigger survives a worker restart and converges before the next turn.
+  compactRequested: boolean("compact_requested").notNull().default(false),
   lastSequence: integer("last_sequence").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
