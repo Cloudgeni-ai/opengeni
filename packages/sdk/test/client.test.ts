@@ -84,6 +84,31 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("clearSessionContext posts an explicit confirm to the context/clear route (204, no body)", async () => {
+    const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
+    await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/clear`);
+    expect(requests[0]!.method).toBe("POST");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ confirm: true });
+  });
+
+  test("clearSessionContext surfaces a 409 (cannot clear mid-turn) as OpenGeniApiError", async () => {
+    const { client } = makeClient(() => new Response("session is running", { status: 409 }));
+    const error = await client.clearSessionContext(WORKSPACE_ID, SESSION_ID).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(409);
+  });
+
+  test("compactSessionContext posts to context/compact and returns the trigger result", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ status: "queued", message: "Compaction will run before the next turn." }));
+    const result = await client.compactSessionContext(WORKSPACE_ID, SESSION_ID);
+    expect(result).toEqual({ status: "queued", message: "Compaction will run before the next turn." });
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/context/compact`);
+    expect(requests[0]!.method).toBe("POST");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({});
+  });
+
   test("non-2xx responses raise OpenGeniApiError with status and body", async () => {
     const { client } = makeClient(() => new Response("workspace not found", { status: 404 }));
     const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(

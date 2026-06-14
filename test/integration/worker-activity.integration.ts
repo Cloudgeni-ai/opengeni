@@ -2974,6 +2974,53 @@ describe("worker activities integration", () => {
     expect(active.map((row) => row.position)).toEqual([0, 1, 2, 3]);
     expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary)).toBe(false);
   });
+
+  test("maybeCompactContext force bypasses the budget trigger (the /compact path)", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "force-compact",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old turn 1" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "recent turn" } },
+        { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
+      ],
+    });
+    // A budget so high the soft trigger would never fire on its own.
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      sessionHistorySource: "items",
+      openaiProvider: "azure",
+      contextCompactionMode: "client",
+      contextWindowTokens: 10_000_000,
+      contextReservedOutputTokens: 0,
+      contextCompactSoftFraction: 0.9,
+      contextKeepRecentTokens: 20,
+    });
+    const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id };
+    const summarize = async () => "summary of the old prefix.";
+
+    // Without force, the tiny token count is below budget -> no-op.
+    const skipped = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, {});
+    expect(skipped.compacted).toBe(false);
+
+    // With force, it compacts despite being below budget.
+    const forced = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, { force: true });
+    expect(forced.compacted).toBe(true);
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
+    expect(active.at(-1)!.item).toMatchObject({ role: "assistant" });
+  });
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];

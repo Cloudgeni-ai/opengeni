@@ -1,17 +1,22 @@
 import {
+  ClearSessionContextRequest,
   ClientSessionEvent,
+  CompactSessionContextRequest,
   ReorderSessionTurnsRequest,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
 } from "@opengeni/contracts";
+import { resolveContextCompactionMode } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
+  clearSessionContext,
   getSession,
   getSessionGoal,
   listSessionEvents,
   listSessions,
   listSessionTurns,
   reorderQueuedSessionTurns,
+  requestSessionCompaction,
   requireSession,
   setSessionGoalStatus,
   updateQueuedSessionTurn,
@@ -133,6 +138,67 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await workflowClient.wakeSessionWorkflow({ accountId: grant.accountId, workspaceId, sessionId, workflowId: workflowIdForSession(sessionId) });
     }
     return c.json(goal);
+  });
+
+  // Operator context controls (slash-command palette: /clear, /compact). These
+  // are session/operator actions — NOT a structured channel to the agent. Both
+  // require sessions:control.
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/context/clear", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    // Explicit confirm on the wire (literal true) — an empty/accidental POST
+    // cannot wipe context. Mirrors the client-side confirm affordance. A
+    // missing/false confirm is a client error (400), not a server fault.
+    const clearBody = ClearSessionContextRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!clearBody.success) {
+      throw new HTTPException(400, { message: "context clear requires an explicit { confirm: true }" });
+    }
+    const session = await requireSession(db, workspaceId, sessionId);
+    // Clearing mid-turn would strand the in-flight RunState (and, in
+    // requires_action, an awaiting approval whose resume needs that blob).
+    // Refuse, mirroring the goal 409 guards.
+    if (session.status === "queued" || session.status === "running" || session.status === "requires_action") {
+      throw new HTTPException(409, { message: `session is ${session.status}; cannot clear context mid-turn — stop the turn first` });
+    }
+    const result = await clearSessionContext(db, { accountId: grant.accountId, workspaceId, sessionId });
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
+      type: "session.context.cleared",
+      payload: {
+        clearedBy: "api",
+        supersededItems: result.supersededItems,
+        markerPosition: result.markerPosition,
+      },
+    }]);
+    return c.body(null, 204);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/context/compact", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    CompactSessionContextRequest.parse((await c.req.json().catch(() => ({}))) ?? {});
+    // /compact is only a TRIGGER — it never duplicates the compaction engine.
+    // Client-managed (Azure) path: set a durable request flag the worker honors
+    // before the next turn (forced compaction). Server-managed provider / off:
+    // compaction is automatic or disabled, so this is an honest no-op.
+    //
+    // Integration seam with provider-aware-compaction: when that work exposes a
+    // synchronous "compact now" entry callable from the API process, this route
+    // should call it directly and return its result; until then the flag +
+    // worker maybeCompactContext(force) is the minimal honored interface.
+    const mode = resolveContextCompactionMode(settings);
+    if (mode === "client") {
+      await requestSessionCompaction(db, workspaceId, sessionId);
+      return c.json({ status: "queued", message: "Compaction will run before the next turn." });
+    }
+    if (mode === "server") {
+      return c.json({ status: "noop", message: "This session's provider compacts context automatically; no manual compaction is needed." });
+    }
+    return c.json({ status: "noop", message: "Context compaction is disabled for this session." });
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {

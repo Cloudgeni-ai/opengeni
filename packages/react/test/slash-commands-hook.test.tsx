@@ -1,0 +1,184 @@
+import { describe, expect, test } from "bun:test";
+import { useState } from "react";
+import { defaultCommands } from "../src/commands/registry";
+import type { Notice, SlashCommand } from "../src/commands/types";
+import type { KeyboardEvent } from "react";
+import { useSlashCommands, type SlashCommandContext, type SlashCommandHandlers } from "../src/hooks/use-slash-commands";
+import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import { flush, registerDom, renderHook } from "./render-hook";
+
+registerDom();
+
+type KeyInit = { key: string; shiftKey?: boolean; isComposing?: boolean };
+
+/** A minimal KeyboardEvent stub matching what the hook reads. */
+function keyEvent(init: KeyInit): KeyboardEvent<HTMLTextAreaElement> {
+  return {
+    key: init.key,
+    shiftKey: init.shiftKey ?? false,
+    nativeEvent: { isComposing: init.isComposing ?? false },
+    preventDefault: () => {},
+  } as unknown as KeyboardEvent<HTMLTextAreaElement>;
+}
+
+type Harness = {
+  value: string;
+  setValue: (v: string) => void;
+  notices: Notice[];
+  helpOpened: number;
+  viewCleared: number;
+  confirmAnswer: boolean;
+  command: ReturnType<typeof useSlashCommands>;
+};
+
+function setup(options: {
+  initialValue?: string;
+  context?: SlashCommandContext | undefined;
+  commands?: readonly SlashCommand[];
+  confirmAnswer?: boolean;
+}) {
+  return renderHook<Harness, void>(() => {
+    const [value, setValue] = useState(options.initialValue ?? "");
+    const [notices, setNotices] = useState<Notice[]>([]);
+    const [helpOpened, setHelpOpened] = useState(0);
+    const [viewCleared, setViewCleared] = useState(0);
+    const handlers: SlashCommandHandlers = {
+      notice: (n) => setNotices((cur) => [...cur, n]),
+      openHelp: () => setHelpOpened((n) => n + 1),
+      clearView: () => { setViewCleared((n) => n + 1); return true; },
+      confirm: async () => options.confirmAnswer ?? true,
+    };
+    const command = useSlashCommands({
+      commands: options.commands ?? defaultCommands,
+      context: options.context,
+      handlers,
+      value,
+      setValue,
+    });
+    return { value, setValue, notices, helpOpened, viewCleared, confirmAnswer: options.confirmAnswer ?? true, command };
+  }, undefined);
+}
+
+const sessionCtx: SlashCommandContext = {
+  client: fakeClient({
+    updateGoal: async () => ({}) as never,
+    clearSessionContext: async () => {},
+    compactSessionContext: async () => ({ status: "queued", message: "Compaction will run before the next turn." }),
+  }),
+  workspaceId: WORKSPACE_ID,
+  sessionId: SESSION_ID,
+  status: null,
+  permissions: ["sessions:control"] as never,
+};
+
+describe("useSlashCommands", () => {
+  test("opens and filters as a slash token is typed", async () => {
+    const h = await setup({ initialValue: "/cl", context: sessionCtx });
+    expect(h.result.current.command.open).toBe(true);
+    expect(h.result.current.command.items.map((c) => c.name)).toEqual(expect.arrayContaining(["clear", "clear-view"]));
+    await h.unmount();
+  });
+
+  test("stays closed for plain chat", async () => {
+    const h = await setup({ initialValue: "hello", context: sessionCtx });
+    expect(h.result.current.command.open).toBe(false);
+    await h.unmount();
+  });
+
+  test("ArrowDown/ArrowUp move the highlight with wrap", async () => {
+    const h = await setup({ initialValue: "/", context: sessionCtx });
+    const count = h.result.current.command.items.length;
+    expect(count).toBeGreaterThan(1);
+    expect(h.result.current.command.highlight).toBe(0);
+    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+    await h.rerender();
+    expect(h.result.current.command.highlight).toBe(1);
+    // Wrap back to top from the last item.
+    for (let i = 1; i < count; i += 1) {
+      h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+      await h.rerender();
+    }
+    expect(h.result.current.command.highlight).toBe(0);
+    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowUp" }));
+    await h.rerender();
+    expect(h.result.current.command.highlight).toBe(count - 1);
+    await h.unmount();
+  });
+
+  test("Tab autocompletes the highlighted command name + trailing space", async () => {
+    const h = await setup({ initialValue: "/comp", context: sessionCtx });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Tab" }));
+    await h.rerender();
+    expect(h.result.current.value).toBe("/compact ");
+    await h.unmount();
+  });
+
+  test("Escape closes the palette but keeps the draft", async () => {
+    const h = await setup({ initialValue: "/clear", context: sessionCtx });
+    expect(h.result.current.command.open).toBe(true);
+    h.result.current.command.onKeyDown(keyEvent({ key: "Escape" }));
+    await h.rerender();
+    expect(h.result.current.command.open).toBe(false);
+    expect(h.result.current.value).toBe("/clear");
+    // Editing re-opens.
+    h.result.current.setValue("/clear-");
+    await h.rerender();
+    expect(h.result.current.command.open).toBe(true);
+    await h.unmount();
+  });
+
+  test("Enter runs a client command and clears the draft", async () => {
+    const h = await setup({ initialValue: "/help", context: sessionCtx });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await flush();
+    await h.rerender();
+    expect(h.result.current.helpOpened).toBe(1);
+    expect(h.result.current.value).toBe("");
+    await h.unmount();
+  });
+
+  test("Enter on a required-arg command without the arg does not run (waits at the hint)", async () => {
+    const h = await setup({ initialValue: "/goal ", context: sessionCtx });
+    expect(h.result.current.command.activeCommand?.name).toBe("goal");
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await h.rerender();
+    // Still /goal with no notice — nothing fired.
+    expect(h.result.current.value).toBe("/goal ");
+    expect(h.result.current.notices).toHaveLength(0);
+    await h.unmount();
+  });
+
+  test("Enter on /goal pause runs and surfaces an ok notice", async () => {
+    const h = await setup({ initialValue: "/goal pause", context: sessionCtx });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await flush();
+    await h.rerender();
+    expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Goal paused." });
+    expect(h.result.current.value).toBe("");
+    await h.unmount();
+  });
+
+  test("danger command runs only after confirm resolves true", async () => {
+    let cleared = false;
+    const ctx: SlashCommandContext = { ...sessionCtx, client: fakeClient({ clearSessionContext: async () => { cleared = true; } }) };
+    const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    for (let i = 0; i < 5; i += 1) {
+      await flush();
+    }
+    await h.rerender();
+    expect(cleared).toBe(true);
+    expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Context cleared." });
+    await h.unmount();
+  });
+
+  test("the palette is inert without a command context", async () => {
+    const h = await setup({ initialValue: "/clear", context: undefined });
+    // open still derives from value (commands have no perm gate for help), but
+    // running does nothing without a context.
+    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await h.rerender();
+    expect(h.result.current.notices).toHaveLength(0);
+    await h.unmount();
+  });
+});

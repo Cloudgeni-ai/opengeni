@@ -11,6 +11,7 @@ import {
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
+  consumeSessionCompactionRequest,
   countActiveSessionHistoryItems,
   nextSessionHistoryPosition,
   requeuePreemptedTurn,
@@ -371,14 +372,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // RunState or in-flight tail must replay verbatim).
       if (triggerType === "user.message" || triggerType === "goal.continuation") {
         try {
+          // Operator /compact (the slash command) sets a durable request flag;
+          // consume it atomically so a forced compaction runs now even when the
+          // budget trigger would not fire. Only the turn that observes the flag
+          // runs it, so concurrent turns can't double-compact.
+          const forced = await consumeSessionCompactionRequest(db, input.workspaceId, input.sessionId);
           const outcome = await maybeCompactContext(
             db,
             runSettings,
             { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId },
             session.lastInputTokens,
+            undefined,
+            forced ? { force: true } : {},
           );
           if (outcome.compacted) {
-            await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition } }]);
+            await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, ...(forced ? { trigger: "operator" } : {}) } }]);
           }
         } catch (compactError) {
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);

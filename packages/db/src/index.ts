@@ -49,7 +49,7 @@ import type {
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
-import { reasoningEffortForMetadata } from "@opengeni/contracts";
+import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -2240,6 +2240,131 @@ export async function setSessionLastInputTokens(db: Database, workspaceId: strin
   });
 }
 
+/**
+ * The neutral marker written by clearSessionContext as the sole active history
+ * row. It keeps getActiveSessionHistoryItems().length > 0 so the items read
+ * path (run-input.ts messageInput) stays selected and never falls through to
+ * the getLatestRunState blob — that fallback is the resurrection vector a clear
+ * must defeat. A plain user message is a valid, sanitizer-clean item.
+ */
+export function clearedContextMarkerItem(): Record<string, unknown> {
+  return { type: "message", role: "user", content: "[context cleared]" };
+}
+
+/**
+ * The sentinel serializedRunState written by clearSessionContext, re-exported
+ * from @opengeni/contracts so the writer (here) and the readers (run-input /
+ * runtime) share one definition. It is audit-honest (carries no prior
+ * conversation) and is NOT a real Agents-SDK run state — it has no
+ * `$schemaVersion`/history, so `RunState.fromString` throws on it.
+ *
+ * Both run-state read paths therefore guard against it explicitly via
+ * {@link isClearedRunStateBlob}:
+ *  - the message path (run-input messageInput) honors it in BOTH items and
+ *    run_state history modes — in items mode the boundary marker keeps the
+ *    active read non-empty so the blob is never reached, and in run_state mode
+ *    the sentinel is recognized and treated as a fresh empty start;
+ *  - the approval path is additionally refused by the API for mid-turn /
+ *    requires_action sessions, so it never sees the sentinel.
+ * Stored so getLatestRunState (the run_state-source read path) reflects the
+ * clear instead of resurrecting the pre-clear blob.
+ */
+export const CLEARED_RUN_STATE = CLEARED_RUN_STATE_BLOB;
+
+export type ClearSessionContextResult = {
+  /** Active history rows superseded (active=true -> false). */
+  supersededItems: number;
+  /** Position of the inserted neutral boundary marker. */
+  markerPosition: number;
+  /** stateVersion of the fresh cleared run-state row. */
+  runStateVersion: number;
+};
+
+/**
+ * Clear a session's conversation context in ONE transaction, audit-preserving
+ * and idempotent. Defeats the RunState-fallback resurrection on BOTH model read
+ * paths:
+ *
+ *  (a) supersede every active session_history_items row (active=true -> false).
+ *      Nothing is deleted — the full transcript stays as an audit trail, same
+ *      pattern as applyContextCompaction.
+ *  (b) insert ONE active neutral boundary marker at max(position)+1 so the
+ *      active read path returns length 1 (not 0) and run-input.ts stays on the
+ *      items route, away from the getLatestRunState blob (the bug).
+ *  (c) insert a fresh agent_run_states row (stateVersion = max+1) with an empty
+ *      cleared blob and pendingApprovals:[], so getLatestRunState (approval /
+ *      run_state-source read path) also reflects the clear.
+ *
+ * Also resets last_input_tokens to 0 so the next turn's compaction trigger
+ * starts fresh against the now-short context.
+ *
+ * Idempotent: a re-run supersedes the (now sole, already-marker) active row,
+ * inserts another marker at the next position, and another cleared run-state.
+ * The post-conditions (one active marker row, latest run-state cleared) hold.
+ */
+export async function clearSessionContext(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+}): Promise<ClearSessionContextResult> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const supersededRows = await tx.update(schema.sessionHistoryItems)
+        .set({ active: false })
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+          eq(schema.sessionHistoryItems.active, true),
+        ))
+        .returning({ id: schema.sessionHistoryItems.id });
+
+      const [{ maxPosition } = { maxPosition: -1 }] = await tx.select({
+        maxPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1)`,
+      }).from(schema.sessionHistoryItems)
+        .where(and(
+          eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+          eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+        ));
+      const markerPosition = Number(maxPosition) + 1;
+      await tx.insert(schema.sessionHistoryItems).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: null,
+        position: markerPosition,
+        item: clearedContextMarkerItem(),
+        active: true,
+      }).onConflictDoNothing({
+        target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+      });
+
+      const [{ maxVersion } = { maxVersion: 0 }] = await tx.select({
+        maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+      }).from(schema.agentRunStates)
+        .where(and(
+          eq(schema.agentRunStates.workspaceId, input.workspaceId),
+          eq(schema.agentRunStates.sessionId, input.sessionId),
+        ));
+      const runStateVersion = Number(maxVersion) + 1;
+      await tx.insert(schema.agentRunStates).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: null,
+        stateVersion: runStateVersion,
+        serializedRunState: CLEARED_RUN_STATE,
+        pendingApprovals: [],
+      });
+
+      await tx.update(schema.sessions)
+        .set({ lastInputTokens: 0, updatedAt: new Date() })
+        .where(and(eq(schema.sessions.workspaceId, input.workspaceId), eq(schema.sessions.id, input.sessionId)));
+
+      return { supersededItems: supersededRows.length, markerPosition, runStateVersion };
+    });
+  });
+}
+
 export async function countSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select({
@@ -2247,6 +2372,38 @@ export async function countSessionHistoryItems(db: Database, workspaceId: string
     }).from(schema.sessionHistoryItems)
       .where(and(eq(schema.sessionHistoryItems.workspaceId, workspaceId), eq(schema.sessionHistoryItems.sessionId, sessionId)));
     return Number(row?.count ?? 0);
+  });
+}
+
+/**
+ * Set the operator /compact request flag. The worker honors it before the next
+ * turn (forced client-side compaction) and clears it. Idempotent: repeated
+ * requests collapse to one pending compaction.
+ */
+export async function requestSessionCompaction(db: Database, workspaceId: string, sessionId: string): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessions)
+      .set({ compactRequested: true, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
+/**
+ * Atomically consume the /compact request flag: clear it and report whether it
+ * was set. The worker calls this pre-turn; only the call that observed `true`
+ * runs the forced compaction, so concurrent turns can't double-compact.
+ */
+export async function consumeSessionCompactionRequest(db: Database, workspaceId: string, sessionId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const cleared = await scopedDb.update(schema.sessions)
+      .set({ compactRequested: false, updatedAt: new Date() })
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.id, sessionId),
+        eq(schema.sessions.compactRequested, true),
+      ))
+      .returning({ id: schema.sessions.id });
+    return cleared.length > 0;
   });
 }
 

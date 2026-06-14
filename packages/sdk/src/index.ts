@@ -48,6 +48,7 @@ export type {
   CapabilityPackSkillFile,
   CapabilityRuntime,
   CapabilitySource,
+  CompactSessionContextResult,
   ClientSessionEventInput,
   CompleteFileUploadResponse,
   CreateApiKeyRequest,
