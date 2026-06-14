@@ -5,10 +5,13 @@ import {
   applyContextCompaction,
   bootstrapWorkspace,
   claimNextQueuedTurn,
+  clearSessionContext,
+  consumeSessionCompactionRequest,
   countSessionHistoryItems,
   createDb,
   getActiveSessionHistoryItems,
   getSessionHistoryItems,
+  requestSessionCompaction,
   setSessionLastInputTokens,
   createScheduledTask,
   createScheduledTaskRun,
@@ -984,6 +987,109 @@ describe("DB integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBeNull();
     await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 654_321);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(654_321);
+  });
+
+  test("clearSessionContext supersedes all live history, keeps the audit trail, and defeats the RunState fallback", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "clear",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "secret one" } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "secret two" }] } },
+        { position: 2, item: { type: "message", role: "user", content: "secret three" } },
+      ],
+    });
+    // A stale RunState blob carrying the old conversation — the resurrection
+    // vector clear must neutralize (run-input.ts falls back to this when the
+    // active items read is empty).
+    await saveRunState(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      serializedRunState: JSON.stringify({ history: ["secret one", "secret two"] }),
+      pendingApprovals: [],
+    });
+    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 50_000);
+
+    const result = await clearSessionContext(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+    });
+    expect(result.supersededItems).toBe(3);
+    expect(result.markerPosition).toBe(3);
+
+    // (a)+(b): the active read returns ONLY the neutral marker (length 1, not
+    // 0) so messageInput stays on the items route, away from the RunState blob.
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active).toHaveLength(1);
+    expect(active[0]!.item).toMatchObject({ role: "user", content: "[context cleared]" });
+
+    // Audit trail preserved: the three superseded rows still exist.
+    const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(all.map((row) => row.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3]);
+
+    // (c): the latest run state now reflects the clear (no old conversation).
+    const latest = await getLatestRunState(dbClient.db, grant.workspaceId, session.id);
+    expect(latest!.serializedRunState).not.toContain("secret");
+    expect(latest!.pendingApprovals).toEqual([]);
+
+    // last_input_tokens reset so the next turn's trigger starts fresh.
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.lastInputTokens).toBe(0);
+  });
+
+  test("clearSessionContext is idempotent — a re-run keeps exactly one active marker", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "clear-twice",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [{ position: 0, item: { type: "message", role: "user", content: "x" } }],
+    });
+    await clearSessionContext(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id });
+    await clearSessionContext(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id });
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active).toHaveLength(1);
+    expect(active[0]!.item).toMatchObject({ content: "[context cleared]" });
+  });
+
+  test("compaction request flag: request sets it, consume reports + clears it exactly once", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "compact-flag",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    // No request yet: consume is a no-op false.
+    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(false);
+    await requestSessionCompaction(dbClient.db, grant.workspaceId, session.id);
+    // First consumer wins; a second consumer sees it already cleared.
+    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(true);
+    expect(await consumeSessionCompactionRequest(dbClient.db, grant.workspaceId, session.id)).toBe(false);
   });
 });
 

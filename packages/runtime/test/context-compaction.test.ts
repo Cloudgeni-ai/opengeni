@@ -141,6 +141,30 @@ describe("planCompaction trigger", () => {
     expect(plan.shouldCompact).toBe(true);
     expect(plan.boundaryIndex).toBe(2);
   });
+
+  test("force bypasses the budget trigger but still respects the structural guards", () => {
+    const items: CompactionItem[] = [
+      user("old 1"), assistant("a1"),
+      user("recent"), assistant("a2"),
+    ];
+    // Far below the soft threshold: without force this is a no-op.
+    const base = {
+      items,
+      lastInputTokens: 1,
+      inputBudgetTokens: BUDGET,
+      softFraction: SOFT,
+      hardFraction: HARD,
+      keepRecentTokens: estimateTokens(items.slice(2)),
+    } as const;
+    expect(planCompaction(base).shouldCompact).toBe(false);
+    const forced = planCompaction({ ...base, force: true });
+    expect(forced.shouldCompact).toBe(true);
+    expect(forced.boundaryIndex).toBe(2);
+
+    // Force with nothing to summarize (whole transcript kept) is still a no-op.
+    const noPrefix = planCompaction({ ...base, force: true, keepRecentTokens: estimateTokens(items) });
+    expect(noPrefix.shouldCompact).toBe(false);
+  });
 });
 
 describe("planCompaction orphan safety (the boundary rule)", () => {

@@ -184,6 +184,13 @@ export type PlanCompactionInput = {
   softFraction: number;
   hardFraction: number;
   keepRecentTokens: number;
+  /**
+   * Operator-forced compaction (the /compact command): bypass the soft-limit
+   * token trigger and compact now if there is anything to summarize. The
+   * boundary / nothing-to-summarize guards still apply — force never invents a
+   * cut that would orphan a tool-call pair or summarize an empty prefix.
+   */
+  force?: boolean;
 };
 
 /**
@@ -213,7 +220,9 @@ export function planCompaction(input: PlanCompactionInput): CompactionPlan {
     typeof input.lastInputTokens === "number" && input.lastInputTokens > 0
       ? input.lastInputTokens
       : estimateTokens(input.items);
-  if (signalTokens < softLimit) {
+  // force bypasses the budget trigger only; the structural guards below still
+  // run, so a forced compaction with nothing to summarize is still a no-op.
+  if (!input.force && signalTokens < softLimit) {
     return empty;
   }
 

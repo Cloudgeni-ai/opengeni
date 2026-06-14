@@ -10,6 +10,7 @@ import type {
   CapabilityCatalogResponse,
   CapabilityInstallation,
   ClientSessionEventInput,
+  CompactSessionContextResult,
   CompleteFileUploadResponse,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
@@ -372,6 +373,29 @@ export class OpenGeniClient {
   /** Resume a paused goal: resets counters and re-arms the continuation loop. */
   async resumeGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
     return await this.updateGoal(workspaceId, sessionId, { status: "active" });
+  }
+
+  // --- Operator context controls (/clear, /compact) ---------------------------
+
+  /**
+   * Clear the session's conversation context. Destructive and audit-preserving:
+   * the server supersedes (never deletes) the live history and emits a
+   * `session.context.cleared` event. Refused (409) while a turn is in flight or
+   * awaiting action. `confirm:true` is sent so an accidental call cannot wipe
+   * context — the destructive intent is explicit on the wire.
+   */
+  async clearSessionContext(workspaceId: string, sessionId: string): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/clear`, { confirm: true });
+  }
+
+  /**
+   * Trigger conversation compaction now. On the client-managed (Azure) path this
+   * queues a forced compaction the worker honors before the next turn
+   * (`status:"queued"`); on a server-managed provider or when compaction is off
+   * it is a no-op (`status:"noop"`) with an explanatory message.
+   */
+  async compactSessionContext(workspaceId: string, sessionId: string): Promise<CompactSessionContextResult> {
+    return await this.requestJson<CompactSessionContextResult>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/compact`, {});
   }
 
   // --- Access + workspaces -----------------------------------------------------
@@ -779,10 +803,15 @@ export class OpenGeniClient {
   }
 
   /** Like `requestJson` for endpoints that respond with no body (204). */
-  private async requestVoid(method: string, path: string): Promise<void> {
+  private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const response = await this.fetchImpl(this.url(path), {
       method,
-      headers: { ...this.headers(), Accept: "application/json" },
+      headers: {
+        ...this.headers(),
+        Accept: "application/json",
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));

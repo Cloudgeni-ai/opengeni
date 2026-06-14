@@ -8,6 +8,7 @@ import {
   OpenGeniProvider,
   SessionStatus,
   useComposer,
+  useOpenGeni,
   useScheduledTasks,
   useSession,
   useSessionEvents,
@@ -55,10 +56,20 @@ function Harness() {
 
 /** The hero surface: manager session timeline + composer. */
 function OpsChannel() {
+  const { client, workspaceId } = useOpenGeni();
   const { session } = useSession(MANAGER_SESSION_ID, { pollIntervalMs: 5000 });
   const { timeline, sessionStatus, connectionState } = useSessionEvents(MANAGER_SESSION_ID);
   const composer = useComposer(MANAGER_SESSION_ID);
   const status = sessionStatus ?? session?.status ?? null;
+  // Surface the slash-command palette (type "/"): operator controls on this
+  // session. The demo operator holds full control.
+  const commandContext = {
+    client,
+    workspaceId,
+    sessionId: MANAGER_SESSION_ID,
+    status,
+    permissions: ["sessions:control"],
+  };
 
   return (
     <section className="flex min-h-0 flex-col overflow-hidden rounded-og-xl border border-og-border bg-og-surface-1/50">
@@ -79,7 +90,7 @@ function OpsChannel() {
         onOpenSession={(sessionId) => window.alert(`Open worker session ${sessionId}`)}
       />
       <div className="shrink-0 px-4 pb-4 pt-1">
-        <ChatComposer composer={composer} status={status} placeholder="Message your infrastructure…" autoFocus />
+        <ChatComposer composer={composer} status={status} placeholder="Message your infrastructure…" autoFocus commandContext={commandContext} />
       </div>
     </section>
   );

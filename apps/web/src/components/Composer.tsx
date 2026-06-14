@@ -2,7 +2,7 @@
 // attachments (upload, chips, paste-to-attach) and the console's control
 // strip. The textarea, send/stop controls, Enter handling, and draft/error
 // state all come from the package.
-import { ChatComposer, type ComposerState } from "@opengeni/react";
+import { ChatComposer, type ComposerState, type SlashCommandContext } from "@opengeni/react";
 import { FileIcon, ImageIcon, ListPlusIcon, Loader2Icon, PaperclipIcon, XIcon, ZapIcon } from "lucide-react";
 import {
   type ClipboardEvent,
@@ -122,6 +122,14 @@ export function ConsoleComposer(props: {
    * message behind the running turn; steer interrupts and injects it now.
    */
   showDeliveryMode?: boolean;
+  /**
+   * Enables the slash-command palette (type "/"): session/operator controls
+   * (/goal, /clear, /compact, /help). Absent on surfaces with no live session
+   * (e.g. the new-session screen), where the palette stays inert.
+   */
+  commandContext?: SlashCommandContext;
+  /** Reset the local timeline view (the /clear-view command target). */
+  onClearView?: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const { composer, attachments } = props;
@@ -159,6 +167,8 @@ export function ConsoleComposer(props: {
         autoFocus={props.autoFocus}
         disabled={props.disabled}
         onPaste={handlePaste}
+        {...(props.commandContext ? { commandContext: props.commandContext } : {})}
+        {...(props.onClearView ? { onClearView: props.onClearView } : {})}
         header={attachments.attachments.length > 0 ? (
           <AttachmentChips attachments={attachments.attachments} onRemove={attachments.removeAttachment} />
         ) : undefined}

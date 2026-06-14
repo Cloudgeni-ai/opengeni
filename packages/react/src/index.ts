@@ -69,6 +69,35 @@ export type {
   WorkerItem,
 } from "./timeline";
 
+// Slash-command palette (registry + UI + hook)
+export {
+  argHint,
+  defaultCommands,
+  filterCommands,
+  firstMissingRequiredArg,
+  hasPermission,
+  matchCommand,
+  parseCommandLine,
+} from "./commands/registry";
+export type { ParsedCommandLine } from "./commands/registry";
+export type {
+  CommandContext,
+  CommandResult,
+  Notice,
+  SlashArg,
+  SlashCommand,
+} from "./commands/types";
+export { useSlashCommands } from "./hooks/use-slash-commands";
+export type {
+  ConfirmState,
+  SlashCommandContext,
+  SlashCommandHandlers,
+  UseSlashCommandsOptions,
+  UseSlashCommandsResult,
+} from "./hooks/use-slash-commands";
+export { CommandPalette } from "./components/command-palette";
+export type { CommandPaletteProps } from "./components/command-palette";
+
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";

@@ -260,6 +260,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { ...goal };
   }
 
+  async clearSessionContext(_workspaceId: string, sessionId: string): Promise<void> {
+    this.bus(sessionId).append("session.context.cleared", { clearedBy: "api" });
+  }
+
+  async compactSessionContext(_workspaceId: string, sessionId: string): Promise<{ status: "queued" | "noop"; message: string }> {
+    this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
+    return { status: "queued", message: "Compaction will run before the next turn." };
+  }
+
   async sendApprovalDecision(
     _workspaceId: string,
     sessionId: string,

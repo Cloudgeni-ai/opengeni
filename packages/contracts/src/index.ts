@@ -604,6 +604,33 @@ export const UpdateSessionGoalRequest = z.object({
 });
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
+// Operator context controls (slash-command palette: /clear, /compact). These
+// are session/operator actions, NOT a structured way to talk to the agent —
+// the human↔agent channel stays plain chat. Both require `sessions:control`.
+
+/**
+ * Clear a session's conversation context. `confirm` must be the literal `true`
+ * so an accidental/empty POST cannot wipe context — the destructive intent is
+ * explicit on the wire, mirroring the client-side confirm affordance.
+ */
+export const ClearSessionContextRequest = z.object({
+  confirm: z.literal(true),
+});
+export type ClearSessionContextRequest = z.infer<typeof ClearSessionContextRequest>;
+
+/** Trigger conversation compaction now. No body fields today (forward-room). */
+export const CompactSessionContextRequest = z.object({}).strict();
+export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextRequest>;
+
+/** Outcome of a manual /compact trigger. */
+export const CompactSessionContextResult = z.object({
+  // queued: a client-side (Azure) compaction will run before the next turn.
+  // noop:   nothing to do (server-managed provider, mode off, or no history).
+  status: z.enum(["queued", "noop"]),
+  message: z.string(),
+});
+export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
+
 export const SessionTurn = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -1176,6 +1203,7 @@ export const SessionEventType = z.enum([
   "session.status.changed",
   "session.requiresAction",
   "session.context.compacted",
+  "session.context.cleared",
   "user.message",
   "user.interrupt",
   "user.approvalDecision",

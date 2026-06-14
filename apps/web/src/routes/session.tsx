@@ -192,6 +192,24 @@ function SessionChatPane(props: {
     onSent: () => attachments.clear(),
   });
 
+  // Slash-command palette context: the operator controls (/goal, /clear,
+  // /compact, /help) act on THIS session. Permissions come from the workspace
+  // grant so the palette hides commands the operator can't run.
+  const workspacePermissions = useMemo(
+    () => context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === props.session.workspaceId)?.permissions ?? [],
+    [context.accessContext.workspaceGrants, props.session.workspaceId],
+  );
+  const commandContext = useMemo(
+    () => ({
+      client: context.client,
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      status: props.session.status,
+      permissions: workspacePermissions,
+    }),
+    [context.client, props.session.workspaceId, props.session.id, props.session.status, workspacePermissions],
+  );
+
   // Steering needs something to interrupt: when the turn ends, fall back to
   // the queue default so a stale steer toggle cannot surprise a later send.
   useEffect(() => {
@@ -280,6 +298,7 @@ function SessionChatPane(props: {
             status={props.session.status}
             disabled={terminal}
             showDeliveryMode
+            commandContext={commandContext}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder={terminal
               ? `Session is ${props.session.status}.`
