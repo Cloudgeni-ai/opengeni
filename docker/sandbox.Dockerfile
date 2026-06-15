@@ -16,6 +16,7 @@ RUN set -eux; \
         openssh-client \
         fuse3 \
         rclone \
+        ripgrep \
         unzip \
         wget \
     "; \
