@@ -230,7 +230,15 @@ export function ChatComposer({
             aria-activedescendant={paletteEnabled && palette.open ? `${listboxId}-option-${palette.highlight}` : undefined}
             className={cn(
               "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6",
-              "text-og-fg placeholder:text-og-fg-subtle focus:outline-none",
+              // The wrapper owns the whole-composer focus affordance (focus-within
+              // border + soft glow). Suppress any self-scoped focus outline on the
+              // textarea itself: `focus:outline-none` alone only sets outline-style
+              // on `:focus`, which a host app's zero-specificity
+              // `:where(...):focus-visible { outline: ... }` base rule re-applies as
+              // the full shorthand. `focus-visible:outline-none` matches the same
+              // state at class specificity and wins, so no second highlight (the
+              // top-half rectangle bounded to the textarea box) ever paints.
+              "text-og-fg placeholder:text-og-fg-subtle focus:outline-none focus-visible:outline-none",
               "disabled:cursor-not-allowed disabled:opacity-60",
             )}
           />
