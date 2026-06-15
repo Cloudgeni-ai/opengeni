@@ -38,12 +38,12 @@ import { Label } from "@/components/ui/label";
 import {
   buildResources,
   buildTools,
-  enabledCustomMcpServers,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   isAbortError,
   isUiReasoningEffort,
   mergeMcpServerOptions,
+  selectableMcpServers,
   selectedAvailableCapabilityToolIds,
   type IntelligenceEffort,
   type McpServerOption,
@@ -95,10 +95,6 @@ export type AppContextValue = {
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
   setGithubOrg: Dispatch<SetStateAction<string>>;
-  openGeniToolEnabled: boolean;
-  setOpenGeniToolEnabled: Dispatch<SetStateAction<boolean>>;
-  documentSearchEnabled: boolean;
-  setDocumentSearchEnabled: Dispatch<SetStateAction<boolean>>;
   selectedCapabilityToolIds: Set<string>;
   setSelectedCapabilityToolIds: Dispatch<SetStateAction<Set<string>>>;
   busy: boolean;
@@ -106,7 +102,7 @@ export type AppContextValue = {
   githubAppBusy: boolean;
   selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
-  customMcpServers: McpServerOption[];
+  toolMcpServers: McpServerOption[];
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -162,11 +158,12 @@ export function RootRouteComponent() {
   const [githubStatus, setGithubStatus] = useState<{ configured: boolean; missing: string[]; installUrl: string | null } | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
-  const [openGeniToolEnabled, setOpenGeniToolEnabled] = useState(true);
-  const [documentSearchEnabled, setDocumentSearchEnabled] = useState(false);
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(() => new Set());
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set());
+  // Seed "docs" as already-seen so Document Search is not auto-selected on first
+  // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
+  // including the first-party "opengeni", is auto-selected when it first appears.
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs"]));
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   const [busy, setBusy] = useState(false);
@@ -281,8 +278,8 @@ export function RootRouteComponent() {
   const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
   const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
   const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
-  const customMcpServers = useMemo(
-    () => mergeMcpServerOptions(enabledCustomMcpServers(clientConfig), workspaceMcpServers),
+  const toolMcpServers = useMemo(
+    () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
     [clientConfig, workspaceMcpServers],
   );
   const currentResources = useMemo(
@@ -294,10 +291,10 @@ export function RootRouteComponent() {
     if (!clientConfig) {
       return;
     }
-    const availableIds = customMcpServers.map((server) => server.id);
+    const availableIds = toolMcpServers.map((server) => server.id);
     setSelectedCapabilityToolIds((current) => selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current));
     previousCapabilityToolIds.current = new Set(availableIds);
-  }, [clientConfig, customMcpServers]);
+  }, [clientConfig, toolMcpServers]);
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
@@ -379,7 +376,7 @@ export function RootRouteComponent() {
   async function startSession(workspaceId: string, submission: TurnSubmission): Promise<Session | null> {
     setBusy(true);
     try {
-      const selectedTools = buildTools(submission.tools, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]);
+      const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
       const created = await client.createSession(workspaceId, {
         initialMessage: submission.text,
         resources: [...currentResources, ...(submission.resources ?? [])],
@@ -534,10 +531,6 @@ export function RootRouteComponent() {
     setGithubAppOpen,
     githubOrg,
     setGithubOrg,
-    openGeniToolEnabled,
-    setOpenGeniToolEnabled,
-    documentSearchEnabled,
-    setDocumentSearchEnabled,
     selectedCapabilityToolIds,
     setSelectedCapabilityToolIds,
     busy,
@@ -545,7 +538,7 @@ export function RootRouteComponent() {
     githubAppBusy,
     selectedInstallationId,
     repositoryGroups,
-    customMcpServers,
+    toolMcpServers,
     currentResources,
     addManualRepository,
     forgetAccessKey,

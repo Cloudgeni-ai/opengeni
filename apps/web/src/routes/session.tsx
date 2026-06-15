@@ -25,10 +25,8 @@ import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
 import {
-  DocumentSearchToolToggle,
   EnabledMcpToolPicker,
   ModelPicker,
-  OpenGeniToolToggle,
 } from "@/components/pickers";
 import {
   FailedSessionBanner,
@@ -210,13 +208,13 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const terminal = isTerminalSessionStatus(props.session.status);
   const attachments = useDraftAttachments(props.session.workspaceId);
-  const { documentSearchEnabled, openGeniToolEnabled, selectedCapabilityToolIds, model, reasoningEffort } = context;
+  const { selectedCapabilityToolIds, model, reasoningEffort } = context;
   const composer = useComposer(props.session.id, {
-    // Evaluated at send time: attachments and tool toggles picked while the
-    // draft was being written ride along with the message.
+    // Evaluated at send time: attachments and tools picked while the draft was
+    // being written ride along with the message.
     sendExtras: () => ({
       resources: attachments.readyResources,
-      tools: buildTools(undefined, documentSearchEnabled, openGeniToolEnabled, [...selectedCapabilityToolIds]),
+      tools: buildTools(undefined, [...selectedCapabilityToolIds]),
       model,
       reasoningEffort,
     }),
@@ -347,18 +345,8 @@ function SessionChatPane(props: {
                   onModelChange={context.setModel}
                   onEffortChange={context.setReasoningEffort}
                 />
-                <DocumentSearchToolToggle
-                  enabled={context.documentSearchEnabled}
-                  disabled={composer.sending || terminal}
-                  onToggle={() => context.setDocumentSearchEnabled((enabled) => !enabled)}
-                />
-                <OpenGeniToolToggle
-                  enabled={context.openGeniToolEnabled}
-                  disabled={composer.sending || terminal}
-                  onToggle={() => context.setOpenGeniToolEnabled((enabled) => !enabled)}
-                />
                 <EnabledMcpToolPicker
-                  servers={context.customMcpServers}
+                  servers={context.toolMcpServers}
                   selectedIds={context.selectedCapabilityToolIds}
                   disabled={composer.sending || terminal}
                   onChange={context.setSelectedCapabilityToolIds}

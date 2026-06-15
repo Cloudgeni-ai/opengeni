@@ -1,4 +1,4 @@
-import { CheckIcon, ChevronDownIcon, FilesIcon, PlugIcon, WrenchIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, PlugIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -74,54 +74,6 @@ function pillClass(active: boolean): string {
     active
       ? "border-[color:var(--color-brand)]/35 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
       : "border-transparent text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
-  );
-}
-
-export function DocumentSearchToolToggle(props: {
-  enabled: boolean;
-  disabled?: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={props.enabled ? "secondary" : "ghost"}
-      size="sm"
-      disabled={props.disabled}
-      onClick={props.onToggle}
-      aria-pressed={props.enabled}
-      aria-label="Attach document search tool"
-      title="Attach document search"
-      className={pillClass(props.enabled)}
-    >
-      <FilesIcon className="size-3.5" />
-      <span className="truncate">Docs</span>
-      {props.enabled ? <CheckIcon className="size-3 shrink-0" /> : null}
-    </Button>
-  );
-}
-
-export function OpenGeniToolToggle(props: {
-  enabled: boolean;
-  disabled?: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <Button
-      type="button"
-      variant={props.enabled ? "secondary" : "ghost"}
-      size="sm"
-      disabled={props.disabled}
-      onClick={props.onToggle}
-      aria-pressed={props.enabled}
-      aria-label="Attach OpenGeni tool"
-      title="Attach OpenGeni"
-      className={pillClass(props.enabled)}
-    >
-      <WrenchIcon className="size-3.5" />
-      <span className="truncate">OpenGeni</span>
-      {props.enabled ? <CheckIcon className="size-3 shrink-0" /> : null}
-    </Button>
   );
 }
 

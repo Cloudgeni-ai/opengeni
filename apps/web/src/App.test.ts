@@ -349,31 +349,31 @@ describe("summarizeSessionFailure", () => {
 });
 
 describe("buildTools", () => {
-  test("adds OpenGeni tool once when enabled", () => {
-    expect(buildTools(undefined, false, true)).toEqual([{ kind: "mcp", id: "opengeni" }]);
-    expect(buildTools([{ kind: "mcp", id: "opengeni" }], false, true)).toEqual([{ kind: "mcp", id: "opengeni" }]);
+  test("adds a selected MCP tool once", () => {
+    expect(buildTools(undefined, ["opengeni"])).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    expect(buildTools([{ kind: "mcp", id: "opengeni" }], ["opengeni"])).toEqual([{ kind: "mcp", id: "opengeni" }]);
   });
 
-  test("adds document search and file download tools once when enabled", () => {
-    expect(buildTools(undefined, true, false)).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
-    expect(buildTools([{ kind: "mcp", id: "docs" }], true, false)).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
-    expect(buildTools([{ kind: "mcp", id: "files" }], true, false)).toEqual([{ kind: "mcp", id: "files" }, { kind: "mcp", id: "docs" }]);
+  test("pulls in the file download helper whenever document search is selected", () => {
+    expect(buildTools(undefined, ["docs"])).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
+    expect(buildTools([{ kind: "mcp", id: "docs" }], ["docs"])).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }]);
+    expect(buildTools([{ kind: "mcp", id: "files" }], ["docs"])).toEqual([{ kind: "mcp", id: "files" }, { kind: "mcp", id: "docs" }]);
   });
 
-  test("preserves existing tools when document search is disabled", () => {
-    expect(buildTools([{ kind: "mcp", id: "custom" }], false, false)).toEqual([{ kind: "mcp", id: "custom" }]);
+  test("preserves existing tools when nothing is selected", () => {
+    expect(buildTools([{ kind: "mcp", id: "custom" }], [])).toEqual([{ kind: "mcp", id: "custom" }]);
   });
 
   test("combines OpenGeni with document tools", () => {
-    expect(buildTools(undefined, true, true)).toEqual([
+    expect(buildTools(undefined, ["opengeni", "docs"])).toEqual([
       { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "docs" },
       { kind: "mcp", id: "files" },
     ]);
   });
 
-  test("adds enabled custom MCP tools once", () => {
-    expect(buildTools([{ kind: "mcp", id: "custom" }], false, false, ["custom", "search"])).toEqual([
+  test("adds selected MCP tools once", () => {
+    expect(buildTools([{ kind: "mcp", id: "custom" }], ["custom", "search"])).toEqual([
       { kind: "mcp", id: "custom" },
       { kind: "mcp", id: "search" },
     ]);

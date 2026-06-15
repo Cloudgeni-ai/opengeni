@@ -9,10 +9,8 @@ import { useEffect, useState } from "react";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import {
-  DocumentSearchToolToggle,
   EnabledMcpToolPicker,
   ModelPicker,
-  OpenGeniToolToggle,
 } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
@@ -185,18 +183,8 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
         onOrgChange={context.setGithubOrg}
         onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
       />
-      <DocumentSearchToolToggle
-        enabled={context.documentSearchEnabled}
-        disabled={context.busy}
-        onToggle={() => context.setDocumentSearchEnabled((enabled) => !enabled)}
-      />
-      <OpenGeniToolToggle
-        enabled={context.openGeniToolEnabled}
-        disabled={context.busy}
-        onToggle={() => context.setOpenGeniToolEnabled((enabled) => !enabled)}
-      />
       <EnabledMcpToolPicker
-        servers={context.customMcpServers}
+        servers={context.toolMcpServers}
         selectedIds={context.selectedCapabilityToolIds}
         disabled={context.busy}
         onChange={context.setSelectedCapabilityToolIds}

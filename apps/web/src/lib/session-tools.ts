@@ -14,21 +14,17 @@ export function labelEffort(value: IntelligenceEffort): string {
   return value === "xhigh" ? "Extra high" : value.slice(0, 1).toUpperCase() + value.slice(1);
 }
 
-export function buildTools(existing: ToolRef[] | undefined, documentSearchEnabled: boolean, openGeniEnabled: boolean, extraMcpServerIds: string[] = []): ToolRef[] {
+export function buildTools(existing: ToolRef[] | undefined, mcpServerIds: string[] = []): ToolRef[] {
   const out = [...(existing ?? [])];
-  if (openGeniEnabled && !out.some((tool) => tool.kind === "mcp" && tool.id === "opengeni")) {
-    out.push({ kind: "mcp", id: "opengeni" });
+  const ids = [...mcpServerIds];
+  // Document Search is one user-facing tool but needs its file-download helper
+  // ("files") alongside it; pull it in whenever "docs" is selected.
+  if (ids.includes("docs") && !ids.includes("files")) {
+    ids.push("files");
   }
-  for (const id of extraMcpServerIds) {
+  for (const id of ids) {
     if (id && !out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
       out.push({ kind: "mcp", id });
-    }
-  }
-  if (documentSearchEnabled) {
-    for (const id of ["docs", "files"]) {
-      if (!out.some((tool) => tool.kind === "mcp" && tool.id === id)) {
-        out.push({ kind: "mcp", id });
-      }
     }
   }
   return out;
@@ -135,12 +131,16 @@ export function groupRepositories(repositories: GitHubRepository[]): RepositoryG
   }, []);
 }
 
-export function enabledCustomMcpServers(config: ClientConfig | null): McpServerOption[] {
+export function selectableMcpServers(config: ClientConfig | null): McpServerOption[] {
   if (!config) {
     return [];
   }
-  const builtIns = new Set(["opengeni", "docs", "files"]);
-  return config.mcpServers.filter((server) => !builtIns.has(server.id));
+  // "files" is the document-search download helper, attached automatically with
+  // "docs" (see buildTools) — it is not a tool the user picks on its own, so
+  // hide it. Everything else, including the first-party "opengeni" and "docs",
+  // is selectable from the unified Tools dropdown.
+  const hidden = new Set(["files"]);
+  return config.mcpServers.filter((server) => !hidden.has(server.id));
 }
 
 export function enabledWorkspaceCapabilityMcpServers(items: CapabilityCatalogItem[]): McpServerOption[] {
