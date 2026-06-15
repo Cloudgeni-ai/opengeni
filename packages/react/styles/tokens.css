@@ -67,8 +67,11 @@
   --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.28);
   --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.32), 0 1px 2px oklch(0 0 0 / 0.24);
   --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.42), 0 2px 8px oklch(0 0 0 / 0.28);
-  --og-shadow-glow: 0 0 0 1px color-mix(in oklch, var(--og-color-accent) 45%, transparent),
-    0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+  /* One soft halo only. The composer's focus affordance already draws a crisp
+     brand edge via `focus-within:border-og-accent/60`; the old `0 0 0 1px`
+     ring sat flush against that border and read as a doubled hairline, so the
+     glow is now purely the diffuse outer halo. */
+  --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
 
   color-scheme: dark;
 }
@@ -102,8 +105,7 @@
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
   --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
-  --og-shadow-glow: 0 0 0 1px color-mix(in oklch, var(--og-color-accent) 38%, transparent),
-    0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
+  --og-shadow-glow: 0 0 20px color-mix(in oklch, var(--og-color-accent) 14%, transparent);
 
   color-scheme: light;
 }

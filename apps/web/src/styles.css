@@ -148,8 +148,12 @@ body {
   background: transparent;
 }
 
-/* Focus ring */
-:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible {
+/* Focus ring. The composer textarea is excluded: its wrapper already shows a
+   whole-composer focus affordance (focus-within border + soft glow), and a
+   per-textarea outline here painted a second highlight bounded to the textarea
+   box (the top half, stopping above the toolbar). Scoping it out of `.og-root`
+   leaves every other control's focus ring intact. */
+:where(button, a, input, textarea, [role="button"], [tabindex]):focus-visible:not(.og-root textarea) {
   outline: 2px solid var(--color-brand);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
