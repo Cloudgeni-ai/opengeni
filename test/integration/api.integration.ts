@@ -2091,12 +2091,39 @@ describe("API component integration", () => {
     });
     expect(setVariable.status).toBeLessThan(300);
 
+    // Env-on-enable through the unified capability path: an environment.required
+    // pack with no prior attachment enables when an environmentId is supplied
+    // (no 422), and the initial attachment is persisted — mirroring what the
+    // dedicated /packs/:id/enable endpoint does.
+    const capabilityEnableWithEnvironment = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({ environmentId: environment.id }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnableWithEnvironment.status).toBe(201);
+    const capabilityInstallation = await capabilityEnableWithEnvironment.json() as { status: string };
+    expect(capabilityInstallation.status).toBe("active");
+    // The attachment is persisted on the pack installation (mirroring the
+    // dedicated /packs/:id/enable endpoint), which the catalog reads for
+    // enablement; the returned capability installation is the pack:{id} row.
+    const storedAfterUnifiedEnable = await getPackInstallation(dbClient.db, workspaceId, packId);
+    expect(storedAfterUnifiedEnable?.status).toBe("active");
+    expect(storedAfterUnifiedEnable?.metadata.environmentId).toBe(environment.id);
+
+    // A bogus environmentId on the unified path is rejected up front.
+    const capabilityEnableUnknownEnvironment = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(`pack:${packId}`)}/enable`), {
+      method: "POST",
+      body: JSON.stringify({ environmentId: crypto.randomUUID() }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(capabilityEnableUnknownEnvironment.status).toBe(422);
+
     const enabled = await app.request(workspacePath(workspaceId, `/packs/${packId}/enable`), {
       method: "POST",
       body: JSON.stringify({ environmentId: environment.id }),
       headers: { "content-type": "application/json" },
     });
-    expect(enabled.status).toBe(201);
+    expect(enabled.status).toBe(200);
     const installation = await enabled.json() as { status: string; metadata: Record<string, unknown> };
     expect(installation.status).toBe("active");
     expect(installation.metadata.packVersion).toBe("0.1.1");

@@ -864,6 +864,12 @@ export type EnableCapabilityRequest = {
    * API (responses expose header names only).
    */
   headers?: Record<string, string> | undefined;
+  /**
+   * Initial environment attachment for kind=pack capabilities — mirrors the
+   * dedicated POST /packs/:id/enable body. Required to enable an
+   * environment.required pack through this unified path; ignored otherwise.
+   */
+  environmentId?: string | undefined;
 };
 
 export type DiscoverMcpCapabilitiesResponse = {

@@ -1208,6 +1208,13 @@ export const EnableCapabilityRequest = z.object({
    * and never returned by the API — responses expose header names only.
    */
   headers: z.record(z.string(), z.string()).default({}),
+  /**
+   * Initial environment attachment for kind=pack capabilities. Mirrors the
+   * dedicated POST /packs/:id/enable body: required to enable an
+   * environment.required pack through the unified capability-enable path,
+   * optional otherwise. Ignored by non-pack capabilities.
+   */
+  environmentId: z.string().uuid().optional(),
 });
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
 

@@ -6,8 +6,8 @@
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /workspaces/:id/environments             → environments + variables
-//   /workspaces/:id/packs                    → capability packs
-//   /workspaces/:id/capabilities             → capability catalog + registry
+//   /workspaces/:id/packs                    → redirect to capabilities (Packs subsection)
+//   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/account                  → account, usage, API keys
@@ -25,7 +25,6 @@ import { AccountRoute } from "@/routes/account";
 import { CapabilitiesRoute } from "@/routes/capabilities";
 import { DocumentsRoute } from "@/routes/documents";
 import { EnvironmentsRoute } from "@/routes/environments";
-import { PacksRoute } from "@/routes/packs";
 import { SchedulesRoute } from "@/routes/schedules";
 import { SessionRoute } from "@/routes/session";
 import { SessionsIndexRoute } from "@/routes/sessions-index";
@@ -73,14 +72,21 @@ const workspaceEnvironmentsRoute = createRoute({
   path: "environments",
   component: Environments,
 });
+// Legacy standalone Packs route: packs are now a subsection of Capabilities,
+// so this redirects there (focusing the Packs subsection) instead of mounting
+// a separate page.
 const workspacePacksRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "packs",
-  component: Packs,
+  component: PacksRedirect,
 });
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
+  // `?section=packs` focuses the Packs subsection (used by the legacy
+  // /packs redirect and the nav). Unknown values fall back to the catalog.
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" } =>
+    search.section === "packs" ? { section: "packs" } : {},
   component: Capabilities,
 });
 const workspaceSchedulesRoute = createRoute({
@@ -159,14 +165,22 @@ function Environments() {
   return <EnvironmentsRoute workspaceId={workspaceId} />;
 }
 
-function Packs() {
+function PacksRedirect() {
   const { workspaceId } = workspacePacksRoute.useParams();
-  return <PacksRoute workspaceId={workspaceId} />;
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/capabilities"
+      params={{ workspaceId }}
+      search={{ section: "packs" }}
+      replace
+    />
+  );
 }
 
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
-  return <CapabilitiesRoute workspaceId={workspaceId} />;
+  const { section } = workspaceCapabilitiesRoute.useSearch();
+  return <CapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {

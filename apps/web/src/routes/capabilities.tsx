@@ -1,8 +1,16 @@
 // Capabilities: the workspace catalog (packs, MCPs, APIs, skills, plugins)
-// plus the public MCP registry search and manual capability tracking.
+// plus the public MCP registry search and manual capability tracking. Packs —
+// the heaviest, workspace-runtime-altering capability — render as a dedicated
+// first-class subsection at the top, with register/enable-with-environment/
+// disable/unregister. Pack enable rides the unified capability-enable path
+// (pack:{id}), passing the initial environment attachment.
+import { useEnvironments, usePacks } from "@opengeni/react";
 import {
+  CalendarClockIcon,
   CheckIcon,
   ChevronDownIcon,
+  ContainerIcon,
+  FileCode2Icon,
   FilesIcon,
   GlobeIcon,
   Loader2Icon,
@@ -12,12 +20,14 @@ import {
   RefreshCwIcon,
   SearchIcon,
   SparkleIcon,
+  Trash2Icon,
   WrenchIcon,
+  XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState, PageHeader } from "@/components/common";
+import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
@@ -35,10 +45,11 @@ import {
   type PackContentsSummary,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
+import { scheduleLabel } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, CapabilityPack, PackInstallation } from "@/types";
 
-export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
+export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId: string; initialSection?: "packs" }) {
   const context = useAppContext();
   const client = context.client;
   const onRuntimeChanged = () => void context.refreshWorkspaceMcpServers(workspaceId);
@@ -46,13 +57,25 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [filter, setFilter] = useState<CapabilityFilter>("all");
+  // The legacy /packs redirect lands here with section=packs, so open on the
+  // Packs filter to keep that surface front-and-center.
+  const [filter, setFilter] = useState<CapabilityFilter>(initialSection === "packs" ? "pack" : "all");
   const [query, setQuery] = useState("");
   const [registryQuery, setRegistryQuery] = useState("");
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
   const [addForm, setAddForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
-  const visibleItems = useMemo(() => filterCapabilityCatalogItems(items, filter, query), [items, filter, query]);
+  // Packs are their own data source (manifests + installations) so the rich
+  // subsection can register/unregister and attach environments; the generic
+  // catalog rows below render every other capability kind.
+  const packs = usePacks({ workspaceId });
+  const environments = useEnvironments({ workspaceId });
+  const showPacks = filter === "all" || filter === "pack";
+  const visibleItems = useMemo(
+    // Packs render in the rich subsection, never as generic catalog rows.
+    () => filterCapabilityCatalogItems(items, filter, query).filter((item) => item.kind !== "pack"),
+    [items, filter, query],
+  );
   const counts = useMemo(() => capabilityCounts(items), [items]);
   // Honest list state: a failed catalog load renders as an error with retry,
   // never as "No capabilities match this filter."; a catalog already on
@@ -162,6 +185,80 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
     }
   }
 
+  // --- Packs subsection actions ------------------------------------------------------------
+
+  async function registerPackManifest(manifestDraft: string): Promise<boolean> {
+    let manifest: unknown;
+    try {
+      manifest = JSON.parse(manifestDraft);
+    } catch {
+      toast.error("Manifest must be valid JSON");
+      return false;
+    }
+    const registered = await packs.register(manifest as Parameters<typeof packs.register>[0]);
+    if (registered) {
+      toast.success(`Pack ${registered.pack.id}@${registered.pack.version} registered`);
+      await refresh();
+      return true;
+    }
+    if (packs.mutationError) {
+      const copy = capabilityErrorToast(packs.mutationError, "Failed to register pack");
+      toast.error(copy.title, { description: copy.description });
+      packs.clearMutationError();
+    }
+    return false;
+  }
+
+  async function enablePack(pack: CapabilityPack, environmentId: string | undefined) {
+    setBusyId(`pack:${pack.id}`);
+    try {
+      // Pack enable rides the unified capability-enable path, which now accepts
+      // and persists the initial environment attachment (env-on-enable).
+      await client.enableCapability(workspaceId, `pack:${pack.id}`, environmentId ? { environmentId } : {});
+      await Promise.all([packs.refresh(), refresh()]);
+      onRuntimeChanged();
+      toast.success(`Pack ${pack.name} enabled`);
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to enable pack");
+      toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function disablePack(pack: CapabilityPack) {
+    setBusyId(`pack:${pack.id}`);
+    try {
+      // Disable rides the capability installation (pack:{id}), same as before.
+      await client.disableCapability(workspaceId, `pack:${pack.id}`);
+      await Promise.all([packs.refresh(), refresh()]);
+      onRuntimeChanged();
+      toast.success(`Pack ${pack.name} disabled`);
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to disable pack");
+      toast.error(copy.title, { description: copy.description });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function unregisterPack(pack: CapabilityPack) {
+    setBusyId(`pack:${pack.id}`);
+    try {
+      const removed = await packs.remove(pack.id);
+      if (removed) {
+        toast.success(`Pack ${pack.id} unregistered`);
+        await refresh();
+      } else if (packs.mutationError) {
+        const copy = capabilityErrorToast(packs.mutationError, "Failed to unregister pack");
+        toast.error(copy.title, { description: copy.description });
+        packs.clearMutationError();
+      }
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
       <section className="flex min-h-0 flex-1 flex-col text-left">
@@ -201,8 +298,20 @@ export function CapabilitiesRoute({ workspaceId }: { workspaceId: string }) {
         </div>
 
         <div className="mt-5 grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_390px]">
-          <div className="min-w-0">
-            {catalogView === "loading" ? (
+          <div className="min-w-0 space-y-4">
+            {showPacks ? (
+              <PacksSection
+                packs={packs}
+                environments={environments.environments.map((environment) => ({ id: environment.id, name: environment.name }))}
+                busyPackId={busyId?.startsWith("pack:") ? busyId.slice("pack:".length) : null}
+                onRegister={registerPackManifest}
+                onEnable={(pack, environmentId) => void enablePack(pack, environmentId)}
+                onDisable={(pack) => void disablePack(pack)}
+                onUnregister={(pack) => void unregisterPack(pack)}
+              />
+            ) : null}
+
+            {filter === "pack" ? null : catalogView === "loading" ? (
               <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
                 <Loader2Icon className="size-4 animate-spin" />
                 Loading capabilities
@@ -534,4 +643,322 @@ function capabilityKindIcon(kind: CapabilityFilter): ReactNode {
   if (kind === "skill") return <SparkleIcon className={className} />;
   if (kind === "plugin") return <WrenchIcon className={className} />;
   return <FilesIcon className={className} />;
+}
+
+// --- Packs subsection ----------------------------------------------------------------------
+// Packs are the heaviest, workspace-runtime-altering capability (a sandbox
+// image + skills + tools + connectors + knowledge + schedule templates that
+// enable as one unit), so they get a first-class subsection at the top of the
+// catalog with register/enable-with-environment/disable/unregister.
+
+function PacksSection(props: {
+  packs: ReturnType<typeof usePacks>;
+  environments: Array<{ id: string; name: string }>;
+  busyPackId: string | null;
+  onRegister: (manifestDraft: string) => Promise<boolean>;
+  onEnable: (pack: CapabilityPack, environmentId: string | undefined) => void;
+  onDisable: (pack: CapabilityPack) => void;
+  onUnregister: (pack: CapabilityPack) => void;
+}) {
+  const { packs } = props;
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const [manifestDraft, setManifestDraft] = useState("");
+  // Honest list state: a failed load renders as an error with retry, never as
+  // the "No packs are available…" empty state.
+  const packsView = listViewState({ loading: packs.loading, error: packs.error, count: packs.packs.length });
+
+  async function register() {
+    const registered = await props.onRegister(manifestDraft);
+    if (registered) {
+      setRegisterOpen(false);
+      setManifestDraft("");
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <PackageIcon className="size-4 text-[color:var(--color-brand)]" />
+            Packs
+          </div>
+          <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+            Complete agent capabilities: a sandbox image, skills, tools, connectors, knowledge, and schedule templates that enable as one unit.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button type="button" variant="ghost" size="sm" onClick={() => void packs.refresh()} disabled={packs.loading} className="h-8 text-xs">
+            <RefreshCwIcon className={cn("size-3.5", packs.loading && "animate-spin")} />
+            Refresh
+          </Button>
+          <Button type="button" size="sm" onClick={() => setRegisterOpen((open) => !open)} className="h-8 text-xs">
+            <PlusIcon className="size-3.5" />
+            Register manifest
+          </Button>
+        </div>
+      </div>
+
+      {registerOpen ? (
+        <div className="mt-3 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3">
+          <textarea
+            value={manifestDraft}
+            onChange={(event) => setManifestDraft(event.target.value)}
+            placeholder='{"id": "my-pack", "name": "My pack", "description": "...", "role": "...", "category": "...", "version": "1.0.0", ...}'
+            className="min-h-40 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 font-mono text-xs leading-5"
+            aria-label="Pack manifest JSON"
+          />
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>Cancel</Button>
+            <Button type="button" size="sm" disabled={packs.mutating || !manifestDraft.trim()} onClick={() => void register()}>
+              {packs.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+              Register
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="mt-3 grid gap-3">
+        {packsView === "loading" ? (
+          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-4 text-sm text-[color:var(--color-fg-muted)]">
+            <Loader2Icon className="size-4 animate-spin" />
+            Loading packs
+          </div>
+        ) : packsView === "error" ? (
+          <LoadErrorState title="Couldn't load packs" error={packs.error} onRetry={() => void packs.refresh()} />
+        ) : packsView === "empty" ? (
+          <EmptyState>No packs are available to this workspace.</EmptyState>
+        ) : (
+          packs.packs.map((pack) => (
+            <PackCard
+              key={pack.id}
+              pack={pack}
+              installation={packs.installationFor(pack.id)}
+              environments={props.environments}
+              busy={props.busyPackId === pack.id}
+              onEnable={(environmentId) => props.onEnable(pack, environmentId)}
+              onDisable={() => props.onDisable(pack)}
+              onUnregister={() => props.onUnregister(pack)}
+            />
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PackCard(props: {
+  pack: CapabilityPack;
+  installation: PackInstallation | null;
+  environments: Array<{ id: string; name: string }>;
+  busy: boolean;
+  onEnable: (environmentId: string | undefined) => void;
+  onDisable: () => void;
+  onUnregister: () => void;
+}) {
+  const { pack, installation } = props;
+  const enabled = installation?.status === "active";
+  const [expanded, setExpanded] = useState(false);
+  const [environmentId, setEnvironmentId] = useState("");
+  const needsEnvironment = pack.environment?.required === true;
+
+  return (
+    <article className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h3 className="truncate text-sm font-medium">{pack.name}</h3>
+            <span className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">v{pack.version}</span>
+            <span
+              className={cn(
+                "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+                enabled
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  : "border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-fg-subtle)]",
+              )}
+            >
+              {enabled ? "enabled" : installation ? "disabled" : "available"}
+            </span>
+          </div>
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[color:var(--color-fg-muted)]">{pack.description}</p>
+          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+            <span>{pack.role}</span>
+            <span>{pack.category}</span>
+            {pack.sandboxImage ? (
+              <span className="flex min-w-0 items-center gap-1" title={pack.sandboxImage}>
+                <ContainerIcon className="size-3 shrink-0" />
+                <span className="max-w-72 truncate font-mono text-[10px]">{pack.sandboxImage}</span>
+              </span>
+            ) : null}
+          </div>
+          {pack.skills.length > 0 ? (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {pack.skills.map((skill) => (
+                <span key={skill.name} title={skill.description} className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">
+                  <SparkleIcon className="size-3" />
+                  {skill.name}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <div className="flex items-center gap-1.5">
+            <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
+              <ChevronDownIcon className={cn("size-3.5 transition-transform", expanded && "rotate-180")} />
+              Contents
+            </Button>
+            {enabled ? (
+              <Button type="button" variant="secondary" size="sm" className="h-8 min-w-24 text-xs" disabled={props.busy} onClick={props.onDisable}>
+                {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <XIcon className="size-3.5" />}
+                Disable
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                className="h-8 min-w-24 text-xs"
+                disabled={props.busy || (needsEnvironment && !environmentId)}
+                title={needsEnvironment && !environmentId ? "This pack requires an environment attachment" : undefined}
+                onClick={() => props.onEnable(environmentId || undefined)}
+              >
+                {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+                Enable
+              </Button>
+            )}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Unregister pack ${pack.id}`}
+              className="hover:text-red-300"
+              disabled={props.busy}
+              title="Unregister this workspace pack (built-ins cannot be removed)"
+              onClick={props.onUnregister}
+            >
+              <Trash2Icon className="size-3.5" />
+            </Button>
+          </div>
+          {pack.environment ? (
+            <div className="flex items-center gap-1.5">
+              <select
+                value={environmentId}
+                onChange={(event) => setEnvironmentId(event.target.value)}
+                aria-label={`Environment for ${pack.name}`}
+                className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+              >
+                <option value="">{needsEnvironment ? "Choose environment (required)" : "No environment"}</option>
+                {props.environments.map((environment) => (
+                  <option key={environment.id} value={environment.id}>{environment.name}</option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      {expanded ? (
+        <div className="mt-3 grid gap-3 border-t border-[color:var(--color-border)] pt-3 md:grid-cols-2">
+          <PackSection title="Tools" icon={<PlugIcon className="size-3" />}>
+            {pack.tools.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {pack.tools.map((tool) => (
+                  <span key={`${tool.kind}:${tool.id}`} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{tool.id}</span>
+                ))}
+              </div>
+            ) : <PackNone />}
+          </PackSection>
+
+          <PackSection title="Skills" icon={<FileCode2Icon className="size-3" />}>
+            {pack.skills.length > 0 ? (
+              <div className="grid gap-1.5">
+                {pack.skills.map((skill) => (
+                  <div key={skill.name} className="min-w-0">
+                    <div className="truncate text-xs font-medium">{skill.name}</div>
+                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                      {skill.description ?? "No description"} · {skill.files.length} file{skill.files.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : <PackNone />}
+          </PackSection>
+
+          <PackSection title="Connectors" icon={<PlugIcon className="size-3" />}>
+            {pack.connectors.length > 0 ? (
+              <div className="grid gap-1.5">
+                {pack.connectors.map((connector) => (
+                  <div key={connector.id} className="min-w-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <span className="truncate text-xs font-medium">{connector.name}</span>
+                      {connector.required ? <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[10px] text-amber-300">required</span> : null}
+                    </div>
+                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                      {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : <PackNone />}
+          </PackSection>
+
+          <PackSection title="Knowledge" icon={<FileCode2Icon className="size-3" />}>
+            {pack.knowledge.length > 0 ? (
+              <div className="grid gap-1.5">
+                {pack.knowledge.map((knowledge) => (
+                  <div key={knowledge.id} className="min-w-0">
+                    <div className="truncate text-xs font-medium">{knowledge.name}</div>
+                    {knowledge.description ? <div className="line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{knowledge.description}</div> : null}
+                  </div>
+                ))}
+              </div>
+            ) : <PackNone />}
+          </PackSection>
+
+          <PackSection title="Schedule templates" icon={<CalendarClockIcon className="size-3" />}>
+            {pack.scheduledTaskTemplates.length > 0 ? (
+              <div className="grid gap-1.5">
+                {pack.scheduledTaskTemplates.map((template) => (
+                  <div key={template.id} className="min-w-0">
+                    <div className="truncate text-xs font-medium">{template.name}</div>
+                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{scheduleLabel(template.defaultSchedule)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : <PackNone />}
+          </PackSection>
+
+          {pack.environment ? (
+            <PackSection title="Environment" icon={<ContainerIcon className="size-3" />}>
+              <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{pack.environment.description}</div>
+              {pack.environment.requiredVariables.length > 0 ? (
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {pack.environment.requiredVariables.map((name) => (
+                    <span key={name} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{name}</span>
+                  ))}
+                </div>
+              ) : null}
+            </PackSection>
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function PackSection({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
+  return (
+    <section className="min-w-0">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[color:var(--color-fg-subtle)]">
+        {icon}
+        {title}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function PackNone() {
+  return <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">None declared.</div>;
 }

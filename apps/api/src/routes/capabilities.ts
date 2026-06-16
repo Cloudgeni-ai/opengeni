@@ -55,6 +55,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = EnableCapabilityRequest.parse(await c.req.json());
     const installation = await enableCapability({
       db,
+      grant,
       accountId: grant.accountId,
       workspaceId,
       settings,

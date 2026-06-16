@@ -5,6 +5,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   CapabilityCatalogItem,
+  type AccessGrant,
   type CapabilityCatalogResponse,
   type CapabilityInstallation,
   type CapabilityKind,
@@ -34,6 +35,7 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { validateEnvironmentAttachment } from "./environments";
 import { assertPackSandboxImageCompatible, listCapabilityPacks, listWorkspaceCapabilityPacks, resolveCapabilityPack } from "./packs";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
@@ -119,6 +121,7 @@ export async function createCatalogItem(input: {
 
 export async function enableCapability(input: {
   db: Database;
+  grant: AccessGrant;
   accountId: string;
   workspaceId: string;
   settings: Settings;
@@ -159,31 +162,50 @@ export async function enableCapability(input: {
       throw new HTTPException(404, { message: "pack not found" });
     }
     await assertPackSandboxImageCompatible(input.db, input.workspaceId, pack);
-    // This generic enable path carries no environment attachment, so packs
-    // that demand one must be enabled through the packs endpoint unless a
-    // previous enable already stored an attachment; a stored attachment is
-    // preserved instead of being overwritten by the fresh metadata.
+    // The unified capability-enable path accepts an initial environment
+    // attachment (`payload.environmentId`), mirroring POST /packs/:id/enable:
+    // a request-supplied id is validated as a fresh attachment, otherwise the
+    // attachment stored by a previous enable is preserved and re-validated.
     const existing = await getPackInstallation(input.db, input.workspaceId, packId);
     const storedEnvironmentId = typeof existing?.metadata.environmentId === "string" ? existing.metadata.environmentId : undefined;
-    if (pack.environment?.required && !storedEnvironmentId) {
+    const requestedEnvironmentId = input.payload.environmentId;
+    const environmentId = requestedEnvironmentId ?? storedEnvironmentId;
+    if (pack.environment?.required && !environmentId) {
       throw new HTTPException(422, {
-        message: `pack ${packId} requires an environment attachment; enable it through /v1/workspaces/{workspaceId}/packs/${packId}/enable with environmentId`,
+        message: `pack ${packId} requires an environment attachment; pass environmentId`,
       });
     }
-    if (storedEnvironmentId) {
-      // The stored attachment was authorized at pack-enable time, but the
-      // environment may have been deleted or its variables changed since;
-      // re-validate it like the packs enable endpoint does.
-      const environment = await getWorkspaceEnvironment(input.db, input.workspaceId, storedEnvironmentId);
-      if (!environment) {
-        throw new HTTPException(422, {
-          message: `the stored environment attachment for pack ${packId} no longer exists; re-enable it through /v1/workspaces/{workspaceId}/packs/${packId}/enable with environmentId`,
-        });
-      }
-      const missing = (pack.environment?.requiredVariables ?? [])
-        .filter((name) => !environment.variables.some((variable) => variable.name === name));
-      if (missing.length > 0) {
-        throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+    if (environmentId) {
+      if (requestedEnvironmentId) {
+        // A fresh attachment: validate it like the packs enable endpoint does.
+        // The grant holds workspace:admin here, which implies environments:use,
+        // so the attachment authorization succeeds for this caller.
+        const environment = await validateEnvironmentAttachment(
+          { settings: input.settings, db: input.db },
+          input.grant,
+          input.workspaceId,
+          requestedEnvironmentId,
+        );
+        const missing = (pack.environment?.requiredVariables ?? [])
+          .filter((name) => !environment.variables.some((variable) => variable.name === name));
+        if (missing.length > 0) {
+          throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+        }
+      } else {
+        // The stored attachment was authorized at pack-enable time, but the
+        // environment may have been deleted or its variables changed since;
+        // re-validate it like the packs enable endpoint does.
+        const environment = await getWorkspaceEnvironment(input.db, input.workspaceId, environmentId);
+        if (!environment) {
+          throw new HTTPException(422, {
+            message: `the stored environment attachment for pack ${packId} no longer exists; re-enable it with environmentId`,
+          });
+        }
+        const missing = (pack.environment?.requiredVariables ?? [])
+          .filter((name) => !environment.variables.some((variable) => variable.name === name));
+        if (missing.length > 0) {
+          throw new HTTPException(422, { message: `environment is missing required variable(s): ${missing.join(", ")}` });
+        }
       }
     }
     await enablePackInstallation(input.db, {
@@ -193,7 +215,7 @@ export async function enableCapability(input: {
       metadata: {
         ...input.payload.metadata,
         packVersion: pack.version,
-        ...(storedEnvironmentId ? { environmentId: storedEnvironmentId } : {}),
+        ...(environmentId ? { environmentId } : {}),
       },
     });
   }

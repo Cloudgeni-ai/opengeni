@@ -11,7 +11,6 @@ import {
   FileSearchIcon,
   Loader2Icon,
   LockIcon,
-  PackageIcon,
   PanelRightIcon,
   PencilIcon,
   PlugIcon,
@@ -159,7 +158,6 @@ function WorkspaceHeader(props: {
       <nav className="flex min-w-0 items-center gap-1 overflow-x-auto rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-1">
         <NavButton to="/workspaces/$workspaceId/sessions" workspaceId={props.workspaceId} icon={<BotIcon className="size-3.5" />} label="Sessions" />
         <NavButton to="/workspaces/$workspaceId/environments" workspaceId={props.workspaceId} icon={<BoxIcon className="size-3.5" />} label="Environments" />
-        <NavButton to="/workspaces/$workspaceId/packs" workspaceId={props.workspaceId} icon={<PackageIcon className="size-3.5" />} label="Packs" />
         <NavButton to="/workspaces/$workspaceId/capabilities" workspaceId={props.workspaceId} icon={<PlugIcon className="size-3.5" />} label="Capabilities" />
         <NavButton to="/workspaces/$workspaceId/schedules" workspaceId={props.workspaceId} icon={<CalendarClockIcon className="size-3.5" />} label="Schedules" />
         <NavButton to="/workspaces/$workspaceId/documents" workspaceId={props.workspaceId} icon={<FileSearchIcon className="size-3.5" />} label="Documents" />
@@ -297,7 +295,6 @@ function NavButton(props: {
   to:
     | "/workspaces/$workspaceId/sessions"
     | "/workspaces/$workspaceId/environments"
-    | "/workspaces/$workspaceId/packs"
     | "/workspaces/$workspaceId/capabilities"
     | "/workspaces/$workspaceId/schedules"
     | "/workspaces/$workspaceId/documents"
