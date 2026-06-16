@@ -83,6 +83,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiProviderItemIds: "strip",
     openaiReasoningEncryptedContent: true,
     openaiMaxRetries: 5,
+    webSearchEnabled: true,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,
     azureOpenaiDeployment: undefined,

@@ -169,6 +169,13 @@ const SettingsSchema = z.object({
   // The openai client default of 2 retries is too small for sustained TPM
   // backpressure during long autonomous runs.
   openaiMaxRetries: z.coerce.number().int().nonnegative().default(5),
+  // Native hosted web search. The live Azure Responses path executes the
+  // hosted web_search tool, so this is provider-unconditional: ON by default
+  // on every provider, exposed only so operators can disable it. When true,
+  // buildOpenGeniAgent attaches webSearchTool() to the agent's tools — it is
+  // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
+  // and the sandbox capability tools, never replacing them.
+  webSearchEnabled: EnvBoolean.default(true),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -404,6 +411,7 @@ export function getSettings(): Settings {
     openaiProviderItemIds: optional("OPENGENI_OPENAI_PROVIDER_ITEM_IDS"),
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
+    webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("OPENGENI_AZURE_OPENAI_DEPLOYMENT"),

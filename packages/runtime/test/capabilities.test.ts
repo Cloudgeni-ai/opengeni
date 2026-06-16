@@ -55,6 +55,60 @@ describe("provider-aware capability selection", () => {
   });
 });
 
+function webSearchHostedTools(agent: ReturnType<typeof buildOpenGeniAgent>): Array<Record<string, unknown>> {
+  return ((agent as { tools?: Array<Record<string, unknown>> }).tools ?? []).filter((tool) =>
+    tool.type === "hosted_tool"
+    && (tool.providerData as { type?: unknown } | undefined)?.type === "web_search");
+}
+
+describe("native web search hosted tool", () => {
+  test("default settings attach a web_search hosted tool on the non-sandbox Agent path", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const tools = webSearchHostedTools(agent);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.name).toBe("web_search");
+  });
+
+  test("default settings attach a web_search hosted tool on the SandboxAgent path", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []);
+    const tools = webSearchHostedTools(agent);
+    expect(tools).toHaveLength(1);
+    expect(tools[0]!.name).toBe("web_search");
+  });
+
+  test("web_search is on by default even on Azure (provider-unconditional)", () => {
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", openaiProvider: "azure", contextCompactionMode: "client" }),
+      [],
+    );
+    expect(webSearchHostedTools(agent)).toHaveLength(1);
+  });
+
+  test("the hosted tool serializes into the model request items the SDK sends", async () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    // getAllTools is the exact snapshot the runner serializes into request.tools[]
+    // (runner/modelPreparation: serializedTools = getAllTools().map(serializeTool)).
+    const allTools = await (agent as unknown as {
+      getAllTools: (ctx?: unknown) => Promise<Array<Record<string, unknown>>>;
+    }).getAllTools();
+    const webSearch = allTools.filter((tool) =>
+      tool.type === "hosted_tool"
+      && (tool.providerData as { type?: unknown } | undefined)?.type === "web_search");
+    expect(webSearch).toHaveLength(1);
+    expect((webSearch[0]!.providerData as { type: string }).type).toBe("web_search");
+  });
+
+  test("operators can disable it: webSearchEnabled=false attaches no web_search tool and no tools field", () => {
+    const noneAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", webSearchEnabled: false }), []);
+    const sandboxAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker", webSearchEnabled: false }), []);
+    expect(webSearchHostedTools(noneAgent)).toHaveLength(0);
+    expect(webSearchHostedTools(sandboxAgent)).toHaveLength(0);
+    // With the flag off the explicit tools field is omitted entirely, preserving
+    // the SDK's "no explicit tools" tool-choice semantics.
+    expect((noneAgent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
+  });
+});
+
 describe("server-path store:false precondition", () => {
   test("server mode sets store=false (encrypted compaction item round-trips)", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", openaiProvider: "openai", contextCompactionMode: "server" }), []);

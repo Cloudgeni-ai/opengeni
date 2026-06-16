@@ -13,6 +13,11 @@ import {
   setDefaultOpenAIClient,
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
+  // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
+  // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
+  // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
+  // descriptor the OpenAI Responses model serializes into request.tools[].
+  webSearchTool,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -361,6 +366,14 @@ const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
+  // Native hosted tools attached to every constructed agent. webSearchEnabled
+  // is ON by default and provider-unconditional (the live Azure Responses path
+  // executes the hosted web_search tool). The SDK merges this explicit `tools`
+  // array with the MCP-server tools (Agent.getAllTools = [...mcpTools, ...tools])
+  // and, on the SandboxAgent path, with the sandbox capability tools
+  // (prepareSandboxAgent: tools = [...agent.tools, ...capability.tools()]), so
+  // hosted web_search coexists with both rather than overriding them.
+  const hostedTools = settings.webSearchEnabled ? [webSearchTool()] : [];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -398,6 +411,11 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
         ? { providerData: { include: ["reasoning.encrypted_content"] } }
         : {}),
     },
+    // Explicit hosted tools (web_search when enabled). Threaded into BOTH the
+    // `new Agent(baseConfig)` path (sandboxBackend === "none") and the
+    // `new SandboxAgent({ ...baseConfig, ... })` path via the shared baseConfig
+    // spread; the SDK concatenates these with MCP and sandbox capability tools.
+    ...(hostedTools.length ? { tools: hostedTools } : {}),
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
   } as const;
 
