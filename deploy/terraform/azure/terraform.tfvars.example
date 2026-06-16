@@ -33,5 +33,8 @@ object_storage = {
   bucket = "opengeni-files"
   # Required for direct browser uploads to signed Blob URLs. Prefer exact
   # HTTPS app origins; "*" is acceptable only for short-lived private evaluation stacks.
+  # List every app origin that uploads directly to Blob, e.g. a primary app plus
+  # an additional product front-end sharing the same storage account:
+  #   cors_allowed_origins = ["https://staging.app.opengeni.ai", "https://geni-staging.app.opengeni.ai"]
   cors_allowed_origins = ["https://opengeni.example.com"]
 }

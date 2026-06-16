@@ -61,6 +61,11 @@ config:
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
+  # Cross-origin allow-list for the API. The code wraps this as ^(?:<value>)$,
+  # so it is an unanchored exact-alternation regex (no leading ^ / trailing $).
+  # Covers localhost dev plus the managed staging and production app origins
+  # (a single universal value is fine across staging and prod).
+  OPENGENI_CORS_ALLOW_ORIGIN_REGEX: 'https?://(localhost|127\.0\.0\.1)(:\d+)?|https://staging\.app\.opengeni\.ai|https://geni-staging\.app\.opengeni\.ai|https://app\.opengeni\.ai'
   OPENGENI_PRODUCT_ACCESS_MODE: configured
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
