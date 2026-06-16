@@ -28,6 +28,9 @@ export const workspaces = pgTable("workspaces", {
   slug: text("slug"),
   externalSource: text("external_source"),
   externalId: text("external_id"),
+  // White-label agent persona template override. NULL means the deployment
+  // default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE / DEFAULT_AGENT_INSTRUCTIONS).
+  agentInstructions: text("agent_instructions"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

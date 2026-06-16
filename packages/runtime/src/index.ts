@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
 import { isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
@@ -314,6 +314,14 @@ export type BuildAgentOptions = {
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
+  // Per-call agent persona override (the white-label surface). Resolved by the
+  // caller as session > workspace > deployment default; when omitted the
+  // runtime falls back to settings.agentInstructionsTemplate. The runtime
+  // substitutes the non-bypassable CORE at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER
+  // (or appends it when the template omits the marker), so an override can
+  // restyle the persona but never drop the goal-loop contract or environment
+  // block.
+  instructionsTemplate?: string;
   // Skills delivered by enabled capability packs. They join the bundled
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
@@ -362,6 +370,40 @@ export function workspaceEnvironmentInstructions(environment: WorkspaceEnvironme
   return lines;
 }
 
+/**
+ * The non-bypassable CORE of the agent instructions: the goal-loop ownership
+ * line (which names the opengeni__goal_* tools and is what keeps a long-running
+ * session driving itself) followed by the dynamic workspace-environment block.
+ * Returned as ordered lines so the caller joins them with the rest of the
+ * instructions by " ", exactly as the historical preamble did.
+ *
+ * This is the slice a white-labelled persona template must never be able to
+ * drop: composeAgentInstructions() substitutes it at the persona template's
+ * {{core}} marker, and appends it when the marker is absent.
+ */
+export function coreInstructions(workspaceEnvironment?: WorkspaceEnvironmentContext): string[] {
+  return [
+    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
+  ];
+}
+
+/**
+ * Composes the final agent instructions from a (possibly white-labelled)
+ * persona template and the non-bypassable CORE. The CORE is substituted at the
+ * template's {{core}} marker; if the template omits the marker, the CORE is
+ * appended after it instead (the non-bypassable fail-safe). The substitution
+ * and the append both join by " ", so the DEFAULT_AGENT_INSTRUCTIONS template
+ * with an empty environment reproduces the historical preamble byte-for-byte.
+ */
+export function composeAgentInstructions(template: string, workspaceEnvironment?: WorkspaceEnvironmentContext): string {
+  const core = coreInstructions(workspaceEnvironment).join(" ");
+  if (template.includes(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER)) {
+    return template.split(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER).join(core);
+  }
+  return core ? `${template} ${core}` : template;
+}
+
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 
@@ -377,21 +419,18 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
-    instructions: [
-      "You are an OpenGeni workspace agent.",
-      "Follow the user's task and any enabled pack or skill instructions for the current role.",
-      "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-      "Repository resources are mounted under repos/<owner>/<repo>.",
-      "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
-      "Attached files are mounted read-only; copy them before modifying.",
-      "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
-      "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
-      "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
-      "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
-      "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
-      "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
-      ...(options.workspaceEnvironment ? workspaceEnvironmentInstructions(options.workspaceEnvironment) : []),
-    ].join(" "),
+    // White-label persona composition. The effective template is the per-call
+    // override (options.instructionsTemplate, resolved by the caller as
+    // session > workspace) falling back to the deployment default
+    // (settings.agentInstructionsTemplate, default DEFAULT_AGENT_INSTRUCTIONS).
+    // composeAgentInstructions substitutes the non-bypassable CORE (goal-loop
+    // ownership + workspace-environment block) at the {{core}} marker, or
+    // appends it when the template omits the marker. With the default template
+    // and no environment this is byte-identical to the historical preamble.
+    instructions: composeAgentInstructions(
+      options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+      options.workspaceEnvironment,
+    ),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
       // Server-side compaction (OpenAI platform) requires store=false: the

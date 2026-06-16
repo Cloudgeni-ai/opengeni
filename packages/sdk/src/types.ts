@@ -314,6 +314,7 @@ export type Workspace = {
   slug: string | null;
   externalSource: string | null;
   externalId: string | null;
+  agentInstructions: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -324,11 +325,13 @@ export type CreateWorkspaceRequest = {
   slug?: string | undefined;
   externalSource?: string | undefined;
   externalId?: string | undefined;
+  agentInstructions?: string | null | undefined;
 };
 
 export type UpdateWorkspaceRequest = {
   name?: string | undefined;
   slug?: string | null | undefined;
+  agentInstructions?: string | null | undefined;
 };
 
 export type ApiKey = {

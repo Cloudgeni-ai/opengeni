@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { DEFAULT_AGENT_INSTRUCTIONS, type Settings } from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -84,6 +84,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiReasoningEncryptedContent: true,
     openaiMaxRetries: 5,
     webSearchEnabled: true,
+    agentInstructionsTemplate: DEFAULT_AGENT_INSTRUCTIONS,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,
     azureOpenaiDeployment: undefined,

@@ -42,7 +42,7 @@ import {
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
-import { resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
+import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { turnInput } from "./run-input";
@@ -354,6 +354,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // packs declaring images) fails the turn with its plain error instead
       // of failing the activity opaquely.
       const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+      // Workspace tier of the agent-persona resolution (session > workspace >
+      // deployment default). null means the workspace has no override, so the
+      // runtime falls back to runSettings.agentInstructionsTemplate (the
+      // deployment default, byte-identical to the historical preamble).
+      const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
       const runSettings = {
         ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
         openaiModel: turn.model,
@@ -386,6 +391,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceEnvironment
           ? {
             workspaceEnvironment: {

@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { CapabilityPack } from "@opengeni/contracts";
-import { getWorkspacePack, listPackInstallations, type Database } from "@opengeni/db";
+import { getWorkspace, getWorkspacePack, listPackInstallations, type Database } from "@opengeni/db";
 import type { PackSkill } from "@opengeni/runtime";
 
 /**
@@ -81,6 +81,22 @@ export function workspacePackRuntimeFromPacks(packs: CapabilityPack[]): Workspac
     sandboxImage: imagePacks[0]?.sandboxImage?.trim() ?? null,
     skills,
   };
+}
+
+/**
+ * Resolves the per-workspace agent persona override (the white-label surface).
+ * Returns the workspace's stored template when set, else null to mean "use the
+ * deployment default" (settings.agentInstructionsTemplate). The runtime always
+ * injects the non-bypassable CORE regardless, so a null here keeps the
+ * byte-identical default and a non-null value only restyles the persona.
+ *
+ * This is the workspace tier of the session > workspace > deployment-default
+ * resolution; per-session overrides do not exist in this slice, so the worker
+ * resolves workspace > default and passes the result as instructionsTemplate.
+ */
+export async function resolveWorkspaceAgentInstructions(db: Database, workspaceId: string): Promise<string | null> {
+  const workspace = await getWorkspace(db, workspaceId);
+  return workspace?.agentInstructions ?? null;
 }
 
 /**

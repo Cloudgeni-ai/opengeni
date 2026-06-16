@@ -113,6 +113,12 @@ export const Workspace = z.object({
   slug: z.string().nullable(),
   externalSource: z.string().nullable(),
   externalId: z.string().nullable(),
+  // Per-workspace agent persona template (white-label override). null means
+  // the deployment default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE /
+  // DEFAULT_AGENT_INSTRUCTIONS) is used. The runtime always injects the
+  // non-bypassable CORE (goal-loop ownership + environment block), so an
+  // override restyles the persona without dropping that contract.
+  agentInstructions: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -196,12 +202,18 @@ export const CreateWorkspaceRequest = z.object({
   slug: z.string().min(1).optional(),
   externalSource: z.string().min(1).optional(),
   externalId: z.string().min(1).optional(),
+  // White-label persona override for this workspace's agent. null/omitted uses
+  // the deployment default template.
+  agentInstructions: z.string().min(1).nullable().optional(),
 });
 export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
 export const UpdateWorkspaceRequest = z.object({
   name: z.string().min(1).optional(),
   slug: z.string().min(1).nullable().optional(),
+  // White-label persona override. Pass null to clear it back to the deployment
+  // default; omit to leave it unchanged.
+  agentInstructions: z.string().min(1).nullable().optional(),
 });
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 

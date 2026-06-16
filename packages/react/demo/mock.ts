@@ -620,6 +620,7 @@ function fabricateWorkspace(name: string): Workspace {
     slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
     externalSource: null,
     externalId: null,
+    agentInstructions: null,
     createdAt: now,
     updatedAt: now,
   };

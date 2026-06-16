@@ -888,6 +888,7 @@ describe("workspace switcher helpers", () => {
       slug: null,
       externalSource: null,
       externalId: null,
+      agentInstructions: null,
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,

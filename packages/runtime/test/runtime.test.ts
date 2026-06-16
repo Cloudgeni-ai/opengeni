@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
-import { getSettings } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -416,6 +416,77 @@ describe("runtime event normalization", () => {
     expect(minimal.instructions).toContain('A workspace environment named "bare" is attached to this session');
     expect(minimal.instructions).not.toContain("Exported environment variables:");
     expect(minimal.instructions).not.toContain("Environment notes from the operator:");
+  });
+
+  // THE GATE. The exact preamble buildOpenGeniAgent produced before the
+  // white-label split: the historical hardcoded `instructions` array from
+  // origin/main (packages/runtime/src/index.ts), with no workspace environment,
+  // joined by " ". Captured verbatim; the composed default MUST equal it
+  // byte-for-byte so the white-label slice changes nothing on the default path.
+  const HISTORICAL_DEFAULT_INSTRUCTIONS = [
+    "You are an OpenGeni workspace agent.",
+    "Follow the user's task and any enabled pack or skill instructions for the current role.",
+    "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
+    "Repository resources are mounted under repos/<owner>/<repo>.",
+    "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+    "Attached files are mounted read-only; copy them before modifying.",
+    "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
+    "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
+    "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
+    "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
+    "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
+    "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+  ].join(" ");
+
+  test("default template composes byte-identically to the historical preamble (no override, no environment)", () => {
+    // Direct composition: default template + empty CORE-with-no-env.
+    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS)).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    // End-to-end through the agent builder with the default settings template.
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("default template with an attached environment appends the env block exactly as before", () => {
+    const env = {
+      name: "azure-prod",
+      description: "Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
+      variableNames: ["JOURNAL_DEPLOY_KEY", "ARM_CLIENT_ID"],
+    };
+    const expected = [
+      HISTORICAL_DEFAULT_INSTRUCTIONS,
+      'A workspace environment named "azure-prod" is attached to this session; its variables are exported in the sandbox shell environment.',
+      "Exported environment variables: ARM_CLIENT_ID, JOURNAL_DEPLOY_KEY.",
+      "Environment notes from the operator: Clone the journal repo over SSH with JOURNAL_DEPLOY_KEY.",
+    ].join(" ");
+    expect(composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, env)).toBe(expected);
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceEnvironment: env });
+    expect(agent.instructions).toBe(expected);
+  });
+
+  test("a white-label persona override is substituted at {{core}} but keeps the non-bypassable CORE", () => {
+    const template = `You are ACME's deployment co-pilot. ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER} Stay on brand.`;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { instructionsTemplate: template });
+    expect(agent.instructions).toContain("You are ACME's deployment co-pilot.");
+    expect(agent.instructions).not.toContain("You are an OpenGeni workspace agent.");
+    // CORE (the goal-loop ownership line naming opengeni__goal_*) survives.
+    expect(agent.instructions).toContain("you call opengeni__goal_complete with concrete evidence");
+    expect(agent.instructions).toBe(`You are ACME's deployment co-pilot. ${coreInstructions().join(" ")} Stay on brand.`);
+  });
+
+  test("a persona template without the marker still gets the CORE appended (non-bypassable fail-safe)", () => {
+    const template = "You are ACME's deployment co-pilot.";
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { instructionsTemplate: template });
+    expect(agent.instructions).toBe(`${template} ${coreInstructions().join(" ")}`);
+    expect(agent.instructions).toContain("opengeni__goal_complete");
+  });
+
+  test("the per-call override beats the deployment-default template", () => {
+    const settings = testSettings({ sandboxBackend: "none", agentInstructionsTemplate: `DEPLOY DEFAULT ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}` });
+    const withoutOverride = buildOpenGeniAgent(settings, []);
+    expect(withoutOverride.instructions.startsWith("DEPLOY DEFAULT ")).toBe(true);
+    const withOverride = buildOpenGeniAgent(settings, [], { instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}` });
+    expect(withOverride.instructions.startsWith("WORKSPACE OVERRIDE ")).toBe(true);
+    expect(withOverride.instructions).not.toContain("DEPLOY DEFAULT");
   });
 
   test("builds native S3 mount entries for file resources", () => {

@@ -376,6 +376,7 @@ export async function createWorkspace(db: Database, input: {
   slug?: string | null;
   externalSource?: string | null;
   externalId?: string | null;
+  agentInstructions?: string | null;
 }): Promise<Workspace> {
   const [row] = await db.insert(schema.workspaces).values({
     accountId: input.accountId,
@@ -383,6 +384,7 @@ export async function createWorkspace(db: Database, input: {
     slug: input.slug ?? null,
     externalSource: input.externalSource ?? null,
     externalId: input.externalId ?? null,
+    agentInstructions: input.agentInstructions ?? null,
   }).returning();
   if (!row) {
     throw new Error("Failed to create workspace");
@@ -419,10 +421,12 @@ export async function grantWorkspaceAccess(db: Database, input: {
 export async function updateWorkspace(db: Database, workspaceId: string, input: {
   name?: string;
   slug?: string | null;
+  agentInstructions?: string | null;
 }): Promise<Workspace> {
   const [row] = await db.update(schema.workspaces).set({
     ...(input.name !== undefined ? { name: input.name } : {}),
     ...(input.slug !== undefined ? { slug: input.slug } : {}),
+    ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
     updatedAt: new Date(),
   }).where(eq(schema.workspaces.id, workspaceId)).returning();
   if (!row) {
@@ -3708,6 +3712,7 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     slug: row.slug,
     externalSource: row.externalSource,
     externalId: row.externalId,
+    agentInstructions: row.agentInstructions ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

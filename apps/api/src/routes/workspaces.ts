@@ -51,6 +51,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       slug: payload.slug?.trim() || null,
       externalSource: payload.externalSource ?? null,
       externalId: payload.externalId ?? null,
+      ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
     });
     await grantWorkspaceAccess(deps.db, {
       accountId,
@@ -76,9 +77,21 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspace = await updateWorkspace(deps.db, workspaceId, {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
+      ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
     });
     return c.json(Workspace.parse(workspace));
   });
+}
+
+// A persona override that is null or trims to empty collapses to null (use the
+// deployment default). Otherwise the template is stored verbatim so the runtime
+// can substitute the non-bypassable CORE at its {{core}} marker.
+function normalizeAgentInstructions(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function requireAccountPermission(context: AccessContext, accountId: string, permission: Permission): void {

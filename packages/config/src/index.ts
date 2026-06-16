@@ -58,6 +58,47 @@ export const sandboxPreparationProfiles: Record<string, { env: string[]; hooks: 
   },
 };
 
+/**
+ * Placeholder token inside an agent-instructions persona template. The runtime
+ * substitutes the non-bypassable CORE (goal-loop ownership + the dynamic
+ * workspace-environment block) at this marker. A template that omits the
+ * marker still gets the CORE appended after it (a non-bypassable fail-safe),
+ * so a white-labelled persona can never drop the goal-loop contract or the
+ * environment metadata the agent depends on.
+ */
+export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
+
+/**
+ * Default per-workspace agent persona template. This is the BRAND + tool-usage
+ * opinion (the white-labellable surface): the "You are an OpenGeni workspace
+ * agent." identity line, the framing/opinion lines, and the mount-path facts.
+ *
+ * The CORE that MUST survive any override — the goal-loop ownership line (which
+ * names the opengeni__goal_* tools) and the dynamic workspace-environment block
+ * — is injected at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER by the runtime, never
+ * baked into this overridable string.
+ *
+ * INVARIANT: with no per-workspace override and an empty environment, the
+ * runtime's composed instructions are BYTE-IDENTICAL to the historical
+ * hardcoded preamble. The template below is exactly the historical lines 1–11
+ * joined by " ", followed by " " + the placeholder. Changing a single
+ * character here changes that default; a runtime test pins it.
+ */
+export const DEFAULT_AGENT_INSTRUCTIONS = [
+  "You are an OpenGeni workspace agent.",
+  "Follow the user's task and any enabled pack or skill instructions for the current role.",
+  "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
+  "Repository resources are mounted under repos/<owner>/<repo>.",
+  "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
+  "Attached files are mounted read-only; copy them before modifying.",
+  "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
+  "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
+  "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
+  "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
+  "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
+  AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
+].join(" ");
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -176,6 +217,14 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Deployment-default agent persona template (the white-label surface). The
+  // runtime resolves the effective template per turn as
+  // per-session-override > per-workspace override > this default, substitutes
+  // the non-bypassable CORE at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER (or appends
+  // it when the template omits the marker), and uses the result as the agent's
+  // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
+  // default byte-identical to the historical hardcoded preamble.
+  agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -412,6 +461,7 @@ export function getSettings(): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("OPENGENI_AZURE_OPENAI_DEPLOYMENT"),
