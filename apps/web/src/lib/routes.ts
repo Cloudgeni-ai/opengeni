@@ -17,3 +17,14 @@ export function workspaceAgentPath(workspaceId: string): string {
 export function workspaceSessionPath(workspaceId: string, sessionId: string): string {
   return `${workspaceSessionsPath(workspaceId)}/${encodeURIComponent(sessionId)}`;
 }
+
+// Stripe checkout redirects land on `/billing?checkout=success|cancelled` (the
+// success_url/cancel_url baked into every checkout session by the API). The
+// `/billing` route forwards the shopper onto their account page, carrying this
+// outcome so the balance view can confirm the top-up. Unknown values are
+// dropped so a stray `?checkout=foo` never renders a confirmation.
+export type CheckoutOutcome = "success" | "cancelled";
+
+export function parseCheckoutOutcome(search: Record<string, unknown>): CheckoutOutcome | undefined {
+  return search.checkout === "success" || search.checkout === "cancelled" ? search.checkout : undefined;
+}

@@ -31,7 +31,7 @@ import {
 } from "@/lib/permissions";
 import type { ApiKey, BillingEntitlementsResponse, BillingSummary, UsageEvent } from "@/types";
 
-export function AccountRoute({ workspaceId }: { workspaceId: string }) {
+export function AccountRoute({ workspaceId, checkout }: { workspaceId: string; checkout?: "success" | "cancelled" }) {
   const context = useAppContext();
   const client = context.client;
   const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -65,6 +65,17 @@ export function AccountRoute({ workspaceId }: { workspaceId: string }) {
     }
     void refresh();
   }, [workspaceId, accountId]);
+
+  // Confirm the Stripe checkout outcome the /billing return redirect forwarded
+  // here. Credits post via the asynchronous webhook, so success is phrased as
+  // "shortly" rather than implying the balance already reflects the top-up.
+  useEffect(() => {
+    if (checkout === "success") {
+      toast.success("Payment received", { description: "Your credits will appear shortly." });
+    } else if (checkout === "cancelled") {
+      toast("Checkout cancelled", { description: "No charge was made." });
+    }
+  }, [checkout]);
 
   // Each loader records its own failure: a failed request must render as an
   // error with retry, never as "No API keys." or a quietly absent balance.

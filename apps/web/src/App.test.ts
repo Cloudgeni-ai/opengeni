@@ -16,7 +16,7 @@ import {
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
 } from "./lib/permissions";
-import { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "./lib/routes";
+import { parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "./lib/routes";
 import {
   emptyAdvancedSessionDraft,
   submissionExtrasFromAdvancedSessionDraft,
@@ -62,6 +62,23 @@ describe("workspace route helpers", () => {
 
   test("does not build legacy unscoped session URLs", () => {
     expect(workspaceSessionPath("workspace-1", "session-1")).not.toBe("/sessions/session-1");
+  });
+});
+
+describe("Stripe checkout return", () => {
+  // Regression: the API bakes `/billing?checkout=success` into every checkout
+  // session, but the console had no `/billing` route, so the post-payment
+  // redirect rendered "Page not found". The /billing route now validates this
+  // search param and forwards onto the account page.
+  test("recognizes the success and cancelled outcomes Stripe redirects with", () => {
+    expect(parseCheckoutOutcome({ checkout: "success" })).toBe("success");
+    expect(parseCheckoutOutcome({ checkout: "cancelled" })).toBe("cancelled");
+  });
+
+  test("drops unknown or absent outcomes so no stray confirmation renders", () => {
+    expect(parseCheckoutOutcome({ checkout: "bogus" })).toBeUndefined();
+    expect(parseCheckoutOutcome({})).toBeUndefined();
+    expect(parseCheckoutOutcome({ checkout: "" })).toBeUndefined();
   });
 });
 

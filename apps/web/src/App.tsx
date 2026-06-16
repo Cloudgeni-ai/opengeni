@@ -11,6 +11,7 @@
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/account                  → account, usage, API keys
+//   /billing?checkout=success|cancelled      → Stripe return → default account
 import {
   Navigate,
   RouterProvider,
@@ -21,6 +22,7 @@ import {
 
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
+import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { AccountRoute } from "@/routes/account";
 import { CapabilitiesRoute } from "@/routes/capabilities";
 import { DocumentsRoute } from "@/routes/documents";
@@ -40,6 +42,19 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: RootIndexRoute,
+});
+// Stripe checkout return target. The API bakes `/billing?checkout=…` into every
+// checkout session's success_url/cancel_url; this top-level route forwards the
+// shopper onto their default workspace account (where the balance lives) so the
+// redirect resolves instead of hitting the not-found page.
+const billingReturnRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "billing",
+  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
+    const checkout = parseCheckoutOutcome(search);
+    return checkout ? { checkout } : {};
+  },
+  component: BillingReturnRoute,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -102,10 +117,17 @@ const workspaceDocumentsRoute = createRoute({
 const workspaceAccountRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "account",
+  // `?checkout=success|cancelled` arrives via the /billing Stripe-return
+  // redirect so the account page can confirm the top-up.
+  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
+    const checkout = parseCheckoutOutcome(search);
+    return checkout ? { checkout } : {};
+  },
   component: Account,
 });
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  billingReturnRoute,
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -195,7 +217,25 @@ function Documents() {
 
 function Account() {
   const { workspaceId } = workspaceAccountRoute.useParams();
-  return <AccountRoute workspaceId={workspaceId} />;
+  const { checkout } = workspaceAccountRoute.useSearch();
+  return <AccountRoute workspaceId={workspaceId} checkout={checkout} />;
+}
+
+function BillingReturnRoute() {
+  const context = useAppContext();
+  const { checkout } = billingReturnRoute.useSearch();
+  const workspaceId = context.accessContext.defaultWorkspaceId ?? context.workspaces[0]?.id ?? context.accessContext.workspaceGrants[0]?.workspaceId;
+  if (!workspaceId) {
+    return <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />;
+  }
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/account"
+      params={{ workspaceId }}
+      search={checkout ? { checkout } : {}}
+      replace
+    />
+  );
 }
 
 function NotFoundRoute() {
