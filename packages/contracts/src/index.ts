@@ -1244,6 +1244,10 @@ export const Session = z.object({
   // direct API creates and scheduled-task runs. When set, this session's
   // terminal-for-now transitions wake the parent.
   parentSessionId: z.string().uuid().nullable(),
+  // Workspace-scoped CREATE idempotency key the session was created under (the
+  // dedup target collapsing double-submit/retry races to one session); null
+  // when the create carried no key.
+  createIdempotencyKey: z.string().nullable(),
   temporalWorkflowId: z.string().nullable(),
   activeTurnId: z.string().uuid().nullable(),
   // Actual input tokens of the last model call of the most recent turn; the
@@ -1318,6 +1322,13 @@ export const CreateSessionRequest = z.object({
   environmentId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   clientEventId: z.string().min(1).optional(),
+  // Workspace-scoped CREATE idempotency key: collapses concurrent/retried
+  // create calls carrying the same key to a single session (partial unique
+  // index on (workspace_id, create_idempotency_key)). Distinct from
+  // clientEventId, whose uniqueness is per-session and so cannot dedup the
+  // creation of a brand-new session. Absent means no create-dedup (each call
+  // is an independent create).
+  idempotencyKey: z.string().min(1).max(200).optional(),
   // Permissions the session's first-party MCP token should carry instead of
   // the fixed worker default — how an operator hands a manager-style session
   // the orchestration/environment/github tools. Capped at creation: every

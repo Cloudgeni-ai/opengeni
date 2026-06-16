@@ -444,6 +444,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       sandboxBackend: "modal",
       environmentId: null,
       firstPartyMcpPermissions: null,
+      createIdempotencyKey: null,
       temporalWorkflowId: null,
       activeTurnId: null,
       lastSequence: this.bus(sessionId).events.length,

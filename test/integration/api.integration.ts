@@ -60,6 +60,70 @@ describe("API component integration", () => {
     expect(sessions.some((item) => item.id === session.id && item.workspaceId === workspaceId && item.initialMessage === "hello")).toBe(true);
   });
 
+  test("create idempotency key dedups double-submit and concurrent creates to one session over the API", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const create = (idempotencyKey: string) => app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "dedup me", idempotencyKey, model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // Sequential double-submit: same key twice -> one session, no second start.
+    const seqKey = `route-seq-${crypto.randomUUID()}`;
+    const wakeupsBefore = workflow.wakeups.length;
+    const firstResp = await create(seqKey);
+    expect(firstResp.status).toBe(202);
+    const firstSession = await firstResp.json() as { id: string };
+    const secondResp = await create(seqKey);
+    expect(secondResp.status).toBe(202);
+    const secondSession = await secondResp.json() as { id: string };
+    expect(secondSession.id).toBe(firstSession.id);
+    // Only the winner ran the start flow: one wakeup, one event batch.
+    expect(workflow.wakeups.length).toBe(wakeupsBefore + 1);
+    const seqEvents = await listSessionEvents(dbClient.db, workspaceId, firstSession.id);
+    expect(seqEvents.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+
+    // Concurrent double-dispatch: N at once on the same key -> one session.
+    const raceKey = `route-race-${crypto.randomUUID()}`;
+    const wakeupsBeforeRace = workflow.wakeups.length;
+    const responses = await Promise.all(Array.from({ length: 6 }, () => create(raceKey)));
+    const raceSessions = await Promise.all(responses.map(async (resp) => {
+      expect(resp.status).toBe(202);
+      return (await resp.json() as { id: string }).id;
+    }));
+    const uniqueRaceIds = new Set(raceSessions);
+    expect(uniqueRaceIds.size).toBe(1);
+    // Exactly one create won the start flow despite the race.
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeRace + 1);
+    const rows = await withWorkspaceCount(dbClient.db, workspaceId, raceKey);
+    expect(rows).toBe(1);
+
+    // Different key -> an independent session (back-compat).
+    const otherResp = await create(`route-other-${crypto.randomUUID()}`);
+    const otherSession = await otherResp.json() as { id: string };
+    expect(otherSession.id).not.toBe(firstSession.id);
+
+    // Absent key -> independent each time (the legacy path).
+    const plain1 = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "no key", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    const plain2 = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "no key", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect((await plain1.json() as { id: string }).id).not.toBe((await plain2.json() as { id: string }).id);
+  });
+
   test("creates sessions with goals and manages the goal lifecycle over the API", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
@@ -4130,6 +4194,11 @@ async function hmacSha256Hex(secret: string, message: string): Promise<string> {
 
 function workspacePath(workspaceId: string, path: string): string {
   return `/v1/workspaces/${workspaceId}${path}`;
+}
+
+async function withWorkspaceCount(db: ReturnType<typeof createDb>["db"], workspaceId: string, createIdempotencyKey: string): Promise<number> {
+  const rows = await db.execute(dbSql<{ n: number }>`select count(*)::int as n from sessions where workspace_id = ${workspaceId} and create_idempotency_key = ${createIdempotencyKey}`);
+  return Number(rows[0]?.n ?? 0);
 }
 
 async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {

@@ -1976,6 +1976,7 @@ export async function createSession(db: Database, input: {
   environmentId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
   parentSessionId?: string | null;
+  createIdempotencyKey?: string | null;
 }): Promise<Session> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.sessions).values({
@@ -1990,12 +1991,83 @@ export async function createSession(db: Database, input: {
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey: input.createIdempotencyKey ?? null,
       status: "queued",
     }).returning();
     if (!row) {
       throw new Error("Failed to create session");
     }
     return mapSession(row);
+  });
+}
+
+/**
+ * Inserts a session under a workspace-scoped CREATE idempotency key, collapsing
+ * a concurrent race on the same key to a single row. On the unique-violation
+ * the conflicting insert does nothing (`onConflictDoNothing` on the partial
+ * unique index) and the now-existing winning row is fetched and returned, so
+ * two near-simultaneous creates with the same key yield ONE session and both
+ * callers see the same id. `created` distinguishes the winner (true: this call
+ * inserted and must run the rest of the start flow) from the loser/dup (false:
+ * the row already existed and must be returned as-is).
+ */
+export async function createSessionWithIdempotencyKey(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  initialMessage: string;
+  resources: ResourceRef[];
+  tools?: ToolRef[];
+  metadata: Record<string, unknown>;
+  model: string;
+  sandboxBackend: SandboxBackend;
+  environmentId?: string | null;
+  firstPartyMcpPermissions?: Permission[] | null;
+  parentSessionId?: string | null;
+  createIdempotencyKey: string;
+}): Promise<{ session: Session; created: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [inserted] = await scopedDb.insert(schema.sessions).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      resources: input.resources,
+      tools: input.tools ?? [],
+      metadata: input.metadata,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      environmentId: input.environmentId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey: input.createIdempotencyKey,
+      status: "queued",
+    }).onConflictDoNothing({
+      target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
+      where: sql`${schema.sessions.createIdempotencyKey} is not null`,
+    }).returning();
+    if (inserted) {
+      return { session: mapSession(inserted), created: true };
+    }
+    const [existing] = await scopedDb.select().from(schema.sessions).where(and(
+      eq(schema.sessions.workspaceId, input.workspaceId),
+      eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
+    )).limit(1);
+    if (!existing) {
+      // No row inserted and none found: the conflict target did not actually
+      // collide (should never happen for a present key) — surface it rather
+      // than silently returning a phantom.
+      throw new Error("Failed to create session under idempotency key");
+    }
+    return { session: mapSession(existing), created: false };
+  });
+}
+
+export async function getSessionByCreateIdempotencyKey(db: Database, workspaceId: string, createIdempotencyKey: string): Promise<Session | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessions).where(and(
+      eq(schema.sessions.workspaceId, workspaceId),
+      eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
+    )).limit(1);
+    return row ? mapSession(row) : null;
   });
 }
 
@@ -3478,6 +3550,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     environmentId: row.environmentId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     parentSessionId: row.parentSessionId ?? null,
+    createIdempotencyKey: row.createIdempotencyKey ?? null,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
     lastInputTokens: row.lastInputTokens ?? null,

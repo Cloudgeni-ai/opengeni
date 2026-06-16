@@ -126,6 +126,12 @@ export const sessions = pgTable("sessions", {
   // manager can orchestrate workers without busy-polling. Self-referencing FK,
   // ON DELETE SET NULL so deleting a manager never cascades into its workers.
   parentSessionId: uuid("parent_session_id"),
+  // Workspace-scoped CREATE idempotency key. NULL means the create carried no
+  // key (each such create is independent). When set, the partial unique index
+  // below collapses concurrent/retried creates with the same key in the same
+  // workspace to a single session row — the dedup that closes the
+  // double-submit/double-dispatch stuck-queued bug.
+  createIdempotencyKey: text("create_idempotency_key"),
   temporalWorkflowId: text("temporal_workflow_id"),
   activeTurnId: uuid("active_turn_id"),
   // Actual input tokens reported for the last model call of the most recent
@@ -145,6 +151,11 @@ export const sessions = pgTable("sessions", {
   workspaceCreated: index("sessions_workspace_created_idx").on(table.workspaceId, table.createdAt),
   environment: index("sessions_environment_idx").on(table.workspaceId, table.environmentId),
   parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
+  // Partial unique index: one session per (workspace, create_idempotency_key)
+  // when a key is present. Concurrent creates racing on the same key see a
+  // unique violation on all but one; the domain layer catches it and returns
+  // the winning row instead of erroring.
+  createIdempotency: uniqueIndex("sessions_workspace_create_idempotency_idx").on(table.workspaceId, table.createIdempotencyKey).where(sql`${table.createIdempotencyKey} is not null`),
 }));
 
 export const files = pgTable("files", {

@@ -21,6 +21,8 @@ import {
   createApiKey,
   createSession,
   createSessionGoal,
+  createSessionWithIdempotencyKey,
+  getSessionByCreateIdempotencyKey,
   createTurn,
   dbSql,
   enableCapabilityInstallation,
@@ -132,6 +134,94 @@ describe("DB integration", () => {
     await expect(appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
       { type: "agent.message.delta", payload: { text: "b" }, producerId: "p", producerSeq: 1 },
     ])).rejects.toThrow();
+  });
+
+  test("workspace-scoped create idempotency key collapses sequential and concurrent races to one session", async () => {
+    const grant = await testGrant(dbClient.db);
+    const otherGrant = await testGrant(dbClient.db);
+    const countSessions = async (workspaceId: string, key: string): Promise<number> => {
+      const rows = await dbClient.db.execute(dbSql<{ n: number }>`select count(*)::int as n from sessions where workspace_id = ${workspaceId} and create_idempotency_key = ${key}`);
+      return Number(rows[0]?.n ?? 0);
+    };
+    const baseInput = (key: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "idempotent create",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none" as const,
+      createIdempotencyKey: key,
+    });
+
+    // 1. Sequential: same key twice -> one row, second is a dup of the first.
+    const seqKey = `seq-${crypto.randomUUID()}`;
+    const first = await createSessionWithIdempotencyKey(dbClient.db, baseInput(seqKey));
+    const second = await createSessionWithIdempotencyKey(dbClient.db, baseInput(seqKey));
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.session.id).toBe(first.session.id);
+    expect(await countSessions(grant.workspaceId, seqKey)).toBe(1);
+    // The lookup helper resolves the same row by key.
+    expect((await getSessionByCreateIdempotencyKey(dbClient.db, grant.workspaceId, seqKey))?.id).toBe(first.session.id);
+
+    // 2. Concurrent: N near-simultaneous creates with the same key race the
+    //    partial unique index; exactly one wins (created=true), the rest catch
+    //    the unique violation and return the winner's row.
+    const raceKey = `race-${crypto.randomUUID()}`;
+    const results = await Promise.all(Array.from({ length: 8 }, () =>
+      createSessionWithIdempotencyKey(dbClient.db, baseInput(raceKey))));
+    const winners = results.filter((r) => r.created);
+    expect(winners).toHaveLength(1);
+    const ids = new Set(results.map((r) => r.session.id));
+    expect(ids.size).toBe(1);
+    expect([...ids][0]).toBe(winners[0]!.session.id);
+    expect(await countSessions(grant.workspaceId, raceKey)).toBe(1);
+
+    // 3a. Different key -> independent create (back-compat).
+    const otherKey = `other-${crypto.randomUUID()}`;
+    const otherKeyed = await createSessionWithIdempotencyKey(dbClient.db, baseInput(otherKey));
+    expect(otherKeyed.created).toBe(true);
+    expect(otherKeyed.session.id).not.toBe(first.session.id);
+
+    // 3b. Same key string but a DIFFERENT workspace -> independent create (the
+    //     key is workspace-scoped, not global).
+    const crossWorkspace = await createSessionWithIdempotencyKey(dbClient.db, {
+      accountId: otherGrant.accountId,
+      workspaceId: otherGrant.workspaceId,
+      initialMessage: "idempotent create",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      createIdempotencyKey: seqKey,
+    });
+    expect(crossWorkspace.created).toBe(true);
+    expect(crossWorkspace.session.id).not.toBe(first.session.id);
+
+    // 3c. Absent key (the legacy createSession path) -> always independent, and
+    //     two key-less creates never collide on the partial index.
+    const plainA = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "no key a",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const plainB = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "no key b",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(plainA.id).not.toBe(plainB.id);
+    expect(plainA.createIdempotencyKey).toBeNull();
+    expect(plainB.createIdempotencyKey).toBeNull();
   });
 
   test("persists run state versions and turn status transitions", async () => {

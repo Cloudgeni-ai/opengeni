@@ -166,6 +166,13 @@ export function RootRouteComponent() {
   const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs"]));
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
+  // Stable CREATE idempotency key for the in-flight session create. Generated
+  // lazily and reused across retries (and across a double-click that re-enters
+  // startSession before busy flips), so duplicate creates collapse to one
+  // session server-side; cleared only once a create succeeds so the next real
+  // submit gets a fresh, independent key. Distinct from the per-call
+  // clientEventId (a fresh UUID every send).
+  const pendingCreateKey = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -375,6 +382,10 @@ export function RootRouteComponent() {
 
   async function startSession(workspaceId: string, submission: TurnSubmission): Promise<Session | null> {
     setBusy(true);
+    // Reuse the in-flight key if one survives a prior failed/double-fired
+    // attempt; otherwise mint a fresh stable key for this logical create.
+    const idempotencyKey = pendingCreateKey.current ?? crypto.randomUUID();
+    pendingCreateKey.current = idempotencyKey;
     try {
       const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
       const created = await client.createSession(workspaceId, {
@@ -384,15 +395,20 @@ export function RootRouteComponent() {
         model: submission.model ?? model,
         reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
         clientEventId: crypto.randomUUID(),
+        idempotencyKey,
         ...(submission.sandboxBackend ? { sandboxBackend: submission.sandboxBackend } : {}),
         ...(submission.environmentId ? { environmentId: submission.environmentId } : {}),
         ...(submission.goal ? { goal: submission.goal } : {}),
         ...(submission.firstPartyMcpPermissions ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions } : {}),
       });
+      // Success: release the key so the next distinct submit is independent.
+      pendingCreateKey.current = null;
       setSession(created);
       setConnectionState("idle");
       return created;
     } catch (error) {
+      // Keep the key on failure so a manual retry reuses it and dedups against
+      // a create that may have actually landed server-side.
       toast.error("Failed to start session", { description: error instanceof Error ? error.message : String(error) });
       return null;
     } finally {

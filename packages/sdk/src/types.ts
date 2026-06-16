@@ -57,6 +57,7 @@ export type Session = {
   sandboxBackend: SandboxBackend;
   environmentId: string | null;
   firstPartyMcpPermissions: string[] | null;
+  createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
   lastSequence: number;
@@ -236,6 +237,10 @@ export type CreateSessionRequest = {
   environmentId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
+  // Workspace-scoped CREATE idempotency key: forward a STABLE value to make a
+  // double-submit/retry of the same logical create collapse to one session.
+  // Distinct from the per-call clientEventId.
+  idempotencyKey?: string | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
 };
 

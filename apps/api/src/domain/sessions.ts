@@ -16,7 +16,9 @@ import {
   appendSessionEventsWithLockedSessionUpdate,
   createSession,
   createSessionGoal,
+  createSessionWithIdempotencyKey,
   enqueueSessionTurn,
+  getSessionByCreateIdempotencyKey,
   getSessionTurn,
   requireSession,
   setTemporalWorkflowId,
@@ -62,24 +64,84 @@ export async function createAndStartSession(input: {
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
   parentSessionId?: string | null;
+  // Workspace-scoped CREATE idempotency key. When present, a double-fire with
+  // the same key (sequential retry OR concurrent race) collapses to a single
+  // session: a prior winner is returned as-is and the start flow below is
+  // skipped, so the dup never re-emits events / re-enqueues a turn.
+  createIdempotencyKey?: string | null;
 }) {
+  const sessionMetadata = {
+    ...input.metadata,
+    model: input.model,
+    reasoningEffort: input.reasoningEffort,
+  };
+  // Fast path with a key: return a session already created under this key
+  // (the sequential retry / double-submit case) without inserting again.
+  if (input.createIdempotencyKey) {
+    const existing = await getSessionByCreateIdempotencyKey(input.db, input.workspaceId, input.createIdempotencyKey);
+    if (existing) {
+      return existing;
+    }
+    // No prior session: insert under the key, racing concurrent creates. The
+    // partial unique index lets exactly one insert win; a loser gets back the
+    // winner's row with created=false and must NOT run the start flow (the
+    // winner owns the events/turn/workflow), so we return it as-is.
+    const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      resources: input.resources,
+      tools: input.tools,
+      metadata: sessionMetadata,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      environmentId: input.environment?.id ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey: input.createIdempotencyKey,
+    });
+    if (!created) {
+      return keyed;
+    }
+    return await finishStartSession(input, keyed);
+  }
   const session = await createSession(input.db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
     resources: input.resources,
     tools: input.tools,
-    metadata: {
-      ...input.metadata,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-    },
+    metadata: sessionMetadata,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     environmentId: input.environment?.id ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     parentSessionId: input.parentSessionId ?? null,
   });
+  return await finishStartSession(input, session);
+}
+
+/**
+ * The post-insert half of {@link createAndStartSession}: durable goal row,
+ * the initial event batch (session.created / goal.set / user.message /
+ * status.changed), turn enqueue, and the workflow wake. Split out so the
+ * idempotency-key winner and the key-less create share one body, and the
+ * idempotency-key loser/dup can skip it entirely.
+ */
+async function finishStartSession(input: {
+  db: Database;
+  bus: EventBus;
+  workflowClient: SessionWorkflowClient;
+  initialMessage: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  clientEventId?: string;
+  model: string;
+  reasoningEffort: Settings["openaiReasoningEffort"];
+  sandboxBackend: Settings["sandboxBackend"];
+  environment?: { id: string; name: string } | null;
+  goal?: GoalSpec | null;
+}, session: Session): Promise<Session> {
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
   const goal = input.goal
@@ -362,6 +424,7 @@ export async function createSessionForRequest(
     goal: payload.goal ?? null,
     firstPartyMcpPermissions,
     parentSessionId,
+    createIdempotencyKey: payload.idempotencyKey ?? null,
   });
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,

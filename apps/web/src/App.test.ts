@@ -684,6 +684,7 @@ function session(patch: Partial<Session> = {}): Session {
     sandboxBackend: "none",
     environmentId: null,
     firstPartyMcpPermissions: null,
+    createIdempotencyKey: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",
     lastSequence: 0,

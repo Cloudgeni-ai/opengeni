@@ -527,6 +527,9 @@ function registerWorkspaceOrchestrationTools(
         reasoningEffort: z4.string().optional(),
         sandboxBackend: z4.string().optional(),
         metadata: z4.record(z4.string(), z4.unknown()).optional(),
+        // Workspace-scoped CREATE idempotency key: a retried session_create with
+        // the same key returns the already-spawned worker instead of a duplicate.
+        idempotencyKey: z4.string().min(1).max(200).optional(),
         // First-party MCP token permissions for the spawned session; every
         // permission must be held by this grant (validated in the domain).
         firstPartyMcpPermissions: z4.array(z4.string()).optional(),
