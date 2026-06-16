@@ -15,6 +15,8 @@ export { useSessionEvents } from "./hooks/use-session-events";
 export type { SessionEventsConnectionState, UseSessionEventsOptions, UseSessionEventsResult } from "./hooks/use-session-events";
 export { useComposer, composeSendInput, shouldSubmitOnKey } from "./hooks/use-composer";
 export type { ComposerMode, ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useFileAttachments } from "./hooks/use-file-attachments";
+export type { FileAttachment, UseFileAttachmentsOptions, UseFileAttachmentsResult } from "./hooks/use-file-attachments";
 export {
   useTurnQueue,
   isTurnQueueEvent,
@@ -110,4 +112,4 @@ export type { FleetTileProps } from "./components/fleet-tile";
 
 // Utilities
 export { cn } from "./lib/cn";
-export { formatRelativeTime, stringifyPayload, truncate, tryParseJson } from "./lib/format";
+export { formatBytes, formatRelativeTime, stringifyPayload, truncate, tryParseJson } from "./lib/format";

@@ -6,6 +6,7 @@ import {
   MessageTimeline,
   projectPendingApprovals,
   useComposer,
+  useFileAttachments,
   useGoal,
   useSession,
   useSessionEvents,
@@ -21,7 +22,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
-import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
+import { ConsoleComposer } from "@/components/Composer";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { MarkdownText } from "@/components/markdown";
 import {
@@ -207,7 +208,9 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const terminal = isTerminalSessionStatus(props.session.status);
-  const attachments = useDraftAttachments(props.session.workspaceId);
+  // Workspace-scoped: the provider (mounted on the workspace route) supplies
+  // the workspaceId, so the hook needs no positional argument.
+  const attachments = useFileAttachments();
   const { selectedCapabilityToolIds, model, reasoningEffort } = context;
   const composer = useComposer(props.session.id, {
     // Evaluated at send time: attachments and tools picked while the draft was

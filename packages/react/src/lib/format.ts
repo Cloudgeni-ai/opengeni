@@ -26,6 +26,22 @@ export function formatRelativeTime(iso: string, now: Date = new Date()): string 
   return new Date(iso).toLocaleDateString();
 }
 
+/** Human-readable byte size: "512 B", "8.0 KB", "1.4 MB", "3 GB". */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  const units = ["KB", "MB", "GB"] as const;
+  let value = bytes / 1024;
+  for (const unit of units) {
+    if (value < 1024 || unit === "GB") {
+      return `${value.toFixed(value < 10 ? 1 : 0)} ${unit}`;
+    }
+    value /= 1024;
+  }
+  return `${bytes} B`;
+}
+
 /** Single-line preview of arbitrary text, for tiles and collapsed rows. */
 export function truncate(text: string, maxLength: number): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
