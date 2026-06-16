@@ -14,6 +14,8 @@ import type {
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnablePackRequest,
+  FileAsset,
+  FileDownloadUrlResponse,
   ListPacksResponse,
   PackInstallation,
   RegisterCapabilityPackRequest,
@@ -26,6 +28,7 @@ import type {
   SessionTurn,
   SteerMessageResult,
   StreamSessionEventsOptions,
+  UploadFileInput,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -413,6 +416,44 @@ export class MockOpenGeniClient implements SessionClientLike {
     return {
       balance: { accountId: ACCOUNT_ID, balanceMicros: 42_500_000, currency: "usd", updatedAt: new Date().toISOString() },
       usage: [],
+    };
+  }
+
+  async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
+    const sizeBytes = input.data instanceof Blob
+      ? input.data.size
+      : typeof input.data === "string"
+        ? new TextEncoder().encode(input.data).byteLength
+        : input.data instanceof Uint8Array
+          ? input.data.byteLength
+          : (input.data as ArrayBuffer).byteLength;
+    return this.fileAsset(workspaceId, { filename: input.filename, contentType: input.contentType, sizeBytes });
+  }
+
+  async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
+    return this.fileAsset(workspaceId, { id: fileId });
+  }
+
+  async createFileDownloadUrl(_workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
+    return { url: `https://example.invalid/files/${fileId}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  }
+
+  private fileAsset(workspaceId: string, overrides: Partial<FileAsset>): FileAsset {
+    const now = new Date().toISOString();
+    return {
+      id: overrides.id ?? `file-${Date.now()}`,
+      workspaceId,
+      status: "ready",
+      filename: overrides.filename ?? "file",
+      safeFilename: overrides.filename ?? "file",
+      contentType: overrides.contentType ?? "application/octet-stream",
+      sizeBytes: overrides.sizeBytes ?? 0,
+      sha256: null,
+      bucket: "mock",
+      objectKey: `mock/${overrides.id ?? "file"}`,
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
     };
   }
 

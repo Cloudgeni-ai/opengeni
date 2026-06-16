@@ -1,14 +1,16 @@
 import type { SessionStatus } from "@opengeni/sdk";
-import { ArrowUpIcon, LoaderCircleIcon, SquareIcon } from "lucide-react";
+import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSubmitOnKey } from "../hooks/use-composer";
+import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import { defaultCommands } from "../commands/registry";
 import { useSlashCommands, type ConfirmState, type SlashCommandContext } from "../hooks/use-slash-commands";
 import { cn } from "../lib/cn";
+import { formatBytes } from "../lib/format";
 import { CommandPalette } from "./command-palette";
 
 export type ChatComposerProps = {
@@ -26,6 +28,15 @@ export type ChatComposerProps = {
   header?: ReactNode | undefined;
   /** Paste hook on the textarea (e.g. paste-image-to-attach). */
   onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
+  /**
+   * Opt-in file attachments. When supplied (e.g. from {@link useFileAttachments}),
+   * the composer renders a built-in attach button (prepended to `controlsStart`),
+   * an attachment-chips strip (above the textarea, before any host `header`),
+   * routes paste through `addFromPaste` (image/* filter lives in the hook), and
+   * gates send while `uploading` so a message never departs without its files.
+   * Absent → no attachment UI renders and the composer behaves exactly as before.
+   */
+  attachments?: UseFileAttachmentsResult | undefined;
   className?: string | undefined;
   /**
    * Slash-command palette. Defaults to the built-in {@link defaultCommands};
@@ -65,13 +76,21 @@ export function ChatComposer({
   controlsStart,
   header,
   onPaste,
+  attachments,
   className,
   commands = defaultCommands,
   commandContext,
   onClearView,
 }: ChatComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const active = status != null && ACTIVE_STATUSES.has(status);
+
+  // Block sends while attachments are still uploading so a message never
+  // departs without the files the user attached to it. This gates BOTH the
+  // Enter-to-send path (which calls composer.send directly, bypassing canSend)
+  // and the send button — dropping either path could ship a fileless message.
+  const blockedByUpload = attachments?.uploading === true;
 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -166,9 +185,35 @@ export function ChatComposer({
         setNotice({ tone: "error", message: "That's a slash command — press Enter in the command list to run it, or edit the line to send a message." });
         return;
       }
+      if (blockedByUpload) {
+        // Files are still uploading: swallow the Enter so the message can't
+        // depart without them. The send button is disabled in the same state.
+        return;
+      }
       void composer.send();
     }
   };
+
+  // The host's onPaste still fires (model/tool/whatever paste handling); when
+  // attachments are wired, also feed the clipboard through addFromPaste so the
+  // image/* filter (owned by the hook) attaches pasted images.
+  const handlePaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      onPaste?.(event);
+      attachments?.addFromPaste(event);
+    },
+    [onPaste, attachments],
+  );
+
+  const handleFileChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      if (event.target.files) {
+        attachments?.addFiles(event.target.files);
+      }
+      event.target.value = "";
+    },
+    [attachments],
+  );
 
   const helpCommands = useMemo(
     () =>
@@ -212,6 +257,9 @@ export function ChatComposer({
             "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
           )}
         >
+          {attachments && attachments.attachments.length > 0 ? (
+            <AttachmentChips attachments={attachments.attachments} onRemove={attachments.remove} />
+          ) : null}
           {header}
           <textarea
             ref={textareaRef}
@@ -219,7 +267,7 @@ export function ChatComposer({
             value={composer.value}
             onChange={(event) => composer.setValue(event.target.value)}
             onKeyDown={onKeyDown}
-            onPaste={onPaste}
+            onPaste={handlePaste}
             placeholder={placeholder ?? "Message the agent…"}
             disabled={disabled}
             autoFocus={autoFocus}
@@ -250,8 +298,35 @@ export function ChatComposer({
             />
           ) : (
             <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
-              {controlsStart ? (
-                <span className="flex min-w-0 items-center gap-1.5">{controlsStart}</span>
+              {attachments || controlsStart ? (
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {attachments ? (
+                    <>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        multiple
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                      <button
+                        type="button"
+                        disabled={disabled === true}
+                        onClick={() => fileInputRef.current?.click()}
+                        aria-label="Attach files"
+                        title="Attach files"
+                        className={cn(
+                          "inline-flex size-8 items-center justify-center rounded-og-md",
+                          "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-2 hover:text-og-fg",
+                          "disabled:cursor-not-allowed disabled:opacity-50",
+                        )}
+                      >
+                        <PaperclipIcon className="size-4" />
+                      </button>
+                    </>
+                  ) : null}
+                  {controlsStart}
+                </span>
               ) : (
                 <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
                   {hint ?? "Enter to send · Shift+Enter for a new line · / for commands"}
@@ -288,8 +363,13 @@ export function ChatComposer({
                 </AnimatePresence>
                 <button
                   type="button"
-                  onClick={() => void composer.send()}
-                  disabled={!composer.canSend || disabled === true || commandDraftBlocked}
+                  onClick={() => {
+                    if (blockedByUpload) {
+                      return;
+                    }
+                    void composer.send();
+                  }}
+                  disabled={!composer.canSend || disabled === true || commandDraftBlocked || blockedByUpload}
                   aria-label="Send message"
                   className={cn(
                     "inline-flex size-8 items-center justify-center rounded-og-md",
@@ -366,6 +446,58 @@ function ConfirmBar({ command, onCancel, onConfirm }: { command: SlashCommand; o
           Confirm
         </button>
       </span>
+    </div>
+  );
+}
+
+/**
+ * The attachment-chips strip rendered above the textarea while files are
+ * attached. Each chip shows an image preview (or a type icon), the filename,
+ * an upload/size/failed status line, and a remove control. Styled with the
+ * package's og-* tokens so it themes in any consumer.
+ */
+function AttachmentChips({ attachments, onRemove }: {
+  attachments: UseFileAttachmentsResult["attachments"];
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2 border-b border-og-border px-3 py-2">
+      {attachments.map((attachment) => (
+        <div
+          key={attachment.id}
+          className={cn(
+            "flex min-w-0 max-w-[240px] items-center gap-2 rounded-og-md border px-2 py-1.5",
+            "border-og-border bg-og-surface-2 text-xs",
+          )}
+        >
+          {attachment.previewUrl ? (
+            <img src={attachment.previewUrl} alt="" className="size-8 shrink-0 rounded object-cover" />
+          ) : attachment.contentType.startsWith("image/") ? (
+            <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
+          ) : (
+            <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-og-fg">{attachment.name}</div>
+            <div className={cn(
+              "truncate text-[11px]",
+              attachment.status === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+            )}
+            >
+              {attachment.status === "uploading" ? "Uploading" : attachment.status === "failed" ? "Upload failed" : formatBytes(attachment.sizeBytes)}
+            </div>
+          </div>
+          {attachment.status === "uploading" ? <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" /> : null}
+          <button
+            type="button"
+            onClick={() => onRemove(attachment.id)}
+            className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg"
+            aria-label={`Remove ${attachment.name}`}
+          >
+            <XIcon className="size-3.5" />
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

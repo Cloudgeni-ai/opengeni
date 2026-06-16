@@ -28,6 +28,10 @@ export type SessionClientLike = Pick<
   | "compactSessionContext"
   // Scheduled tasks
   | "listScheduledTasks"
+  // Files (upload + download-url minting for attachments)
+  | "uploadFile"
+  | "getFile"
+  | "createFileDownloadUrl"
   // Environments
   | "listEnvironments"
   | "createEnvironment"
