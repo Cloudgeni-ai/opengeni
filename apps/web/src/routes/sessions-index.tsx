@@ -358,7 +358,7 @@ function WorkspaceSessions({ onSelect }: { onSelect: (id: string) => void }) {
         ) : sessions.length === 0 ? (
           <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">No sessions in this workspace yet.</div>
         ) : sessions.map((item) => (
-          <button key={item.id} type="button" onClick={() => onSelect(item.id)} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-left text-sm hover:bg-[color:var(--color-surface-2)]">
+          <button key={item.id} type="button" onClick={() => onSelect(item.id)} className="min-w-0 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-left text-sm hover:bg-[color:var(--color-surface-2)]">
             <div className="flex min-w-0 items-center justify-between gap-3">
               <div className="min-w-0 truncate font-medium">{item.initialMessage}</div>
               <SessionStatusBadge status={item.status} />
