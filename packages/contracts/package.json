@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/contracts"
+  },
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",

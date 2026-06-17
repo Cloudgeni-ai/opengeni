@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/react"
+  },
   "type": "module",
   "sideEffects": false,
   "main": "./src/index.ts",
