@@ -1,5 +1,9 @@
 global:
-  imageRegistry: ""
+  # Default to the public GHCR images so a vanilla `helm install` pulls the
+  # released OpenGeni images with no extra config. Per-cloud example values
+  # override this with their own registry. The image tags below are left empty
+  # and resolve to the chart appVersion (see the opengeni.image helper).
+  imageRegistry: "ghcr.io/cloudgeni-ai"
   imagePullSecrets: []
 
 nameOverride: ""
@@ -82,7 +86,8 @@ api:
       maxUnavailable: 1
   image:
     repository: opengeni-api
-    tag: "0.1.0"
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   containerPort: 8000
@@ -156,7 +161,8 @@ worker:
       maxUnavailable: 1
   image:
     repository: opengeni-worker
-    tag: "0.1.0"
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   command: []
@@ -223,7 +229,8 @@ web:
       maxUnavailable: 1
   image:
     repository: opengeni-web
-    tag: "0.1.0"
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   containerPort: 3000
@@ -291,7 +298,8 @@ migrations:
   enabled: true
   image:
     repository: opengeni-api
-    tag: "0.1.0"
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
     digest: ""
     pullPolicy: IfNotPresent
   secret:

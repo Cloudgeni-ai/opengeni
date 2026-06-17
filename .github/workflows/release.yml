@@ -1,0 +1,177 @@
+name: Release
+
+# On every push to main, the changesets action opens/updates a "Version
+# Packages" PR collecting the pending changesets. When that PR is merged (the
+# package.json versions + CHANGELOGs land on main), the same action runs the
+# publish step and pushes the three client packages to npm.
+#
+# The GHCR image job runs ONLY when that publish actually happens (the changesets
+# `published` output is 'true'), and tags images with the published release
+# version — so ordinary pushes to main no longer rebuild/re-push the image tags.
+#
+# REQUIRED REPO/ORG SETUP (publish is a no-op until these exist):
+#   - The @opengeni npm org must exist and the NPM_TOKEN secret must be set to
+#     an automation/granular token with publish rights to it. Until then the
+#     publish step is guarded and skipped (it does NOT red-fail pushes).
+#   - GHCR image publishing needs no extra secret — it uses the built-in
+#     GITHUB_TOKEN with `packages: write`.
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Version or publish packages
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance (OIDC)
+      contents: write # changesets opens the Version PR / pushes tags
+      pull-requests: write # changesets opens/updates the Version PR
+      packages: write
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      publishedPackages: ${{ steps.changesets.outputs.publishedPackages }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # ---- Release gate: nothing publishes unless these are green. ----
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Build client packages
+        run: bun run build:packages
+
+      - name: SDK contract-parity test
+        run: cd packages/sdk && bun test test/contract-parity.test.ts
+
+      - name: Publish closure guard
+        run: bun scripts/publish-closure-guard.ts
+
+      # ---- Version PR (normal push) or publish (Version PR merge). ----
+      # Publishing uses npm (not bun) because bun publish cannot emit npm
+      # provenance. The publish command is guarded so a missing NPM_TOKEN does
+      # not fail the run — changesets only publishes on the Version PR merge.
+      - name: Set up Node for npm publish
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Create Version PR or publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: bun run changeset:version
+          publish: bun run release:publish
+          commit: "chore: version packages"
+          title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+  images:
+    name: Build and push GHCR images
+    runs-on: ubuntu-latest
+    # GHCR publishing is the self-host load-bearing piece and is independent of
+    # the npm token. It runs ONLY when the release job actually published a
+    # release (i.e. a "Version Packages" PR merge produced new npm versions), so
+    # ordinary pushes to main no longer re-push the image tags + latest. The
+    # `published` output comes from the changesets/action.
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve image version
+        id: meta
+        env:
+          PUBLISHED_PACKAGES: ${{ needs.release.outputs.publishedPackages }}
+        run: |
+          # Tag images with the PUBLISHED release version, not the Chart.yaml
+          # appVersion. The sdk + react packages are version-linked, so any of
+          # the published @opengeni/* versions identifies this release; prefer
+          # @opengeni/sdk and fall back to the first published package. Only if
+          # the action did not report a version do we fall back to appVersion.
+          version="$(printf '%s' "$PUBLISHED_PACKAGES" \
+            | jq -r '(map(select(.name == "@opengeni/sdk")) + .)[0].version // empty')"
+          if [ -z "${version}" ]; then
+            version="$(grep -E '^appVersion:' deploy/helm/opengeni/Chart.yaml | sed -E 's/appVersion:[[:space:]]*"?([^"]+)"?/\1/')"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: api
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.version }}
+            ghcr.io/cloudgeni-ai/opengeni-api:sha-${{ steps.meta.outputs.sha }}
+            ghcr.io/cloudgeni-ai/opengeni-api:latest
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.version }}
+            ghcr.io/cloudgeni-ai/opengeni-worker:sha-${{ steps.meta.outputs.sha }}
+            ghcr.io/cloudgeni-ai/opengeni-worker:latest
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: web
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
+          tags: |
+            ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.version }}
+            ghcr.io/cloudgeni-ai/opengeni-web:sha-${{ steps.meta.outputs.sha }}
+            ghcr.io/cloudgeni-ai/opengeni-web:latest

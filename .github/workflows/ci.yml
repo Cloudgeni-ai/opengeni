@@ -31,8 +31,14 @@ jobs:
       - name: Workspace auth/billing static guard
         run: bun scripts/check-workspace-billing-static.ts
 
-      - name: Build SDK + React packages (incl. demo harness)
-        run: cd packages/react && bun run build && bun run demo:build
+      - name: Build client packages (contracts + SDK + React)
+        run: bun run build:packages
+
+      - name: Publish closure guard
+        run: bun scripts/publish-closure-guard.ts
+
+      - name: Build React demo harness
+        run: cd packages/react && bun run demo:build
 
   deployment:
     name: Deployment artifacts

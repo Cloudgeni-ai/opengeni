@@ -1,16 +1,17 @@
 {
   "name": "@opengeni/react",
   "version": "0.1.0",
-  "private": true,
   "description": "React hooks and styled components for OpenGeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./styles.css": "./styles/index.css",
     "./tokens.css": "./styles/tokens.css"
@@ -20,9 +21,16 @@
     "src",
     "styles"
   ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "rm -rf dist && (cd ../sdk && bun run build) && tsc -p tsconfig.build.json",
+    "build": "tsup",
     "demo": "vite dev demo --port 3100",
     "demo:build": "vite build demo"
   },
@@ -49,6 +57,7 @@
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "tailwindcss": "^4.2.4",
+    "tsup": "^8.5.0",
     "typescript": "^6.0.3",
     "vite": "^8.0.9"
   }

@@ -42,10 +42,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if $registry -}}
 {{- $repository = printf "%s/%s" ($registry | trimSuffix "/") .image.repository -}}
 {{- end -}}
+{{- $tag := .image.tag | default .root.Chart.AppVersion -}}
 {{- if .image.digest -}}
-{{- printf "%s:%s@%s" $repository .image.tag .image.digest -}}
+{{- printf "%s:%s@%s" $repository $tag .image.digest -}}
 {{- else -}}
-{{- printf "%s:%s" $repository .image.tag -}}
+{{- printf "%s:%s" $repository $tag -}}
 {{- end -}}
 {{- end -}}
 

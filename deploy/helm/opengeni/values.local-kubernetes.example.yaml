@@ -1,6 +1,11 @@
 # Local Kubernetes conformance profile. This file is intentionally self-contained
 # and uses disposable in-cluster fixtures; do not use it as a production values file.
 
+global:
+  # Locally-built images (tag local-k8s) are loaded straight into the cluster,
+  # so opt out of the chart's public GHCR default and use bare image names.
+  imageRegistry: ""
+
 api:
   replicaCount: 1
   image:

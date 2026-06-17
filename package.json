@@ -42,12 +42,18 @@
     "image:build:api": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t opengeni-api:local .",
     "image:build:worker": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local .",
     "image:build:web": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t opengeni-web:local .",
+    "build:packages": "cd packages/contracts && bun run build && cd ../sdk && bun run build && cd ../react && bun run build",
+    "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
+    "changeset:version": "changeset version",
+    "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
+    "release:publish": "bash scripts/release-publish.sh",
     "check": "bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build",
     "check:full": "bun run check && bun run test:integration && bun run test:e2e",
     "check:workspace-billing": "bun run typecheck && bun test && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
     "prep": "bun run check:full"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.11",
     "@opengeni/api": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
