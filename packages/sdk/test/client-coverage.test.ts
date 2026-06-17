@@ -378,7 +378,12 @@ describe("OpenGeniClient files", () => {
       fileId: FILE_ID,
       uploadId: UPLOAD_ID,
       putUrl: "https://storage.example.test/put/abc",
-      requiredHeaders: { "x-amz-meta-sha256": "deadbeef" },
+      // Realistic backend shape: every real backend (Azure/S3/GCS) puts a
+      // lowercase `content-type` into requiredHeaders (see packages/storage/src
+      // index.ts:74/152/208). The SDK must rely on this and not also set its own
+      // `Content-Type` key, or WHATWG Headers comma-joins the two into
+      // "text/plain, text/plain" and the server's COMPLETE check 422s.
+      requiredHeaders: { "content-type": "text/plain", "x-ms-blob-type": "BlockBlob" },
       expiresAt: "2026-06-12T01:00:00.000Z",
       maxSizeBytes: 1024 * 1024,
     };
@@ -406,7 +411,12 @@ describe("OpenGeniClient files", () => {
     const put = requests[1]!;
     expect(put.method).toBe("PUT");
     expect(put.url).toBe(begin.putUrl);
-    expect(put.headers["x-amz-meta-sha256"]).toBe("deadbeef");
+    expect(put.headers["x-ms-blob-type"]).toBe("BlockBlob");
+    // Regression guard: the PUT must send exactly ONE content-type value. If the
+    // SDK redundantly sets a `Content-Type` key alongside the backend's lowercase
+    // `content-type`, WHATWG Headers comma-joins them to "text/plain, text/plain",
+    // the object store persists that verbatim, and COMPLETE rejects it with a 422
+    // ("uploaded object content type does not match file metadata").
     expect(put.headers["content-type"]).toBe("text/plain");
     // API credentials must never be sent to object storage.
     expect(put.headers.authorization).toBeUndefined();

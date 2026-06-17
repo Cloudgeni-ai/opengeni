@@ -559,7 +559,13 @@ export class OpenGeniClient {
     });
     const putResponse = await this.fetchImpl(upload.putUrl, {
       method: "PUT",
-      headers: { "Content-Type": input.contentType, ...upload.requiredHeaders },
+      // The backend's requiredHeaders already carry the canonical lowercase
+      // `content-type` for every storage backend (Azure/S3/GCS). Do NOT also set
+      // a `Content-Type` key here: WHATWG Headers treats the two casings as the
+      // same header and comma-joins their values (e.g. "text/plain, text/plain"),
+      // which the object store persists verbatim and COMPLETE then rejects (422),
+      // and which breaks S3's presigned-URL signature.
+      headers: { ...upload.requiredHeaders },
       body,
     });
     if (!putResponse.ok) {
