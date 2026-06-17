@@ -83,7 +83,11 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     async (explicit?: string): Promise<boolean> => {
       const draftAtSend = value;
       const text = (explicit ?? draftAtSend).trim();
-      if (!text || !sessionId || sending) {
+      // Resolve the extras once: a file-only message (empty text + ≥1 ready
+      // resource) is legitimate, so we must not bail on empty text alone.
+      const extras = resolveSendExtras(sendExtrasRef.current);
+      const hasResources = (extras.resources?.length ?? 0) > 0;
+      if ((!text && !hasResources) || !sessionId || sending) {
         return false;
       }
       // Reuse the clientEventId across retries of the same draft so a
@@ -92,7 +96,11 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
       setSending(true);
       setError(null);
       try {
-        const input = composeSendInput(text, pendingClientEventId.current, sendExtrasRef.current);
+        // The wire contract requires non-empty text (z.string().min(1)) and the
+        // worker rejects whitespace-only text; a file-only message therefore
+        // carries a minimal default so the attachments still get delivered.
+        const sendText = text || FILE_ONLY_MESSAGE_TEXT;
+        const input = composeSendInput(sendText, pendingClientEventId.current, extras);
         if (modeRef.current === "steer") {
           await client.steerMessage(workspaceId, sessionId, input);
         } else {
@@ -104,7 +112,7 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
           // was in flight were never delivered and must survive.
           setValue((current) => (current === draftAtSend ? "" : current));
         }
-        onSent?.(text);
+        onSent?.(sendText);
         return true;
       } catch (cause) {
         setError(cause instanceof Error ? cause : new Error(String(cause)));
@@ -115,6 +123,13 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     },
     [client, workspaceId, sessionId, value, sending, onSent],
   );
+
+  // A send is possible with non-empty text OR with ≥1 attached resource (a
+  // file-only message). Resources ride in `sendExtras`, so we resolve them here
+  // — keeping useComposer attachment-agnostic while still lighting up the send
+  // affordance the moment a file is ready. ChatComposer additionally gates this
+  // on its `attachments.uploading` flag so a message never departs mid-upload.
+  const hasReadyResources = (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
 
   const interrupt = useCallback(
     async (reason?: string): Promise<void> => {
@@ -144,7 +159,7 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     setValue: updateValue,
     send,
     sending,
-    canSend: Boolean(sessionId) && !sending && value.trim().length > 0,
+    canSend: Boolean(sessionId) && !sending && (value.trim().length > 0 || hasReadyResources),
     mode,
     setMode,
     interrupt,
@@ -152,6 +167,21 @@ export function useComposer(sessionId: string | null | undefined, options: UseCo
     error,
     clearError: useCallback(() => setError(null), []),
   };
+}
+
+/**
+ * Default text for a file-only message (attachment(s) present, no typed draft).
+ * Kept non-empty so the wire contract (`text: z.string().min(1)`) and the
+ * worker's non-whitespace guard accept it; the attached files still ride in
+ * `resources`. Exported for tests.
+ */
+export const FILE_ONLY_MESSAGE_TEXT = "(see attached files)";
+
+/** Resolve possibly-deferred extras to a concrete bag (function evaluated now). */
+export function resolveSendExtras(
+  extras: ComposerSendExtras | (() => ComposerSendExtras) | undefined,
+): ComposerSendExtras {
+  return (typeof extras === "function" ? extras() : extras) ?? {};
 }
 
 /**
@@ -163,8 +193,7 @@ export function composeSendInput(
   clientEventId: string,
   extras: ComposerSendExtras | (() => ComposerSendExtras) | undefined,
 ): SendMessageInput {
-  const resolved = typeof extras === "function" ? extras() : extras;
-  return { ...resolved, text, clientEventId };
+  return { ...resolveSendExtras(extras), text, clientEventId };
 }
 
 /** Submit on plain Enter; Shift+Enter inserts a newline. Exported for tests. */

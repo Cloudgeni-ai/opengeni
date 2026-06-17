@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { composeSendInput, shouldSubmitOnKey } from "../src/hooks/use-composer";
+import { composeSendInput, FILE_ONLY_MESSAGE_TEXT, resolveSendExtras, shouldSubmitOnKey } from "../src/hooks/use-composer";
 
 describe("composeSendInput", () => {
   test("sends bare text with the idempotency key when no extras are configured", () => {
@@ -27,6 +27,23 @@ describe("composeSendInput", () => {
     expect(input.clientEventId).toBe("ce-2");
     expect(input.reasoningEffort).toBe("low");
     expect(input.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
+  });
+});
+
+describe("resolveSendExtras", () => {
+  test("returns an empty bag for undefined extras", () => {
+    expect(resolveSendExtras(undefined)).toEqual({});
+  });
+
+  test("evaluates a function and surfaces its resources", () => {
+    const resolved = resolveSendExtras(() => ({ resources: [{ kind: "file", fileId: "f1" }] }));
+    expect(resolved.resources).toEqual([{ kind: "file", fileId: "f1" }]);
+  });
+});
+
+describe("FILE_ONLY_MESSAGE_TEXT", () => {
+  test("is non-empty so the wire contract (text.min(1)) and worker guard accept a file-only message", () => {
+    expect(FILE_ONLY_MESSAGE_TEXT.trim().length).toBeGreaterThan(0);
   });
 });
 

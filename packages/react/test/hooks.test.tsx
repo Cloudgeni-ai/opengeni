@@ -381,6 +381,74 @@ describe("useComposer queue-vs-steer", () => {
   });
 });
 
+describe("useComposer file-only send", () => {
+  test("canSend lights up with a ready resource even when the draft is empty", async () => {
+    const client = fakeClient({ sendMessage: async () => makeEvent(1, "user.message") });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+      }),
+      undefined,
+    );
+    // Empty draft, but a resource is attached → sendable.
+    expect(hook.result.current.value).toBe("");
+    expect(hook.result.current.canSend).toBe(true);
+    await hook.unmount();
+  });
+
+  test("with no draft and no resources, canSend stays false and send() bails", async () => {
+    const calls: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        calls.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(hook.result.current.canSend).toBe(false);
+    let result = true;
+    await flushing(async () => {
+      result = await hook.result.current.send();
+    });
+    expect(result).toBe(false);
+    expect(calls).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("sending a file-only message dispatches the resources with a minimal default text", async () => {
+    const sent: { text: string; resources?: unknown }[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message as { text: string; resources?: unknown });
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+      }),
+      undefined,
+    );
+    // Empty draft (no explicit text) — the send path must still go through.
+    await flushing(async () => {
+      const ok = await hook.result.current.send();
+      expect(ok).toBe(true);
+    });
+    expect(sent).toHaveLength(1);
+    // Resources ride along, and the wire text is non-empty (contract: min(1)).
+    expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
+    expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+});
+
 describe("useEnvironments", () => {
   test("lists environments and refreshes after each mutation", async () => {
     const log: string[] = [];

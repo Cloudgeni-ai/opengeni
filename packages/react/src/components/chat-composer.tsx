@@ -1,7 +1,7 @@
 import type { SessionStatus } from "@opengeni/sdk";
 import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
@@ -91,6 +91,61 @@ export function ChatComposer({
   // Enter-to-send path (which calls composer.send directly, bypassing canSend)
   // and the send button — dropping either path could ship a fileless message.
   const blockedByUpload = attachments?.uploading === true;
+
+  // A ready attachment makes a file-only message (empty draft) sendable. The
+  // composer (when wired with `sendExtras.resources`) already reflects this in
+  // `canSend`; we OR it in here too so send-enablement is correct even for a
+  // composer whose canSend doesn't know about attachments — and so this stays
+  // the single home of the attachment send-gate.
+  const hasReadyAttachment = (attachments?.readyResources.length ?? 0) > 0;
+  // The send affordance: text OR a ready attachment, never mid-upload or mid-send.
+  const canSend = (composer.canSend || hasReadyAttachment) && !blockedByUpload && !composer.sending;
+
+  // Drag-and-drop file attach: only a drop target when `attachments` is wired,
+  // and only reacts to drags that actually carry files (so it never hijacks
+  // normal text drag/drop). `dragging` drives the drop overlay.
+  const [dragging, setDragging] = useState(false);
+  const dragCarriesFiles = (event: { dataTransfer: DataTransfer | null }): boolean =>
+    event.dataTransfer != null && [...event.dataTransfer.types].includes("Files");
+  const handleDragOver = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!attachments || !dragCarriesFiles(event)) {
+        return;
+      }
+      // preventDefault marks this a valid drop target so the browser fires drop.
+      event.preventDefault();
+      setDragging(true);
+    },
+    [attachments],
+  );
+  const handleDragLeave = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!attachments) {
+        return;
+      }
+      // Ignore leaves bubbling from children: only clear when the pointer left
+      // the composer bounds entirely (the related target is outside it).
+      if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        return;
+      }
+      setDragging(false);
+    },
+    [attachments],
+  );
+  const handleDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!attachments || !dragCarriesFiles(event)) {
+        return;
+      }
+      event.preventDefault();
+      setDragging(false);
+      // Same path the picker uses: addFiles accepts ALL files (no image filter).
+      if (event.dataTransfer.files.length > 0) {
+        attachments.addFiles(event.dataTransfer.files);
+      }
+    },
+    [attachments],
+  );
 
   const [notice, setNotice] = useState<Notice | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -251,12 +306,35 @@ export function ChatComposer({
           />
         ) : null}
         <div
+          // Drag-and-drop file attach lives on the field wrapper, but only when
+          // `attachments` is wired — without it the composer is not a drop target
+          // and behaves exactly as before.
+          onDragOver={attachments ? handleDragOver : undefined}
+          onDragLeave={attachments ? handleDragLeave : undefined}
+          onDrop={attachments ? handleDrop : undefined}
           className={cn(
-            "rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
+            "relative rounded-og-lg border border-og-border bg-og-surface-1 shadow-og-sm",
             "transition-[border-color,box-shadow] duration-200",
             "focus-within:border-og-accent/60 focus-within:shadow-og-glow",
+            // While files are dragged over, swap to a dashed accent border to
+            // signal a live drop target (the overlay carries the label).
+            dragging && "border-dashed border-og-accent",
           )}
         >
+          {dragging ? (
+            <div
+              aria-hidden
+              className={cn(
+                "pointer-events-none absolute inset-0 z-10 flex items-center justify-center",
+                "rounded-og-lg bg-og-surface-1/85 text-sm font-medium text-og-accent backdrop-blur-[1px]",
+              )}
+            >
+              <span className="inline-flex items-center gap-2">
+                <PaperclipIcon className="size-4" />
+                Drop files to attach
+              </span>
+            </div>
+          ) : null}
           {attachments && attachments.attachments.length > 0 ? (
             <AttachmentChips attachments={attachments.attachments} onRemove={attachments.remove} />
           ) : null}
@@ -369,7 +447,7 @@ export function ChatComposer({
                     }
                     void composer.send();
                   }}
-                  disabled={!composer.canSend || disabled === true || commandDraftBlocked || blockedByUpload}
+                  disabled={!canSend || disabled === true || commandDraftBlocked}
                   aria-label="Send message"
                   className={cn(
                     "inline-flex size-8 items-center justify-center rounded-og-md",
