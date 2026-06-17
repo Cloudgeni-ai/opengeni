@@ -46,6 +46,7 @@
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
     "changeset:version": "changeset version",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
+    "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",
     "check": "bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build",
     "check:full": "bun run check && bun run test:integration && bun run test:e2e",

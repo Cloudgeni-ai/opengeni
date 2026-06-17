@@ -33,6 +33,17 @@ bun scripts/publish-closure-guard.ts
 # committed; run with `--restore` locally to undo it.
 bun scripts/rewrite-workspace-deps.ts
 
+# Rewrite the entry-point fields (main/module/types/exports) of the publishable
+# packages from their committed `src` form to the compiled `dist` form. The
+# committed package.json files point at `./src/index.ts` so internal workspace
+# consumers (apps/web, apps/api, apps/worker, sibling packages) resolve via
+# source — CI typechecks and builds the images from src BEFORE any dist exists.
+# External npm consumers, however, must load the built JS + .d.ts, so the
+# published tarball has to point at `./dist/...`. This swap runs after the tsup
+# build above produced dist/, in the ephemeral CI checkout only, and is never
+# committed; run with `--restore` locally to undo it.
+bun scripts/rewrite-entry-points.ts
+
 # changeset publish reads publishConfig (access: public, provenance: true) from
 # each package and runs `npm publish` with provenance under the hood.
 npx changeset publish
