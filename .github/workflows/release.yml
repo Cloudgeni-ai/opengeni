@@ -9,12 +9,18 @@ name: Release
 # `published` output is 'true'), and tags images with the published release
 # version — so ordinary pushes to main no longer rebuild/re-push the image tags.
 #
-# REQUIRED REPO/ORG SETUP (publish is a no-op until these exist):
-#   - The @opengeni npm org must exist and the NPM_TOKEN secret must be set to
-#     an automation/granular token with publish rights to it. Until then the
-#     publish step is guarded and skipped (it does NOT red-fail pushes).
-#   - GHCR image publishing needs no extra secret — it uses the built-in
-#     GITHUB_TOKEN with `packages: write`.
+# REQUIRED REPO/ORG SETUP. This workflow is DORMANT until activated, so it does
+# not run — or red-fail — on pushes to main until you opt in:
+#   1. Set the repo variable RELEASE_ENABLED=true to activate the pipeline
+#      (Settings -> Secrets and variables -> Actions -> Variables).
+#   2. Claim the @opengeni npm org and set the NPM_TOKEN secret to an
+#      automation/granular token with publish rights (provenance via OIDC).
+#   3. Let the Version PR be opened: EITHER enable Settings -> Actions -> General
+#      -> "Allow GitHub Actions to create and approve pull requests", OR set a
+#      RELEASE_PAT secret (a PAT with repo + pull-requests scope) — this workflow
+#      prefers RELEASE_PAT over the default GITHUB_TOKEN for exactly that reason.
+#   - GHCR image publishing needs no extra secret (built-in GITHUB_TOKEN) and
+#     runs only when a release actually publishes.
 
 on:
   push:
@@ -32,6 +38,9 @@ jobs:
   release:
     name: Version or publish packages
     runs-on: ubuntu-latest
+    # Dormant until opted in: skips cleanly (no red) on pushes to main until the
+    # repo variable RELEASE_ENABLED is set to 'true'. See the header for setup.
+    if: ${{ vars.RELEASE_ENABLED == 'true' }}
     permissions:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets opens the Version PR / pushes tags
@@ -86,7 +95,10 @@ jobs:
           commit: "chore: version packages"
           title: "chore: version packages"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Prefer a PAT (repo + pull-requests scope) so the Version PR can be
+          # opened even if the org keeps "Actions may create PRs" disabled;
+          # falls back to the default token when the org setting is enabled.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
