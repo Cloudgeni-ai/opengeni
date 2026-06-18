@@ -217,11 +217,22 @@ export const documents = pgTable("documents", {
   parser: text("parser").notNull().default("liteparse"),
   chunkCount: integer("chunk_count").notNull().default(0),
   error: text("error"),
+  sourceKind: text("source_kind").notNull().default("manual_upload"),
+  sourceUri: text("source_uri"),
+  sourceExternalId: text("source_external_id"),
+  sourceTitle: text("source_title"),
+  sourceAuthor: text("source_author"),
+  sourceCreatedAt: timestamp("source_created_at", { withTimezone: true }),
+  sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
+  sourceVersion: text("source_version"),
+  aclTags: jsonb("acl_tags").$type<string[]>().notNull().default([]),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   baseFile: uniqueIndex("documents_workspace_base_file_idx").on(table.workspaceId, table.baseId, table.fileId),
   baseStatus: index("documents_workspace_base_status_idx").on(table.workspaceId, table.baseId, table.status),
+  sourceKind: index("documents_workspace_source_kind_idx").on(table.workspaceId, table.sourceKind),
+  sourceExternalId: index("documents_workspace_source_external_id_idx").on(table.workspaceId, table.sourceExternalId),
 }));
 
 export const documentChunks = pgTable("document_chunks", {
@@ -240,6 +251,29 @@ export const documentChunks = pgTable("document_chunks", {
 }, (table) => ({
   documentIndex: uniqueIndex("document_chunks_workspace_document_index_idx").on(table.workspaceId, table.documentId, table.chunkIndex),
   base: index("document_chunks_workspace_base_idx").on(table.workspaceId, table.baseId),
+}));
+
+export const knowledgeMemories = pgTable("knowledge_memories", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  status: text("status").notNull().default("proposed"),
+  kind: text("kind").notNull().default("semantic"),
+  scope: text("scope").notNull().default("workspace"),
+  text: text("text").notNull(),
+  sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
+  confidence: integer("confidence").notNull().default(50),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdBySessionId: uuid("created_by_session_id").references(() => sessions.id, { onDelete: "set null" }),
+  reviewedBy: text("reviewed_by"),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceStatus: index("knowledge_memories_workspace_status_idx").on(table.workspaceId, table.status),
+  workspaceKind: index("knowledge_memories_workspace_kind_idx").on(table.workspaceId, table.kind),
+  workspaceScope: index("knowledge_memories_workspace_scope_idx").on(table.workspaceId, table.scope),
+  createdBySession: index("knowledge_memories_workspace_created_by_session_idx").on(table.workspaceId, table.createdBySessionId),
 }));
 
 export const sessionTurns = pgTable("session_turns", {

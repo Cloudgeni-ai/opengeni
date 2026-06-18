@@ -2869,13 +2869,23 @@ describe("API component integration", () => {
 
     const addResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
       method: "POST",
-      body: JSON.stringify({ fileId: upload.fileId }),
+      body: JSON.stringify({
+        fileId: upload.fileId,
+        sourceKind: "meeting_transcript",
+        sourceUri: "https://meetings.example.test/network-runbook",
+        sourceTitle: "Network policy review",
+        sourceAuthor: "platform team",
+        aclTags: ["platform", "private"],
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(addResponse.status).toBe(201);
-    const document = await addResponse.json() as { id: string; status: string; chunkCount: number };
+    const document = await addResponse.json() as { id: string; status: string; chunkCount: number; sourceKind: string; sourceTitle: string | null; aclTags: string[] };
     expect(document.status).toBe("ready");
     expect(document.chunkCount).toBe(1);
+    expect(document.sourceKind).toBe("meeting_transcript");
+    expect(document.sourceTitle).toBe("Network policy review");
+    expect(document.aclTags).toEqual(["platform", "private"]);
 
     const readyRetryResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}/reindex`), { method: "POST" });
     expect(readyRetryResponse.status).toBe(422);
@@ -2887,13 +2897,73 @@ describe("API component integration", () => {
 
     const searchResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/search`), {
       method: "POST",
-      body: JSON.stringify({ query: "network policy", limit: 3 }),
+      body: JSON.stringify({ query: "network policy", limit: 3, mode: "keyword", sourceKinds: ["meeting_transcript"], aclTags: ["platform"] }),
       headers: { "content-type": "application/json" },
     });
     expect(searchResponse.status).toBe(200);
-    const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
+    const search = await searchResponse.json() as { results: Array<{ text: string; title: string; matchType: string; sourceKind: string; aclTags: string[] }> };
     expect(search.results[0]?.text).toContain("network policy");
-    expect(search.results[0]?.title).toBe("network-runbook.txt");
+    expect(search.results[0]?.title).toBe("Network policy review");
+    expect(search.results[0]?.matchType).toBe("keyword");
+    expect(search.results[0]?.sourceKind).toBe("meeting_transcript");
+    expect(search.results[0]?.aclTags).toEqual(["platform", "private"]);
+
+    const knowledgeSearchResponse = await app.request(workspacePath(workspaceId, "/knowledge/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "private endpoint", baseIds: [base.id], mode: "hybrid", aclTags: ["private"] }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(knowledgeSearchResponse.status).toBe(200);
+    const knowledgeSearch = await knowledgeSearchResponse.json() as { results: Array<{ text: string }> };
+    expect(knowledgeSearch.results[0]?.text).toContain("Private endpoint");
+  });
+
+  test("creates, reviews, and searches workspace knowledge memories", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const proposedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Use Azure Blob for production object storage.",
+        kind: "decision",
+        confidence: 0.92,
+        sourceRefs: [{ kind: "external", id: "adr-42", title: "ADR 42" }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedResponse.status).toBe(201);
+    const proposed = await proposedResponse.json() as { id: string; status: string; kind: string; workspaceId: string };
+    expect(proposed.status).toBe("proposed");
+    expect(proposed.kind).toBe("decision");
+    expect(proposed.workspaceId).toBe(workspaceId);
+
+    const approvedSearchBefore = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"));
+    expect(approvedSearchBefore.status).toBe(200);
+    expect(await approvedSearchBefore.json()).toHaveLength(0);
+
+    const approvedResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposed.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "approved", reviewedBy: "operator" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(approvedResponse.status).toBe(200);
+    const approved = await approvedResponse.json() as { id: string; status: string; reviewedBy: string | null; reviewedAt: string | null };
+    expect(approved.id).toBe(proposed.id);
+    expect(approved.status).toBe("approved");
+    expect(approved.reviewedBy).toBe("operator");
+    expect(approved.reviewedAt).toBeTruthy();
+
+    const approvedSearchAfter = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"));
+    expect(approvedSearchAfter.status).toBe(200);
+    const memories = await approvedSearchAfter.json() as Array<{ id: string; text: string }>;
+    expect(memories[0]?.id).toBe(proposed.id);
+    expect(memories[0]?.text).toContain("Azure Blob");
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {

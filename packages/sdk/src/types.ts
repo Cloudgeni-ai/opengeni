@@ -577,6 +577,8 @@ export type UploadFileInput = {
 // --- Documents -------------------------------------------------------------------
 
 export type DocumentStatus = "queued" | "indexing" | "ready" | "failed";
+export type KnowledgeSourceKind = "manual_upload" | "meeting_transcript" | "repository" | "email" | "chat" | "document" | "web" | "other";
+export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
 export type DocumentBase = {
   id: string;
@@ -597,6 +599,15 @@ export type Document = {
   parser: string;
   chunkCount: number;
   error: string | null;
+  sourceKind: KnowledgeSourceKind;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: string | null;
+  sourceUpdatedAt: string | null;
+  sourceVersion: string | null;
+  aclTags: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -610,8 +621,20 @@ export type DocumentSearchResult = {
   title: string;
   text: string;
   score: number;
+  matchType: DocumentSearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
   chunkIndex: number;
   metadata: Record<string, unknown>;
+  sourceKind: KnowledgeSourceKind;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: string | null;
+  sourceUpdatedAt: string | null;
+  sourceVersion: string | null;
+  aclTags: string[];
 };
 
 export type CreateDocumentBaseRequest = {
@@ -619,13 +642,89 @@ export type CreateDocumentBaseRequest = {
   description?: string | undefined;
 };
 
+export type AddDocumentRequest = {
+  fileId: string;
+  title?: string | undefined;
+  sourceKind?: KnowledgeSourceKind | undefined;
+  sourceUri?: string | undefined;
+  sourceExternalId?: string | undefined;
+  sourceTitle?: string | undefined;
+  sourceAuthor?: string | undefined;
+  sourceCreatedAt?: string | undefined;
+  sourceUpdatedAt?: string | undefined;
+  sourceVersion?: string | undefined;
+  aclTags?: string[] | undefined;
+};
+
 export type DocumentSearchRequest = {
   query: string;
+  baseIds?: string[] | undefined;
+  mode?: DocumentSearchMode | undefined;
+  sourceKinds?: KnowledgeSourceKind[] | undefined;
+  aclTags?: string[] | undefined;
   limit?: number | undefined;
 };
 
 export type DocumentSearchResponse = {
   results: DocumentSearchResult[];
+};
+
+export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected";
+export type KnowledgeMemoryKind = "semantic" | "episodic" | "procedural" | "decision" | "preference";
+
+export type KnowledgeSourceRef = {
+  kind: "document_chunk" | "document" | "session_event" | "memory" | "external";
+  id: string;
+  uri?: string | undefined;
+  title?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type KnowledgeMemory = {
+  id: string;
+  workspaceId: string;
+  status: KnowledgeMemoryStatus;
+  kind: KnowledgeMemoryKind;
+  scope: string;
+  text: string;
+  sourceRefs: KnowledgeSourceRef[];
+  confidence: number;
+  metadata: Record<string, unknown>;
+  createdBySessionId: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateKnowledgeMemoryRequest = {
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  text: string;
+  sourceRefs?: KnowledgeSourceRef[] | undefined;
+  confidence?: number | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  createdBySessionId?: string | undefined;
+};
+
+export type UpdateKnowledgeMemoryRequest = {
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  text?: string | undefined;
+  sourceRefs?: KnowledgeSourceRef[] | undefined;
+  confidence?: number | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  reviewedBy?: string | undefined;
+};
+
+export type KnowledgeMemorySearchRequest = {
+  query?: string | undefined;
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  limit?: number | undefined;
 };
 
 // --- Capability packs ---------------------------------------------------------

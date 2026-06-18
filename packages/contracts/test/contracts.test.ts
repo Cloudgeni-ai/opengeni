@@ -6,6 +6,7 @@ import {
   ClientConfig,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
+  CreateKnowledgeMemoryRequest,
   CreateSocialConnectionRequest,
   CreateSocialPostRequest,
   CreateDocumentBaseRequest,
@@ -14,6 +15,7 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   ResourceRef,
   SessionBusMessage,
@@ -240,8 +242,30 @@ describe("contracts", () => {
       description: "Ops docs",
     });
     expect(AddDocumentRequest.parse({ fileId })).toEqual({ fileId });
-    expect(DocumentSearchRequest.parse({ query: "network policy", limit: 20 })).toEqual({
+    expect(DocumentSearchRequest.parse({ query: "network policy", limit: 20, mode: "hybrid", sourceKinds: ["repository"] })).toEqual({
       query: "network policy",
+      limit: 20,
+      mode: "hybrid",
+      sourceKinds: ["repository"],
+    });
+  });
+
+  test("accepts knowledge memory contracts", () => {
+    expect(CreateKnowledgeMemoryRequest.parse({
+      text: "Prefer Azure Blob for production object storage.",
+      kind: "decision",
+      confidence: 0.9,
+    })).toEqual({
+      text: "Prefer Azure Blob for production object storage.",
+      status: "proposed",
+      kind: "decision",
+      scope: "workspace",
+      sourceRefs: [],
+      confidence: 0.9,
+      metadata: {},
+    });
+    expect(KnowledgeMemorySearchRequest.parse({ status: "approved" })).toEqual({
+      status: "approved",
       limit: 20,
     });
   });
@@ -250,6 +274,7 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+    expect(() => CreateKnowledgeMemoryRequest.parse({ text: "", confidence: 1.1 })).toThrow();
   });
 });
 

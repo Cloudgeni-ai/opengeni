@@ -462,7 +462,13 @@ describe("OpenGeniClient documents", () => {
     await client.listDocuments(WORKSPACE_ID, BASE_ID);
     await client.reindexDocument(WORKSPACE_ID, BASE_ID, DOCUMENT_ID);
     const search = await client.searchDocuments(WORKSPACE_ID, BASE_ID, { query: "rollback steps", limit: 3 });
+    const knowledgeSearch = await client.searchKnowledge(WORKSPACE_ID, { query: "decision", mode: "keyword", limit: 2 });
+    await client.listKnowledgeMemories(WORKSPACE_ID, { status: "approved", query: "azure", limit: 5 });
+    await client.getKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID);
+    await client.createKnowledgeMemory(WORKSPACE_ID, { text: "Prefer reviewed memory.", kind: "decision" });
+    await client.updateKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, { status: "approved" });
     expect(search.results).toEqual([]);
+    expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
       `POST /v1/workspaces/${WORKSPACE_ID}/document-bases`,
       `GET /v1/workspaces/${WORKSPACE_ID}/document-bases`,
@@ -471,8 +477,17 @@ describe("OpenGeniClient documents", () => {
       `GET /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents`,
       `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}/reindex`,
       `POST /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/search`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/search`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
+      `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
+      `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
     ]);
     expect(JSON.parse(requests[6]!.body!)).toEqual({ query: "rollback steps", limit: 3 });
+    expect(JSON.parse(requests[7]!.body!)).toEqual({ query: "decision", mode: "keyword", limit: 2 });
+    expect(new URL(requests[8]!.url).searchParams.get("status")).toBe("approved");
+    expect(JSON.parse(requests[10]!.body!)).toEqual({ text: "Prefer reviewed memory.", kind: "decision" });
+    expect(JSON.parse(requests[11]!.body!)).toEqual({ status: "approved" });
   });
 });
 
