@@ -488,6 +488,10 @@ export async function searchDocuments(
       if (mode === "vector") {
         throw error;
       }
+      console.warn("document hybrid search vector component failed; falling back to keyword search", {
+        workspaceId: input.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
   if (mode === "keyword" || mode === "hybrid") {

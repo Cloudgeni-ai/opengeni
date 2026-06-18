@@ -112,9 +112,8 @@ export function buildDocumentsMcpServer(
       sourceRefs: z.array(SourceRefSchema).optional(),
       confidence: z.number().min(0).max(1).optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
-      createdBySessionId: z.string().uuid().optional(),
     },
-  }, async ({ text, kind, scope, sourceRefs, confidence, metadata, createdBySessionId }) => ({
+  }, async ({ text, kind, scope, sourceRefs, confidence, metadata }) => ({
     content: [{ type: "text", text: JSON.stringify(await createKnowledgeMemory(db, {
       accountId,
       workspaceId,
@@ -125,7 +124,7 @@ export function buildDocumentsMcpServer(
       sourceRefs: sourceRefs?.map((sourceRef) => ({ ...sourceRef, metadata: sourceRef.metadata ?? {} })) ?? [],
       confidence: confidence ?? 0.5,
       metadata: metadata ?? {},
-      createdBySessionId: createdBySessionId ?? options.createdBySessionId,
+      createdBySessionId: options.createdBySessionId,
     })) }],
   }));
 
