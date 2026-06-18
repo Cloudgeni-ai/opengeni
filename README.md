@@ -300,9 +300,11 @@ The generated app requests user authorization during install so OpenGeni can pro
 
 The generated GitHub URL is only the manifest form target. Opening or copying that URL by itself only sends `state`, so GitHub shows an empty app form instead of the prefilled manifest.
 
-## Documents
+## Documents And Knowledge
 
-The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and semantic search. Failed rows show parser errors and can be retried individually or in bulk after fixing the parser/runtime issue.
+The Documents workspace supports document bases, file upload, indexing status, failed-document retry, and hybrid/vector/keyword search. Indexed documents can carry source metadata such as source kind, URI, title, author, version, timestamps, and ACL tags for retrieval filtering.
+
+The workspace knowledge layer also includes reviewed memory records. Agents can search approved memories and propose new memories through the built-in docs MCP server. Human/API review happens through workspace knowledge memory endpoints before proposed memories become approved retrieval context.
 
 Document indexing depends on:
 
@@ -345,6 +347,11 @@ Document endpoints:
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/search`
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex`
+- `POST /v1/workspaces/:workspaceId/knowledge/search`
+- `GET /v1/workspaces/:workspaceId/knowledge/memories`
+- `POST /v1/workspaces/:workspaceId/knowledge/memories`
+- `GET /v1/workspaces/:workspaceId/knowledge/memories/:memoryId`
+- `PATCH /v1/workspaces/:workspaceId/knowledge/memories/:memoryId`
 
 Connected Machine endpoints (all return `404` unless `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`):
 

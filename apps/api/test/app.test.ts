@@ -170,6 +170,8 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents/document-1`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents/document-1/reindex`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId/reindex");
+    expect(routeLabel(`/v1/workspaces/${workspace}/knowledge/search`)).toBe("/v1/workspaces/:workspaceId/knowledge/search");
+    expect(routeLabel(`/v1/workspaces/${workspace}/knowledge/memories/memory-1`)).toBe("/v1/workspaces/:workspaceId/knowledge/memories/:id");
     expect(routeLabel(`/v1/workspaces/${workspace}/scheduled-tasks/task-1/runs`)).toBe("/v1/workspaces/:workspaceId/scheduled-tasks/:id/runs");
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities`)).toBe("/v1/workspaces/:workspaceId/capabilities");
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities/discovery/mcp-registry`)).toBe("/v1/workspaces/:workspaceId/capabilities/discovery/mcp-registry");

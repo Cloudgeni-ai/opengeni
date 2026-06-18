@@ -1827,7 +1827,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       id: "docs",
       name: "Document Search",
       url: firstPartyDocsMcpUrl,
-      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+      allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases", "knowledge_search", "knowledge_fetch", "memory_search", "memory_propose"],
       cacheToolsList: false,
     }]),
     ...existing,

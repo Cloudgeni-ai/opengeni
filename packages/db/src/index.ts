@@ -16,6 +16,10 @@ import type {
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  KnowledgeMemory,
+  KnowledgeMemoryKind,
+  KnowledgeMemoryStatus,
+  KnowledgeSourceRef,
   ManagedAccount,
   Permission,
   PackInstallation,
@@ -1138,6 +1142,38 @@ export type RegisterWorkspacePackInput = {
   pack: CapabilityPack;
 };
 
+export type CreateKnowledgeMemoryInput = {
+  accountId: string;
+  workspaceId: string;
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  text: string;
+  sourceRefs?: KnowledgeSourceRef[] | undefined;
+  confidence?: number | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  createdBySessionId?: string | null | undefined;
+};
+
+export type UpdateKnowledgeMemoryInput = {
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  text?: string | undefined;
+  sourceRefs?: KnowledgeSourceRef[] | undefined;
+  confidence?: number | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  reviewedBy?: string | null | undefined;
+};
+
+export type ListKnowledgeMemoryOptions = {
+  query?: string | undefined;
+  status?: KnowledgeMemoryStatus | undefined;
+  kind?: KnowledgeMemoryKind | undefined;
+  scope?: string | undefined;
+  limit?: number | undefined;
+};
+
 export type CreateSocialConnectionInput = {
   accountId: string;
   workspaceId: string;
@@ -2019,6 +2055,90 @@ export async function recordConnectionUsed(db: Database, workspaceId: string, co
       lastUsedAt: new Date(),
       updatedAt: new Date(),
     }).where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)));
+export async function createKnowledgeMemory(db: Database, input: CreateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
+  const text = requireDbString(input.text, "knowledge memory text");
+  const scope = cleanDbString(input.scope) ?? "workspace";
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.knowledgeMemories).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      status: input.status ?? "proposed",
+      kind: input.kind ?? "semantic",
+      scope,
+      text,
+      sourceRefs: input.sourceRefs ?? [],
+      confidence: confidenceToStorage(input.confidence ?? 0.5),
+      metadata: input.metadata ?? {},
+      createdBySessionId: input.createdBySessionId ?? null,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create knowledge memory");
+    }
+    return mapKnowledgeMemory(row);
+  });
+}
+
+export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
+  const reviewStatus = input.status === "approved" || input.status === "rejected";
+  const scope = input.scope !== undefined ? requireDbString(input.scope, "knowledge memory scope") : undefined;
+  const text = input.text !== undefined ? requireDbString(input.text, "knowledge memory text") : undefined;
+  const reviewedBy = input.reviewedBy === null
+    ? null
+    : input.reviewedBy !== undefined
+      ? requireDbString(input.reviewedBy, "knowledge memory reviewer")
+      : undefined;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.knowledgeMemories).set({
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.kind !== undefined ? { kind: input.kind } : {}),
+      ...(scope !== undefined ? { scope } : {}),
+      ...(text !== undefined ? { text } : {}),
+      ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
+      ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      ...(reviewedBy !== undefined ? { reviewedBy } : {}),
+      ...(reviewStatus ? { reviewedAt: new Date() } : {}),
+      updatedAt: new Date(),
+    }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning();
+    if (!row) {
+      throw new Error(`Knowledge memory not found: ${memoryId}`);
+    }
+    return mapKnowledgeMemory(row);
+  });
+}
+
+export async function getKnowledgeMemory(db: Database, workspaceId: string, memoryId: string): Promise<KnowledgeMemory | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
+      .limit(1);
+    return row ? mapKnowledgeMemory(row) : null;
+  });
+}
+
+export async function listKnowledgeMemories(db: Database, workspaceId: string, options: ListKnowledgeMemoryOptions = {}): Promise<KnowledgeMemory[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
+    if (options.status) {
+      conditions.push(eq(schema.knowledgeMemories.status, options.status));
+    }
+    if (options.kind) {
+      conditions.push(eq(schema.knowledgeMemories.kind, options.kind));
+    }
+    const scope = cleanDbString(options.scope);
+    if (scope) {
+      conditions.push(eq(schema.knowledgeMemories.scope, scope));
+    }
+    const query = cleanDbString(options.query);
+    if (query) {
+      conditions.push(sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`);
+    }
+    const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+    const rows = await scopedDb.select().from(schema.knowledgeMemories)
+      .where(and(...conditions))
+      .orderBy(desc(schema.knowledgeMemories.updatedAt))
+      .limit(limit);
+    return rows.map(mapKnowledgeMemory);
   });
 }
 
@@ -8402,6 +8522,20 @@ function mapConnectionMetadata(row: {
     metadata: row.metadata,
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
+function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): KnowledgeMemory {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    status: row.status as KnowledgeMemoryStatus,
+    kind: row.kind as KnowledgeMemoryKind,
+    scope: row.scope,
+    text: row.text,
+    sourceRefs: Array.isArray(row.sourceRefs) ? row.sourceRefs as KnowledgeSourceRef[] : [],
+    confidence: confidenceFromStorage(row.confidence),
+    metadata: row.metadata,
+    createdBySessionId: row.createdBySessionId,
+    reviewedBy: row.reviewedBy,
+    reviewedAt: row.reviewedAt ? row.reviewedAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -8498,6 +8632,30 @@ function stringArrayConfig(value: unknown): string[] | undefined {
   }
   const values = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
   return values.length > 0 ? [...new Set(values.map((item) => item.trim()))] : undefined;
+}
+
+function cleanDbString(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function requireDbString(value: string, field: string): string {
+  const trimmed = cleanDbString(value);
+  if (!trimmed) {
+    throw new Error(`${field} is required`);
+  }
+  return trimmed;
+}
+
+function confidenceToStorage(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 50;
+  }
+  return Math.round(Math.min(Math.max(value, 0), 1) * 100);
+}
+
+function confidenceFromStorage(value: number): number {
+  return Number((Math.min(Math.max(value, 0), 100) / 100).toFixed(2));
 }
 
 function positiveIntegerConfig(value: unknown): number | undefined {
