@@ -9,6 +9,11 @@ import { MemoryEventBus, parseSseBlock, startTestMcpServer, startTestServices, t
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import { buildTimeline } from "../../packages/react/src/timeline";
+import {
+  DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+  DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+  searchDocuments,
+} from "../../packages/documents/src";
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -3034,6 +3039,40 @@ describe("API component integration", () => {
     const knowledgeSearch = await knowledgeSearchResponse.json() as { results: Array<{ text: string }> };
     expect(knowledgeSearch.results[0]?.text).toContain("Private endpoint");
 
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const fallbackResults = await searchDocuments(dbClient.db, {
+        workspaceId,
+        query: "network policy",
+        baseIds: [base.id],
+        mode: "hybrid",
+      }, {
+        embedder: {
+          model: DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+          dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+          embedMany: async () => {
+            throw new Error("not used in search");
+          },
+          embedQuery: async () => {
+            throw new Error("embedding unavailable");
+          },
+        },
+      });
+      expect(fallbackResults[0]?.matchType).toBe("keyword");
+      expect(fallbackResults[0]?.text).toContain("network policy");
+      expect(warnings[0]?.[0]).toBe("document hybrid search vector component failed; falling back to keyword search");
+      expect(warnings[0]?.[1]).toMatchObject({
+        workspaceId,
+        error: "embedding unavailable",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
     const deleteResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`), { method: "DELETE" });
     expect(deleteResponse.status).toBe(204);
     expect(await deleteResponse.text()).toBe("");
@@ -3258,14 +3297,23 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const mcpApp = createApp({
+      settings: {
+        ...appSettings,
+        productAccessMode: "configured",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
     const settings = {
       ...appSettings,
       mcpServers: [{
         id: "docs",
         name: "Document Search",
         url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/docs`,
-        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases", "memory_propose"],
         timeoutMs: undefined,
         cacheToolsList: false,
       }, {
@@ -3282,6 +3330,24 @@ describe("API component integration", () => {
       const access = await defaultAccessContext(app);
       const workspaceId = access.defaultWorkspaceId!;
       const accountId = access.defaultAccountId!;
+      const serverSession = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "server-attributed docs MCP session",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      const forgedSession = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "forged attribution target",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
       const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
         method: "POST",
         body: JSON.stringify({ filename: "mcp-runbook.txt", contentType: "text/plain", sizeBytes: 60 }),
@@ -3305,6 +3371,7 @@ describe("API component integration", () => {
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }], {
         accountId,
         workspaceId,
+        sessionId: serverSession.id,
         subjectId: "test:mcp-client",
       });
       const docsServer = prepared.mcpServers[0]!;
@@ -3316,6 +3383,15 @@ describe("API component integration", () => {
 
       const result = await docsServer.callTool("docs__search_documents", { query: "private endpoint", baseIds: [base.id], limit: 3 });
       expect(JSON.stringify(result)).toContain("private endpoint runbook");
+
+      const proposedMemory = JSON.parse(mcpText(await docsServer.callTool("docs__memory_propose", {
+        text: "Private endpoint MCP memory should be reviewed.",
+        kind: "decision",
+        createdBySessionId: forgedSession.id,
+      }))) as { text: string; createdBySessionId: string | null };
+      expect(proposedMemory.text).toBe("Private endpoint MCP memory should be reviewed.");
+      expect(proposedMemory.createdBySessionId).toBe(serverSession.id);
+      expect(proposedMemory.createdBySessionId).not.toBe(forgedSession.id);
 
       const downloadResult = await filesServer.callTool("files__files_get_download_url", { fileId: upload.fileId });
       const downloadPayload = JSON.parse(mcpText(downloadResult)) as { file: { id: string; filename: string }; downloadUrl: { url: string } };
