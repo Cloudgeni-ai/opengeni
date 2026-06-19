@@ -1,15 +1,26 @@
 import {
+  AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
+  ListWorkspaceMembersResponse,
+  UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   Workspace,
+  WorkspaceMember,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
+  countActiveSessionsForWorkspace,
+  countWorkspacesForAccount,
   createWorkspace,
+  deleteWorkspace,
+  getManagedUserByEmail,
   grantWorkspaceAccess,
+  listScheduledTasks,
+  listWorkspaceMembers,
   listWorkspacesForSubject,
+  removeWorkspaceMember,
   requireWorkspace,
   updateWorkspace,
 } from "@opengeni/db";
@@ -18,6 +29,7 @@ import { HTTPException } from "hono/http-exception";
 import { hasPermission, requireAccessContext, requireAccessGrant } from "../access";
 import { requireLimit } from "../billing/limits";
 import type { ApiRouteDeps } from "../dependencies";
+import { assertWorkspaceDeletable, assertWorkspaceMemberRemovable, resolveMemberSubjectId } from "../domain/workspace-members";
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {
@@ -80,6 +92,98 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(payload.agentInstructions !== undefined ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) } : {}),
     });
     return c.json(Workspace.parse(workspace));
+  });
+
+  app.delete("/v1/workspaces/:workspaceId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    // Refuse before any external/DB mutation: never delete the account's only
+    // workspace, and never delete while a session could still be running in
+    // Temporal (there is no clean per-session terminate to call, so deleting
+    // the row would orphan the workflow — the operator must stop them first).
+    const [workspaceCountForAccount, activeSessionCount] = await Promise.all([
+      countWorkspacesForAccount(deps.db, grant.accountId),
+      countActiveSessionsForWorkspace(deps.db, workspaceId),
+    ]);
+    assertWorkspaceDeletable({ workspaceCountForAccount, activeSessionCount });
+    // Clean external Temporal state the FK cascade can't reach: every scheduled
+    // task's schedule (best-effort, mirroring the scheduled-task delete path).
+    const tasks = await listScheduledTasks(deps.db, workspaceId, 1000);
+    await Promise.all(tasks.map((task) =>
+      deps.workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId: task.temporalScheduleId }).catch(() => undefined),
+    ));
+    await deleteWorkspace(deps.db, workspaceId);
+    return c.body(null, 204);
+  });
+
+  // --- Members ("People with access") ---------------------------------------
+
+  app.get("/v1/workspaces/:workspaceId/members", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    return c.json(ListWorkspaceMembersResponse.parse({ members }));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/members", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const payload = AddWorkspaceMemberRequest.parse(await c.req.json());
+    const email = payload.email.trim();
+    // Email invites for not-yet-registered users are deferred: an unknown email
+    // resolves to null, which resolveMemberSubjectId turns into a 404.
+    const subjectId = resolveMemberSubjectId(await getManagedUserByEmail(deps.db, email));
+    await grantWorkspaceAccess(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId,
+      subjectLabel: email,
+      ...(payload.role !== undefined ? { role: payload.role } : {}),
+      permissions: payload.permissions,
+    });
+    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    const member = members.find((candidate) => candidate.subjectId === subjectId);
+    if (!member) {
+      throw new HTTPException(500, { message: "failed to add member" });
+    }
+    return c.json(WorkspaceMember.parse(member), 201);
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const subjectId = decodeURIComponent(c.req.param("subjectId"));
+    const payload = UpdateWorkspaceMemberRequest.parse(await c.req.json());
+    const existing = await listWorkspaceMembers(deps.db, workspaceId);
+    const current = existing.find((member) => member.subjectId === subjectId);
+    if (!current) {
+      throw new HTTPException(404, { message: "member not found" });
+    }
+    await grantWorkspaceAccess(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId,
+      ...(current.subjectLabel ? { subjectLabel: current.subjectLabel } : {}),
+      role: payload.role ?? current.role,
+      permissions: payload.permissions,
+    });
+    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    const member = members.find((candidate) => candidate.subjectId === subjectId);
+    if (!member) {
+      throw new HTTPException(500, { message: "failed to update member" });
+    }
+    return c.json(WorkspaceMember.parse(member));
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const subjectId = decodeURIComponent(c.req.param("subjectId"));
+    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    // Never remove yourself, and never remove the last administering member.
+    assertWorkspaceMemberRemovable({ members, subjectId, callerSubjectId: grant.subjectId });
+    await removeWorkspaceMember(deps.db, workspaceId, subjectId);
+    return c.body(null, 204);
   });
 }
 

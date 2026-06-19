@@ -211,6 +211,7 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
         />
 
         <MembersSection
+          workspaceId={workspaceId}
           canManage={canManageMembers}
           subjectLabel={accountGrant?.subjectLabel ?? context.accessContext.subjectLabel ?? context.accessContext.subjectId}
           role={accountGrant?.role ?? null}
@@ -362,18 +363,27 @@ function UsageSection(props: {
   );
 }
 
-/** Members: the current subject's standing in the org. Full member management
- *  is delivered by the API's members surface; the console surfaces the caller's
- *  own role and a clear capability hint. */
-function MembersSection(props: { canManage: boolean; subjectLabel: string; role: string | null }) {
+/** Members: the caller's standing in the org, with a pointer to per-workspace
+ *  member management. Access is granted per workspace (the workspace_memberships
+ *  model), so the editable roster lives in Workspace settings → People with
+ *  access; this read-only card stays honest by showing only the caller. */
+function MembersSection(props: { workspaceId: string; canManage: boolean; subjectLabel: string; role: string | null }) {
   return (
     <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
-      <div>
-        <h2 className="flex items-center gap-1.5 text-sm font-medium">
-          <UsersIcon className="size-3.5 text-[color:var(--color-brand)]" />
-          Members
-        </h2>
-        <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Who can act in this organization.</p>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <UsersIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            Members
+          </h2>
+          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Who can act in this organization.</p>
+        </div>
+        <Button asChild type="button" variant="ghost" size="sm">
+          <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId: props.workspaceId }}>
+            <UsersIcon className="size-3.5" />
+            Manage members
+          </Link>
+        </Button>
       </div>
       <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-3 py-2">
         <div className="min-w-0">
@@ -385,9 +395,8 @@ function MembersSection(props: { canManage: boolean; subjectLabel: string; role:
         </span>
       </div>
       <p className="text-xs text-[color:var(--color-fg-subtle)]">
-        {props.canManage
-          ? "You can manage members for this organization."
-          : "Only organization admins can invite or remove members."}
+        Access is granted per workspace. Manage members in Workspace settings → People with access.
+        {props.canManage ? "" : " Only organization admins can change organization-level roles."}
       </p>
     </section>
   );

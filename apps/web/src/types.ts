@@ -5,6 +5,7 @@ export type {
   AccessContext,
   AccessGrant,
   AccountGrant,
+  AddWorkspaceMemberRequest,
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,
@@ -42,10 +43,12 @@ export type {
   SessionStatus,
   SessionTurn,
   ToolRef,
+  UpdateWorkspaceMemberRequest,
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  WorkspaceMember,
 } from "@opengeni/sdk";
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type { GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";

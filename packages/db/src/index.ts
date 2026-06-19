@@ -47,6 +47,7 @@ import type {
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  WorkspaceMember,
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
@@ -139,6 +140,7 @@ export async function withAccountRls<T>(
 export const allWorkspacePermissions: Permission[] = [
   "workspace:read",
   "workspace:admin",
+  "members:manage",
   "sessions:create",
   "sessions:read",
   "sessions:control",
@@ -450,6 +452,42 @@ export async function getWorkspaceGrant(db: Database, subjectId: string, workspa
     ...(row.membership.subjectLabel ? { subjectLabel: row.membership.subjectLabel } : {}),
     permissions: row.membership.permissions as Permission[],
   } : null;
+}
+
+export async function listWorkspaceMembers(db: Database, workspaceId: string): Promise<WorkspaceMember[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.workspaceMemberships)
+      .where(eq(schema.workspaceMemberships.workspaceId, workspaceId))
+      .orderBy(asc(schema.workspaceMemberships.createdAt));
+    return rows.map(mapWorkspaceMember);
+  });
+}
+
+export async function removeWorkspaceMember(db: Database, workspaceId: string, subjectId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.workspaceMemberships)
+      .where(and(eq(schema.workspaceMemberships.workspaceId, workspaceId), eq(schema.workspaceMemberships.subjectId, subjectId)))
+      .returning({ id: schema.workspaceMemberships.id });
+    return rows.length > 0;
+  });
+}
+
+/**
+ * Resolve a Better Auth user email to its user id. The `auth_users` table is
+ * owned by Better Auth and is NOT in the Drizzle schema, so this runs a raw
+ * parameterized select. Returns the id (or null when no such user exists),
+ * matching emails case-insensitively. Used to add an already-registered user
+ * to a workspace; email invites for unknown users are deferred.
+ */
+export async function getManagedUserByEmail(db: Database, email: string): Promise<string | null> {
+  const rows = await db.execute(sql<{ id: string }>`
+    select id from auth_users where lower(email) = lower(${email}) limit 1
+  `);
+  return (rows[0]?.id as string | undefined) ?? null;
+}
+
+export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
+  await db.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
 }
 
 export async function createApiKey(db: Database, input: {
@@ -2085,6 +2123,26 @@ export async function listSessions(db: Database, workspaceId: string, limit = 50
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
     return rows.map(mapSession);
+  });
+}
+
+/**
+ * Count sessions still attached to a live Temporal workflow: queued, running,
+ * or awaiting an approval (requires_action). idle has no running execution and
+ * failed/cancelled are terminal, so neither blocks a workspace delete. The
+ * delete path uses this to refuse (409) while a session could still be running
+ * in Temporal, since there is no clean session-terminate to call first.
+ */
+export async function countActiveSessionsForWorkspace(db: Database, workspaceId: string): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.sessions)
+      .where(and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
+      ));
+    return Number(count);
   });
 }
 
@@ -3788,6 +3846,16 @@ function mapWorkspace(row: typeof schema.workspaces.$inferSelect): Workspace {
     agentInstructions: row.agentInstructions ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapWorkspaceMember(row: typeof schema.workspaceMemberships.$inferSelect): WorkspaceMember {
+  return {
+    subjectId: row.subjectId,
+    subjectLabel: row.subjectLabel,
+    role: row.role,
+    permissions: row.permissions as Permission[],
+    createdAt: row.createdAt.toISOString(),
   };
 }
 

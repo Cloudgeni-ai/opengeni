@@ -369,6 +369,32 @@ export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
 };
 
+// A person (or API key) with access to a workspace. `subjectId` is
+// `user:<betterAuthUserId>` or `api_key:<id>`; the People surface lists the
+// `user:` subjects (api_key subjects belong to the API keys section).
+export type WorkspaceMember = {
+  subjectId: string;
+  subjectLabel: string | null;
+  role: string;
+  permissions: Permission[];
+  createdAt: string;
+};
+
+export type ListWorkspaceMembersResponse = {
+  members: WorkspaceMember[];
+};
+
+export type AddWorkspaceMemberRequest = {
+  email: string;
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type UpdateWorkspaceMemberRequest = {
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
 // --- Goals -------------------------------------------------------------------
 
 export type SessionGoalStatus = "active" | "paused" | "completed";

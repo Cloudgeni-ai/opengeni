@@ -2,6 +2,7 @@ import { OpenGeniApiError } from "./errors";
 import { streamSessionEvents, type SessionEventStreamTransport, type StreamSessionEventsOptions } from "./stream";
 import type {
   AccessContext,
+  AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
   BillingSummary,
@@ -39,6 +40,7 @@ import type {
   GitHubRepositoriesResponse,
   ListApiKeysResponse,
   ListPacksResponse,
+  ListWorkspaceMembersResponse,
   PackInstallation,
   ReasoningEffort,
   RegisterCapabilityPackRequest,
@@ -54,10 +56,12 @@ import type {
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
+  UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UploadFileInput,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  WorkspaceMember,
   WorkspaceRegisteredPack,
   Workspace,
 } from "./types";
@@ -419,6 +423,46 @@ export class OpenGeniClient {
 
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
+  }
+
+  /**
+   * Delete a workspace and everything in it. Refused (409) for the account's
+   * only workspace and while it still has a running session. Irreversible.
+   */
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}`);
+  }
+
+  // --- Members ("People with access") -------------------------------------------
+
+  /** The workspace's members (user + api_key subjects). */
+  async listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+    const response = await this.requestJson<ListWorkspaceMembersResponse>("GET", `/v1/workspaces/${workspaceId}/members`);
+    return response.members;
+  }
+
+  /**
+   * Add an already-registered user by email. 404s when no user with that email
+   * exists (email invites for unknown users are deferred).
+   */
+  async addWorkspaceMember(workspaceId: string, request: AddWorkspaceMemberRequest): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>("POST", `/v1/workspaces/${workspaceId}/members`, request);
+  }
+
+  async updateWorkspaceMember(workspaceId: string, subjectId: string, request: UpdateWorkspaceMemberRequest): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`,
+      request,
+    );
+  }
+
+  /**
+   * Remove a member. Refused (409) for your own membership and for the last
+   * member who can still manage the workspace.
+   */
+  async removeWorkspaceMember(workspaceId: string, subjectId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/members/${encodeURIComponent(subjectId)}`);
   }
 
   // --- Scheduled tasks (write + runs) -------------------------------------------

@@ -109,6 +109,7 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
@@ -329,6 +330,20 @@ export function RootRouteComponent() {
       toast.error("Failed to rename workspace", { description: error instanceof Error ? error.message : String(error) });
       return null;
     }
+  }
+
+  // Delete drops the workspace from the cached list and refreshes grants (the
+  // owner grant for the deleted workspace is gone). The caller navigates away.
+  async function deleteWorkspace(workspaceId: string): Promise<boolean> {
+    try {
+      await client.deleteWorkspace(workspaceId);
+    } catch (error) {
+      toast.error("Failed to delete workspace", { description: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
+    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    return true;
   }
 
   async function refreshGitHub(workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) {
@@ -561,6 +576,7 @@ export function RootRouteComponent() {
     handleManagedSignOut,
     createWorkspace,
     renameWorkspace,
+    deleteWorkspace,
     refreshGitHub,
     refreshWorkspaceMcpServers,
     startGitHubAppManifestFlow,
