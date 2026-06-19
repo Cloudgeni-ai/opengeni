@@ -39,7 +39,7 @@ Then open the smallest source files that answer the question:
 - Runtime/sandbox/tools: `packages/runtime/src/index.ts`.
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
-- Documents/retrieval: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`.
+- Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
 - GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
@@ -88,6 +88,7 @@ Keep these concepts straight while working:
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
+- **Knowledge memory**: reviewed workspace memory records stored separately from per-session conversation history. First-party docs MCP can search approved memories and propose new ones; approval/rejection lives in workspace API/UI review paths.
 
 ## Source Discovery Workflow
 
@@ -204,6 +205,7 @@ Use careful wording:
 - "Agents SDK runs in worker activities" if runtime calls remain in worker activity code.
 - "Sandbox backend is pluggable" if backend selection and SDK client wiring remain configurable.
 - "MCP tools are pluggable" if MCP server config and tool refs remain.
+- "The first-party docs MCP exposes retrieval/memory tools" only after verifying the `docs` allowed tool list in `packages/config/src/index.ts`.
 
 Avoid absolute claims until verified in current code:
 

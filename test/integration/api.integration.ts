@@ -8,6 +8,11 @@ import { settingsWithEnabledCapabilityMcpServers } from "../../apps/worker/src/a
 import { MemoryEventBus, parseSseBlock, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
+import {
+  DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+  DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+  searchDocuments,
+} from "../../packages/documents/src";
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -2869,13 +2874,23 @@ describe("API component integration", () => {
 
     const addResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
       method: "POST",
-      body: JSON.stringify({ fileId: upload.fileId }),
+      body: JSON.stringify({
+        fileId: upload.fileId,
+        sourceKind: "meeting_transcript",
+        sourceUri: "https://meetings.example.test/network-runbook",
+        sourceTitle: "Network policy review",
+        sourceAuthor: "platform team",
+        aclTags: ["platform", "private"],
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(addResponse.status).toBe(201);
-    const document = await addResponse.json() as { id: string; status: string; chunkCount: number };
+    const document = await addResponse.json() as { id: string; status: string; chunkCount: number; sourceKind: string; sourceTitle: string | null; aclTags: string[] };
     expect(document.status).toBe("ready");
     expect(document.chunkCount).toBe(1);
+    expect(document.sourceKind).toBe("meeting_transcript");
+    expect(document.sourceTitle).toBe("Network policy review");
+    expect(document.aclTags).toEqual(["platform", "private"]);
 
     const readyRetryResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}/reindex`), { method: "POST" });
     expect(readyRetryResponse.status).toBe(422);
@@ -2887,13 +2902,107 @@ describe("API component integration", () => {
 
     const searchResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/search`), {
       method: "POST",
-      body: JSON.stringify({ query: "network policy", limit: 3 }),
+      body: JSON.stringify({ query: "network policy", limit: 3, mode: "keyword", sourceKinds: ["meeting_transcript"], aclTags: ["platform"] }),
       headers: { "content-type": "application/json" },
     });
     expect(searchResponse.status).toBe(200);
-    const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
+    const search = await searchResponse.json() as { results: Array<{ text: string; title: string; matchType: string; sourceKind: string; aclTags: string[] }> };
     expect(search.results[0]?.text).toContain("network policy");
-    expect(search.results[0]?.title).toBe("network-runbook.txt");
+    expect(search.results[0]?.title).toBe("Network policy review");
+    expect(search.results[0]?.matchType).toBe("keyword");
+    expect(search.results[0]?.sourceKind).toBe("meeting_transcript");
+    expect(search.results[0]?.aclTags).toEqual(["platform", "private"]);
+
+    const knowledgeSearchResponse = await app.request(workspacePath(workspaceId, "/knowledge/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "private endpoint", baseIds: [base.id], mode: "hybrid", aclTags: ["private"] }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(knowledgeSearchResponse.status).toBe(200);
+    const knowledgeSearch = await knowledgeSearchResponse.json() as { results: Array<{ text: string }> };
+    expect(knowledgeSearch.results[0]?.text).toContain("Private endpoint");
+
+    const originalWarn = console.warn;
+    const warnings: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const fallbackResults = await searchDocuments(dbClient.db, {
+        workspaceId,
+        query: "network policy",
+        baseIds: [base.id],
+        mode: "hybrid",
+      }, {
+        embedder: {
+          model: DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+          dimensions: DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
+          embedMany: async () => {
+            throw new Error("not used in search");
+          },
+          embedQuery: async () => {
+            throw new Error("embedding unavailable");
+          },
+        },
+      });
+      expect(fallbackResults[0]?.matchType).toBe("keyword");
+      expect(fallbackResults[0]?.text).toContain("network policy");
+      expect(warnings[0]?.[0]).toBe("document hybrid search vector component failed; falling back to keyword search");
+      expect(warnings[0]?.[1]).toMatchObject({
+        workspaceId,
+        error: "embedding unavailable",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("creates, reviews, and searches workspace knowledge memories", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const proposedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Use Azure Blob for production object storage.",
+        kind: "decision",
+        confidence: 0.92,
+        sourceRefs: [{ kind: "external", id: "adr-42", title: "ADR 42" }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedResponse.status).toBe(201);
+    const proposed = await proposedResponse.json() as { id: string; status: string; kind: string; workspaceId: string };
+    expect(proposed.status).toBe("proposed");
+    expect(proposed.kind).toBe("decision");
+    expect(proposed.workspaceId).toBe(workspaceId);
+
+    const approvedSearchBefore = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"));
+    expect(approvedSearchBefore.status).toBe(200);
+    expect(await approvedSearchBefore.json()).toHaveLength(0);
+
+    const approvedResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposed.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "approved", reviewedBy: "operator" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(approvedResponse.status).toBe(200);
+    const approved = await approvedResponse.json() as { id: string; status: string; reviewedBy: string | null; reviewedAt: string | null };
+    expect(approved.id).toBe(proposed.id);
+    expect(approved.status).toBe("approved");
+    expect(approved.reviewedBy).toBe("operator");
+    expect(approved.reviewedAt).toBeTruthy();
+
+    const approvedSearchAfter = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=approved&query=Azure"));
+    expect(approvedSearchAfter.status).toBe(200);
+    const memories = await approvedSearchAfter.json() as Array<{ id: string; text: string }>;
+    expect(memories[0]?.id).toBe(proposed.id);
+    expect(memories[0]?.text).toContain("Azure Blob");
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
@@ -3046,14 +3155,23 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    const mcpApp = createApp({
+      settings: {
+        ...appSettings,
+        productAccessMode: "configured",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcpApp.fetch });
     const settings = {
       ...appSettings,
       mcpServers: [{
         id: "docs",
         name: "Document Search",
         url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp/docs`,
-        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases"],
+        allowedTools: ["search_documents", "fetch_document_chunk", "list_document_bases", "memory_propose"],
         timeoutMs: undefined,
         cacheToolsList: false,
       }, {
@@ -3070,6 +3188,24 @@ describe("API component integration", () => {
       const access = await defaultAccessContext(app);
       const workspaceId = access.defaultWorkspaceId!;
       const accountId = access.defaultAccountId!;
+      const serverSession = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "server-attributed docs MCP session",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      const forgedSession = await createSession(dbClient.db, {
+        accountId,
+        workspaceId,
+        initialMessage: "forged attribution target",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
       const uploadResponse = await app.request(workspacePath(workspaceId, "/files/uploads"), {
         method: "POST",
         body: JSON.stringify({ filename: "mcp-runbook.txt", contentType: "text/plain", sizeBytes: 60 }),
@@ -3093,6 +3229,7 @@ describe("API component integration", () => {
       prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "files" }], {
         accountId,
         workspaceId,
+        sessionId: serverSession.id,
         subjectId: "test:mcp-client",
       });
       const docsServer = prepared.mcpServers[0]!;
@@ -3104,6 +3241,15 @@ describe("API component integration", () => {
 
       const result = await docsServer.callTool("docs__search_documents", { query: "private endpoint", baseIds: [base.id], limit: 3 });
       expect(JSON.stringify(result)).toContain("private endpoint runbook");
+
+      const proposedMemory = JSON.parse(mcpText(await docsServer.callTool("docs__memory_propose", {
+        text: "Private endpoint MCP memory should be reviewed.",
+        kind: "decision",
+        createdBySessionId: forgedSession.id,
+      }))) as { text: string; createdBySessionId: string | null };
+      expect(proposedMemory.text).toBe("Private endpoint MCP memory should be reviewed.");
+      expect(proposedMemory.createdBySessionId).toBe(serverSession.id);
+      expect(proposedMemory.createdBySessionId).not.toBe(forgedSession.id);
 
       const downloadResult = await filesServer.callTool("files__files_get_download_url", { fileId: upload.fileId });
       const downloadPayload = JSON.parse(mcpText(downloadResult)) as { file: { id: string; filename: string }; downloadUrl: { url: string } };

@@ -10,6 +10,7 @@ import type {
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
+  AddDocumentRequest,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -23,6 +24,7 @@ import type {
   CreateFileUploadResponse,
   CreateGitHubAppManifestRequest,
   CreateGitHubAppManifestResponse,
+  CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateWorkspaceEnvironmentRequest,
@@ -30,6 +32,7 @@ import type {
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
+  DocumentSearchRequest,
   DocumentSearchResponse,
   EnableCapabilityRequest,
   EnablePackRequest,
@@ -38,6 +41,8 @@ import type {
   GetPackResponse,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
+  KnowledgeMemory,
+  KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListPacksResponse,
   ListWorkspaceMembersResponse,
@@ -52,6 +57,7 @@ import type {
   SessionGoal,
   SessionTurn,
   ToolRef,
+  UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
@@ -642,7 +648,7 @@ export class OpenGeniClient {
   }
 
   /** Index an uploaded file into the base. The file must be `ready`. */
-  async addDocument(workspaceId: string, baseId: string, request: { fileId: string }): Promise<Document> {
+  async addDocument(workspaceId: string, baseId: string, request: AddDocumentRequest): Promise<Document> {
     return await this.requestJson<Document>("POST", `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`, request);
   }
 
@@ -661,13 +667,43 @@ export class OpenGeniClient {
   async searchDocuments(
     workspaceId: string,
     baseId: string,
-    request: { query: string; limit?: number },
+    request: Omit<DocumentSearchRequest, "baseIds">,
   ): Promise<DocumentSearchResponse> {
     return await this.requestJson<DocumentSearchResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/document-bases/${baseId}/search`,
       request,
     );
+  }
+
+  async searchKnowledge(
+    workspaceId: string,
+    request: DocumentSearchRequest,
+  ): Promise<DocumentSearchResponse> {
+    return await this.requestJson<DocumentSearchResponse>("POST", `/v1/workspaces/${workspaceId}/knowledge/search`, request);
+  }
+
+  async listKnowledgeMemories(workspaceId: string, request: KnowledgeMemorySearchRequest = {}): Promise<KnowledgeMemory[]> {
+    const params = new URLSearchParams();
+    if (request.query) params.set("query", request.query);
+    if (request.status) params.set("status", request.status);
+    if (request.kind) params.set("kind", request.kind);
+    if (request.scope) params.set("scope", request.scope);
+    if (request.limit) params.set("limit", String(request.limit));
+    const query = params.toString();
+    return await this.requestJson<KnowledgeMemory[]>("GET", `/v1/workspaces/${workspaceId}/knowledge/memories${query ? `?${query}` : ""}`);
+  }
+
+  async getKnowledgeMemory(workspaceId: string, memoryId: string): Promise<KnowledgeMemory> {
+    return await this.requestJson<KnowledgeMemory>("GET", `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`);
+  }
+
+  async createKnowledgeMemory(workspaceId: string, request: CreateKnowledgeMemoryRequest): Promise<KnowledgeMemory> {
+    return await this.requestJson<KnowledgeMemory>("POST", `/v1/workspaces/${workspaceId}/knowledge/memories`, request);
+  }
+
+  async updateKnowledgeMemory(workspaceId: string, memoryId: string, request: UpdateKnowledgeMemoryRequest): Promise<KnowledgeMemory> {
+    return await this.requestJson<KnowledgeMemory>("PATCH", `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`, request);
   }
 
   // --- Capability packs ------------------------------------------------------------------

@@ -11,6 +11,7 @@ import {
   clearSessionContext,
   consumeSessionCompactionRequest,
   countSessionHistoryItems,
+  createKnowledgeMemory,
   createDb,
   getActiveSessionHistoryItems,
   getSessionHistoryItems,
@@ -38,6 +39,7 @@ import {
   updateSessionGoal,
   upsertSessionGoal,
   listEnabledMcpCapabilityServers,
+  listKnowledgeMemories,
   listScheduledTaskRuns,
   listScheduledTasks,
   getSessionTurn,
@@ -833,6 +835,44 @@ describe("DB integration", () => {
         permissions: ["sessions:create"],
       });
       expect((await findActiveApiKeyByHash(appDbClient.db, keyHash))?.id).toBe(apiKey.id);
+    } finally {
+      await appDbClient.close();
+    }
+  });
+
+  test("RLS policies isolate knowledge memories for a non-owner app role", async () => {
+    const appRoleUrl = await createRlsAppRole(dbClient.db, services.databaseUrl);
+    const appDbClient = createDb(appRoleUrl);
+    try {
+      const grantA = await testGrant(dbClient.db);
+      const grantB = await testGrant(dbClient.db);
+      await createKnowledgeMemory(dbClient.db, {
+        accountId: grantB.accountId,
+        workspaceId: grantB.workspaceId,
+        status: "approved",
+        kind: "decision",
+        text: "Workspace B private decision",
+      });
+
+      const hidden = await appDbClient.db.execute(dbSql<{ count: string }>`select count(*)::text as count from knowledge_memories`);
+      expect(Number(hidden[0]?.count ?? 0)).toBe(0);
+
+      const created = await createKnowledgeMemory(appDbClient.db, {
+        accountId: grantA.accountId,
+        workspaceId: grantA.workspaceId,
+        kind: "semantic",
+        text: "Workspace A reviewed context",
+      });
+      expect(created.workspaceId).toBe(grantA.workspaceId);
+
+      const visible = await listKnowledgeMemories(appDbClient.db, grantA.workspaceId);
+      expect(visible.map((memory) => memory.workspaceId)).toEqual([grantA.workspaceId]);
+
+      await expect(createKnowledgeMemory(appDbClient.db, {
+        accountId: grantA.accountId,
+        workspaceId: grantB.workspaceId,
+        text: "Mismatched memory",
+      })).rejects.toThrow();
     } finally {
       await appDbClient.close();
     }

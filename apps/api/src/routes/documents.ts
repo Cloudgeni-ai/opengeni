@@ -1,10 +1,20 @@
 import {
   AddDocumentRequest,
+  CreateKnowledgeMemoryRequest,
   CreateDocumentBaseRequest,
   Document,
   DocumentBase,
   DocumentSearchRequest,
+  KnowledgeMemory,
+  KnowledgeMemorySearchRequest,
+  UpdateKnowledgeMemoryRequest,
 } from "@opengeni/contracts";
+import {
+  createKnowledgeMemory,
+  getKnowledgeMemory,
+  listKnowledgeMemories,
+  updateKnowledgeMemory,
+} from "@opengeni/db";
 import {
   addDocumentToBase,
   createDocumentBase,
@@ -58,7 +68,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "document:index", quantity: 0 });
     const payload = AddDocumentRequest.parse(await c.req.json());
     try {
-      const document = await addDocumentToBase(db, { accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId"), fileId: payload.fileId });
+      const document = await addDocumentToBase(db, { ...payload, accountId: grant.accountId, workspaceId, baseId: c.req.param("baseId") });
       const wasCreated = document.status === "queued" && document.chunkCount === 0 && document.error === null;
       const indexed = document.status === "ready" ? document : (await documentIndexer.indexDocument({ accountId: grant.accountId, workspaceId, documentId: document.id }) ?? document);
       if (indexed.status === "ready") {
@@ -142,15 +152,86 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         baseIds: [base.id],
         query: payload.query,
         limit: payload.limit,
+        mode: payload.mode,
+        sourceKinds: payload.sourceKinds,
+        aclTags: payload.aclTags,
       }, getDocumentServices()),
     });
   });
 
-  app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/knowledge/search", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const payload = DocumentSearchRequest.parse(await c.req.json());
+    return c.json({
+      results: await searchDocuments(db, {
+        workspaceId,
+        query: payload.query,
+        baseIds: payload.baseIds,
+        limit: payload.limit,
+        mode: payload.mode,
+        sourceKinds: payload.sourceKinds,
+        aclTags: payload.aclTags,
+      }, getDocumentServices()),
+    });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const payload = KnowledgeMemorySearchRequest.parse({
+      query: c.req.query("query") || undefined,
+      status: c.req.query("status") || undefined,
+      kind: c.req.query("kind") || undefined,
+      scope: c.req.query("scope") || undefined,
+      limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
+    });
+    return c.json((await listKnowledgeMemories(db, workspaceId, payload)).map((memory) => KnowledgeMemory.parse(memory)));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const memory = await getKnowledgeMemory(db, workspaceId, c.req.param("memoryId"));
+    if (!memory) {
+      throw new HTTPException(404, { message: "knowledge memory not found" });
+    }
+    return c.json(KnowledgeMemory.parse(memory));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const payload = CreateKnowledgeMemoryRequest.parse(await c.req.json());
+    return c.json(KnowledgeMemory.parse(await createKnowledgeMemory(db, {
+      ...payload,
+      accountId: grant.accountId,
+      workspaceId,
+    })), 201);
+  });
+
+  app.patch("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    const payload = UpdateKnowledgeMemoryRequest.parse(await c.req.json());
+    const reviewedBy = payload.reviewedBy
+      ?? (payload.status === "approved" || payload.status === "rejected" ? grant.subjectLabel ?? grant.subjectId : undefined);
+    try {
+      return c.json(KnowledgeMemory.parse(await updateKnowledgeMemory(db, workspaceId, c.req.param("memoryId"), {
+        ...payload,
+        ...(reviewedBy ? { reviewedBy } : {}),
+      })));
+    } catch (error) {
+      throw documentHttpException(error);
+    }
+  });
+
+  app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    const sessionId = typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const server = buildDocumentsMcpServer(db, workspaceId, getDocumentServices());
+    const server = buildDocumentsMcpServer(db, grant.accountId, workspaceId, getDocumentServices(), { createdBySessionId: sessionId });
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);
   });

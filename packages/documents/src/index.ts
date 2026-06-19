@@ -1,10 +1,19 @@
 import type { Settings } from "@opengeni/config";
-import type { AddDocumentRequest, CreateDocumentBaseRequest, Document, DocumentBase, DocumentSearchResult, FileAsset } from "@opengeni/contracts";
+import type {
+  AddDocumentRequest,
+  CreateDocumentBaseRequest,
+  Document,
+  DocumentBase,
+  DocumentSearchMode,
+  DocumentSearchResult,
+  FileAsset,
+  KnowledgeSourceKind,
+} from "@opengeni/contracts";
 import { requireFile, withRlsContext, withWorkspaceRls, type Database } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
 import { LiteParse } from "@llamaindex/liteparse";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import OpenAI from "openai";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
@@ -43,6 +52,16 @@ export type DocumentServices = {
   parser: DocumentParser;
   chunker: DocumentChunker;
   embedder: DocumentEmbedder;
+};
+
+export type DocumentSearchInput = {
+  workspaceId: string;
+  query: string;
+  baseIds?: string[] | undefined;
+  limit?: number | undefined;
+  mode?: DocumentSearchMode | undefined;
+  sourceKinds?: KnowledgeSourceKind[] | undefined;
+  aclTags?: string[] | undefined;
 };
 
 export type DocumentIndexHooks = {
@@ -320,8 +339,17 @@ export async function addDocumentToBase(db: Database, input: AddDocumentRequest 
       baseId: input.baseId,
       fileId: input.fileId,
       status: "queued",
-      title: file.filename,
+      title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? file.filename,
       parser: DEFAULT_DOCUMENT_PARSER,
+      sourceKind: input.sourceKind ?? "manual_upload",
+      sourceUri: cleanString(input.sourceUri) ?? null,
+      sourceExternalId: cleanString(input.sourceExternalId) ?? null,
+      sourceTitle: cleanString(input.sourceTitle) ?? null,
+      sourceAuthor: cleanString(input.sourceAuthor) ?? null,
+      sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt),
+      sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
+      sourceVersion: cleanString(input.sourceVersion) ?? null,
+      aclTags: cleanStringArray(input.aclTags),
       updatedAt: now,
     }).returning();
     if (!row) throw new Error("Failed to create document");
@@ -403,7 +431,19 @@ export async function indexDocumentNow(
           fileId: file.id,
           chunkIndex: index,
           text: chunk.text,
-          metadata: chunk.metadata,
+          metadata: {
+            ...chunk.metadata,
+            documentTitle: document.title,
+            sourceKind: document.sourceKind,
+            sourceUri: document.sourceUri,
+            sourceExternalId: document.sourceExternalId,
+            sourceTitle: document.sourceTitle,
+            sourceAuthor: document.sourceAuthor,
+            sourceCreatedAt: document.sourceCreatedAt?.toISOString() ?? null,
+            sourceUpdatedAt: document.sourceUpdatedAt?.toISOString() ?? null,
+            sourceVersion: document.sourceVersion,
+            aclTags: document.aclTags,
+          },
           embedding: validateEmbedding(embeddings[index] ?? [], services.embedder.dimensions, services.embedder.model),
           embeddingModel: services.embedder.model,
         })));
@@ -434,10 +474,38 @@ export async function indexDocumentNow(
 
 export async function searchDocuments(
   db: Database,
-  input: { workspaceId: string; query: string; baseIds?: string[]; limit?: number },
+  input: DocumentSearchInput,
   services: Pick<DocumentServices, "embedder"> = createDocumentServices(),
 ): Promise<DocumentSearchResult[]> {
-  const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+  const mode = input.mode ?? "hybrid";
+  const limit = Math.min(Math.max(input.limit ?? 5, 1), 50);
+  const candidateLimit = mode === "hybrid" ? Math.min(limit * 4, 100) : limit;
+  const rows: CombinedSearchRow[] = [];
+  if (mode === "vector" || mode === "hybrid") {
+    try {
+      rows.push(...await vectorSearchDocuments(db, input, candidateLimit, services));
+    } catch (error) {
+      if (mode === "vector") {
+        throw error;
+      }
+      console.warn("document hybrid search vector component failed; falling back to keyword search", {
+        workspaceId: input.workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  if (mode === "keyword" || mode === "hybrid") {
+    rows.push(...await keywordSearchDocuments(db, input, candidateLimit));
+  }
+  return mergeDocumentSearchRows(rows, mode).slice(0, limit);
+}
+
+async function vectorSearchDocuments(
+  db: Database,
+  input: DocumentSearchInput,
+  limit: number,
+  services: Pick<DocumentServices, "embedder">,
+): Promise<CombinedSearchRow[]> {
   const queryEmbedding = await services.embedder.embedQuery(input.query);
   validateEmbedding(queryEmbedding, services.embedder.dimensions, services.embedder.model);
   const distance = sql<number>`${schema.documentChunks.embedding} <=> ${vectorLiteral(queryEmbedding)}::vector`;
@@ -451,29 +519,64 @@ export async function searchDocuments(
       text: schema.documentChunks.text,
       chunkIndex: schema.documentChunks.chunkIndex,
       metadata: schema.documentChunks.metadata,
+      sourceKind: schema.documents.sourceKind,
+      sourceUri: schema.documents.sourceUri,
+      sourceExternalId: schema.documents.sourceExternalId,
+      sourceTitle: schema.documents.sourceTitle,
+      sourceAuthor: schema.documents.sourceAuthor,
+      sourceCreatedAt: schema.documents.sourceCreatedAt,
+      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+      sourceVersion: schema.documents.sourceVersion,
+      aclTags: schema.documents.aclTags,
       distance,
     }).from(schema.documentChunks)
       .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
-      .where(and(
-        eq(schema.documents.status, "ready"),
-        eq(schema.documentChunks.workspaceId, input.workspaceId),
-        eq(schema.documentChunks.embeddingModel, services.embedder.model),
-        input.baseIds && input.baseIds.length > 0 ? inArray(schema.documentChunks.baseId, input.baseIds) : undefined,
-      ))
+      .where(and(...documentSearchConditions(input, services.embedder.model)))
       .orderBy(distance)
       .limit(limit)
   );
   return rows.map((row) => ({
-    chunkId: row.chunkId,
-    workspaceId: input.workspaceId,
-    documentId: row.documentId,
-    baseId: row.baseId,
-    fileId: row.fileId,
-    title: row.title,
-    text: row.text,
-    score: 1 / (1 + Number(row.distance)),
-    chunkIndex: row.chunkIndex,
-    metadata: row.metadata,
+    ...mapSearchRowBase(row, input.workspaceId),
+    vectorScore: 1 / (1 + Number(row.distance)),
+    keywordScore: null,
+  }));
+}
+
+async function keywordSearchDocuments(db: Database, input: DocumentSearchInput, limit: number): Promise<CombinedSearchRow[]> {
+  const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.documentChunks.text}), plainto_tsquery('simple', ${input.query}))`;
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    await scopedDb.select({
+      chunkId: schema.documentChunks.id,
+      documentId: schema.documentChunks.documentId,
+      baseId: schema.documentChunks.baseId,
+      fileId: schema.documentChunks.fileId,
+      title: schema.documents.title,
+      text: schema.documentChunks.text,
+      chunkIndex: schema.documentChunks.chunkIndex,
+      metadata: schema.documentChunks.metadata,
+      sourceKind: schema.documents.sourceKind,
+      sourceUri: schema.documents.sourceUri,
+      sourceExternalId: schema.documents.sourceExternalId,
+      sourceTitle: schema.documents.sourceTitle,
+      sourceAuthor: schema.documents.sourceAuthor,
+      sourceCreatedAt: schema.documents.sourceCreatedAt,
+      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+      sourceVersion: schema.documents.sourceVersion,
+      aclTags: schema.documents.aclTags,
+      rank,
+    }).from(schema.documentChunks)
+      .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
+      .where(and(
+        ...documentSearchConditions(input),
+        sql`to_tsvector('simple', ${schema.documentChunks.text}) @@ plainto_tsquery('simple', ${input.query})`,
+      ))
+      .orderBy(desc(rank))
+      .limit(limit)
+  );
+  return rows.map((row) => ({
+    ...mapSearchRowBase(row, input.workspaceId),
+    vectorScore: null,
+    keywordScore: normalizeKeywordScore(Number(row.rank)),
   }));
 }
 
@@ -488,12 +591,76 @@ export async function getDocumentChunk(db: Database, workspaceId: string, chunkI
       text: schema.documentChunks.text,
       chunkIndex: schema.documentChunks.chunkIndex,
       metadata: schema.documentChunks.metadata,
+      sourceKind: schema.documents.sourceKind,
+      sourceUri: schema.documents.sourceUri,
+      sourceExternalId: schema.documents.sourceExternalId,
+      sourceTitle: schema.documents.sourceTitle,
+      sourceAuthor: schema.documents.sourceAuthor,
+      sourceCreatedAt: schema.documents.sourceCreatedAt,
+      sourceUpdatedAt: schema.documents.sourceUpdatedAt,
+      sourceVersion: schema.documents.sourceVersion,
+      aclTags: schema.documents.aclTags,
     }).from(schema.documentChunks)
       .innerJoin(schema.documents, eq(schema.documentChunks.documentId, schema.documents.id))
       .where(and(eq(schema.documentChunks.workspaceId, workspaceId), eq(schema.documentChunks.id, chunkId), eq(schema.documents.status, "ready")))
       .limit(1)
   );
   if (!row) return null;
+  return {
+    ...mapSearchRowBase(row, workspaceId),
+    score: 1,
+    matchType: "hybrid",
+    vectorScore: null,
+    keywordScore: null,
+  };
+}
+
+type SearchRowBase = Omit<DocumentSearchResult, "score" | "matchType" | "vectorScore" | "keywordScore">;
+type CombinedSearchRow = SearchRowBase & {
+  vectorScore: number | null;
+  keywordScore: number | null;
+};
+
+function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: string): SQL[] {
+  const conditions: SQL[] = [
+    eq(schema.documents.status, "ready"),
+    eq(schema.documentChunks.workspaceId, input.workspaceId),
+  ];
+  if (embeddingModel) {
+    conditions.push(eq(schema.documentChunks.embeddingModel, embeddingModel));
+  }
+  if (input.baseIds?.length) {
+    conditions.push(inArray(schema.documentChunks.baseId, input.baseIds));
+  }
+  if (input.sourceKinds?.length) {
+    conditions.push(inArray(schema.documents.sourceKind, input.sourceKinds));
+  }
+  const aclTags = cleanStringArray(input.aclTags);
+  if (aclTags.length > 0) {
+    conditions.push(sql`${schema.documents.aclTags} @> ${JSON.stringify(aclTags)}::jsonb`);
+  }
+  return conditions;
+}
+
+function mapSearchRowBase(row: {
+  chunkId: string;
+  documentId: string;
+  baseId: string;
+  fileId: string;
+  title: string;
+  text: string;
+  chunkIndex: number;
+  metadata: Record<string, unknown>;
+  sourceKind: string;
+  sourceUri: string | null;
+  sourceExternalId: string | null;
+  sourceTitle: string | null;
+  sourceAuthor: string | null;
+  sourceCreatedAt: Date | null;
+  sourceUpdatedAt: Date | null;
+  sourceVersion: string | null;
+  aclTags: string[];
+}, workspaceId: string): SearchRowBase {
   return {
     chunkId: row.chunkId,
     workspaceId,
@@ -502,10 +669,77 @@ export async function getDocumentChunk(db: Database, workspaceId: string, chunkI
     fileId: row.fileId,
     title: row.title,
     text: row.text,
-    score: 1,
     chunkIndex: row.chunkIndex,
     metadata: row.metadata,
+    sourceKind: normalizeKnowledgeSourceKind(row.sourceKind),
+    sourceUri: row.sourceUri,
+    sourceExternalId: row.sourceExternalId,
+    sourceTitle: row.sourceTitle,
+    sourceAuthor: row.sourceAuthor,
+    sourceCreatedAt: row.sourceCreatedAt?.toISOString() ?? null,
+    sourceUpdatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
+    sourceVersion: row.sourceVersion,
+    aclTags: cleanStringArray(row.aclTags),
   };
+}
+
+function mergeDocumentSearchRows(rows: CombinedSearchRow[], mode: DocumentSearchMode): DocumentSearchResult[] {
+  const byChunk = new Map<string, CombinedSearchRow>();
+  for (const row of rows) {
+    const existing = byChunk.get(row.chunkId);
+    if (!existing) {
+      byChunk.set(row.chunkId, row);
+      continue;
+    }
+    byChunk.set(row.chunkId, {
+      ...existing,
+      vectorScore: Math.max(existing.vectorScore ?? 0, row.vectorScore ?? 0) || null,
+      keywordScore: Math.max(existing.keywordScore ?? 0, row.keywordScore ?? 0) || null,
+    });
+  }
+  return [...byChunk.values()].map((row) => {
+    const vectorScore = row.vectorScore;
+    const keywordScore = row.keywordScore;
+    const matchType: DocumentSearchMode = vectorScore !== null && keywordScore !== null
+      ? "hybrid"
+      : vectorScore !== null
+        ? "vector"
+        : "keyword";
+    return {
+      ...row,
+      score: combinedSearchScore(mode, vectorScore, keywordScore, matchType),
+      matchType,
+    };
+  }).sort((left, right) =>
+    right.score - left.score
+    || (right.vectorScore ?? 0) - (left.vectorScore ?? 0)
+    || (right.keywordScore ?? 0) - (left.keywordScore ?? 0)
+    || left.chunkIndex - right.chunkIndex
+  );
+}
+
+function combinedSearchScore(
+  mode: DocumentSearchMode,
+  vectorScore: number | null,
+  keywordScore: number | null,
+  matchType: DocumentSearchMode,
+): number {
+  const vector = vectorScore ?? 0;
+  const keyword = keywordScore ?? 0;
+  if (mode === "vector") return roundScore(vector);
+  if (mode === "keyword") return roundScore(keyword);
+  return roundScore(Math.min(1, (0.65 * vector) + (0.35 * keyword) + (matchType === "hybrid" ? 0.1 : 0)));
+}
+
+function normalizeKeywordScore(rank: number): number {
+  if (!Number.isFinite(rank) || rank <= 0) {
+    return 0;
+  }
+  return rank / (rank + 1);
+}
+
+function roundScore(value: number): number {
+  return Number(value.toFixed(6));
 }
 
 export async function parseDocumentBytes(bytes: Uint8Array, file: FileAsset, parser: DocumentParser = new LiteParseDocumentParser()): Promise<ParsedDocument> {
@@ -616,6 +850,43 @@ function withOverlap(previous: string, overlapChars: number, next: string, maxCh
   return candidate.length <= maxChars ? candidate : next;
 }
 
+function cleanString(value: string | undefined | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function cleanStringArray(values: string[] | undefined | null): string[] {
+  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))];
+}
+
+function parseOptionalDate(value: string | undefined): Date | null {
+  const trimmed = cleanString(value);
+  if (!trimmed) {
+    return null;
+  }
+  const date = new Date(trimmed);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid source timestamp: ${trimmed}`);
+  }
+  return date;
+}
+
+function normalizeKnowledgeSourceKind(value: string): KnowledgeSourceKind {
+  switch (value) {
+    case "manual_upload":
+    case "meeting_transcript":
+    case "repository":
+    case "email":
+    case "chat":
+    case "document":
+    case "web":
+    case "other":
+      return value;
+    default:
+      return "other";
+  }
+}
+
 function vectorLiteral(values: number[]): string {
   return `[${values.join(",")}]`;
 }
@@ -642,6 +913,15 @@ function mapDocument(row: typeof schema.documents.$inferSelect): Document {
     parser: row.parser,
     chunkCount: row.chunkCount,
     error: row.error,
+    sourceKind: normalizeKnowledgeSourceKind(row.sourceKind),
+    sourceUri: row.sourceUri,
+    sourceExternalId: row.sourceExternalId,
+    sourceTitle: row.sourceTitle,
+    sourceAuthor: row.sourceAuthor,
+    sourceCreatedAt: row.sourceCreatedAt?.toISOString() ?? null,
+    sourceUpdatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
+    sourceVersion: row.sourceVersion,
+    aclTags: cleanStringArray(row.aclTags),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
