@@ -16,7 +16,9 @@ import {
   buildSessionMcpPermissionGroups,
   delegableApiKeyPermissions,
 } from "./lib/permissions";
-import { parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "./lib/routes";
+import { orgSettingsPath, parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath, workspaceSettingsPath } from "./lib/routes";
+import { groupSessionsForRail, recencyGroupFor, relativeTimeLabel } from "./lib/sessions-group";
+import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
   emptyAdvancedSessionDraft,
   submissionExtrasFromAdvancedSessionDraft,
@@ -62,6 +64,84 @@ describe("workspace route helpers", () => {
 
   test("does not build legacy unscoped session URLs", () => {
     expect(workspaceSessionPath("workspace-1", "session-1")).not.toBe("/sessions/session-1");
+  });
+
+  test("builds the new workspace-settings and organization-settings paths", () => {
+    expect(workspaceSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/settings");
+    expect(orgSettingsPath("workspace-1")).toBe("/workspaces/workspace-1/organization");
+  });
+});
+
+describe("rail session grouping", () => {
+  const NOW = new Date("2026-06-19T12:00:00.000Z");
+  function railSession(patch: Partial<Session> & Pick<Session, "id">): Session {
+    return { ...session(), status: "idle", ...patch };
+  }
+
+  test("pins running sessions above the recency buckets, newest first", () => {
+    const grouped = groupSessionsForRail([
+      railSession({ id: "old-running", status: "running", updatedAt: "2026-01-01T00:00:00.000Z" }),
+      railSession({ id: "today-idle", status: "idle", updatedAt: "2026-06-19T09:00:00.000Z" }),
+      railSession({ id: "new-running", status: "running", updatedAt: "2026-06-19T11:59:00.000Z" }),
+    ], NOW);
+
+    expect(grouped.running.map((entry) => entry.id)).toEqual(["new-running", "old-running"]);
+    expect(grouped.grouped[0]?.group).toBe("today");
+    expect(grouped.grouped[0]?.sessions.map((entry) => entry.id)).toEqual(["today-idle"]);
+  });
+
+  test("buckets non-running sessions by recency, most-recent first, dropping empty groups", () => {
+    const grouped = groupSessionsForRail([
+      railSession({ id: "today", updatedAt: "2026-06-19T08:00:00.000Z" }),
+      railSession({ id: "yesterday", updatedAt: "2026-06-18T08:00:00.000Z" }),
+      railSession({ id: "older", updatedAt: "2026-05-01T08:00:00.000Z" }),
+    ], NOW);
+
+    expect(grouped.running).toEqual([]);
+    expect(grouped.grouped.map((bucket) => bucket.group)).toEqual(["today", "yesterday", "older"]);
+  });
+
+  test("recencyGroupFor classifies calendar-local buckets", () => {
+    expect(recencyGroupFor(new Date("2026-06-19T01:00:00.000Z").getTime(), NOW)).toBe("today");
+    expect(recencyGroupFor(new Date("2026-06-18T23:00:00.000Z").getTime(), NOW)).toBe("yesterday");
+    expect(recencyGroupFor(new Date("2026-06-15T12:00:00.000Z").getTime(), NOW)).toBe("previous7");
+    expect(recencyGroupFor(new Date("2026-05-01T12:00:00.000Z").getTime(), NOW)).toBe("older");
+  });
+
+  test("relativeTimeLabel reads compactly", () => {
+    expect(relativeTimeLabel("2026-06-19T11:59:50.000Z", NOW)).toBe("now");
+    expect(relativeTimeLabel("2026-06-19T11:30:00.000Z", NOW)).toBe("30m");
+    expect(relativeTimeLabel("2026-06-19T09:00:00.000Z", NOW)).toBe("3h");
+    expect(relativeTimeLabel("2026-06-17T12:00:00.000Z", NOW)).toBe("2d");
+  });
+});
+
+describe("organization helpers", () => {
+  function ctx(patch: Partial<AccessContext> = {}): AccessContext {
+    return { mode: "managed", subjectId: "s", accountGrants: [], workspaceGrants: [], defaultAccountId: null, defaultWorkspaceId: null, ...patch };
+  }
+  function ws(id: string, accountId: string): Workspace {
+    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
+  }
+
+  test("derives a label, preferring an account name in grant metadata", () => {
+    expect(orgLabel("acc-12345678abc", [{ accountId: "acc-12345678abc", subjectId: "s", permissions: [], metadata: { accountName: "Acme" } }])).toBe("Acme");
+    expect(orgLabel("acc-12345678abc", [])).toBe("Org acc-1234");
+  });
+
+  test("lists every org the subject can reach, default first", () => {
+    const context = ctx({
+      defaultAccountId: "acc-b",
+      accountGrants: [{ accountId: "acc-a", subjectId: "s", permissions: ["billing:read"] }],
+    });
+    const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
+    expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
+    expect(orgs.find((org) => org.accountId === "acc-a")?.canManage).toBe(true);
+  });
+
+  test("workspacesInOrg filters and sorts by name", () => {
+    const filtered = workspacesInOrg([ws("beta", "acc-a"), ws("alpha", "acc-a"), ws("other", "acc-b")], "acc-a");
+    expect(filtered.map((workspace) => workspace.name)).toEqual(["alpha", "beta"]);
   });
 });
 

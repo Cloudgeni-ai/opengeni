@@ -18,6 +18,16 @@ export function workspaceSessionPath(workspaceId: string, sessionId: string): st
   return `${workspaceSessionsPath(workspaceId)}/${encodeURIComponent(sessionId)}`;
 }
 
+/** Workspace settings: workspace name, API keys, environments link, danger zone. */
+export function workspaceSettingsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/settings`;
+}
+
+/** Organization (formerly "account") settings: billing, usage, plan, members. */
+export function orgSettingsPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/organization`;
+}
+
 // Stripe checkout redirects land on `/billing?checkout=success|cancelled` (the
 // success_url/cancel_url baked into every checkout session by the API). The
 // `/billing` route forwards the shopper onto their account page, carrying this
