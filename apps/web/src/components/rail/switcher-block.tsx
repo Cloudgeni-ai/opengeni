@@ -154,12 +154,13 @@ function OrgLine(props: {
   activeAccountId: string | null;
 }) {
   const rail = useRail();
+  // The org *name* renders in normal case (it's a name, not a section caption).
   // Exactly one org: a static muted label, no useless switcher.
   if (props.orgs.length <= 1) {
     return (
-      <span className="flex items-center gap-1 truncate px-0.5 text-[11px] font-medium uppercase tracking-wide text-[color:var(--color-fg-subtle)]" title={props.currentLabel}>
+      <span className="flex min-w-0 items-center gap-1 px-0.5 text-[11px] font-medium text-[color:var(--color-fg-subtle)]" title={props.currentLabel}>
         <BuildingIcon className="size-3 shrink-0" />
-        <span className="truncate">{props.currentLabel}</span>
+        <span className="min-w-0 truncate">{props.currentLabel}</span>
       </span>
     );
   }
@@ -169,10 +170,10 @@ function OrgLine(props: {
         <button
           type="button"
           aria-label="Switch organization"
-          className="flex items-center gap-1 truncate rounded px-0.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-[color:var(--color-fg-subtle)] transition-colors hover:text-[color:var(--color-fg-muted)] focus-visible:outline-none"
+          className="flex min-w-0 items-center gap-1 rounded px-0.5 py-0.5 text-[11px] font-medium text-[color:var(--color-fg-subtle)] transition-colors hover:text-[color:var(--color-fg-muted)] focus-visible:outline-none"
         >
           <BuildingIcon className="size-3 shrink-0" />
-          <span className="truncate">{props.currentLabel}</span>
+          <span className="min-w-0 truncate">{props.currentLabel}</span>
           <ChevronsUpDownIcon className="size-3 shrink-0" />
         </button>
       </DropdownMenuTrigger>

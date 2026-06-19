@@ -3,7 +3,7 @@
 // and supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
 // dot + single-line truncated title + hover-revealed relative time. The active
 // session (from the URL) is highlighted with an accent bar.
-import { StatusDot, useWorkspaceSessions } from "@opengeni/react";
+import { useWorkspaceSessions } from "@opengeni/react";
 import { useRouterState } from "@tanstack/react-router";
 import { MessagesSquareIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -77,8 +77,8 @@ export function SessionList() {
   }, [focusIndex]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between gap-2 px-3 pb-1 pt-1">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1 pt-1">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
           Sessions
         </span>
@@ -105,7 +105,7 @@ export function SessionList() {
         aria-label="Sessions"
         tabIndex={0}
         onKeyDown={onKeyDown}
-        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
+        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2 outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
       >
         {loading && sessions.length === 0 ? (
           <SessionListSkeleton />
@@ -159,11 +159,11 @@ function SessionGroup(props: {
   running?: boolean;
 }) {
   return (
-    <div className="mb-1.5">
+    <div className="mb-1.5 min-w-0">
       <p className="px-2 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
         {props.label}
       </p>
-      <div className="grid gap-px">
+      <div className="grid min-w-0 grid-cols-1 gap-px">
         {props.sessions.map((session) => {
           const index = props.flat.indexOf(session);
           return (
@@ -198,26 +198,55 @@ function SessionRow(props: {
       onClick={() => props.onSelect(props.session.id)}
       title={title}
       className={cn(
-        "group relative flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm transition-colors",
+        "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-3 text-left text-sm transition-colors",
         "hover:bg-[color:var(--color-surface-2)]",
         props.active
-          ? "bg-[color:var(--color-surface-2)] text-[color:var(--color-fg)]"
+          ? "bg-[color:var(--color-surface-3)] font-medium text-[color:var(--color-fg)]"
           : "text-[color:var(--color-fg-muted)]",
         props.focused && !props.active ? "bg-[color:var(--color-surface-2)]/60" : "",
       )}
     >
       <span
         className={cn(
-          "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] transition-opacity",
+          "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] transition-opacity",
           props.active ? "opacity-100" : "opacity-0",
         )}
       />
-      <StatusDot status={props.session.status} className="size-1.5 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <RailStatusDot status={props.session.status} />
+      {/* min-w-0 + truncate: the title must always ellipsis, never butt the rail
+          border. The pr-1 keeps a gap before the hover time / right edge. */}
+      <span className="min-w-0 flex-1 truncate pr-1">{title}</span>
       <span className="shrink-0 text-[10px] tabular-nums text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity group-hover:opacity-100">
         {relativeTimeLabel(props.session.updatedAt)}
       </span>
     </button>
+  );
+}
+
+/**
+ * Rail-local status dot with the rail's intent semantics: RUNNING reads as a
+ * positive, active state (brand blue) with a breathing pulse; FAILED is danger
+ * red; everything idle/terminal is a calm muted gray. This deliberately differs
+ * from the shared package badge (whose running hue is amber) so a running
+ * session in the list never reads as an error.
+ */
+function RailStatusDot({ status }: { status: Session["status"] }) {
+  const running = status === "running" || status === "queued";
+  const needsAttention = status === "requires_action";
+  const failed = status === "failed";
+  const color = running
+    ? "var(--color-brand)"
+    : needsAttention
+      ? "var(--color-status-running)" // app's amber "attention" hue
+      : failed
+        ? "var(--color-status-failed)"
+        : "var(--color-fg-subtle)";
+  return (
+    <span className="relative inline-flex size-1.5 shrink-0 rounded-full" style={{ backgroundColor: `color-mix(in oklch, ${color} 92%, transparent)` }}>
+      {running || needsAttention ? (
+        <span className="absolute inset-0 animate-og-pulse rounded-full" style={{ backgroundColor: color }} />
+      ) : null}
+    </span>
   );
 }
 
