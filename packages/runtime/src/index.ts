@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
 import { isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
@@ -25,9 +25,7 @@ import {
   type RunStreamEvent,
 } from "@openai/agents";
 import {
-  DockerSandboxClient,
   localDirLazySkillSource,
-  UnixLocalSandboxClient,
 } from "@openai/agents/sandbox/local";
 import {
   Capabilities,
@@ -54,7 +52,7 @@ import {
   type SandboxRunConfig,
   type SkillIndexEntry,
 } from "@openai/agents/sandbox";
-import { ModalCloudBucketMountStrategy, ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { userInfo } from "node:os";
@@ -63,6 +61,17 @@ import { fileURLToPath } from "node:url";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
+import {
+  createSandboxClient,
+  deserializeSandboxSessionStateEnvelope,
+  restoredSandboxSessionStateFromEntry,
+} from "./sandbox";
+
+// The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
+// helpers + the config-owned env/port re-exports). Re-exported verbatim so the
+// barrel surface is unchanged for apps/worker while @opengeni/runtime/sandbox
+// stays importable by the API without the agent loop.
+export * from "./sandbox";
 
 export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
@@ -760,79 +769,8 @@ class PrefixedMcpServer implements MCPServer {
   }
 }
 
-export function createSandboxClient(settings: Settings, environment = collectSandboxEnvironment(settings)): unknown {
-  if (settings.sandboxBackend === "docker") {
-    return withDockerNetwork(new DockerSandboxClient({
-      image: settings.dockerImage,
-      exposedPorts: parseExposedPorts(settings.dockerExposedPorts),
-    }), settings.dockerNetwork);
-  }
-  if (settings.sandboxBackend === "modal") {
-    const options: ConstructorParameters<typeof ModalSandboxClient>[0] = {
-      appName: settings.modalAppName,
-      timeoutMs: settings.modalTimeoutSeconds * 1000,
-      exposedPorts: parseExposedPorts(settings.dockerExposedPorts),
-      env: environment,
-    };
-    if (settings.modalImageRef) {
-      options.image = ModalImageSelector.fromTag(settings.modalImageRef);
-    }
-    if (settings.modalTokenId) {
-      options.tokenId = settings.modalTokenId;
-    }
-    if (settings.modalTokenSecret) {
-      options.tokenSecret = settings.modalTokenSecret;
-    }
-    if (settings.modalEnvironment) {
-      options.environment = settings.modalEnvironment;
-    }
-    return new ModalSandboxClient(options);
-  }
-  if (settings.sandboxBackend === "local") {
-    return new UnixLocalSandboxClient();
-  }
-  return undefined;
-}
-
-function withDockerNetwork(client: SandboxClient, network: string | undefined): SandboxClient {
-  const trimmed = network?.trim();
-  if (!trimmed) {
-    return client;
-  }
-  const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
-    const containerId = (session as { state?: { containerId?: unknown } }).state?.containerId;
-    if (typeof containerId === "string" && containerId.length > 0) {
-      await connectDockerNetwork(trimmed, containerId);
-    }
-    return session;
-  };
-  return {
-    backendId: client.backendId,
-    ...(client.supportsDefaultOptions !== undefined ? { supportsDefaultOptions: client.supportsDefaultOptions } : {}),
-    ...(client.create ? { create: async (...args: any[]) => await wrapSession(await (client.create as any)(...args)) } : {}),
-    ...(client.resume ? { resume: async (state: SandboxSessionState) => await wrapSession(await client.resume!(state)) } : {}),
-    ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
-    ...(client.serializeSessionState ? { serializeSessionState: async (state: SandboxSessionState, options) => await client.serializeSessionState!(state, options) } : {}),
-    ...(client.canPersistOwnedSessionState ? { canPersistOwnedSessionState: async (state: SandboxSessionState) => await client.canPersistOwnedSessionState!(state) } : {}),
-    ...(client.canReusePreservedOwnedSession ? { canReusePreservedOwnedSession: async (state: SandboxSessionState) => await client.canReusePreservedOwnedSession!(state) } : {}),
-    ...(client.deserializeSessionState ? { deserializeSessionState: async (state: Record<string, unknown>) => await client.deserializeSessionState!(state) } : {}),
-  };
-}
-
-async function connectDockerNetwork(network: string, containerId: string): Promise<void> {
-  const result = Bun.spawnSync(["docker", "network", "connect", network, containerId], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (result.exitCode === 0) {
-    return;
-  }
-  const stderr = new TextDecoder().decode(result.stderr);
-  if (stderr.includes("already exists")) {
-    return;
-  }
-  throw new Error(`Failed to connect Docker sandbox container to network ${network}: ${stderr.trim()}`);
-}
+// createSandboxClient (+ withDockerNetwork / connectDockerNetwork) moved to the
+// agent-loop-free leaf ./sandbox; re-exported via `export * from "./sandbox"`.
 
 export type PrepareInputOptions = {
   sandboxClient?: unknown;
@@ -1657,72 +1595,11 @@ async function restoredSandboxSessionState(state: RunState<any, any>, client: un
   return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
 }
 
-/**
- * Extract the sandbox recovery entry from a run state as a plain JSON record,
- * for storage decoupled from the RunState blob (issue #35). Encapsulates the
- * underscore-internal `_sandbox` read in exactly one place.
- */
-export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
-  const sandboxState = (state as any)?._sandbox;
-  if (!sandboxState) {
-    return null;
-  }
-  const entry = sandboxState.sessionsByAgent?.[sandboxState.currentAgentKey]
-    ?? (sandboxState.currentAgentKey && sandboxState.sessionState
-      ? {
-        backendId: sandboxState.backendId,
-        currentAgentKey: sandboxState.currentAgentKey,
-        currentAgentName: sandboxState.currentAgentName,
-        sessionState: sandboxState.sessionState,
-      }
-      : null);
-  if (!entry || !entry.sessionState) {
-    return null;
-  }
-  return entry as Record<string, unknown>;
-}
-
-/**
- * Items-mode counterpart of restoredSandboxSessionState: rebuild the live
- * sandbox session state from a stored entry (as produced by
- * sandboxStateEntryFromRunState) instead of from a RunState blob.
- */
-export async function restoredSandboxSessionStateFromEntry(entry: Record<string, unknown>, client: unknown): Promise<SandboxSessionState | undefined> {
-  if (!client || !entry || typeof entry !== "object" || !("sessionState" in entry)) {
-    return undefined;
-  }
-  if (entry.backendId && (client as SandboxClient).backendId !== entry.backendId) {
-    throw new Error("Stored sandbox envelope backend does not match the configured sandbox client");
-  }
-  return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
-}
-
-export async function deserializeSandboxSessionStateEnvelope(client: SandboxClient, envelope: unknown): Promise<SandboxSessionState | undefined> {
-  if (!envelope || typeof envelope !== "object") {
-    return undefined;
-  }
-  if (!client.deserializeSessionState) {
-    throw new Error("Sandbox client must implement deserializeSessionState() to resume RunState sandbox state");
-  }
-  const state = envelope as {
-    providerState?: Record<string, unknown>;
-    manifest?: unknown;
-    snapshot?: unknown;
-    snapshotFingerprint?: unknown;
-    snapshotFingerprintVersion?: unknown;
-    workspaceReady?: unknown;
-    exposedPorts?: unknown;
-  };
-  return await client.deserializeSessionState({
-    ...(state.providerState ?? {}),
-    manifest: state.manifest,
-    ...(state.snapshot !== undefined ? { snapshot: state.snapshot } : {}),
-    ...(state.snapshotFingerprint !== undefined ? { snapshotFingerprint: state.snapshotFingerprint } : {}),
-    ...(state.snapshotFingerprintVersion !== undefined ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion } : {}),
-    workspaceReady: state.workspaceReady,
-    ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
-  });
-}
+// sandboxStateEntryFromRunState + restoredSandboxSessionStateFromEntry +
+// deserializeSandboxSessionStateEnvelope moved to the agent-loop-free leaf
+// ./sandbox; re-exported via `export * from "./sandbox"`. The private
+// restoredSandboxSessionState above (which takes an agent-loop RunState) calls
+// the moved deserializeSandboxSessionStateEnvelope, imported from ./sandbox.
 
 export type SandboxLifecycleHookPhase = "beforeAgentStart";
 
