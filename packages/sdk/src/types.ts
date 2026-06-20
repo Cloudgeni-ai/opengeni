@@ -87,6 +87,11 @@ export type SessionCapabilities = {
     unredacted: boolean;
     requiresAcknowledgment: boolean;
     acknowledged: boolean;
+    // Shared-exposure disclosure (addendum E.1): `shared` when the group has >1
+    // session; `sharedSessionIds` lists the OTHER sessions' ids ONLY (never their
+    // conversation/metadata).
+    shared: boolean;
+    sharedSessionIds: string[];
     reason: CapabilityUnavailableReason | null;
   };
   Recording: {

@@ -1,4 +1,5 @@
 import {
+  AcknowledgeStreamRequest,
   AttachViewerRequest,
   ClearSessionContextRequest,
   ClientSessionEvent,
@@ -15,12 +16,16 @@ import {
   clearSessionContext,
   getSession,
   getSessionGoal,
+  getStreamAcknowledgment,
   listSessionEvents,
+  listSessionIdsInGroup,
   listSessions,
   listSessionTurns,
+  recordStreamAcknowledgment,
   reorderQueuedSessionTurns,
   requestSessionCompaction,
   requireSession,
+  revokeViewer,
   setSessionGoalStatus,
   updateQueuedSessionTurn,
   type AppendEventInput,
@@ -366,13 +371,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  // Resolve the shared-exposure disclosure for a session's group: `shared` when
+  // the group has >1 session (addendum E.1), and the OTHER sessions' ids ONLY
+  // (never their conversation/metadata; the query selects only id — stress g).
+  async function resolveSharedExposure(
+    workspaceId: string,
+    session: { id: string; sandboxGroupId: string },
+  ): Promise<{ shared: boolean; sharedSessionIds: string[] }> {
+    const ids = await listSessionIdsInGroup(db, workspaceId, session.sandboxGroupId);
+    const others = ids.filter((id) => id !== session.id);
+    return { shared: others.length > 0, sharedSessionIds: others };
+  }
+
   // GET .../stream-capabilities — the capability-negotiation read. Returns the
-  // SessionCapabilities doc (descriptor + lease liveness/epoch + os), API-direct.
-  // The desktop URL/token stay null until P4 mints them (gated by liveness=cold
-  // until a box is warm); the read is non-mutating.
+  // SessionCapabilities doc (descriptor + lease liveness/epoch + os + the
+  // shared-exposure disclosure + the calling principal's acknowledgment state),
+  // API-direct. The desktop URL/token stay null until P4 mints them (gated by
+  // liveness=cold until a box is warm); the read is non-mutating.
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -380,6 +398,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+    const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
+    // Per-principal acknowledgment: A acknowledging does not consent for B. A
+    // shared box requires the SHARED acknowledgment, so `acknowledged` for a
+    // shared box is the shared-consent bit, not the bare un-redacted one.
+    const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
+    const acknowledged = ack ? (shared ? ack.acknowledgedShared : ack.acknowledgedUnredacted) : false;
     const capabilities = negotiateCapabilities({
       sessionId,
       backend: session.sandboxBackend as SandboxBackend,
@@ -391,15 +415,53 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // secret is resolvable, the desktop cell reports transport:null rather
       // than advertising a plane we can never authorize.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
+      desktopAcknowledged: acknowledged,
+      shared,
+      sharedSessionIds,
     });
     return c.json(capabilities);
   });
 
-  // POST .../viewers — acquire a viewer holder (keeps the box warm while
-  // watched). Spins the box up in-process when cold.
+  // POST .../stream-capabilities/acknowledge — record the calling principal's
+  // acknowledgment of the un-redacted pixel plane (and, when shared, the
+  // shared-exposure disclosure). Reuses the acknowledgment machinery — gated on
+  // stream:acknowledge, no new permission. Until this is recorded the
+  // desktop-stream (viewer attach) path returns 409 (P3.2 consent gate).
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities/acknowledge", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:acknowledge");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
+    }
+    const recorded = await recordStreamAcknowledgment(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      subjectId: grant.subjectId,
+      acknowledgeUnredacted: parsed.data.acknowledgeUnredacted,
+      acknowledgeShared: parsed.data.acknowledgeShared,
+    });
+    return c.json({ acknowledged: recorded.acknowledgedUnredacted, acknowledgedShared: recorded.acknowledgedShared });
+  });
+
+  // POST .../viewers — acquire a viewer holder on the desktop-stream (un-redacted
+  // pixel) path. Gated on stream:view (strictly broader than sessions:read: the
+  // pixel plane is un-redacted). THE CONSENT GATE: until the calling principal
+  // has acknowledged the un-redacted plane this returns 409
+  // stream_acknowledgment_required; when the box is shared and the shared-exposure
+  // disclosure is not acknowledged it returns 409 shared_acknowledgment_required.
+  // Only after consent does it acquire the holder (spinning the box up in-process
+  // when cold).
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -409,6 +471,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid viewer attach request" });
+    }
+    // Consent gate (P3.2 / addendum E.1): the un-redacted desktop path requires
+    // the calling principal's acknowledgment, recorded per (group, subject). A
+    // shared box additionally requires the shared-exposure consent.
+    const { shared } = await resolveSharedExposure(workspaceId, session);
+    const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
+    if (!ack?.acknowledgedUnredacted) {
+      throw new HTTPException(409, { message: "stream_acknowledgment_required" });
+    }
+    if (shared && !ack.acknowledgedShared) {
+      throw new HTTPException(409, { message: "shared_acknowledgment_required" });
     }
     const result = await attachViewer({ db, settings }, {
       accountId: grant.accountId,
@@ -420,9 +493,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).
+  // The desktop-stream lifecycle is gated on stream:view (the un-redacted plane).
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -446,7 +520,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   // DELETE .../viewers/:viewerId — release the holder (idempotent).
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
     assertOwnershipEnabled();
     const sessionId = c.req.param("sessionId");
     const session = await getSession(db, workspaceId, sessionId);
@@ -460,6 +534,32 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       viewerId: c.req.param("viewerId"),
     });
     return c.body(null, 204);
+  });
+
+  // POST .../viewers/:viewerId/revoke — OD-6 v1 revocation. Drops the named
+  // viewer's holder from the GROUP lease so refcount recomputes; the box drains
+  // iff nothing else holds it (a turn-held or other-viewer-held box survives —
+  // group-refcount liveness). Gated on stream:view (no new permission). The
+  // live-RFB force-disconnect of an already-open socket is a P4 follow-up; the
+  // holder-drop (so the box can drain) is the v1 deliverable.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/revoke", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "stream:view");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const result = await revokeViewer(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      viewerId: c.req.param("viewerId"),
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+    // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
+    return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
   });
 }
 

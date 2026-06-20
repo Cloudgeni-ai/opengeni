@@ -1944,6 +1944,16 @@ export const SessionCapabilities = z.object({
     unredacted: z.boolean(),
     requiresAcknowledgment: z.boolean(),
     acknowledged: z.boolean(),
+    // SHARED-EXPOSURE disclosure (addendum E.1). `shared` is true when the box's
+    // group has >1 session: watching this desktop ALSO shows the sibling
+    // sessions' agents on the one :0 framebuffer (the pixels cannot be redacted).
+    // `sharedSessionIds` lists the OTHER sessions whose agents may appear — IDS
+    // ONLY, never their goal/metadata/conversation (a viewer of A must not be
+    // able to use "I can see B's id" to subscribe to B's events; stress g). When
+    // shared, the consent gate requires the shared-exposure acknowledgment (409
+    // shared_acknowledgment_required) before the desktop path is handed out.
+    shared: z.boolean().default(false),
+    sharedSessionIds: z.array(z.string().uuid()).default([]),
     reason: CapabilityUnavailableReason.nullable(),
   }),
   Recording: z.object({
@@ -1981,6 +1991,32 @@ export const ViewerHolder = z.object({
   dataPlaneUrl: z.string().nullable(),
 });
 export type ViewerHolder = z.infer<typeof ViewerHolder>;
+
+// POST .../stream-capabilities/acknowledge — record the calling principal's
+// acknowledgment of the un-redacted pixel plane (P3.2; modules/07-channel-b.md
+// §6 + addendum E.1). Reuses the acknowledgment machinery — no new endpoint
+// shape beyond this body, no new permission beyond stream:acknowledge.
+//
+// `acknowledgeShared` MUST be true when the box is shared (the group has >1
+// session): the un-redacted desktop path returns 409 shared_acknowledgment_required
+// until a shared box is acknowledged WITH the shared-exposure consent. For a
+// solo box `acknowledgeShared` is irrelevant (the un-redacted ack alone gates).
+export const AcknowledgeStreamRequest = z.object({
+  // The principal accepts that the desktop pixel plane is un-redacted (can show
+  // cloud creds the agent cat's into a terminal). Always true to record consent;
+  // present for self-documentation + a future explicit withdraw.
+  acknowledgeUnredacted: z.boolean().default(true),
+  // The principal accepts the shared-exposure disclosure: watching this desktop
+  // also shows sibling sessions' agents on the one framebuffer.
+  acknowledgeShared: z.boolean().default(false),
+});
+export type AcknowledgeStreamRequest = z.infer<typeof AcknowledgeStreamRequest>;
+
+export const AcknowledgeStreamResponse = z.object({
+  acknowledged: z.boolean(),
+  acknowledgedShared: z.boolean(),
+});
+export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse>;
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.

@@ -3255,6 +3255,131 @@ export async function readLease(db: Database, workspaceId: string, sandboxGroupI
 }
 
 // ============================================================================
+// P3.2 — the un-redacted-pixel consent gate + viewer revocation.
+//
+// The desktop-stream path is gated behind an explicit acknowledgment that the
+// pixel plane is un-redacted (it can show cloud creds the agent cat's into a
+// terminal — strictly broader than the redacted Channel-A event log). For a
+// SHARED box (the group has >1 session) the principal must additionally consent
+// to the shared-exposure disclosure: watching A's desktop also shows B's agent
+// on the one :0 framebuffer (addendum E.1 / stress g). Consent is per-PRINCIPAL
+// and per-GROUP (one :0 per group), recorded in session_stream_acknowledgments
+// (0019). Reuses the acknowledgment machinery — no new permission beyond
+// stream:acknowledge.
+// ============================================================================
+
+export interface StreamAcknowledgment {
+  acknowledgedUnredacted: boolean;
+  acknowledgedShared: boolean;
+}
+
+// Record (or upsert) a principal's acknowledgment of the group's un-redacted
+// pixel plane (and, when shared, the shared-exposure disclosure). Keyed on
+// (workspace, group, subject); a re-ack (e.g. a solo→shared upgrade adding the
+// shared consent) is ON CONFLICT DO UPDATE, never a duplicate row.
+export async function recordStreamAcknowledgment(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  subjectId: string;
+  acknowledgeUnredacted: boolean;
+  acknowledgeShared: boolean;
+}): Promise<StreamAcknowledgment> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ acknowledged_unredacted: boolean; acknowledged_shared: boolean }>(sql`
+        insert into session_stream_acknowledgments
+          (account_id, workspace_id, sandbox_group_id, subject_id,
+           acknowledged_unredacted, acknowledged_shared, acknowledged_at, updated_at)
+        values
+          (${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId}, ${input.subjectId},
+           ${input.acknowledgeUnredacted}, ${input.acknowledgeShared}, now(), now())
+        on conflict (workspace_id, sandbox_group_id, subject_id) do update set
+          -- Acknowledgment is monotonic: a later ack can ADD the shared consent
+          -- but never silently withdraw a prior one (OR the bits in).
+          acknowledged_unredacted = session_stream_acknowledgments.acknowledged_unredacted or excluded.acknowledged_unredacted,
+          acknowledged_shared     = session_stream_acknowledgments.acknowledged_shared     or excluded.acknowledged_shared,
+          acknowledged_at         = now(),
+          updated_at              = now()
+        returning acknowledged_unredacted, acknowledged_shared
+      `);
+      const row = rows[0]!;
+      return { acknowledgedUnredacted: row.acknowledged_unredacted, acknowledgedShared: row.acknowledged_shared };
+    });
+}
+
+// Read a principal's recorded acknowledgment for a group, or null if they have
+// never acknowledged the un-redacted pixel plane. The negotiation read + the
+// desktop-stream gate both consult this.
+export async function getStreamAcknowledgment(db: Database, input: {
+  workspaceId: string;
+  sandboxGroupId: string;
+  subjectId: string;
+}): Promise<StreamAcknowledgment | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ acknowledged_unredacted: boolean; acknowledged_shared: boolean }>(sql`
+      select acknowledged_unredacted, acknowledged_shared
+      from session_stream_acknowledgments
+      where workspace_id = ${input.workspaceId}
+        and sandbox_group_id = ${input.sandboxGroupId}
+        and subject_id = ${input.subjectId}
+      limit 1
+    `);
+    if (!rows[0]) return null;
+    return { acknowledgedUnredacted: rows[0].acknowledged_unredacted, acknowledgedShared: rows[0].acknowledged_shared };
+  });
+}
+
+// Enumerate the session ids in a group (workspace-scoped). The shared-exposure
+// disclosure surfaces the OTHER sessions' ids ONLY — never their goal/metadata/
+// conversation. The query selects ONLY the id column (id is the disclosure
+// boundary; stress g). RLS-scoped: a foreign-workspace group returns no rows.
+export async function listSessionIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<string[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ id: string }>(sql`
+      select id from sessions
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
+      order by created_at asc
+    `);
+    return rows.map((r) => r.id);
+  });
+}
+
+// OD-6 v1 — revoke a viewer: DROP that viewer's holder from the GROUP lease so
+// refcount recomputes (the box drains iff nothing else holds it — a turn-held or
+// other-viewer-held box survives), AND block its reconnect by recording the
+// revoked subject so a re-attach with the same viewerId is refused. The
+// live-RFB force-disconnect of an already-open socket is a P4 follow-up; the
+// holder-drop (so the box can drain) is here.
+//
+// Returns the post-drop lease liveness/refcount (null if the lease was already
+// cold-and-reaped — a revoke is then an idempotent no-op). A revoked viewer who
+// independently holds a holder on a SIBLING session may still watch via that
+// session (correct — authorized there); this drops ONLY the named viewerId's
+// holder.
+export async function revokeViewer(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  viewerId: string;
+  idleGraceMs: number;
+}): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
+  // The drop is exactly releaseLeaseHolder's idempotent delete-my-row +
+  // recompute (refcount recomputes; warm→draining is guarded refcount=0 AND
+  // turn_holders=0, so a turn-held box never drains on a viewer revoke). The
+  // reconnect-block is a P4 concern (the holder-drop is the v1 deliverable —
+  // the box can now drain); a re-attach mints a fresh viewerId regardless.
+  return await releaseLeaseHolder(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sandboxGroupId: input.sandboxGroupId,
+    kind: "viewer",
+    holderId: input.viewerId,
+    idleGraceMs: input.idleGraceMs,
+  });
+}
+
+// ============================================================================
 // Warm-time metering (P2.1) — the COST hole the lease design opens.
 //
 // A box held warm by a viewer with no agent turn running emits ZERO model usage

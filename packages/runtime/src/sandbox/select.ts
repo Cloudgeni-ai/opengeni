@@ -34,8 +34,17 @@ export interface NegotiationContext {
    * caller that never threads it (e.g. headless tests) is unaffected.
    */
   streamTokenSecretAvailable?: boolean;
-  /** Whether the viewer has acknowledged the un-redacted desktop pixels. */
+  /** Whether the calling principal has acknowledged the un-redacted desktop
+   *  pixels (and, for a shared box, the shared-exposure disclosure). When the
+   *  box is shared this must be the SHARED acknowledgment; a bare un-redacted ack
+   *  does not satisfy a shared box. */
   desktopAcknowledged?: boolean;
+  /** True when the box's group has >1 session: watching this desktop also shows
+   *  the sibling sessions' agents on the one :0 framebuffer (addendum E.1). */
+  shared?: boolean;
+  /** The OTHER sessions whose agents may appear on the shared desktop — IDS
+   *  ONLY, never their conversation/metadata (stress g). Empty for a solo box. */
+  sharedSessionIds?: string[];
   /** Override the negotiation clock (tests). */
   now?: Date;
 }
@@ -141,6 +150,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       available = false;
       reason = "lease_cold";
     }
+    const shared = available ? Boolean(ctx.shared) : false;
     return {
       transport: available ? cap.transport : null,
       client: available ? ("novnc" as const) : null,
@@ -154,6 +164,12 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       unredacted: true,
       requiresAcknowledgment: available,
       acknowledged: available ? Boolean(ctx.desktopAcknowledged) : false,
+      // Shared-exposure disclosure (addendum E.1): `shared` when the group has
+      // >1 session; `sharedSessionIds` is the OTHER sessions' ids ONLY (never
+      // their conversation/metadata). Empty/false for a solo box or when the
+      // desktop cell is unavailable.
+      shared,
+      sharedSessionIds: shared ? (ctx.sharedSessionIds ?? []) : [],
       reason,
     };
   })();
