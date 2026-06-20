@@ -366,14 +366,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
-      // Multi-provider per-turn model routing. When turn.model is in the
-      // provider registry, this gives the provider-bound Model instance + the
-      // gating (compaction mode, hosted web search, encrypted reasoning, context
-      // window) the agent and compaction summarizer must use; null falls back to
-      // the legacy global-client path (runSettings.openaiModel + the default
-      // client configureOpenAI set up). Cost accounting already covers registry
+      // Multi-provider per-turn routing → the provider gating (compaction mode,
+      // hosted web search, encrypted reasoning, context window) the agent and
+      // compaction summarizer must use; null falls back to the legacy global
+      // client. Resolve against `capabilitySettings` (whose openaiModel is the
+      // deployment default), NOT `runSettings`: runSettings.openaiModel is the
+      // turn's model, so for a turn ON a registry model the built-in provider
+      // would otherwise claim that id (configuredModels builds the built-in's
+      // models from openaiModel) and shadow the registry entry — resolving the
+      // turn to the built-in (Azure) gating while the global model router routes
+      // the name to its registry provider. That mismatch attaches web_search to
+      // a chat-only Fireworks model. Resolving against the default-model settings
+      // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
-      const resolvedModel = runtime.resolveTurnModel(runSettings, turn.model);
+      const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       const turnTools = mergeToolRefs(session.tools, turn.tools);
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);

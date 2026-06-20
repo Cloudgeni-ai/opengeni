@@ -216,3 +216,31 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     }
   });
 });
+
+describe("registry model shadowing — why the worker resolves gating against the deployment-default settings", () => {
+  // The worker overrides settings.openaiModel to the TURN's model. For a turn on
+  // a registry model that override makes the built-in provider claim the id
+  // (configuredModels derives the built-in's models from openaiModel) and shadow
+  // the registry entry — resolving the turn to built-in (Azure) gating while the
+  // global router routes the name to the registry provider, attaching web_search
+  // to a chat-only Fireworks model. So the worker MUST resolve against the
+  // default-model settings, asserted here.
+  const azure = () => multiProviderSettings({
+    openaiProvider: "azure",
+    azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+    azureOpenaiApiKey: "az-test-key",
+  });
+
+  test("against deployment-default settings, a registry model resolves to its registry provider with gating off", () => {
+    const resolved = resolveTurnModel(azure(), FIREWORKS_MODEL)!;
+    expect(resolved.provider.id).toBe("fireworks");
+    expect(resolved.provider.api).toBe("chat");
+    expect(resolved.configured.hostedWebSearch).toBe(false);
+  });
+
+  test("against turn-overridden settings (openaiModel = the registry id) the built-in shadows it — the trap the worker avoids", () => {
+    const shadowed = resolveTurnModel({ ...azure(), openaiModel: FIREWORKS_MODEL }, FIREWORKS_MODEL)!;
+    expect(shadowed.provider.builtin).toBe(true);
+    expect(shadowed.configured.hostedWebSearch).toBe(true);
+  });
+});
