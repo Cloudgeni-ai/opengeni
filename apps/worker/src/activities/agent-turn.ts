@@ -58,7 +58,7 @@ import type {
   RunAgentTurnResult,
 } from "./types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
-import type { ResourceRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
 
 // How long the session workflow holds the loop after a retryable provider
 // failure before the goal continuation re-enters the model. Azure/OpenAI TPM
@@ -1056,10 +1056,14 @@ async function sandboxFileDownloadsForRun(
 }
 
 function requiresSignedFileResourceDownloads(settings: Settings): boolean {
+  // A nativeBucketMount backend (modal) cannot mount Azure Blob entries, so it
+  // needs pre-signed downloads for that store. Keying on the descriptor (not the
+  // "modal" literal) keeps this correct as bucket-mount backends are added.
+  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
   return (settings.sandboxBackend === "docker" && settings.objectStorageBackend === "s3-compatible")
     || settings.objectStorageBackend === "aws-s3"
     || settings.objectStorageBackend === "gcs"
-    || (settings.sandboxBackend === "modal" && settings.objectStorageBackend === "azure-blob");
+    || (nativeBucketMount && settings.objectStorageBackend === "azure-blob");
 }
 
 function objectStorageForSandboxDownloads(settings: Settings, objectStorage: ObjectStorage): ObjectStorage {

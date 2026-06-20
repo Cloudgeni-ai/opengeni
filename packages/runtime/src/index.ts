@@ -1,6 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
-import { isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -1417,8 +1417,13 @@ function sandboxDownloadDirectory(download: SandboxFileDownload, mountPath: stri
 }
 
 function objectStorageFileMount(settings: Settings, prefix: string): any {
+  // Descriptor-driven: a nativeBucketMount backend (modal) mounts via the
+  // provider's own bucket-mount strategy and cannot mount Azure Blob entries —
+  // it needs pre-signed downloads instead. Reading the descriptor (not a
+  // hard-coded backend name) keeps this honest as providers are added.
+  const nativeBucketMount = CAPABILITY_DESCRIPTORS[settings.sandboxBackend].nativeBucketMount;
   if (settings.objectStorageBackend === "azure-blob") {
-    if (settings.sandboxBackend === "modal") {
+    if (nativeBucketMount) {
       throw new Error("Modal sandbox Azure Blob file resources require pre-signed download materialization because the current OpenAI Agents SDK Modal client does not support Azure Blob mount entries.");
     }
     const config = azureBlobMountConfig(settings);
@@ -1445,7 +1450,7 @@ function objectStorageFileMount(settings: Settings, prefix: string): any {
     accessKeyId: config.accessKeyId,
     secretAccessKey: config.secretAccessKey,
     readOnly: true,
-    mountStrategy: settings.sandboxBackend === "modal"
+    mountStrategy: nativeBucketMount
       ? new ModalCloudBucketMountStrategy()
       : inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
   });

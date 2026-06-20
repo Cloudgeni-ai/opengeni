@@ -294,7 +294,9 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
   local: {
     backend: "local",
-    backendId: "local",
+    // The SDK's UnixLocalSandboxClient reports backendId "unix_local" — this MUST
+    // match it (it is the resume-fence field compared against client.backendId).
+    backendId: "unix_local",
     tier: "dev",
     os: { supported: ["linux"], default: "linux" },
     capabilities: {

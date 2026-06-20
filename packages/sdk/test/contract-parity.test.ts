@@ -146,11 +146,12 @@ describe("SDK / contracts parity", () => {
     for (const backend of ContractSandboxBackend.options) {
       const descriptor = CAPABILITY_DESCRIPTORS[backend];
       expect(descriptor).toBeDefined();
-      // The record key, the `backend` field, and `backendId` agree. (The
-      // descriptor.backendId === SDK client.backendId assertion is deferred to
-      // P0.3 where the runtime clients exist.)
+      // The record key and the `backend` field agree. backendId is pinned to the
+      // SDK client's actual backendId (asserted against the real clients in
+      // packages/runtime — P0.3): it == the enum key for every backend except
+      // local, whose UnixLocalSandboxClient reports "unix_local".
       expect(descriptor.backend).toBe(backend);
-      expect(descriptor.backendId).toBe(backend);
+      expect(descriptor.backendId).toBe(backend === "local" ? "unix_local" : backend);
     }
   });
 

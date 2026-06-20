@@ -4,7 +4,7 @@ import {
   environmentsEncryptionKeyBytes,
   type Settings,
 } from "@opengeni/config";
-import type { ResourceRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
   getWorkspaceEnvironmentValuesForRun,
@@ -77,8 +77,13 @@ export async function sandboxEnvironmentForRun(
     ...collectGitIdentityEnvironment(settings),
     ...workspaceEnvironment,
   };
-  if (settings.sandboxBackend === "docker" || settings.sandboxBackend === "modal") {
-    environment.HOME ??= "/workspace";
+  // Backend-aware HOME/workspaceRoot: a provisioned box (docker + every cloud
+  // provider) runs the agent under the descriptor's workspaceRoot. `local` runs
+  // in-process as the host unix user (keep its real $HOME); `none` has no box.
+  // Behavior-preserving for docker/modal (both → /workspace).
+  const descriptor = CAPABILITY_DESCRIPTORS[settings.sandboxBackend];
+  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+    environment.HOME ??= descriptor.workspaceRoot;
   }
   const selection = githubRepositorySelection(resources);
   if (!selection) {

@@ -20,16 +20,14 @@
 
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
-import {
-  DockerSandboxClient,
-  UnixLocalSandboxClient,
-} from "@openai/agents/sandbox/local";
+import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 import type {
   SandboxClient,
   SandboxSessionLike,
   SandboxSessionState,
 } from "@openai/agents/sandbox";
-import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { PROVIDER_REGISTRY } from "./providers";
+import { SandboxConfigError } from "./errors";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -37,38 +35,71 @@ import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extension
 // (moving them into runtime would create a config→runtime cycle — ledger CR8).
 export { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
 
+// The provider registry surface — the descriptor table self-test, the per-
+// provider registrations, selection + capability negotiation, and the typed
+// construction errors. All agent-loop-free, so the API-direct control plane
+// imports them from this one leaf.
+export {
+  CAPABILITY_DESCRIPTORS,
+  DESKTOP_STREAM_PORT,
+  assertDescriptorRegistryInvariants,
+  type CapabilityDescriptor,
+} from "./capabilities";
+export { SandboxConfigError, SandboxProviderUnavailableError } from "./errors";
+export {
+  PROVIDER_REGISTRY,
+  assertProviderRegistryInvariants,
+  type ProviderRegistration,
+  type ProviderConstructionContext,
+} from "./providers";
+export {
+  selectBackend,
+  backendSupportsOs,
+  negotiateCapabilities,
+  type NegotiationContext,
+} from "./select";
+
+/**
+ * Construct the raw provider SandboxClient for the configured backend. Registry-
+ * driven (the old flat if/else is gone): the backend's ProviderRegistration owns
+ * validateCredentials + build, with per-provider units/field-names. Returns
+ * undefined for "none".
+ *
+ * The desktop stream port (6080) is merged into exposedPorts for every desktop-
+ * capable (backend, os) when desktop is enabled AND the provider cannot expose
+ * ports on demand (modal/runloop/e2b pre-declare; blaxel resolves on demand).
+ * Existing modal/docker/local construction is behavior-preserved.
+ */
 export function createSandboxClient(settings: Settings, environment = collectSandboxEnvironment(settings)): unknown {
-  if (settings.sandboxBackend === "docker") {
-    return withDockerNetwork(new DockerSandboxClient({
-      image: settings.dockerImage,
-      exposedPorts: parseExposedPorts(settings.dockerExposedPorts),
-    }), settings.dockerNetwork);
+  const registration = PROVIDER_REGISTRY[settings.sandboxBackend];
+  if (!registration) {
+    throw new SandboxConfigError(settings.sandboxBackend, `Unknown sandbox backend "${settings.sandboxBackend}"`);
   }
-  if (settings.sandboxBackend === "modal") {
-    const options: ConstructorParameters<typeof ModalSandboxClient>[0] = {
-      appName: settings.modalAppName,
-      timeoutMs: settings.modalTimeoutSeconds * 1000,
-      exposedPorts: parseExposedPorts(settings.dockerExposedPorts),
-      env: environment,
-    };
-    if (settings.modalImageRef) {
-      options.image = ModalImageSelector.fromTag(settings.modalImageRef);
-    }
-    if (settings.modalTokenId) {
-      options.tokenId = settings.modalTokenId;
-    }
-    if (settings.modalTokenSecret) {
-      options.tokenSecret = settings.modalTokenSecret;
-    }
-    if (settings.modalEnvironment) {
-      options.environment = settings.modalEnvironment;
-    }
-    return new ModalSandboxClient(options);
+  if (registration.backend === "none") {
+    return undefined;
   }
-  if (settings.sandboxBackend === "local") {
-    return new UnixLocalSandboxClient();
+  registration.validateCredentials(settings); // fail-fast, typed
+
+  const exposedPorts = parseExposedPorts(settings.dockerExposedPorts);
+  // 6080 port-merge: a desktop-capable backend that pre-declares ports (not
+  // on-demand) must carry the desktop port at construction so resolveExposedPort
+  // (6080) succeeds later. runloop is included (it is desktop-capable but NOT
+  // on-demand → must pre-declare). blaxel is on-demand → skipped here.
+  const desktop = registration.descriptor.capabilities.DesktopStream;
+  if (
+    desktop.available
+    && settings.sandboxDesktopEnabled
+    && !registration.descriptor.portExposure.supportsOnDemandPorts
+    && !exposedPorts.includes(DESKTOP_STREAM_PORT)
+  ) {
+    exposedPorts.push(DESKTOP_STREAM_PORT);
   }
-  return undefined;
+
+  const raw = registration.build({ settings, environment, exposedPorts });
+  // Docker network decoration stays backend-specific (only docker).
+  return registration.backend === "docker"
+    ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
+    : raw;
 }
 
 function withDockerNetwork(client: SandboxClient, network: string | undefined): SandboxClient {
