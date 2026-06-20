@@ -36,6 +36,7 @@
   },
   "devDependencies": {
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/deployment": "workspace:*",
     "tsup": "^8.5.0",
     "typescript": "^6.0.3",
     "zod": "^4.2.1"

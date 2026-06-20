@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  CAPABILITY_DESCRIPTORS,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  DESKTOP_STREAM_PORT,
   SandboxBackend as ContractSandboxBackend,
   Session as ContractSessionSchema,
   SessionEvent as ContractSessionEventSchema,
@@ -14,6 +16,7 @@ import {
   ScheduledTaskRunMode as ContractScheduledTaskRunMode,
   ScheduledTaskStatus as ContractScheduledTaskStatus,
 } from "@opengeni/contracts";
+import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
 import { SESSION_EVENT_TYPES } from "../src/types";
 import type {
@@ -49,6 +52,31 @@ describe("SDK / contracts parity", () => {
     expect(statuses).toEqual(ContractSessionStatus.options);
     expect(backends).toEqual(ContractSandboxBackend.options);
     expect(efforts).toEqual(ContractReasoningEffort.options);
+  });
+
+  test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {
+    // The SDK ships a hand-written `SandboxBackend` type (no runtime array), so
+    // we pin a runtime literal list to that type: TS rejects this assignment if
+    // any value drifts from the SDK type, and the sorted-equality below pins it
+    // to the two runtime Zod enums. All three sources must agree.
+    const sdkBackends: readonly SandboxBackend[] = [
+      "docker",
+      "modal",
+      "local",
+      "none",
+      "daytona",
+      "runloop",
+      "e2b",
+      "blaxel",
+      "cloudflare",
+      "vercel",
+    ];
+    const contracts = [...ContractSandboxBackend.options].sort();
+    const deployment = [...DeploymentSandboxBackend.options].sort();
+    const sdk = [...sdkBackends].sort();
+    expect(contracts).toEqual(deployment);
+    expect(contracts).toEqual(sdk);
+    expect(contracts).toHaveLength(10);
   });
 
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
@@ -109,5 +137,49 @@ describe("SDK / contracts parity", () => {
       goal: { text: "Keep deploys green" },
     };
     expect(ContractCreateSessionRequest.safeParse(request).success).toBe(true);
+  });
+
+  test("every sandbox backend has a capability descriptor row keyed by itself", () => {
+    const backends = [...ContractSandboxBackend.options].sort();
+    const descriptorKeys = Object.keys(CAPABILITY_DESCRIPTORS).sort();
+    expect(descriptorKeys).toEqual(backends);
+    for (const backend of ContractSandboxBackend.options) {
+      const descriptor = CAPABILITY_DESCRIPTORS[backend];
+      expect(descriptor).toBeDefined();
+      // The record key, the `backend` field, and `backendId` agree. (The
+      // descriptor.backendId === SDK client.backendId assertion is deferred to
+      // P0.3 where the runtime clients exist.)
+      expect(descriptor.backend).toBe(backend);
+      expect(descriptor.backendId).toBe(backend);
+    }
+  });
+
+  test("descriptor invariants: Recording feasibility, OS, and the 6080 desktop port", () => {
+    for (const backend of ContractSandboxBackend.options) {
+      const descriptor = CAPABILITY_DESCRIPTORS[backend];
+      const desktopCapable = descriptor.capabilities.DesktopStream.available;
+      const isLinux = descriptor.os.default === "linux" && descriptor.os.supported.includes("linux");
+
+      // Recording feasibility == DesktopStream.available && os==linux (x11grab
+      // is X11-only). In v1 every reachable cell is Linux, so this reduces to
+      // Recording.available === DesktopStream.available.
+      expect(descriptor.capabilities.Recording.available).toBe(desktopCapable && isLinux);
+
+      if (desktopCapable) {
+        // Desktop-capable backends are Linux in v1 and must carry a real VNC
+        // transport (never null).
+        expect(isLinux).toBe(true);
+        expect(descriptor.capabilities.DesktopStream.transport).not.toBeNull();
+        // 6080 is the websockify/noVNC port; it is merged into exposedPorts by
+        // createSandboxClient (P0.3). The descriptor must reserve the canonical
+        // port constant for every desktop-capable (backend, os).
+        expect(DESKTOP_STREAM_PORT).toBe(6080);
+      } else {
+        // Non-desktop backends never advertise a DesktopStream transport and
+        // are never recording-capable.
+        expect(descriptor.capabilities.DesktopStream.transport).toBeNull();
+        expect(descriptor.capabilities.Recording.available).toBe(false);
+      }
+    }
   });
 });

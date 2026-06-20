@@ -11,7 +11,92 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-export type SandboxBackend = "docker" | "modal" | "local" | "none";
+// Mirror of `@opengeni/contracts` SandboxBackend (10 values; existing four keep
+// position). 3-way enum parity is pinned by `test/contract-parity.test.ts`.
+export type SandboxBackend =
+  | "docker"
+  | "modal"
+  | "local"
+  | "none"
+  | "daytona"
+  | "runloop"
+  | "e2b"
+  | "blaxel"
+  | "cloudflare"
+  | "vercel";
+
+// Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
+export type SandboxOs = "linux" | "macos" | "windows";
+
+// Mirror of `@opengeni/contracts` SandboxCapabilityName.
+export type SandboxCapabilityName =
+  | "FileSystem"
+  | "Terminal"
+  | "Git"
+  | "DesktopStream"
+  | "Recording";
+
+// Mirror of `@opengeni/contracts` CapabilityUnavailableReason.
+export type CapabilityUnavailableReason =
+  | "backend_unsupported"
+  | "os_unsupported"
+  | "not_provisioned"
+  | "disabled_by_policy"
+  | "lease_cold"
+  | "tier_headless";
+
+// Mirror of `@opengeni/contracts` SessionCapabilities (the negotiated handshake
+// document). The descriptor table itself is NOT mirrored — it lives in
+// contracts (P0.1) and is consumed by the SDK config in a later PR.
+export type SessionCapabilities = {
+  sessionId: string;
+  backend: SandboxBackend;
+  os: SandboxOs;
+  liveness: "cold" | "warming" | "warm" | "draining";
+  leaseEpoch: number;
+  viewerHeartbeatIntervalMs: number;
+  FileSystem: {
+    available: boolean;
+    readOnly: boolean;
+    root: string;
+    pathSep: "/" | "\\";
+    treeMode: "lazy" | "snapshot";
+    reason: CapabilityUnavailableReason | null;
+  };
+  Terminal: {
+    transport: "sse-events" | "pty-ws" | null;
+    ptyCapable: boolean;
+    shell: string;
+    url: string | null;
+    token: string | null;
+    reason: CapabilityUnavailableReason | null;
+  };
+  Git: {
+    available: boolean;
+    repos: string[];
+    reason: CapabilityUnavailableReason | null;
+  };
+  DesktopStream: {
+    transport: "vnc-ws" | "rdp-ws" | "webrtc" | null;
+    client: "novnc" | "web-rdp" | null;
+    mode: "read-only" | "interactive";
+    url: string | null;
+    token: string | null;
+    expiresAt: string | null;
+    resolution: [number, number];
+    unredacted: boolean;
+    requiresAcknowledgment: boolean;
+    acknowledged: boolean;
+    reason: CapabilityUnavailableReason | null;
+  };
+  Recording: {
+    available: boolean;
+    modes: ("manual" | "on-turn" | "on-verify")[];
+    codecs: ("h264-mp4" | "vp9-webm")[];
+    reason: CapabilityUnavailableReason | null;
+  };
+  negotiatedAt: string;
+};
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 

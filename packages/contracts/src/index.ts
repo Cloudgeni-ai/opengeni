@@ -10,8 +10,339 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-export const SandboxBackend = z.enum(["docker", "modal", "local", "none"]);
+// 10 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// `packages/sdk/test/contract-parity.test.ts`. The existing four keep their
+// positions; the six new backends are additive.
+export const SandboxBackend = z.enum([
+  "docker",
+  "modal",
+  "local",
+  "none",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
+
+// OS axis. Only "linux" is reachable in v1; macos/windows are seam placeholders.
+export const SandboxOs = z.enum(["linux", "macos", "windows"]);
+export type SandboxOs = z.infer<typeof SandboxOs>;
+
+// The five surfaceable sandbox capabilities (PascalCase, the canonical names).
+export const SandboxCapabilityName = z.enum([
+  "FileSystem", // Channel A: list/read/write/search (Pierre tree)
+  "Terminal", // Channel A: command-output firehose (+ future pty-ws)
+  "Git", // Channel A: status/diff/log/show (Pierre diff)
+  "DesktopStream", // Channel B: noVNC pixels over a scoped tunnel URL
+  "Recording", // ffmpeg x11grab -> object storage
+]);
+export type SandboxCapabilityName = z.infer<typeof SandboxCapabilityName>;
+
+// How a backend exposes a network port to the data plane.
+export type PortExposureKind = "provider-tunnel" | "preview-url" | "local-port" | "none";
+
+// Static per-backend metadata — pure data, no runtime state. This table lives
+// in CONTRACTS (not runtime) so config can read it without an import cycle
+// through runtime (ledger CR8). Everything downstream (config boot-validation,
+// OS image selection, capability negotiation, env/mount branch) reads this
+// data, never a hard-coded backend name.
+export type CapabilityDescriptor = {
+  backend: SandboxBackend;
+  backendId: string; // asserted === SDK client.backendId at registry build (deferred to P0.3)
+  tier: "desktop" | "headless" | "dev" | "none";
+  os: { supported: SandboxOs[]; default: SandboxOs };
+  capabilities: {
+    FileSystem: { available: boolean; readOnly: boolean };
+    Terminal: { available: boolean; transport: "sse-events" | "pty-ws" | null; pty: boolean };
+    Git: { available: boolean };
+    DesktopStream: { available: boolean; transport: "vnc-ws" | "rdp-ws" | "webrtc" | null };
+    // Feasibility only (== DesktopStream.available && os==linux); NOT a request.
+    Recording: { available: boolean };
+  };
+  lifetime: {
+    hardLifetimeMs?: number; // modal 24h, vercel 5h
+    requiresSnapshotRollover: boolean;
+    hasIdleKiller: boolean;
+    supportsSuspendResume: boolean; // runloop/e2b/vercel/modal true
+    resumeIsLockFree: boolean; // modal true (fromId, no lock)
+    idleKillDisableHint?: string;
+  };
+  snapshot: {
+    kind: "native-fs" | "native-dir" | "native-snapshot-id" | "tar-only" | "none";
+    hasTarFallback: boolean;
+  };
+  portExposure: { kind: PortExposureKind; supportsOnDemandPorts: boolean }; // runloop=false; blaxel only true
+  workspaceRoot: string; // os-overridable; per-backend default (providers owns; os defers)
+  nativeBucketMount: boolean; // modal true -> mount/signed-download branch
+  persistable: boolean;
+  supportsRunAs: boolean;
+};
+
+// The websockify/noVNC desktop port that is merged into `exposedPorts` for
+// every desktop-capable (backend, os). Asserted present by boot-validation.
+export const DESKTOP_STREAM_PORT = 6080;
+
+// The Part-D matrix (master-spine PART D + module 03-providers). One row per
+// backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
+// placeholders (no enum members shipped). Reading rule: a capability cell is
+// `available:false` + a reason in the negotiated doc, never absent.
+export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor> = {
+  modal: {
+    backend: "modal",
+    backendId: "modal",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      hardLifetimeMs: 24 * 60 * 60 * 1000,
+      requiresSnapshotRollover: true,
+      hasIdleKiller: true,
+      supportsSuspendResume: true,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "native-fs", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // pre-declare 6080
+    workspaceRoot: "/workspace",
+    nativeBucketMount: true,
+    persistable: true,
+    supportsRunAs: true,
+  },
+  daytona: {
+    backend: "daytona",
+    backendId: "daytona",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: true,
+      supportsSuspendResume: true,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
+    portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: true,
+  },
+  runloop: {
+    backend: "runloop",
+    backendId: "runloop",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: true,
+      supportsSuspendResume: true,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // CR9: pre-declare 6080
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: false,
+  },
+  e2b: {
+    backend: "e2b",
+    backendId: "e2b",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false }, // pty-until-proven=no
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: true,
+      supportsSuspendResume: true,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
+    portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
+    workspaceRoot: "/home/user",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: false,
+  },
+  blaxel: {
+    backend: "blaxel",
+    backendId: "blaxel",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false }, // pty-until-proven=no
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: true,
+      supportsSuspendResume: false,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true }, // only on-demand backend
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: false,
+  },
+  cloudflare: {
+    backend: "cloudflare",
+    backendId: "cloudflare",
+    tier: "headless",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: true,
+      supportsSuspendResume: false,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: true,
+  },
+  vercel: {
+    backend: "vercel",
+    backendId: "vercel",
+    tier: "headless",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: false },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      hardLifetimeMs: 5 * 60 * 60 * 1000,
+      requiresSnapshotRollover: true,
+      hasIdleKiller: true,
+      supportsSuspendResume: true,
+      resumeIsLockFree: false,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
+    workspaceRoot: "/vercel/sandbox",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: false,
+  },
+  docker: {
+    backend: "docker",
+    backendId: "docker",
+    tier: "dev",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null }, // local
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "native-dir", hasTarFallback: true },
+    portExposure: { kind: "local-port", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: true,
+  },
+  local: {
+    backend: "local",
+    backendId: "local",
+    tier: "dev",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "native-dir", hasTarFallback: true },
+    portExposure: { kind: "local-port", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: false,
+    supportsRunAs: false,
+  },
+  none: {
+    backend: "none",
+    backendId: "none",
+    tier: "none",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: false, readOnly: true },
+      Terminal: { available: false, transport: null, pty: false },
+      Git: { available: false },
+      DesktopStream: { available: false, transport: null },
+      Recording: { available: false },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "none", hasTarFallback: false },
+    portExposure: { kind: "none", supportsOnDemandPorts: false },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: false,
+    supportsRunAs: false,
+  },
+};
 
 export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
@@ -1421,6 +1752,75 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
   }),
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
+
+// The negotiated capability handshake document (master-spine C.3). ONE shape;
+// collapses the parallel per-module definitions. A capability cell is always
+// present with `available`/`transport` + a `reason` when unavailable — never
+// absent.
+export const CapabilityUnavailableReason = z.enum([
+  "backend_unsupported",
+  "os_unsupported",
+  "not_provisioned",
+  "disabled_by_policy",
+  "lease_cold",
+  "tier_headless",
+]);
+export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
+
+export const SessionCapabilities = z.object({
+  sessionId: z.string().uuid(),
+  backend: SandboxBackend,
+  os: SandboxOs,
+  liveness: z.enum(["cold", "warming", "warm", "draining"]),
+  // Echoed on viewer heartbeats (the split-brain fence).
+  leaseEpoch: z.number().int().nonnegative(),
+  viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
+  FileSystem: z.object({
+    available: z.boolean(),
+    readOnly: z.boolean(),
+    root: z.string(),
+    pathSep: z.enum(["/", "\\"]),
+    treeMode: z.enum(["lazy", "snapshot"]),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  Terminal: z.object({
+    transport: z.enum(["sse-events", "pty-ws"]).nullable(),
+    ptyCapable: z.boolean(),
+    shell: z.string(),
+    url: z.string().url().nullable(),
+    token: z.string().nullable(),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  Git: z.object({
+    available: z.boolean(),
+    repos: z.array(z.string()),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  DesktopStream: z.object({
+    transport: z.enum(["vnc-ws", "rdp-ws", "webrtc"]).nullable(),
+    client: z.enum(["novnc", "web-rdp"]).nullable(),
+    mode: z.enum(["read-only", "interactive"]).default("read-only"),
+    url: z.string().url().nullable(),
+    token: z.string().nullable(),
+    expiresAt: z.string().nullable(),
+    resolution: z
+      .tuple([z.number().int().positive(), z.number().int().positive()])
+      .default([1024, 768]),
+    // REQUIRED, no default (the server must assert un-redacted pixels).
+    unredacted: z.boolean(),
+    requiresAcknowledgment: z.boolean(),
+    acknowledged: z.boolean(),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  Recording: z.object({
+    available: z.boolean(),
+    modes: z.array(z.enum(["manual", "on-turn", "on-verify"])),
+    codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  negotiatedAt: z.string(),
+});
+export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),

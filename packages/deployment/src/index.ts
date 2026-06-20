@@ -31,7 +31,20 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-export const SandboxBackend = z.enum(["docker", "modal", "local", "none"]);
+// Mirror of `@opengeni/contracts` SandboxBackend (10 values; existing four keep
+// position). 3-way enum parity is pinned by the SDK contract-parity test.
+export const SandboxBackend = z.enum([
+  "docker",
+  "modal",
+  "local",
+  "none",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
 export const SecretDeliveryMode = z.enum([
