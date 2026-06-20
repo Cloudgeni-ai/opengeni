@@ -40,8 +40,8 @@ import {
   buildTools,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
+  initialReasoningEffort,
   isAbortError,
-  isUiReasoningEffort,
   mergeMcpServerOptions,
   selectableMcpServers,
   selectedAvailableCapabilityToolIds,
@@ -215,9 +215,11 @@ export function RootRouteComponent() {
         setClientConfig(config);
         setConfigError(null);
         setModel(config.defaultModel);
-        if (isUiReasoningEffort(config.defaultReasoningEffort)) {
-          setReasoningEffort(config.defaultReasoningEffort);
-        }
+        // Sync to the deployment default UNCONDITIONALLY: the full enum is now
+        // representable, so a `none`/`minimal` default no longer gets clamped to
+        // the "low" placeholder (which the server treated as an override beating
+        // the deployer's configured default — a silent billing footgun).
+        setReasoningEffort(initialReasoningEffort(config));
       })
       .catch((error) => {
         if (cancelled) {

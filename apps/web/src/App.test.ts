@@ -25,9 +25,13 @@ import {
 } from "./lib/session-create";
 import {
   buildTools,
+  effortOptionsFor,
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
+  initialReasoningEffort,
+  labelEffort,
   mergeMcpServerOptions,
+  reasoningEffortOrder,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
 import {
@@ -42,6 +46,7 @@ import { upsertWorkspace, workspaceCreationAccountId } from "./lib/workspaces";
 import type {
   AccessContext,
   CapabilityCatalogItem,
+  ClientConfig,
   GitHubRepository,
   ResourceRef,
   ScheduledTask,
@@ -521,6 +526,57 @@ describe("buildTools", () => {
       { id: "shared", name: "Configured Shared" },
       { id: "workspace", name: "Workspace" },
     ]);
+  });
+});
+
+describe("composer reasoning-effort picker (full host enum)", () => {
+  // Regression: the composer used to clamp the effort to a UI-only subset
+  // (low|medium|high|xhigh). A deployment whose default was `none`/`minimal`
+  // was silently overridden to "low" — the placeholder never synced and the
+  // picker could not even display `none`/`minimal` — so every web turn sent
+  // `reasoningEffort:"low"`, which the server treats as an override beating the
+  // deployer's configured default (a billing footgun). The picker is now driven
+  // faithfully by the host config over the FULL enum.
+  function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
+    return {
+      deploymentRevision: "rev-1",
+      defaultModel: "gpt-5.5",
+      allowedModels: ["gpt-5.5"],
+      models: [],
+      defaultReasoningEffort: "none",
+      allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      mcpServers: [],
+      fileUploads: { enabled: false, maxSizeBytes: 0 },
+      productAccessMode: "local",
+      auth: { mode: "none" },
+      ...patch,
+    };
+  }
+
+  test("the composer initializes effort to the deployment default, even when it is `none`", () => {
+    // This is the exact value context.tsx writes into state when config lands.
+    // Before the fix the guard kept the "low" placeholder for a `none` default;
+    // now the default is honored verbatim, so the submitted turn carries "none".
+    expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "none" }))).toBe("none");
+    expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "minimal" }))).toBe("minimal");
+    expect(initialReasoningEffort(clientConfig({ defaultReasoningEffort: "high" }))).toBe("high");
+  });
+
+  test("the picker offers `none`/`minimal` when the host allows them, canonically ordered", () => {
+    // The old `isUiReasoningEffort` filter dropped these two entirely.
+    expect(effortOptionsFor(clientConfig())).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
+  });
+
+  test("the picker honors a narrowed host allow-list, keeping canonical order", () => {
+    expect(effortOptionsFor(clientConfig({ allowedReasoningEfforts: ["high", "none", "low"] }))).toEqual(["none", "low", "high"]);
+  });
+
+  test("the picker falls back to the full enum when the host exposes no allow-list", () => {
+    expect(effortOptionsFor(null)).toEqual(reasoningEffortOrder);
+  });
+
+  test("labelEffort reads sensibly for every effort, including the previously-unrepresentable ones", () => {
+    expect(reasoningEffortOrder.map(labelEffort)).toEqual(["None", "Minimal", "Low", "Medium", "High", "Extra high"]);
   });
 });
 

@@ -1,17 +1,38 @@
 import type { CapabilityCatalogItem, ClientConfig, GitHubRepository, ReasoningEffort, ResourceRef, ToolRef } from "@/types";
 
 export type RepoDraft = { id: number; url: string; ref: string };
-export type IntelligenceEffort = Extract<ReasoningEffort, "low" | "medium" | "high" | "xhigh">;
+// The composer's effort picker spans the FULL host enum, not a UI-only subset:
+// the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
+// whose default is one of those was overridden to "low" on every web turn
+// (billing impact — "low" beats the deployer's configured default server-side).
+export type IntelligenceEffort = ReasoningEffort;
 export type McpServerOption = { id: string; name: string };
 
-export const uiReasoningEffortOrder: IntelligenceEffort[] = ["low", "medium", "high", "xhigh"];
-
-export function isUiReasoningEffort(value: ReasoningEffort): value is IntelligenceEffort {
-  return value === "low" || value === "medium" || value === "high" || value === "xhigh";
-}
+// Canonical low→high ordering over the full enum; the picker renders efforts in
+// this order, filtered to whatever the host curates in `allowedReasoningEfforts`.
+export const reasoningEffortOrder: IntelligenceEffort[] = ["none", "minimal", "low", "medium", "high", "xhigh"];
 
 export function labelEffort(value: IntelligenceEffort): string {
-  return value === "xhigh" ? "Extra high" : value.slice(0, 1).toUpperCase() + value.slice(1);
+  if (value === "xhigh") {
+    return "Extra high";
+  }
+  return value.slice(0, 1).toUpperCase() + value.slice(1);
+}
+
+// The host-curated effort options for the picker, in canonical order. Falls back
+// to the full enum when the host exposes no allow-list. No lossy UI filter: every
+// effort the host allows (including `none`/`minimal`) is offered, so the deployer's
+// configured default is always representable/selectable.
+export function effortOptionsFor(config: Pick<ClientConfig, "allowedReasoningEfforts"> | null): IntelligenceEffort[] {
+  const allowed = config?.allowedReasoningEfforts ?? reasoningEffortOrder;
+  return reasoningEffortOrder.filter((effort) => allowed.includes(effort));
+}
+
+// The composer's initial effort once config lands: the deployment default,
+// faithfully — no clamping to a UI subset (the bug that pinned `none`/`minimal`
+// defaults to "low").
+export function initialReasoningEffort(config: Pick<ClientConfig, "defaultReasoningEffort">): IntelligenceEffort {
+  return config.defaultReasoningEffort;
 }
 
 export function buildTools(existing: ToolRef[] | undefined, mcpServerIds: string[] = []): ToolRef[] {

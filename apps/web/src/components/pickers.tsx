@@ -11,9 +11,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { displayModel } from "@/lib/format";
 import {
-  isUiReasoningEffort,
+  effortOptionsFor,
   labelEffort,
-  uiReasoningEffortOrder,
   type IntelligenceEffort,
   type McpServerOption,
 } from "@/lib/session-tools";
@@ -56,8 +55,9 @@ export function ModelPicker(props: {
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
 }) {
-  const allowedEfforts = props.config?.allowedReasoningEfforts.filter(isUiReasoningEffort) ?? uiReasoningEffortOrder;
-  const effortOptions = uiReasoningEffortOrder.filter((option) => allowedEfforts.includes(option));
+  // Host-curated effort allow-list, canonically ordered, full enum — mirrors how
+  // the model picker is driven by config.allowedModels (no lossy UI filter).
+  const effortOptions = effortOptionsFor(props.config);
   const choices = modelChoices(props.config, props.model);
   return (
     <DropdownMenu>
