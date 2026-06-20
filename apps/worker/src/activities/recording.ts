@@ -1,0 +1,209 @@
+// apps/worker/src/activities/recording.ts — the recording finalize helper (P4.3).
+//
+// The "agent films itself proving the fix" finalize loop, run IN the process that
+// already holds the resumed-by-id box (the agent turn's own activity). The bytes
+// go box → process memory → object-storage PUT and are NEVER serialized as a
+// Temporal activity result (F10): read + PUT happen in ONE invocation here.
+//
+// Ordering invariant (F9): the box file is deleted ONLY after the storage PUT
+// confirms and the `available` row commits — so a failed upload leaves the bytes
+// recoverable on the box.
+
+import type { Settings } from "@opengeni/config";
+import type { Database } from "@opengeni/db";
+import { updateRecording } from "@opengeni/db";
+import type {
+  RecordingAvailablePayload,
+  RecordingCodec,
+  RecordingFailedReason,
+  RecordingStartedPayload,
+} from "@opengeni/contracts";
+import {
+  contentTypeForCodec,
+  deleteRecordingArtifacts,
+  readRecordingBytes,
+  RecordingError,
+  recordingStorageKey,
+  startRecording as startRecordingOnBox,
+  stopRecording as stopRecordingOnBox,
+  type RecordingProcess,
+} from "@opengeni/runtime";
+import type { ObjectStorage } from "@opengeni/storage";
+import { DOWNLOAD_URL_TTL_SECONDS } from "@opengeni/storage";
+
+export type RecordingMode = "manual" | "on-turn" | "on-verify";
+
+export type ActiveRecording = {
+  recordingId: string;
+  turnId: string | null;
+  mode: RecordingMode;
+  proc: RecordingProcess;
+  dimensions: [number, number];
+  framerate: number;
+};
+
+/**
+ * Insert the recording row, launch ffmpeg on the box, and return the live handle.
+ * Emits the `recording.started` payload (the caller publishes it on the spine).
+ */
+export async function beginRecording(args: {
+  settings: Settings;
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  recordingId: string;
+  mode: RecordingMode;
+  session: unknown;
+  runAs?: string | undefined;
+  reason?: string | null;
+}): Promise<{ active: ActiveRecording; started: RecordingStartedPayload }> {
+  const { settings, db } = args;
+  const codec = settings.recordingDefaultCodec as RecordingCodec;
+  const dimensions: [number, number] = [settings.streamResolutionWidth, settings.streamResolutionHeight];
+  const framerate = settings.recordingFramerate;
+  await import("@opengeni/db").then(({ insertRecording }) => insertRecording(db, {
+    id: args.recordingId,
+    accountId: args.accountId,
+    workspaceId: args.workspaceId,
+    sessionId: args.sessionId,
+    turnId: args.turnId,
+    mode: args.mode,
+    codec,
+    width: dimensions[0],
+    height: dimensions[1],
+    reason: scrubFreeText(args.reason),
+  }));
+  const proc = await startRecordingOnBox(args.session, {
+    recordingId: args.recordingId,
+    codec,
+    framerate,
+    maxSeconds: settings.recordingMaxSeconds,
+    dimensions,
+    ...(args.runAs ? { runAs: args.runAs } : {}),
+  });
+  const active: ActiveRecording = {
+    recordingId: args.recordingId,
+    turnId: args.turnId,
+    mode: args.mode,
+    proc,
+    dimensions,
+    framerate,
+  };
+  const started: RecordingStartedPayload = {
+    recordingId: args.recordingId,
+    turnId: args.turnId,
+    mode: args.mode,
+    codec,
+    dimensions,
+    framerate,
+    startedAt: new Date().toISOString(),
+    reason: scrubFreeText(args.reason),
+  };
+  return { active, started };
+}
+
+export type FinalizeOutcome =
+  | { ok: true; available: RecordingAvailablePayload }
+  | { ok: false; reason: RecordingFailedReason; detail: string | null };
+
+/**
+ * Stop ffmpeg, read the bytes off the box, PUT them to storage, commit `available`,
+ * and (only then) delete the box file (F9). Returns the available payload, or a
+ * failure reason. NEVER throws — finalize runs in a turn `finally` and must not
+ * mask the turn outcome.
+ */
+export async function finalizeRecording(args: {
+  settings: Settings;
+  db: Database;
+  objectStorage: ObjectStorage | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  active: ActiveRecording;
+  session: unknown;
+  runAs?: string | undefined;
+}): Promise<FinalizeOutcome> {
+  const { settings, db, objectStorage, active } = args;
+  const codec = settings.recordingDefaultCodec as RecordingCodec;
+  const fail = async (reason: RecordingFailedReason, detail: string | null): Promise<FinalizeOutcome> => {
+    await updateRecording(db, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      recordingId: active.recordingId,
+      state: "failed",
+      reason: scrubFreeText(detail),
+    }).catch(() => undefined);
+    return { ok: false, reason, detail: scrubFreeText(detail) };
+  };
+
+  try {
+    await updateRecording(db, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      recordingId: active.recordingId,
+      state: "finalizing",
+    }).catch(() => undefined);
+
+    // 1. SIGINT ffmpeg and wait for the clean trailer.
+    await stopRecordingOnBox(args.session, active.proc);
+
+    // 2. Read bytes off the box (size-gated; no eager delete — F8/F9).
+    const finalized = await readRecordingBytes(args.session, active.proc, settings.recordingMaxBytes);
+
+    if (!objectStorage) {
+      return await fail("upload-failed", "object storage is not configured");
+    }
+
+    // 3. PUT to storage (the byte transfer stays IN this process — F10).
+    const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
+    const put = await objectStorage.createPutUrl({ key, contentType: finalized.contentType });
+    // Blob-wrap the bytes (the BodyInit shape fetch accepts; mirrors the SDK's
+    // upload path). `.slice()` detaches a fresh ArrayBuffer from the box read.
+    const res = await fetch(put.url, { method: "PUT", headers: put.requiredHeaders, body: new Blob([finalized.bytes.slice()]) });
+    if (!res.ok) {
+      return await fail("upload-failed", `storage PUT returned ${res.status}`);
+    }
+
+    // 4. Commit `available` with the artifact ref.
+    await updateRecording(db, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      recordingId: active.recordingId,
+      state: "available",
+      storageKey: key,
+      sizeBytes: finalized.sizeBytes,
+      durationSeconds: finalized.durationSeconds,
+    });
+
+    // 5. ONLY NOW delete the box artifacts (F9 — never before a confirmed PUT).
+    await deleteRecordingArtifacts(args.session, active.proc);
+
+    const available: RecordingAvailablePayload = {
+      recordingId: active.recordingId,
+      turnId: active.turnId,
+      codec,
+      contentType: contentTypeForCodec(codec),
+      storageKey: key,
+      durationSeconds: finalized.durationSeconds,
+      sizeBytes: finalized.sizeBytes,
+      dimensions: active.dimensions,
+    };
+    return { ok: true, available };
+  } catch (error) {
+    const reason: RecordingFailedReason = error instanceof RecordingError ? error.reason : "ffmpeg-error";
+    return await fail(reason, error instanceof Error ? error.message : String(error));
+  }
+}
+
+export { DOWNLOAD_URL_TTL_SECONDS };
+
+// Agent/ffmpeg-controlled free text rides redact() like every payload, but we
+// also cap it here (defense in depth — a path/URL with creds shouldn't ride a
+// reason/detail field unbounded; the redactor scrubs known secret shapes).
+function scrubFreeText(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).slice(0, 2_000);
+  return trimmed.length === 0 ? null : trimmed;
+}

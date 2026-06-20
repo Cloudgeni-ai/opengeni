@@ -461,6 +461,44 @@ export const sandboxLeaseHolders = pgTable("sandbox_lease_holders", {
   leaseIdx: index("sandbox_lease_holders_lease_idx").on(table.leaseId),
 }));
 
+// The recording lifecycle states (P4.3). Exported so the activity + the query
+// layer share one source of truth for the §3.1 state machine.
+export const sessionRecordingStateValues = ["recording", "finalizing", "available", "failed"] as const;
+export const sessionRecordingModeValues = ["manual", "on-turn", "on-verify"] as const;
+export const sessionRecordingCodecValues = ["h264-mp4", "vp9-webm"] as const;
+
+// One row per recording — the durable index for the "agent films itself proving
+// the fix" loop. ffmpeg x11grab of the SAME :0 humans watch, finalized by
+// reading the bytes off the box and PUTting them to @opengeni/storage in the
+// process that holds the resumed-by-id handle (never a Temporal payload, F10).
+// Mirrors the account/workspace/session FK chain of sandboxSessionEnvelopes;
+// turnId is ON DELETE SET NULL (a deleted turn must not kill the artifact row).
+export const sessionRecordings = pgTable("session_recordings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  turnId: uuid("turn_id").references(() => sessionTurns.id, { onDelete: "set null" }),
+
+  state: text("state", { enum: sessionRecordingStateValues }).notNull(),
+  mode: text("mode", { enum: sessionRecordingModeValues }).notNull(),
+  codec: text("codec", { enum: sessionRecordingCodecValues }).notNull(),
+
+  storageKey: text("storage_key"),
+  sizeBytes: bigint("size_bytes", { mode: "number" }),
+  durationSeconds: numeric("duration_seconds").$type<number>(),
+
+  width: integer("width").notNull(),
+  height: integer("height").notNull(),
+
+  reason: text("reason"),
+
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  finalizedAt: timestamp("finalized_at", { withTimezone: true }),
+}, (table) => ({
+  sessionIdx: index("session_recordings_session_idx").on(table.workspaceId, table.sessionId, table.createdAt),
+}));
+
 export const scheduledTasks = pgTable("scheduled_tasks", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

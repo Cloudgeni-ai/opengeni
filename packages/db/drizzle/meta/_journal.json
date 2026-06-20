@@ -134,6 +134,20 @@
       "when": 1782518400000,
       "tag": "0018_sandbox_os",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1782604800000,
+      "tag": "0019_session_stream_acknowledgments",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1782691200000,
+      "tag": "0020_session_recordings",
+      "breakpoints": true
     }
   ]
 }

@@ -263,6 +263,20 @@ const SettingsSchema = z.object({
   // down→up restart. Defaults match the proven spike geometry (1280x800).
   streamResolutionWidth: z.coerce.number().int().positive().default(1280),
   streamResolutionHeight: z.coerce.number().int().positive().default(800),
+  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
+  // scrot). Gated by sandboxDesktopEnabled + a desktop-capable backend in
+  // buildAgentCapabilities; computerUseReadOnly:false is the agent-driver default
+  // (it must click/type — the human viewer plane is the read-only one).
+  computerUseEnabled: EnvBoolean.default(true),
+  computerUseReadOnly: EnvBoolean.default(false),
+  // P4.3 recording loop: ffmpeg x11grab of :0 → mp4/webm → @opengeni/storage.
+  // recordingMaxBytes caps the in-memory finalize buffer (≤ storage single-PUT);
+  // recordingMaxSeconds is the ffmpeg -t hard ceiling (bounds a multi-day turn).
+  recordingEnabled: EnvBoolean.default(true),
+  recordingDefaultCodec: z.enum(["h264-mp4", "vp9-webm"]).default("h264-mp4"),
+  recordingFramerate: z.coerce.number().int().positive().default(15),
+  recordingMaxSeconds: z.coerce.number().int().positive().default(600),
+  recordingMaxBytes: z.coerce.number().int().positive().default(268_435_456), // 256 MB
   // --- daytona ---
   daytonaApiKey: z.string().optional(),
   daytonaApiUrl: z.string().url().optional(),
@@ -635,6 +649,13 @@ export function getSettings(): Settings {
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
     streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
     streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
+    computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),
+    computerUseReadOnly: optional("OPENGENI_COMPUTER_USE_READONLY"),
+    recordingEnabled: optional("OPENGENI_RECORDING_ENABLED"),
+    recordingDefaultCodec: optional("OPENGENI_RECORDING_DEFAULT_CODEC"),
+    recordingFramerate: optional("OPENGENI_RECORDING_FRAMERATE"),
+    recordingMaxSeconds: optional("OPENGENI_RECORDING_MAX_SECONDS"),
+    recordingMaxBytes: optional("OPENGENI_RECORDING_MAX_BYTES"),
     daytonaApiKey: optional("OPENGENI_DAYTONA_API_KEY"),
     daytonaApiUrl: optional("OPENGENI_DAYTONA_API_URL"),
     daytonaTarget: optional("OPENGENI_DAYTONA_TARGET"),

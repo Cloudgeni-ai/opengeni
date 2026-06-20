@@ -64,8 +64,25 @@ import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 import {
   createSandboxClient,
   deserializeSandboxSessionStateEnvelope,
+  desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
 } from "./sandbox";
+import { computerUse } from "./sandbox-computer";
+
+// P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
+// so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
+// alongside the rest of the runtime. NOT part of the agent-loop-free leaf (it
+// imports computerTool from the @openai/agents root).
+export {
+  SandboxComputer,
+  ComputerUseCapability,
+  computerUse,
+  ComputerUnavailableError,
+  ComputerReadOnlyError,
+  ComputerActionError,
+  type SandboxComputerOptions,
+  type ComputerUseArgs,
+} from "./sandbox-computer";
 
 // The agent-loop-free sandbox leaf (createSandboxClient + resume/recovery
 // helpers + the config-owned env/port re-exports). Re-exported verbatim so the
@@ -507,6 +524,24 @@ export function buildAgentCapabilities(settings: Settings, packSkills: PackSkill
     caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold(settings)) }));
   }
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
+  // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
+  // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
+  // backend is one whose image carries the X stack (descriptorgate — honest about
+  // which backends are desktop-capable today; headless/dev backends never get the
+  // tool, so a misconfigured non-desktop box can't register a tool that always
+  // fails). The capability's tools() bind to the live externally-owned session at
+  // run time (the SandboxAgent merge); xdotool drives :0 regardless of whether any
+  // viewer is attached, so no pixel-tunnel dependency.
+  if (
+    settings.computerUseEnabled
+    && settings.sandboxDesktopEnabled
+    && desktopCapableBackend(settings.sandboxBackend)
+  ) {
+    caps.push(computerUse({
+      dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
+      readOnly: settings.computerUseReadOnly,
+    }) as unknown as ReturnType<typeof Capabilities.default>[number]);
+  }
   return caps;
 }
 
@@ -1914,7 +1949,7 @@ export function sandboxCommandExitCode(result: unknown): number | null {
   return null;
 }
 
-function sandboxCommandOutput(result: unknown): string {
+export function sandboxCommandOutput(result: unknown): string {
   if (!result || typeof result !== "object") {
     return "";
   }
@@ -1942,7 +1977,7 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
 }
 
-function sandboxCommandStillRunning(result: unknown): boolean {
+export function sandboxCommandStillRunning(result: unknown): boolean {
   if (typeof result === "string") {
     return /Process running with session ID \d+/u.test(result);
   }

@@ -61,8 +61,11 @@ import type {
   RunAgentTurnResult,
 } from "./types";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
+import { beginRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
+import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
 import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
+import { randomUUID } from "node:crypto";
 
 // How long the session workflow holds the loop after a retryable provider
 // failure before the goal continuation re-enters the model. Azure/OpenAI TPM
@@ -207,6 +210,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    // P4.3 on-turn recording: when the desktop tier + recording are enabled and
+    // the box is desktop-capable, the turn films the SAME :0 the agent's
+    // computer-use drives, finalized to storage in this activity's `finally`
+    // (read+PUT in-process — never a Temporal payload, F10). null otherwise.
+    let activeRecording: ActiveRecording | null = null;
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
@@ -424,6 +432,40 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
       ], true);
       turnStartedPublished = true;
+
+      // P4.3 on-turn recording. The box's :0 display stack was brought up by
+      // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
+      // the duration of this turn so the human can watch the agent work and the
+      // agent's computer-use proofs are captured. Best-effort: a recording start
+      // failure NEVER fails the turn (the desktop is a value-add). Finalized in
+      // `finally` (read+PUT in this same activity — never a Temporal payload).
+      if (
+        resolvedSandbox
+        && settings.sandboxDesktopEnabled
+        && settings.recordingEnabled
+        && desktopCapableBackend(resolvedSandbox.established.backendId)
+      ) {
+        try {
+          const begun = await beginRecording({
+            settings,
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turnId!,
+            recordingId: randomUUID(),
+            mode: "on-turn",
+            session: resolvedSandbox.established.session,
+            runAs: sandboxRunAs(settings),
+            reason: null,
+          });
+          activeRecording = begun.active;
+          await publish([{ type: "recording.started", payload: begun.started }]);
+        } catch (recordingError) {
+          activeRecording = null;
+          console.error("on-turn recording start failed (turn outcome unaffected)", recordingError);
+        }
+      }
 
       // Pack-scoped runtime: enabled packs may declare the sandbox image this
       // workspace's sessions run in and skills for the sandbox skill index.
@@ -982,6 +1024,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // release failure must never mask the turn's real outcome.
       if (leaseHeartbeatTimer) {
         clearInterval(leaseHeartbeatTimer);
+      }
+      // P4.3: finalize the on-turn recording BEFORE releasing the box handle
+      // (the read+PUT needs the live session). read bytes → storage PUT →
+      // updateRecording(available) → publish recording.available; the box file is
+      // deleted only after the PUT confirms (F9). Best-effort: a finalize failure
+      // emits recording.failed and never masks the turn outcome (F10: the bytes
+      // never become a Temporal payload — read+PUT happen here in-process).
+      if (activeRecording && resolvedSandbox) {
+        try {
+          const outcome = await finalizeRecording({
+            settings,
+            db,
+            objectStorage,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            active: activeRecording,
+            session: resolvedSandbox.established.session,
+            runAs: sandboxRunAs(settings),
+          });
+          if (publish) {
+            await publish(outcome.ok
+              ? [{ type: "recording.available", payload: outcome.available }]
+              : [{ type: "recording.failed", payload: { recordingId: activeRecording.recordingId, turnId: activeRecording.turnId, reason: outcome.reason, detail: outcome.detail } }]);
+          }
+        } catch (finalizeError) {
+          console.error("recording finalize failed (turn outcome unaffected)", finalizeError);
+        } finally {
+          activeRecording = null;
+        }
       }
       if (resolvedSandbox) {
         await resolvedSandbox.release().catch((releaseError) => {

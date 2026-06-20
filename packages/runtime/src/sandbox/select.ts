@@ -26,6 +26,12 @@ export interface NegotiationContext {
   leaseEpoch: number;
   /** The deployment desktop toggle (settings.sandboxDesktopEnabled). */
   desktopEnabled: boolean;
+  /** The deployment computer-use toggle (settings.computerUseEnabled). The agent
+   *  drives :0 via xdotool/scrot; availability tracks desktop. Defaults to true. */
+  computerUseEnabled?: boolean;
+  /** Whether the agent computer-use driver is gated to no-op input
+   *  (settings.computerUseReadOnly). v1 default false (the agent clicks/types). */
+  computerUseReadOnly?: boolean;
   /**
    * Whether a scoped-stream-token secret is resolvable (I8/OD-8). When desktop
    * is enabled but this is false (no streamTokenSecret AND no delegationSecret),
@@ -245,6 +251,25 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     };
   })();
 
+  const computerUse = (() => {
+    // The agent computer-use driver requires the same desktop image (X stack) as
+    // the pixel plane: it drives :0 with xdotool/scrot. Availability == desktop-
+    // capable backend && desktopEnabled && computerUseEnabled. Degradation is a
+    // value, never silent (an unavailable cell carries a reason).
+    const desktopCapable = descriptor.capabilities.DesktopStream.available;
+    const readOnly = ctx.computerUseReadOnly ?? false;
+    if (osReason) {
+      return { available: false, readOnly, reason: osReason };
+    }
+    if (!desktopCapable) {
+      return { available: false, readOnly, reason: descriptor.tier === "headless" ? ("tier_headless" as const) : ("backend_unsupported" as const) };
+    }
+    if (!ctx.desktopEnabled || ctx.computerUseEnabled === false) {
+      return { available: false, readOnly, reason: "disabled_by_policy" as const };
+    }
+    return { available: true, readOnly, reason: null };
+  })();
+
   return {
     sessionId: ctx.sessionId,
     backend: ctx.backend,
@@ -257,6 +282,7 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     Git: git,
     DesktopStream: desktop,
     Recording: recording,
+    ComputerUse: computerUse,
     negotiatedAt,
   };
 }

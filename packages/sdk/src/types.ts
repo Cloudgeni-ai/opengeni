@@ -100,6 +100,11 @@ export type SessionCapabilities = {
     codecs: ("h264-mp4" | "vp9-webm")[];
     reason: CapabilityUnavailableReason | null;
   };
+  ComputerUse: {
+    available: boolean;
+    readOnly: boolean;
+    reason: CapabilityUnavailableReason | null;
+  };
   negotiatedAt: string;
 };
 
@@ -226,6 +231,10 @@ export const SESSION_EVENT_TYPES = [
   "stream.opened",
   "stream.closed",
   "stream.revoked",
+  // Channel-B recording signals (P4.3 — "agent films itself proving the fix").
+  "recording.started",
+  "recording.available",
+  "recording.failed",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
@@ -261,6 +270,47 @@ export type AgentToolCallCreatedPayload = {
 };
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
+
+// Recording payloads (P4.3 — plain TS mirror of the contracts Zod schemas; the
+// SDK is zero-runtime-dep so these are TYPES, not Zod, F15). The contract-parity
+// test asserts the event-type literals; these shapes document the wire payloads.
+export type RecordingMode = "manual" | "on-turn" | "on-verify";
+export type RecordingCodec = "h264-mp4" | "vp9-webm";
+export type RecordingContentType = "video/mp4" | "video/webm";
+export type RecordingFailedReason =
+  | "ffmpeg-error"
+  | "box-death"
+  | "box-rollover"
+  | "upload-failed"
+  | "max-bytes-exceeded"
+  | "display-unavailable";
+
+export type RecordingStartedPayload = {
+  recordingId: string;
+  turnId: string | null;
+  mode: RecordingMode;
+  codec: RecordingCodec;
+  dimensions: [number, number];
+  framerate: number;
+  startedAt: string;
+  reason?: string | null | undefined;
+};
+export type RecordingAvailablePayload = {
+  recordingId: string;
+  turnId: string | null;
+  codec: RecordingCodec;
+  contentType: RecordingContentType;
+  storageKey: string;
+  durationSeconds: number | null;
+  sizeBytes: number;
+  dimensions: [number, number];
+};
+export type RecordingFailedPayload = {
+  recordingId: string;
+  turnId: string | null;
+  reason: RecordingFailedReason;
+  detail?: string | null | undefined;
+};
 
 export type ScheduledTaskStatus = "active" | "paused";
 

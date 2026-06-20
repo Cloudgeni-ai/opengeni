@@ -1755,6 +1755,13 @@ export const SessionEventType = z.enum([
   "stream.opened", // a viewer attached (audit + refcount visibility)
   "stream.closed", // a viewer detached / was reaped
   "stream.revoked", // a grant was revoked → connected clients MUST disconnect now
+  // Channel-B recording signals (P4.3 / module 05 §3.4). The "agent films itself
+  // proving the fix" loop: ffmpeg x11grab of the SAME :0 humans watch → artifact
+  // → storage. The artifact ref rides the AVAILABLE event (storageKey, NOT a
+  // long-lived URL — clients mint a short-TTL signed GET via the route).
+  "recording.started", // ffmpeg launched on :0 (mode/codec/dimensions)
+  "recording.available", // finalized: bytes PUT to storage, replayable
+  "recording.failed", // ffmpeg/box-death/rollover/upload error — no artifact
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
@@ -1796,6 +1803,68 @@ export const StreamRevokedPayload = z.object({
   reason: z.enum(["grant-revoked", "session-failed", "admin"]),
 });
 export type StreamRevokedPayload = z.infer<typeof StreamRevokedPayload>;
+
+// ── Recording payloads (P4.3 / module 05 §3.4) ──────────────────────────────
+// SessionEvent.payload is z.unknown() (NOT a discriminated union) — these are
+// standalone schemas parsed explicitly at the producer (the recording activity)
+// and the SDK/React consumer. The codec/contentType pair stays consistent
+// (h264-mp4↔video/mp4, vp9-webm↔video/webm).
+export const RecordingMode = z.enum(["manual", "on-turn", "on-verify"]);
+export type RecordingMode = z.infer<typeof RecordingMode>;
+export const RecordingCodec = z.enum(["h264-mp4", "vp9-webm"]);
+export type RecordingCodec = z.infer<typeof RecordingCodec>;
+export const RecordingContentType = z.enum(["video/mp4", "video/webm"]);
+export type RecordingContentType = z.infer<typeof RecordingContentType>;
+
+export const RecordingStartedPayload = z.object({
+  recordingId: z.string().uuid(),
+  turnId: z.string().uuid().nullable(),
+  mode: RecordingMode,
+  codec: RecordingCodec,
+  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+  framerate: z.number().int().positive(),
+  startedAt: z.string(), // ISO
+  // The verification rationale ("agent-verification: tf apply succeeded"). Agent-
+  // authored free text — the producer caps + scrubs it before emit.
+  reason: z.string().nullable().optional(),
+});
+export type RecordingStartedPayload = z.infer<typeof RecordingStartedPayload>;
+
+export const RecordingAvailablePayload = z.object({
+  recordingId: z.string().uuid(),
+  turnId: z.string().uuid().nullable(),
+  codec: RecordingCodec,
+  contentType: RecordingContentType,
+  // The @opengeni/storage object key. NO long-lived URL in the event — clients
+  // mint a short-TTL signed GET via GET …/recordings/:id/url.
+  storageKey: z.string(),
+  durationSeconds: z.number().nonnegative().nullable(),
+  sizeBytes: z.number().int().nonnegative(),
+  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+});
+export type RecordingAvailablePayload = z.infer<typeof RecordingAvailablePayload>;
+
+// `max-bytes-exceeded` is distinct from `timeout` (the -t ceiling hitting is a
+// SUCCESSFUL finalize, never a failure) — the adversarial-review F7 fix.
+export const RecordingFailedReason = z.enum([
+  "ffmpeg-error",
+  "box-death",
+  "box-rollover",
+  "upload-failed",
+  "max-bytes-exceeded",
+  "display-unavailable",
+]);
+export type RecordingFailedReason = z.infer<typeof RecordingFailedReason>;
+
+export const RecordingFailedPayload = z.object({
+  recordingId: z.string().uuid(),
+  turnId: z.string().uuid().nullable(),
+  reason: RecordingFailedReason,
+  // ffmpeg-stderr tail / error detail — agent/ffmpeg-controlled, so the producer
+  // caps + scrubs it before emit (it rides redact() like every payload).
+  detail: z.string().nullable().optional(),
+});
+export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
 
 export const SessionEvent = z.object({
   id: z.string().uuid(),
@@ -2006,6 +2075,15 @@ export const SessionCapabilities = z.object({
     available: z.boolean(),
     modes: z.array(z.enum(["manual", "on-turn", "on-verify"])),
     codecs: z.array(z.enum(["h264-mp4", "vp9-webm"])),
+    reason: CapabilityUnavailableReason.nullable(),
+  }),
+  // The AGENT drives the SAME :0 (xdotool/XTEST + scrot) the human watches; the
+  // human viewer plane is read-only by default (§6). `available` == desktop-
+  // capable backend && computerUseEnabled; `readOnly` reports whether the agent
+  // driver itself is gated to no-op input (v1 default false — the agent clicks).
+  ComputerUse: z.object({
+    available: z.boolean(),
+    readOnly: z.boolean(),
     reason: CapabilityUnavailableReason.nullable(),
   }),
   negotiatedAt: z.string(),

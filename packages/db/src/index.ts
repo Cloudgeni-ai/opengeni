@@ -2679,6 +2679,140 @@ export async function getSandboxSessionEnvelope(db: Database, workspaceId: strin
 }
 
 // ============================================================================
+// Session recordings — the durable index for the "agent films itself proving
+// the fix" loop (P4.3). One row per recording; insert at start, update at
+// finalize (available with the storage_key) or failure. Read-side feeds the
+// list route + the signed-URL replay route (storage_key is the source of truth).
+// ============================================================================
+
+export type SessionRecordingState = (typeof schema.sessionRecordingStateValues)[number];
+export type SessionRecordingMode = (typeof schema.sessionRecordingModeValues)[number];
+export type SessionRecordingCodec = (typeof schema.sessionRecordingCodecValues)[number];
+
+export type SessionRecordingRow = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string | null;
+  state: SessionRecordingState;
+  mode: SessionRecordingMode;
+  codec: SessionRecordingCodec;
+  storageKey: string | null;
+  sizeBytes: number | null;
+  durationSeconds: number | null;
+  width: number;
+  height: number;
+  reason: string | null;
+  createdAt: Date;
+  finalizedAt: Date | null;
+};
+
+function mapRecording(row: typeof schema.sessionRecordings.$inferSelect): SessionRecordingRow {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    state: row.state,
+    mode: row.mode,
+    codec: row.codec,
+    storageKey: row.storageKey,
+    sizeBytes: row.sizeBytes === null || row.sizeBytes === undefined ? null : Number(row.sizeBytes),
+    durationSeconds: row.durationSeconds === null || row.durationSeconds === undefined ? null : Number(row.durationSeconds),
+    width: row.width,
+    height: row.height,
+    reason: row.reason,
+    createdAt: row.createdAt,
+    finalizedAt: row.finalizedAt,
+  };
+}
+
+export async function insertRecording(db: Database, input: {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId?: string | null;
+  mode: SessionRecordingMode;
+  codec: SessionRecordingCodec;
+  width: number;
+  height: number;
+  reason?: string | null;
+}): Promise<SessionRecordingRow> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sessionRecordings).values({
+      id: input.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? null,
+      state: "recording",
+      mode: input.mode,
+      codec: input.codec,
+      width: input.width,
+      height: input.height,
+      reason: input.reason ?? null,
+    }).returning();
+    return mapRecording(row!);
+  });
+}
+
+export async function updateRecording(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  state: SessionRecordingState;
+  storageKey?: string | null;
+  sizeBytes?: number | null;
+  durationSeconds?: number | null;
+  reason?: string | null;
+  finalized?: boolean;
+}): Promise<SessionRecordingRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const set: Partial<typeof schema.sessionRecordings.$inferInsert> = { state: input.state };
+    if (input.storageKey !== undefined) set.storageKey = input.storageKey;
+    if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
+    if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
+    if (input.reason !== undefined) set.reason = input.reason;
+    if (input.finalized || input.state === "available" || input.state === "failed") {
+      set.finalizedAt = new Date();
+    }
+    const [row] = await scopedDb.update(schema.sessionRecordings)
+      .set(set)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+        eq(schema.sessionRecordings.id, input.recordingId),
+      ))
+      .returning();
+    return row ? mapRecording(row) : null;
+  });
+}
+
+export async function getRecording(db: Database, workspaceId: string, recordingId: string): Promise<SessionRecordingRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, workspaceId),
+        eq(schema.sessionRecordings.id, recordingId),
+      ))
+      .limit(1);
+    return row ? mapRecording(row) : null;
+  });
+}
+
+export async function listRecordings(db: Database, workspaceId: string, sessionId: string): Promise<SessionRecordingRow[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, workspaceId),
+        eq(schema.sessionRecordings.sessionId, sessionId),
+      ))
+      .orderBy(desc(schema.sessionRecordings.createdAt));
+    return rows.map(mapRecording);
+  });
+}
+
+// ============================================================================
 // Sandbox singleton lease — the SOLE enforcer of one-box-per-group (P1.1).
 //
 // Group-keyed (workspace_id, sandbox_group_id) from the start. The sole

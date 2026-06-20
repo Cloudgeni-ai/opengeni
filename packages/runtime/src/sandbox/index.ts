@@ -100,6 +100,25 @@ export {
   type ExposeStreamPortResult,
 } from "./stream-port";
 
+// P4.3 recording loop — plain functions over a live session handle (no agent
+// loop); finalize reads bytes + PUTs to storage in the holding process (F10).
+export {
+  startRecording,
+  stopRecording,
+  readRecordingBytes,
+  deleteRecordingArtifacts,
+  recordingStorageKey,
+  contentTypeForCodec,
+  extForCodec,
+  RecordingUnavailableError,
+  RecordingError,
+  type RecordingCodec,
+  type RecordingContentType,
+  type StartRecordingInput,
+  type RecordingProcess,
+  type FinalizeRecordingResult,
+} from "./recording";
+
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
  * driven (the old flat if/else is gone): the backend's ProviderRegistration owns
