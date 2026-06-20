@@ -20,6 +20,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateEnvironmentAttachment } from "./environments";
+import { assertConfiguredModel } from "./sessions";
 import {
   normalizeResources,
   validateFileResources,
@@ -268,6 +269,12 @@ async function validateScheduledTaskAgentConfig(input: {
   workspaceId: string;
   toolsProvided?: boolean;
 }): Promise<ScheduledTaskAgentConfig> {
+  // Reject a curated-out model before touching the DB: a scheduled task is a
+  // session the worker runs later, so it must pass the same allow-list as the
+  // session choke points (a `scheduled_tasks:manage` holder could otherwise set
+  // a model the host does not expose). An omitted model inherits the host
+  // default downstream, which is always configured.
+  assertConfiguredModel(input.settings, input.payload.agentConfig.model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(input.db, input.workspaceId, input.settings);
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);

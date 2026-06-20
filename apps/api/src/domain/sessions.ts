@@ -230,9 +230,11 @@ export function workflowIdForSession(sessionId: string): string {
  * `model` is the explicit, caller-supplied value (null/undefined when omitted).
  * An omitted model defaults to `settings.openaiModel` downstream — which is
  * always first in `configuredAllowedModels` — so only an explicit value is
- * checked. Centralized here so the three model-carrying choke points
- * (create-session, user-message/turn-accept, queued-turn update) and the MCP
- * surfaces that share them validate identically and cannot drift.
+ * checked. Centralized here so every model-carrying choke point
+ * (create-session, user-message/turn-accept, queued-turn update, and
+ * scheduled-task agentConfig — a scheduled task is a session the worker runs
+ * later) and the MCP surfaces that share them validate identically and cannot
+ * drift.
  */
 export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
   if (model === null || model === undefined) {
