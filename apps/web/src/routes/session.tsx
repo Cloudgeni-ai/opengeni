@@ -211,7 +211,10 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { selectedCapabilityToolIds, model, reasoningEffort } = context;
+  const { selectedCapabilityToolIds, reasoningEffort } = context;
+  // The model is session-scoped: this session remembers its own pick (falling
+  // back to the deployment default), so a switch here doesn't bleed into others.
+  const model = context.modelForSession(props.session.id);
   const composer = useComposer(props.session.id, {
     // Evaluated at send time: attachments and tools picked while the draft was
     // being written ride along with the message.
@@ -342,10 +345,10 @@ function SessionChatPane(props: {
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker
                   config={context.clientConfig}
-                  model={context.model}
+                  model={model}
                   effort={context.reasoningEffort}
                   disabled={composer.sending}
-                  onModelChange={context.setModel}
+                  onModelChange={(value) => context.setModelForSession(props.session.id, value)}
                   onEffortChange={context.setReasoningEffort}
                 />
                 <EnabledMcpToolPicker

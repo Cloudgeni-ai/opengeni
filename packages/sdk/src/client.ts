@@ -10,6 +10,7 @@ import type {
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
+  ClientConfig,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -403,6 +404,17 @@ export class OpenGeniClient {
   }
 
   // --- Access + workspaces -----------------------------------------------------
+
+  /**
+   * The deployment's public client bootstrap config: the host-exposed models
+   * (provider-grouped in `models`, flat in `allowedModels` for back-compat),
+   * reasoning efforts, MCP servers, file-upload limits, and how the client is
+   * expected to authenticate. Drives a composer's model picker without prior
+   * knowledge of the host setup; safe to call before any auth is established.
+   */
+  async getClientConfig(): Promise<ClientConfig> {
+    return await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+  }
 
   /** The caller's access context: subject, account + workspace grants, defaults. */
   async getAccessContext(): Promise<AccessContext> {

@@ -30,6 +30,7 @@ import {
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
+  summarizeForCompaction,
   type SandboxFileDownload,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -365,6 +366,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
+      // Multi-provider per-turn model routing. When turn.model is in the
+      // provider registry, this gives the provider-bound Model instance + the
+      // gating (compaction mode, hosted web search, encrypted reasoning, context
+      // window) the agent and compaction summarizer must use; null falls back to
+      // the legacy global-client path (runSettings.openaiModel + the default
+      // client configureOpenAI set up). Cost accounting already covers registry
+      // models via configuredModelPricing.
+      const resolvedModel = runtime.resolveTurnModel(runSettings, turn.model);
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       const turnTools = mergeToolRefs(session.tools, turn.tools);
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
@@ -390,6 +399,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        // Resolved-model routing (legacy global-client path when null). The
+        // provider-bound Model instance plus its gating: server-side store/
+        // compaction follow the provider's compaction mode (registry providers
+        // resolve to "client"); encrypted reasoning is only round-tripped on the
+        // Responses wire API; hosted web search is attached only when the model
+        // opts in; the effective context window drives the compaction threshold.
+        ...(resolvedModel
+          ? {
+            model: resolvedModel.model,
+            compactionMode: resolvedModel.provider.compactionMode,
+            hostedWebSearch: resolvedModel.configured.hostedWebSearch,
+            encryptedReasoning: resolvedModel.provider.api === "responses" && runSettings.openaiReasoningEncryptedContent,
+            contextWindowTokens: resolvedModel.configured.contextWindowTokens ?? runSettings.contextWindowTokens,
+          }
+          : {}),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceEnvironment
@@ -422,7 +446,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             runSettings,
             { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId },
             session.lastInputTokens,
-            undefined,
+            // Provider-aware summarizer: when the turn's model resolved to a
+            // registry provider, summarize on THAT provider's client + wire API
+            // (a chat provider can't summarize through OpenAI/Azure). Null
+            // resolution keeps the default built-in Responses summarizer.
+            resolvedModel
+              ? (s, m) => summarizeForCompaction(s, m, {
+                client: resolvedModel.client,
+                api: resolvedModel.provider.api,
+                model: resolvedModel.configured.id,
+                maxOutputTokens: s.contextSummaryMaxTokens,
+              })
+              : undefined,
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {

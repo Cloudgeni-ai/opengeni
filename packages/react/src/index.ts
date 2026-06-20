@@ -43,6 +43,8 @@ export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
+export { useAvailableModels } from "./hooks/use-available-models";
+export type { UseAvailableModelsOptions, UseAvailableModelsResult } from "./hooks/use-available-models";
 
 // Pending-approvals projection
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
@@ -103,6 +105,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { ModelPicker } from "./components/model-picker";
+export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";

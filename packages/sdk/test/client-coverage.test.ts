@@ -320,6 +320,34 @@ describe("OpenGeniClient access + workspaces", () => {
     ]);
     expect(JSON.parse(requests[4]!.body!)).toEqual({ name: "Ops 2", slug: null });
   });
+
+  test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
+    const config = {
+      deploymentRevision: "rev-1",
+      defaultModel: "gpt-5.5",
+      allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
+      models: [
+        { id: "gpt-5.5", label: "GPT-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses", contextWindowTokens: 400000 },
+        { id: "accounts/fireworks/models/glm-5p2", label: "GLM 5.2", provider: "fireworks", providerLabel: "Fireworks AI", api: "chat", contextWindowTokens: 1048576 },
+      ],
+      defaultReasoningEffort: "medium",
+      allowedReasoningEfforts: ["low", "medium", "high"],
+      mcpServers: [{ id: "documents", name: "Documents" }],
+      fileUploads: { enabled: true, maxSizeBytes: 26214400 },
+      productAccessMode: "managed",
+      auth: { mode: "managedSession", session: "cookie" },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(config));
+    const result = await client.getClientConfig();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("GET");
+    expect(new URL(requests[0]!.url).pathname).toBe("/v1/config/client");
+    expect(result.defaultModel).toBe("gpt-5.5");
+    expect(result.models.map((model) => `${model.provider}:${model.id}:${model.api}`)).toEqual([
+      "openai:gpt-5.5:responses",
+      "fireworks:accounts/fireworks/models/glm-5p2:chat",
+    ]);
+  });
 });
 
 describe("OpenGeniClient scheduled tasks", () => {

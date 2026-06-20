@@ -77,6 +77,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
         outputMicrosPerMillionTokens: 1,
       },
     }),
+    modelProvidersJson: "[]",
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh",
     openaiResponsesTransport: "http",

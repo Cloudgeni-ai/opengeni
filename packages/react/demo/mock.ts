@@ -11,6 +11,7 @@
 import type {
   BillingUsageResponse,
   CapabilityPack,
+  ClientConfig,
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnablePackRequest,
@@ -118,6 +119,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       this.buses.set(sessionId, bus);
     }
     return bus;
+  }
+
+  async getClientConfig(): Promise<ClientConfig> {
+    return CLIENT_CONFIG;
   }
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
@@ -562,6 +567,35 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
 /* --- fixtures ------------------------------------------------------------------ */
 
 const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+/**
+ * A two-provider deployment config so the demo composer exercises the
+ * <ModelPicker>: the built-in OpenAI provider serving gpt-5.5 (the default,
+ * `responses` wire API) plus a Fireworks AI registry provider serving GLM 5.2
+ * (`chat` wire API) — exactly the host config example in model-providers.md.
+ */
+const CLIENT_CONFIG: ClientConfig = {
+  deploymentRevision: "demo",
+  defaultModel: "gpt-5.5",
+  allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
+  models: [
+    { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+    {
+      id: "accounts/fireworks/models/glm-5p2",
+      label: "GLM 5.2",
+      provider: "fireworks",
+      providerLabel: "Fireworks AI",
+      api: "chat",
+      contextWindowTokens: 1_048_576,
+    },
+  ],
+  defaultReasoningEffort: "medium",
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
+  fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
+  productAccessMode: "managed",
+  auth: { mode: "none" },
+};
 
 function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
   const now = new Date(Date.now() - (10 - position) * 60_000).toISOString();

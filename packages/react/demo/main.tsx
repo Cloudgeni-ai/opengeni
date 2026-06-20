@@ -7,6 +7,7 @@ import {
   MessageTimeline,
   OpenGeniProvider,
   SessionStatus,
+  useAvailableModels,
   useComposer,
   useOpenGeni,
   useScheduledTasks,
@@ -59,7 +60,16 @@ function OpsChannel() {
   const { client, workspaceId } = useOpenGeni();
   const { session } = useSession(MANAGER_SESSION_ID, { pollIntervalMs: 5000 });
   const { timeline, sessionStatus, connectionState } = useSessionEvents(MANAGER_SESSION_ID);
-  const composer = useComposer(MANAGER_SESSION_ID);
+  // Host-exposed models for the composer's <ModelPicker>; preselect the
+  // deployment default once it loads, then let the operator switch.
+  const { models, defaultModel } = useAvailableModels();
+  const [selectedModel, setSelectedModel] = useState<string | undefined>(undefined);
+  const model = selectedModel ?? defaultModel ?? undefined;
+  // Thread the chosen model into every send via sendExtras (evaluated at send
+  // time so it always reflects the current selection).
+  const composer = useComposer(MANAGER_SESSION_ID, {
+    sendExtras: () => (model ? { model } : {}),
+  });
   const status = sessionStatus ?? session?.status ?? null;
   // Surface the slash-command palette (type "/"): operator controls on this
   // session. The demo operator holds full control.
@@ -90,7 +100,16 @@ function OpsChannel() {
         onOpenSession={(sessionId) => window.alert(`Open worker session ${sessionId}`)}
       />
       <div className="shrink-0 px-4 pb-4 pt-1">
-        <ChatComposer composer={composer} status={status} placeholder="Message your infrastructure…" autoFocus commandContext={commandContext} />
+        <ChatComposer
+          composer={composer}
+          status={status}
+          placeholder="Message your infrastructure…"
+          autoFocus
+          commandContext={commandContext}
+          models={models}
+          selectedModel={model}
+          onSelectModel={setSelectedModel}
+        />
       </div>
     </section>
   );

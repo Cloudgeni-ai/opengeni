@@ -282,6 +282,53 @@ export type Permission = KnownPermission | (string & {});
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
+/**
+ * One model a client may select at send time, plus the provider that serves it.
+ * The wire API (`responses` | `chat`) lets a client reason about provider
+ * capabilities; the provider id/label drive a picker's grouping. Mirrors the
+ * `ClientModel` shape projected into `ClientConfig` by the server.
+ */
+export type ClientModel = {
+  id: string;
+  label: string;
+  /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
+  provider: string;
+  providerLabel: string;
+  api: "responses" | "chat";
+  contextWindowTokens?: number | undefined;
+};
+
+/**
+ * How a deployment expects clients to authenticate to it, surfaced so a UI can
+ * wire up the right header/cookie without prior knowledge of the host setup.
+ * Discriminated on `mode`; `none` is the back-compat default.
+ */
+export type ClientAuthConfig =
+  | { mode: "none" }
+  | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
+  | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
+  | { mode: "managedSession"; session: "cookie" };
+
+/**
+ * Public, unauthenticated-by-default client bootstrap config returned by
+ * `GET /v1/config/client`: which models + reasoning efforts are exposed, the
+ * MCP servers and file-upload limits a composer should offer, and how the
+ * deployment expects the client to authenticate. `allowedModels` is kept for
+ * back-compat; `models` carries the richer provider-grouped list for a picker.
+ */
+export type ClientConfig = {
+  deploymentRevision: string;
+  defaultModel: string;
+  allowedModels: string[];
+  models: ClientModel[];
+  defaultReasoningEffort: ReasoningEffort;
+  allowedReasoningEfforts: ReasoningEffort[];
+  mcpServers: { id: string; name: string }[];
+  fileUploads: { enabled: boolean; maxSizeBytes: number };
+  productAccessMode: ProductAccessMode;
+  auth: ClientAuthConfig;
+};
+
 export type AccountRole = "owner" | "admin" | "member";
 
 export type AccountGrant = {

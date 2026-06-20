@@ -1454,10 +1454,30 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;
 
+/**
+ * A single host-exposed model + the provider that serves it, as surfaced to
+ * clients (SDK + React composer) by GET /v1/config/client. The wire `api`
+ * ("responses" | "chat") lets a client reason about provider capabilities; the
+ * provider id/label drive the picker's grouping. This mirrors the runtime's
+ * ConfiguredModel (packages/config) projected to the client-safe fields.
+ */
+export const ClientModel = z.object({
+  id: z.string(),
+  label: z.string(),
+  provider: z.string(),        // provider id
+  providerLabel: z.string(),
+  api: z.enum(["responses", "chat"]),
+  contextWindowTokens: z.number().int().positive().optional(),
+});
+export type ClientModel = z.infer<typeof ClientModel>;
+
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),
   defaultModel: z.string(),
   allowedModels: z.array(z.string()).min(1),
+  // Richer model list (provider-grouped) for the picker. Defaults to [] for
+  // back-compat: callers that only read allowedModels are unaffected.
+  models: z.array(ClientModel).default([]),
   defaultReasoningEffort: ReasoningEffort,
   allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
   mcpServers: z.array(z.object({

@@ -20,6 +20,34 @@ import {
 import { cn } from "@/lib/utils";
 import type { ClientConfig } from "@/types";
 
+/**
+ * One row in the model dropdown: the id sent to the host plus the display label
+ * and the provider section it belongs under. Derived from the host-exposed
+ * {@link ClientConfig.models} (provider-grouped, with labels) when present, and
+ * falls back to the flat {@link ClientConfig.allowedModels} id list on older
+ * hosts (no provider grouping, label === id). Always includes the currently
+ * selected model so a stale/curated-out choice still renders its own row.
+ */
+type ModelChoice = { id: string; label: string; providerLabel: string | null };
+
+function modelChoices(config: ClientConfig | null, selected: string): ModelChoice[] {
+  const rich = config?.models ?? [];
+  const choices: ModelChoice[] = rich.length > 0
+    ? rich.map((model) => ({ id: model.id, label: model.label, providerLabel: model.providerLabel }))
+    : (config?.allowedModels ?? [selected]).map((id) => ({ id, label: displayModel(id), providerLabel: null }));
+  // Guarantee the active selection is always offered, even if the host has since
+  // curated it out of the exposed list (mirrors the old `[props.model]` fallback).
+  if (!choices.some((choice) => choice.id === selected)) {
+    choices.unshift({ id: selected, label: displayModel(selected), providerLabel: null });
+  }
+  return choices;
+}
+
+/** Trigger label for the active model: its display label from the exposed list. */
+function selectedModelLabel(choices: ModelChoice[], selected: string): string {
+  return choices.find((choice) => choice.id === selected)?.label ?? displayModel(selected);
+}
+
 export function ModelPicker(props: {
   config: ClientConfig | null;
   model: string;
@@ -30,7 +58,7 @@ export function ModelPicker(props: {
 }) {
   const allowedEfforts = props.config?.allowedReasoningEfforts.filter(isUiReasoningEffort) ?? uiReasoningEffortOrder;
   const effortOptions = uiReasoningEffortOrder.filter((option) => allowedEfforts.includes(option));
-  const modelOptions = props.config?.allowedModels ?? [props.model];
+  const choices = modelChoices(props.config, props.model);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -42,9 +70,9 @@ export function ModelPicker(props: {
           aria-label="Model and effort"
           className="h-8 max-w-[14rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]"
         >
-          <span className="font-medium text-[color:var(--color-fg)]">{displayModel(props.model)}</span>
+          <span className="truncate font-medium text-[color:var(--color-fg)]">{selectedModelLabel(choices, props.model)}</span>
           <span>{labelEffort(props.effort)}</span>
-          <ChevronDownIcon className="size-3" />
+          <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-56 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl">
@@ -57,14 +85,41 @@ export function ModelPicker(props: {
         ))}
         <DropdownMenuSeparator className="my-2 bg-[color:var(--color-border)]" />
         <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">Model</DropdownMenuLabel>
-        {modelOptions.map((option) => (
-          <DropdownMenuItem key={option} onSelect={() => props.onModelChange(option)} className="h-8 cursor-pointer rounded-md px-2 text-sm">
-            <span>{option}</span>
-            {option === props.model ? <CheckIcon className="ml-auto size-4" /> : null}
-          </DropdownMenuItem>
+        {choices.map((choice, index) => (
+          <ModelChoiceRow
+            key={choice.id}
+            choice={choice}
+            // Repeat a provider heading only when it changes from the row above,
+            // so multi-provider lists read as grouped sections; single-provider
+            // (and the flat allowedModels fallback) shows no heading at all.
+            showProviderLabel={choice.providerLabel !== null && choice.providerLabel !== choices[index - 1]?.providerLabel}
+            selected={choice.id === props.model}
+            onSelect={() => props.onModelChange(choice.id)}
+          />
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function ModelChoiceRow(props: {
+  choice: ModelChoice;
+  showProviderLabel: boolean;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <>
+      {props.showProviderLabel ? (
+        <DropdownMenuLabel className="px-2 pt-1 pb-0.5 text-[10px] font-normal uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+          {props.choice.providerLabel}
+        </DropdownMenuLabel>
+      ) : null}
+      <DropdownMenuItem onSelect={props.onSelect} className="h-8 cursor-pointer rounded-md px-2 text-sm">
+        <span className="truncate">{props.choice.label}</span>
+        {props.selected ? <CheckIcon className="ml-auto size-4 shrink-0" /> : null}
+      </DropdownMenuItem>
+    </>
   );
 }
 
