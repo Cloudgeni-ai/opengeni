@@ -33,6 +33,9 @@ import {
 } from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
+  ensureDisplayStack as ensureDisplayStackOnBox,
+  desktopCapableBackend,
+  DisplayStackUnsupportedError,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
@@ -268,27 +271,48 @@ async function waitForWarmOrReacquire(
 }
 
 // ============================================================================
-// Channel-B display-stack stubs (P1.2 placeholders; real bodies land in P4.1).
+// Channel-B display-stack launch (P4.1 — ensureDisplayStack is now real).
 //
-// Idempotent + callable by ANY worker on the resumed handle. No-op when the
-// session tier is not desktop (the HEADLESS ROLLOVER branch, I5): until P4.x
-// wires the desktop tier, these are inert so the headless turn path is
-// unchanged. They are called by the spawner branch of resumeBoxForTurn so the
-// seam exists now; flipping them on is a P4 concern.
+// Idempotent + callable by ANY worker on the resumed handle (and by the API on a
+// viewer op). When the desktop tier is OFF (sandboxDesktopEnabled=false) or the
+// backend is headless-only, this is a NO-OP — the HEADLESS ROLLOVER branch (I5),
+// so the headless turn path is byte-for-byte unchanged. When the tier is ON for
+// a desktop-capable backend, it execs the canonical opengeni-desktop-up under an
+// in-box flock (re-establishes after a rollover; safe to call N times).
+// `exposeStreamPort` real body remains a P4.2 concern.
 // ============================================================================
 
 /**
- * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc -> websockify:6080)
- * is up on the live box. Idempotent (a P4 body probes the box and re-runs at
- * most once). NO-OP today: there is no desktop tier yet, so a headless turn
- * never launches a display stack. Real body: P4.1.
+ * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc -viewonly ->
+ * websockify:6080 -> noVNC) is up on the live box. Idempotent: the in-box flock +
+ * the up-script's per-stage PID guards make a second call a no-op. NO-OP when the
+ * desktop tier is disabled or the backend cannot serve a desktop (degradation is
+ * a value: a headless-only session simply skips the stack). Delegates to the
+ * agent-loop-free leaf (@opengeni/runtime/sandbox display-stack).
  */
 export async function ensureDisplayStack(
-  _settings: Settings,
-  _established: EstablishedSandboxSession,
+  settings: Settings,
+  established: EstablishedSandboxSession,
 ): Promise<void> {
-  // Headless rollover branch (I5): tier !== desktop -> no display stack.
-  return;
+  // Headless rollover branch (I5): the tier is off OR the backend is
+  // headless-only -> no display stack. Behavior-preserving for the headless path.
+  if (!settings.sandboxDesktopEnabled) {
+    return;
+  }
+  if (!desktopCapableBackend(established.backendId)) {
+    return;
+  }
+  try {
+    await ensureDisplayStackOnBox(established.session);
+  } catch (error) {
+    // A box that genuinely can't run commands degrades to Channel-A-only rather
+    // than failing the whole turn (the desktop is a value-add, not load-bearing
+    // for the agent's work). A real stage failure (DisplayStackError) propagates.
+    if (error instanceof DisplayStackUnsupportedError) {
+      return;
+    }
+    throw error;
+  }
 }
 
 /**

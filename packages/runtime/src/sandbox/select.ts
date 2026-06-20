@@ -67,6 +67,33 @@ export function backendSupportsOs(descriptor: CapabilityDescriptor, os: SandboxO
 }
 
 /**
+ * True iff the backend can serve the Channel-B desktop pixel plane at all — i.e.
+ * its static descriptor advertises DesktopStream as available. The gate the
+ * worker / API use before launching the display stack (so a headless-only
+ * backend like cloudflare/vercel/none never tries). This is the STATIC
+ * feasibility only; the runtime `sandboxDesktopEnabled` policy toggle and the
+ * stream-token-secret gate are layered on by the caller / negotiateCapabilities.
+ *
+ * Accepts EITHER the SandboxBackend enum value (e.g. "local") OR the SDK
+ * client backendId (e.g. "unix_local") — they diverge for the local backend —
+ * so a caller holding only `established.backendId` resolves correctly.
+ */
+export function desktopCapableBackend(backend: SandboxBackend | string): boolean {
+  const direct = CAPABILITY_DESCRIPTORS[backend as SandboxBackend];
+  if (direct) {
+    return direct.capabilities.DesktopStream.available === true;
+  }
+  // Fall back to a backendId lookup (the SDK client id, which differs from the
+  // enum key for `local`/`unix_local`).
+  for (const descriptor of Object.values(CAPABILITY_DESCRIPTORS)) {
+    if (descriptor.backendId === backend) {
+      return descriptor.capabilities.DesktopStream.available === true;
+    }
+  }
+  return false;
+}
+
+/**
  * Negotiate a coherent SessionCapabilities document for (backend, os). Every
  * capability is reported with availability + a reason-when-unavailable; nothing
  * is ever absent. The reason precedence is: os_unsupported (the OS axis can't be

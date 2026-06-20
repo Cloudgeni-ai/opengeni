@@ -55,6 +55,7 @@ export {
 export {
   selectBackend,
   backendSupportsOs,
+  desktopCapableBackend,
   negotiateCapabilities,
   type NegotiationContext,
 } from "./select";
@@ -69,6 +70,23 @@ export {
   type MintStreamTokenInput,
   type StreamTokenPayloadType,
 } from "./stream-token";
+
+// The Channel-B desktop display-stack launcher (P4.1). Exec-launched,
+// flock-idempotent; the worker (per-turn) and the API (per viewer op) both drive
+// it from this leaf to bring up Xvfb -> XFCE -> x11vnc -viewonly -> websockify:6080.
+export {
+  STREAM_PORT,
+  DISPLAY_STACK_TIMEOUT_MS,
+  DEFAULT_DESKTOP_GEOMETRY,
+  DisplayStackError,
+  DisplayStackUnsupportedError,
+  buildDisplayStackScript,
+  ensureDisplayStack,
+  tearDownDisplayStack,
+  type DesktopGeometry,
+  type EnsureDisplayStackOptions,
+  type EnsureDisplayStackResult,
+} from "./display-stack";
 
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
