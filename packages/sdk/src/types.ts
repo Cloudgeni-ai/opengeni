@@ -343,8 +343,17 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Sandbox-surfacing (mirror of @opengeni/contracts Permission). stream:view is
+  // strictly broader than sessions:read (un-redacted pixels); stream:control is
+  // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak
+  // consent gate.
+  "stream:view",
+  "stream:control",
+  "stream:acknowledge",
   "files:upload",
   "files:read",
+  "files:write",
+  "terminal:attach",
   "documents:manage",
   "documents:search",
   "scheduled_tasks:manage",

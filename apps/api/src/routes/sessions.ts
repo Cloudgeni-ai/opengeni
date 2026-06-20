@@ -9,7 +9,7 @@ import {
   ViewerHeartbeatRequest,
   type SandboxBackend,
 } from "@opengeni/contracts";
-import { resolveContextCompactionMode } from "@opengeni/config";
+import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
   clearSessionContext,
@@ -387,6 +387,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       liveness: lease?.liveness ?? "cold",
       leaseEpoch: lease?.leaseEpoch ?? 0,
       desktopEnabled: settings.sandboxDesktopEnabled,
+      // Graceful degrade (I8/OD-8): if desktop is enabled but no stream-token
+      // secret is resolvable, the desktop cell reports transport:null rather
+      // than advertising a plane we can never authorize.
+      streamTokenSecretAvailable: !streamTokenDegraded(settings),
     });
     return c.json(capabilities);
   });

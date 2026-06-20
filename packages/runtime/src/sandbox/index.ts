@@ -59,6 +59,17 @@ export {
   type NegotiationContext,
 } from "./select";
 
+// Scoped data-plane stream-token mint/verify (P3.1). Agent-loop-free; the API
+// pulls these from this leaf to authorize the desktop pixel plane.
+export {
+  STREAM_TOKEN_DEFAULT_TTL_SECONDS,
+  mintStreamToken,
+  verifyStreamToken,
+  StreamTokenPayload,
+  type MintStreamTokenInput,
+  type StreamTokenPayloadType,
+} from "./stream-token";
+
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
  * driven (the old flat if/else is gone): the backend's ProviderRegistration owns

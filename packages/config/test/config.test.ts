@@ -12,11 +12,13 @@ import {
   parseStaticUsageLimitsJson,
   parseMcpServers,
   requiredSandboxEnvForBackend,
+  resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
   startupRetryOptions,
+  streamTokenDegraded,
 } from "../src";
 
 describe("sandbox preparation profiles", () => {
@@ -159,6 +161,63 @@ describe("sandbox preparation profiles", () => {
       OPENGENI_AUTH_REQUIRED: "true",
       OPENGENI_ACCESS_KEY: "configured-shared-key",
     }, () => getSettings()).productAccessMode).toBe("configured");
+  });
+
+  test("stream-token secret resolves explicit first, then falls back to delegationSecret", () => {
+    const explicit = withEnv({
+      OPENGENI_DELEGATION_SECRET: "delegation",
+      OPENGENI_STREAM_TOKEN_SECRET: "stream-explicit",
+    }, () => getSettings());
+    expect(resolveStreamTokenSecret(explicit)).toBe("stream-explicit");
+
+    const fallback = withEnv({
+      OPENGENI_DELEGATION_SECRET: "delegation-only",
+    }, () => getSettings());
+    expect(resolveStreamTokenSecret(fallback)).toBe("delegation-only");
+
+    const neither = withEnv({}, () => getSettings());
+    expect(resolveStreamTokenSecret(neither)).toBeUndefined();
+  });
+
+  test("desktop enabled WITHOUT a stream-token secret GRACEFULLY DEGRADES (boots + warns, no throw)", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      // The whole point of I8/OD-8: desktop on + no secret is NOT a boot-fail.
+      // getSettings() returns settings (does not throw), emits a loud warning,
+      // and streamTokenDegraded() flags the runtime degrade to transport:null.
+      const settings = withEnv({
+        OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+        OPENGENI_DELEGATION_SECRET: "",
+      }, () => getSettings());
+      expect(settings.sandboxDesktopEnabled).toBe(true);
+      expect(streamTokenDegraded(settings)).toBe(true);
+      expect(warnings.some((line) => line.includes("GRACEFULLY DEGRADE"))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("desktop enabled WITH a stream-token secret does not degrade and does not warn", () => {
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      const settings = withEnv({
+        OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+        OPENGENI_STREAM_TOKEN_SECRET: "stream-secret",
+      }, () => getSettings());
+      expect(streamTokenDegraded(settings)).toBe(false);
+      expect(warnings.some((line) => line.includes("GRACEFULLY DEGRADE"))).toBe(false);
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("streamControlEnabled defaults to false (the input plane is OFF in v1)", () => {
+    expect(withEnv({}, () => getSettings()).streamControlEnabled).toBe(false);
+    expect(withEnv({ OPENGENI_STREAM_CONTROL_ENABLED: "true" }, () => getSettings()).streamControlEnabled).toBe(true);
   });
 
   test("retries startup dependency operations with bounded backoff", async () => {

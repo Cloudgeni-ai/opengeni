@@ -399,8 +399,28 @@ export const Permission = z.enum([
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Sandbox-surfacing (master-spine §C.3 / crosscut PART 1.2). stream:view is a
+  // REAL, distinct permission — strictly BROADER than sessions:read — because the
+  // pixel plane (Channel B) is UN-REDACTED: a viewer of raw pixels can see cloud
+  // creds the agent cat's into a terminal, which the redacted Channel-A event log
+  // never exposes. sessions:read is NOT permission to watch raw pixels.
+  "stream:view",
+  // SEPARATE from stream:view: raw input to the desktop (bypasses approvalQueue /
+  // interrupt). NEVER granted by default in v1 (the input plane is OFF —
+  // streamControlEnabled=false); the permission exists so later hardening is a
+  // flag flip, not a redesign.
+  "stream:control",
+  // Accept the pixel-plane secret-leak acknowledgment (consent gate before the
+  // un-redacted desktop URL is handed out).
+  "stream:acknowledge",
   "files:upload",
   "files:read",
+  // Channel-A structured write surface (FS writes / apply-patch); distinct from
+  // files:read so a read-only viewer can't mutate the box filesystem.
+  "files:write",
+  // Attach to an interactive PTY (terminal-as-pty, Channel A); distinct from
+  // sessions:read which only reads the command-output firehose.
+  "terminal:attach",
   "documents:manage",
   "documents:search",
   "scheduled_tasks:manage",
@@ -523,6 +543,84 @@ export async function verifyDelegatedAccessToken(secret: string, token: string, 
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
+// --- Scoped data-plane stream token (master-spine §C.3 / crosscut PART 1.3) ---
+//
+// REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
+// base64Url + hmacSha256Base64Url) — NOT a second crypto — but with a distinct
+// `ogs_` prefix and a HARD-NARROW claim set. The token is a CLAIM the OpenGeni
+// control plane mints; it is NOT the provider's tunnel secret. The browser
+// receives { providerUrl, streamToken }; the provider tunnel URL is the
+// transport, the streamToken is what the in-box edge validates (websockify
+// TokenFile is later-hardening; in v1 the URL's short TTL + the acknowledged
+// stream:view gate are the real boundary). The token is minted + recorded
+// against the holder from day one. It is NEVER appended to the URL as a query
+// param (the provider's own scoped token already lives in the URL).
+//
+// `leaseEpoch` is the fence: when the box is re-elected (warming→warm bumps the
+// epoch) the URL is re-minted with epoch+1 and the old tunnel is torn down, so a
+// stale token points at a dead tunnel. Epoch mismatch is enforced at USE (by the
+// caller comparing the claim against the live lease), not inside verify.
+export const StreamTokenPayload = z.object({
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  // Identifies the sandbox_lease_holders row (the viewer holder).
+  viewerId: z.string().uuid(),
+  // Fence: the token logically dies when the box is re-elected (epoch++).
+  leaseEpoch: z.number().int().nonnegative(),
+  // v1 is always "view"; "control" is the never-granted raw-input plane.
+  mode: z.enum(["view", "control"]),
+  // 6080 (noVNC); pins the token to ONE exposed port.
+  port: z.number().int().positive(),
+  // Short TTL (120s default); rotation is event-driven under the epoch fence,
+  // not on a keepalive clock.
+  exp: z.number().int().positive(),
+});
+export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
+
+export async function signStreamToken(secret: string, payload: StreamTokenPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(StreamTokenPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `ogs_${encodedPayload}.${signature}`;
+}
+
+/**
+ * Verify a stream token: rejects (returns null) on a bad prefix, malformed
+ * envelope, bad HMAC signature (constant-time), schema-invalid claims, or an
+ * expired token (`exp < now`). Mirrors verifyDelegatedAccessToken exactly.
+ *
+ * The epoch fence (claim.leaseEpoch vs the LIVE lease epoch) and the
+ * workspace/session scope are checked by the CALLER at use against the live
+ * lease + route params — verify proves the token is authentic + unexpired, the
+ * caller proves it is for THIS box's current epoch and THIS workspace+session.
+ */
+export async function verifyStreamToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<StreamTokenPayload | null> {
+  if (!token.startsWith("ogs_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("ogs_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = StreamTokenPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }

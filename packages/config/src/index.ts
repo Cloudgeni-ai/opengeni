@@ -123,6 +123,16 @@ const SettingsSchema = z.object({
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
+  // Sandbox-surfacing scoped stream-token HMAC secret (master-spine §C.3 / I8).
+  // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
+  // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
+  // BOTH while sandboxDesktopEnabled=true is a GRACEFUL DEGRADE (DesktopStream
+  // transport:null + a loud boot warning), NOT a hard boot-fail (I8/OD-8).
+  streamTokenSecret: z.string().optional(),
+  // The desktop input plane (raw stream:control writes) is OFF in v1: even a
+  // holder of stream:control gets 403 until this flips. Keeps stream:control a
+  // declared-but-inert permission so later hardening is a flag flip.
+  streamControlEnabled: EnvBoolean.default(false),
   environmentsEncryptionKey: z.string().optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
@@ -561,6 +571,8 @@ export function getSettings(): Settings {
     staticEntitlementsJson: optional("OPENGENI_STATIC_ENTITLEMENTS_JSON"),
     staticUsageLimitsJson: optional("OPENGENI_STATIC_USAGE_LIMITS_JSON"),
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
+    streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
+    streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
@@ -1289,6 +1301,47 @@ function validateSettings(settings: Settings): void {
         + `reapable before the box idles out from under it (the provider idle-timeout is the backstop).`);
     }
   }
+  // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (I8) ---
+  // The desktop pixel plane needs an HMAC secret to mint scoped stream tokens.
+  // It is REQUIRED when desktop is enabled — but per OD-8 a missing secret is NOT
+  // a hard boot-fail: we emit a LOUD warning and the deployment ships with
+  // DesktopStream.transport:null (resolveStreamTokenSecret returns undefined ->
+  // negotiateCapabilities degrades the desktop cell). This keeps a desktop-
+  // configured deployment bootable (headless + Channel-A still work) instead of
+  // crashing the whole API on a missing secret.
+  if (settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined) {
+    console.warn(
+      "[opengeni] OPENGENI_SANDBOX_DESKTOP_ENABLED=true but neither OPENGENI_STREAM_TOKEN_SECRET nor "
+      + "OPENGENI_DELEGATION_SECRET is set: the desktop pixel plane will GRACEFULLY DEGRADE "
+      + "(DesktopStream.transport=null — no scoped stream tokens can be minted). Set "
+      + "OPENGENI_STREAM_TOKEN_SECRET to enable the live desktop stream.",
+    );
+  }
+}
+
+/**
+ * Resolve the secret used to sign/verify scoped stream tokens (master-spine
+ * §C.3). Falls back to `delegationSecret` (the same HMAC envelope family —
+ * `ogs_` vs `ogd_` prefix) so a deployment that already carries a delegation
+ * secret does not need a second one. Returns undefined when neither is set,
+ * which drives the graceful-degrade (DesktopStream.transport:null).
+ */
+export function resolveStreamTokenSecret(settings: Settings): string | undefined {
+  const explicit = settings.streamTokenSecret?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const delegation = settings.delegationSecret?.trim();
+  return delegation ? delegation : undefined;
+}
+
+/**
+ * True iff the desktop pixel plane must GRACEFULLY DEGRADE because desktop is
+ * enabled but no stream-token secret is resolvable (I8/OD-8). When true,
+ * negotiateCapabilities forces DesktopStream.transport:null.
+ */
+export function streamTokenDegraded(settings: Settings): boolean {
+  return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
 function splitCsv(raw: string): string[] {

@@ -26,6 +26,14 @@ export interface NegotiationContext {
   leaseEpoch: number;
   /** The deployment desktop toggle (settings.sandboxDesktopEnabled). */
   desktopEnabled: boolean;
+  /**
+   * Whether a scoped-stream-token secret is resolvable (I8/OD-8). When desktop
+   * is enabled but this is false (no streamTokenSecret AND no delegationSecret),
+   * the desktop plane GRACEFULLY DEGRADES to transport:null — the deployment
+   * boots, but the pixel plane cannot mint scoped tokens. Defaults to true so a
+   * caller that never threads it (e.g. headless tests) is unaffected.
+   */
+  streamTokenSecretAvailable?: boolean;
   /** Whether the viewer has acknowledged the un-redacted desktop pixels. */
   desktopAcknowledged?: boolean;
   /** Override the negotiation clock (tests). */
@@ -120,6 +128,13 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       // backend_unsupported for desktop.
       reason = descriptor.tier === "headless" ? "tier_headless" : "backend_unsupported";
     } else if (!ctx.desktopEnabled) {
+      available = false;
+      reason = "disabled_by_policy";
+    } else if (ctx.streamTokenSecretAvailable === false) {
+      // Graceful degrade (I8/OD-8): desktop is enabled + backend-capable, but no
+      // stream-token secret is resolvable, so no scoped token can be minted. The
+      // deployment boots; the desktop cell reports transport:null + a typed
+      // reason rather than crashing the API.
       available = false;
       reason = "disabled_by_policy";
     } else if (ctx.liveness === "cold") {

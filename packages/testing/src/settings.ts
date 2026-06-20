@@ -29,6 +29,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",
+    streamTokenSecret: undefined,
+    streamControlEnabled: false,
     environmentsEncryptionKey: undefined,
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
