@@ -1,10 +1,13 @@
 import {
+  AttachViewerRequest,
   ClearSessionContextRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   ReorderSessionTurnsRequest,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
+  ViewerHeartbeatRequest,
+  type SandboxBackend,
 } from "@opengeni/contracts";
 import { resolveContextCompactionMode } from "@opengeni/config";
 import {
@@ -23,10 +26,12 @@ import {
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
+import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
+import { attachViewer, detachViewer, heartbeatViewer, readGroupLease } from "../sandbox/viewer";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   normalizeResources,
@@ -339,6 +344,118 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     return c.json(accepted, 202);
+  });
+
+  // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────
+  //
+  // All IN-PROCESS: capability negotiation reads the descriptor + the group
+  // lease (liveness/epoch); viewer attach acquires a holder on the group lease
+  // and (when cold) spins the box up via resume-by-id — NO worker, NO Temporal.
+  // Gated behind sandboxOwnershipEnabled (the lease is inert with the flag off).
+  //
+  // ROUTE DISCIPLINE: requireAccessGrant BEFORE any Zod parse; explicit
+  // HTTPException(400) on a parse failure (never a raw ZodError → 500);
+  // HTTPException(409) on an epoch fence.
+
+  function assertOwnershipEnabled(): void {
+    if (!settings.sandboxOwnershipEnabled) {
+      // The viewer-holder lifecycle rides the sandbox lease, which is dormant
+      // until the flag flips per-environment. A 404 (not 403) keeps the route
+      // invisible while disabled — it does not exist for this deployment yet.
+      throw new HTTPException(404, { message: "sandbox ownership is not enabled for this deployment" });
+    }
+  }
+
+  // GET .../stream-capabilities — the capability-negotiation read. Returns the
+  // SessionCapabilities doc (descriptor + lease liveness/epoch + os), API-direct.
+  // The desktop URL/token stay null until P4 mints them (gated by liveness=cold
+  // until a box is warm); the read is non-mutating.
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+    const capabilities = negotiateCapabilities({
+      sessionId,
+      backend: session.sandboxBackend as SandboxBackend,
+      os: session.sandboxOs,
+      liveness: lease?.liveness ?? "cold",
+      leaseEpoch: lease?.leaseEpoch ?? 0,
+      desktopEnabled: settings.sandboxDesktopEnabled,
+    });
+    return c.json(capabilities);
+  });
+
+  // POST .../viewers — acquire a viewer holder (keeps the box warm while
+  // watched). Spins the box up in-process when cold.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid viewer attach request" });
+    }
+    const result = await attachViewer({ db, settings }, {
+      accountId: grant.accountId,
+      workspaceId,
+      session,
+      ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+    });
+    return c.json(result, 201);
+  });
+
+  // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId/heartbeat", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
+    }
+    const alive = await heartbeatViewer({ db, settings }, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      viewerId: c.req.param("viewerId"),
+      expectedEpoch: parsed.data.leaseEpoch,
+    });
+    return c.json({ alive });
+  });
+
+  // DELETE .../viewers/:viewerId — release the holder (idempotent).
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/viewers/:viewerId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId");
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    await detachViewer({ db, settings }, {
+      accountId: grant.accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      viewerId: c.req.param("viewerId"),
+    });
+    return c.body(null, 204);
   });
 }
 

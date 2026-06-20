@@ -2100,6 +2100,27 @@ export async function getSession(db: Database, workspaceId: string, sessionId: s
   });
 }
 
+/**
+ * Resolve ANY session that belongs to a shared-sandbox group (addendum 05 §D.3,
+ * stress (e)). Used by the create-session `sandbox:{groupId}` join path to (1)
+ * prove the group exists and (2) inherit its box's (backend, os).
+ *
+ * `workspaceId` is a MANDATORY access boundary, NOT optional: the group uuid is
+ * caller-supplied, so the workspace filter (inside RLS) is what forbids a
+ * cross-workspace join — a foreign group returns null → the caller 404s. The
+ * group uuid itself is never an authorization boundary. Returns the first member
+ * session (any one suffices to read the shared box's backend/os); null when the
+ * group has no session in this workspace.
+ */
+export async function getAnySessionInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Session | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)))
+      .limit(1);
+    return row ? mapSession(row) : null;
+  });
+}
+
 export async function listSessions(db: Database, workspaceId: string, limit = 50): Promise<Session[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.sessions)
@@ -2908,13 +2929,18 @@ export async function commitWarmingToWarm(db: Database, input: {
 }): Promise<{ committed: boolean; lease: LeaseSnapshot | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // resume_state is jsonb: the raw postgres driver does NOT auto-stringify a
+      // plain object bound for a jsonb column, so serialize to a JSON string and
+      // cast ::jsonb (null stays a real SQL null). Binding the object directly
+      // throws "string argument must be of type string" on the wire.
+      const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
       const rows = await scopedDb.execute<LeaseRow>(sql`
         update sandbox_leases set
           liveness          = 'warm',
           instance_id       = ${input.instanceId},
           data_plane_url    = ${input.dataPlaneUrl ?? null},
           resume_backend_id = ${input.resumeBackendId ?? null},
-          resume_state      = ${input.resumeState ?? null},
+          resume_state      = ${resumeStateJson}::jsonb,
           lease_epoch       = lease_epoch + 1,
           expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
           updated_at        = now()

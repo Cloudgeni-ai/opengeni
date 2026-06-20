@@ -533,6 +533,17 @@ function registerWorkspaceOrchestrationTools(
         // First-party MCP token permissions for the spawned session; every
         // permission must be held by this grant (validated in the domain).
         firstPartyMcpPermissions: z4.array(z4.string()).optional(),
+        // Shared-sandbox placement (addendum 05 §D). OMIT to share THIS box by
+        // default (a session-spawned session shares its creator's box); pass
+        // "new" for a fresh private box, or {groupId} (a sibling session's
+        // `sandboxGroupId` from a prior session_create response) to fan two
+        // workers into one box. A shared box means one filesystem/repo/desktop,
+        // N independent conversations. The group is workspace-scoped.
+        sandbox: z4.union([
+          z4.literal("shared"),
+          z4.literal("new"),
+          z4.object({ groupId: z4.string().uuid() }),
+        ]).optional(),
         // The parent (manager) session is auto-inferred from the caller's
         // worker-signed sessionId claim, so a spawned worker's completion wakes
         // its manager automatically. There is deliberately no caller-supplied

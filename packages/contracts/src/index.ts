@@ -1682,6 +1682,23 @@ export const CreateSessionRequest = z.object({
   // the orchestration/environment/github tools. Capped at creation: every
   // requested permission must be held by the creating grant (no escalation).
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
+  // today's behavior (a context-dependent default resolved server-side: from
+  // inside a session → "shared" with the creator's box, top-level → "new").
+  //   - "shared":  join the CREATOR's box. Requires a parent session (inferred
+  //                from the worker-signed sessionId claim, never caller-supplied);
+  //                top-level "shared" is a 422.
+  //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
+  //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager
+  //                fan-out). Validated workspace-scoped (cross-workspace → 404).
+  // A shared spawn inherits the box's (backend, os) — it is literally the same
+  // box; the child cannot pick its own backend. Cross-workspace sharing is
+  // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
+  sandbox: z.union([
+    z.literal("shared"),
+    z.literal("new"),
+    z.object({ groupId: z.string().uuid() }),
+  ]).optional(),
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
@@ -1831,6 +1848,45 @@ export const SessionCapabilities = z.object({
   negotiatedAt: z.string(),
 });
 export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
+
+// ── API-direct viewer attach (P1.4) ─────────────────────────────────────────
+// A viewer holds the GROUP lease (keeping the box warm while watched). These
+// shape the in-process attach/heartbeat/detach handlers. The scoped stream
+// token + the un-redacted-pixel acknowledgment are P3/P4 — here it is the
+// viewer-HOLDER lifecycle only.
+
+// POST .../viewers — acquire a viewer holder. An omitted viewerId mints a fresh
+// one (returned in the response, to carry through heartbeats + detach).
+export const AttachViewerRequest = z.object({
+  viewerId: z.string().uuid().optional(),
+});
+export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
+
+export const ViewerHolder = z.object({
+  viewerId: z.string().uuid(),
+  sandboxGroupId: z.string().uuid(),
+  liveness: z.enum(["cold", "warming", "warm", "draining"]),
+  // The epoch the viewer is fenced on; echoed back on heartbeats.
+  leaseEpoch: z.number().int().nonnegative(),
+  viewerHeartbeatIntervalMs: z.number().int().positive(),
+  // The desktop pixel tunnel URL the viewer connects to directly; null until
+  // P4 mints it (gated until then).
+  dataPlaneUrl: z.string().nullable(),
+});
+export type ViewerHolder = z.infer<typeof ViewerHolder>;
+
+// POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
+// a stale-epoch beat (a box re-established under a newer epoch) is rejected.
+export const ViewerHeartbeatRequest = z.object({
+  leaseEpoch: z.number().int().nonnegative(),
+});
+export type ViewerHeartbeatRequest = z.infer<typeof ViewerHeartbeatRequest>;
+
+export const ViewerHeartbeatResponse = z.object({
+  // false ⇒ the holder was reaped or the epoch is stale; the client re-attaches.
+  alive: z.boolean(),
+});
+export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
 
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),

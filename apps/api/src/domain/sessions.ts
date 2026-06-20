@@ -18,6 +18,8 @@ import {
   createSessionGoal,
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
+  getAnySessionInGroup,
+  getSession,
   getSessionByCreateIdempotencyKey,
   getSessionTurn,
   requireSession,
@@ -69,6 +71,10 @@ export async function createAndStartSession(input: {
   // session: a prior winner is returned as-is and the start flow below is
   // skipped, so the dup never re-emits events / re-enqueues a turn.
   createIdempotencyKey?: string | null;
+  // The shared-sandbox group this session's box joins (addendum 05 §D). Null/
+  // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
+  // shared/{groupId} spawn passes the resolved group so both run in ONE box.
+  sandboxGroupId?: string | null;
 }) {
   const sessionMetadata = {
     ...input.metadata,
@@ -99,6 +105,7 @@ export async function createAndStartSession(input: {
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
+      sandboxGroupId: input.sandboxGroupId ?? null,
     });
     if (!created) {
       return keyed;
@@ -117,6 +124,7 @@ export async function createAndStartSession(input: {
     environmentId: input.environment?.id ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     parentSessionId: input.parentSessionId ?? null,
+    sandboxGroupId: input.sandboxGroupId ?? null,
   });
   return await finishStartSession(input, session);
 }
@@ -405,6 +413,44 @@ export async function createSessionForRequest(
   // without holding sessions:control on it (a cross-session write escalation).
   // The claim is the only trustworthy parent source.
   const parentSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
+  //
+  // The DEFAULT rule is context-dependent and resolved server-side from the
+  // TRUSTED claim, never caller-supplied: when `sandbox` is omitted, a session
+  // spawned FROM INSIDE a session (parentSessionId present ⇒ a worker-signed
+  // sessionId claim) defaults to "shared" (join the creator's box); a top-level
+  // create (no parent) defaults to "new" (a private singleton box). Explicit
+  // values always win.
+  //
+  // null sandboxGroupId ⇒ createSession seeds the new row's own id (singleton,
+  // today's 1:1 behavior). A shared/{groupId} spawn inherits the box's backend
+  // (it is literally the same box; the child cannot pick its own). Cross-
+  // workspace sharing is forbidden by construction: getSession/
+  // getAnySessionInGroup are RLS-workspace-scoped, so a foreign parent/group
+  // returns null → 404; the group uuid is NOT an access boundary, the workspace
+  // filter is (stress (e)).
+  const sandboxChoice = payload.sandbox ?? (parentSessionId ? "shared" : "new");
+  let sandboxGroupId: string | null = null;
+  let inheritedBackend: Session["sandboxBackend"] | undefined;
+  if (sandboxChoice === "shared") {
+    if (!parentSessionId) {
+      throw new HTTPException(422, { message: "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create." });
+    }
+    const parent = await getSession(db, workspaceId, parentSessionId);
+    if (!parent) {
+      throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
+    }
+    sandboxGroupId = parent.sandboxGroupId;
+    inheritedBackend = parent.sandboxBackend;
+  } else if (typeof sandboxChoice === "object") {
+    const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
+    if (!member) {
+      throw new HTTPException(404, { message: `sandbox group not found in workspace: ${sandboxChoice.groupId}` });
+    }
+    sandboxGroupId = sandboxChoice.groupId;
+    inheritedBackend = member.sandboxBackend;
+  }
+  // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
   const session = await createAndStartSession({
     db,
@@ -418,7 +464,10 @@ export async function createSessionForRequest(
     ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     model,
     reasoningEffort,
-    sandboxBackend: payload.sandboxBackend ?? settings.sandboxBackend,
+    // A shared spawn inherits the box's backend; a caller-supplied
+    // sandboxBackend on a shared spawn is ignored (it is the same box).
+    sandboxBackend: inheritedBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+    sandboxGroupId,
     metadata: payload.metadata,
     environment: environment ? { id: environment.id, name: environment.name } : null,
     goal: payload.goal ?? null,
