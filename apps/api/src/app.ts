@@ -13,6 +13,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "./dependencies";
 import { requireAccessGrant } from "./access";
 import { createManagedAuth } from "./auth/managed-auth";
+import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "./billing/limits";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
@@ -69,6 +70,12 @@ export function createApp(deps: AppDependencies): Hono {
       });
     },
   };
+  // The API process's own agent-loop-free sandbox client — the API-direct
+  // control-plane seam. Constructed from settings (resumes boxes by id
+  // in-process) unless a client was injected (tests). resumeBoxById is always
+  // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
+  const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
+  const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
   const routeDeps: ApiRouteDeps = {
     ...deps,
     githubStateSecret: deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
@@ -76,6 +83,8 @@ export function createApp(deps: AppDependencies): Hono {
     objectStorage,
     documentIndexer,
     getDocumentServices,
+    ...(sandboxClient ? { sandboxClient } : {}),
+    resumeBoxById,
   };
   const app = new Hono();
   const observability = deps.observability ?? createObservability(deps.settings, { component: "api" });

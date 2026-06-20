@@ -8,6 +8,7 @@ import {
   parseDeploymentContract,
   preflightChecksFor,
   requiredRuntimeEnvVars,
+  SANDBOX_REQUIRED_ENV,
   stackPlanFor,
 } from "../src/index";
 
@@ -665,5 +666,111 @@ describe("deployment contract", () => {
     expect(artifacts.missingEnvVars).toContain("OPENGENI_DATABASE_URL");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_ACCESS_KEY=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DATABASE_URL=");
+  });
+
+  // --- backend-gated sandbox env render (SANDBOX_REQUIRED_ENV, two sites) ---
+
+  function withSandboxBackend(backend: string) {
+    return parseDeploymentContract({
+      ...deploymentProfiles["azure-managed"],
+      sandbox: { backend, preparationProfiles: ["none"], envAllowlist: [] },
+    });
+  }
+
+  test("SANDBOX_REQUIRED_ENV table is the single source for both required-env and render", () => {
+    // The deployment table's `required` set must equal config's required-cred
+    // env (parity is the contract). Asserted here for the providers config gates.
+    expect(SANDBOX_REQUIRED_ENV.modal.required).toEqual([
+      "OPENGENI_MODAL_APP_NAME", "OPENGENI_MODAL_TOKEN_ID", "OPENGENI_MODAL_TOKEN_SECRET", "OPENGENI_MODAL_TIMEOUT_SECONDS",
+    ]);
+    expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
+    expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
+    expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);
+  });
+
+  test("requiredRuntimeEnvVars surfaces ONLY the active backend's required creds", () => {
+    const modalVars = requiredRuntimeEnvVars(withSandboxBackend("modal"));
+    expect(modalVars).toContain("OPENGENI_MODAL_TOKEN_ID");
+    expect(modalVars).toContain("OPENGENI_MODAL_TOKEN_SECRET");
+    expect(modalVars).not.toContain("OPENGENI_DAYTONA_API_KEY");
+
+    const daytonaVars = requiredRuntimeEnvVars(withSandboxBackend("daytona"));
+    expect(daytonaVars).toContain("OPENGENI_DAYTONA_API_KEY");
+    // a daytona deployment must NOT demand Modal creds.
+    expect(daytonaVars).not.toContain("OPENGENI_MODAL_TOKEN_ID");
+    expect(daytonaVars).not.toContain("OPENGENI_MODAL_TOKEN_SECRET");
+
+    // docker needs no sandbox creds at all.
+    const dockerVars = requiredRuntimeEnvVars(withSandboxBackend("docker"));
+    expect(dockerVars).not.toContain("OPENGENI_MODAL_TOKEN_ID");
+    expect(dockerVars).not.toContain("OPENGENI_DAYTONA_API_KEY");
+  });
+
+  test("renders the active backend's creds (required + optional) and nothing else", () => {
+    const env = {
+      OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
+      OPENGENI_DELEGATION_SECRET: "delegation",
+      OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
+      OPENGENI_RESEND_API_KEY: "resend",
+      OPENGENI_DAYTONA_API_KEY: "dk-secret",
+      OPENGENI_DAYTONA_IMAGE: "ghcr.io/opengeni/sandbox:latest",
+      // Modal creds present in env but the active backend is daytona — must NOT render.
+      OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
+      OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
+    };
+    const artifacts = generateRuntimeArtifacts(withSandboxBackend("daytona"), {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "DefaultEndpointsProtocol=https;AccountName=files;AccountKey=secret", sensitive: true },
+      helm_set_values: { value: {} },
+    }, env);
+
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DAYTONA_API_KEY=dk-secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DAYTONA_IMAGE=ghcr.io/opengeni/sandbox:latest");
+    // The inactive backend's creds leak nowhere even though they are in env.
+    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_MODAL_TOKEN_ID=");
+    expect(artifacts.runtimeEnv).not.toContain("OPENGENI_MODAL_TOKEN_SECRET=");
+    // daytona's own required cred is not reported missing (it is set).
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_DAYTONA_API_KEY");
+  });
+
+  test("a missing active-backend cred surfaces in missingEnvVars (requiredEnv)", () => {
+    const artifacts = generateRuntimeArtifacts(withSandboxBackend("daytona"), {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    }, {});
+    expect(artifacts.missingEnvVars).toContain("OPENGENI_DAYTONA_API_KEY");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_DAYTONA_API_KEY=");
+  });
+
+  test("modal render still emits the full required + optional set (no regression)", () => {
+    const env = {
+      OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
+      OPENGENI_DELEGATION_SECRET: "delegation",
+      OPENGENI_BETTER_AUTH_SECRET: "better-auth",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
+      OPENGENI_RESEND_API_KEY: "resend",
+      OPENGENI_MODAL_APP_NAME: "opengeni-staging",
+      OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
+      OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+      OPENGENI_MODAL_ENVIRONMENT: "staging",
+      OPENGENI_MODAL_IMAGE_REF: "ghcr.io/opengeni/modal:latest",
+    };
+    const artifacts = generateRuntimeArtifacts(withSandboxBackend("modal"), {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    }, env);
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_APP_NAME=opengeni-staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_TOKEN_ID=modal-token-id");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_TOKEN_SECRET=modal-token-secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_TIMEOUT_SECONDS=900");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_ENVIRONMENT=staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_IMAGE_REF=ghcr.io/opengeni/modal:latest");
   });
 });

@@ -41,6 +41,7 @@
         "@opengeni/events": "workspace:*",
         "@opengeni/github": "workspace:*",
         "@opengeni/observability": "workspace:*",
+        "@opengeni/runtime": "workspace:*",
         "@opengeni/storage": "workspace:*",
         "@temporalio/client": "^1.17.0",
         "better-auth": "^1.6.14",

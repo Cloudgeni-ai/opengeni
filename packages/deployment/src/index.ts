@@ -47,6 +47,53 @@ export const SandboxBackend = z.enum([
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
+// Backend-gated sandbox env table — the deployment mirror of @opengeni/config's
+// SANDBOX_REQUIRED_ENV. Each backend declares ONLY its own env vars: `required`
+// vars are emitted as requiredEnv (and surface in requiredRuntimeEnvVars), and
+// `optional` vars (operator-tunable passthroughs that may be unset) are emitted
+// as valueEnv. This replaces the single hardcoded modal-if at both the
+// required-env-manifest site and the runtime-env-render site (one table, two
+// consumers — kept in lockstep with config's required-cred set; the parity of
+// `required` here vs config's SANDBOX_REQUIRED_ENV is asserted in the tests).
+export type SandboxEnvBackendSpec = {
+  required: readonly string[];
+  optional: readonly string[];
+};
+
+export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec> = {
+  docker: { required: [], optional: [] },
+  local: { required: [], optional: [] },
+  none: { required: [], optional: [] },
+  modal: {
+    required: ["OPENGENI_MODAL_APP_NAME", "OPENGENI_MODAL_TOKEN_ID", "OPENGENI_MODAL_TOKEN_SECRET", "OPENGENI_MODAL_TIMEOUT_SECONDS"],
+    optional: ["OPENGENI_MODAL_ENVIRONMENT", "OPENGENI_MODAL_IMAGE_REF"],
+  },
+  daytona: {
+    required: ["OPENGENI_DAYTONA_API_KEY"],
+    optional: ["OPENGENI_DAYTONA_API_URL", "OPENGENI_DAYTONA_TARGET", "OPENGENI_DAYTONA_IMAGE", "OPENGENI_DAYTONA_SNAPSHOT_NAME"],
+  },
+  runloop: {
+    required: ["OPENGENI_RUNLOOP_API_KEY"],
+    optional: ["OPENGENI_RUNLOOP_BASE_URL", "OPENGENI_RUNLOOP_BLUEPRINT_NAME", "OPENGENI_RUNLOOP_BLUEPRINT_ID"],
+  },
+  e2b: {
+    required: ["OPENGENI_E2B_API_KEY"],
+    optional: ["OPENGENI_E2B_TEMPLATE"],
+  },
+  blaxel: {
+    required: ["OPENGENI_BLAXEL_API_KEY"],
+    optional: ["OPENGENI_BLAXEL_IMAGE", "OPENGENI_BLAXEL_REGION"],
+  },
+  cloudflare: {
+    required: ["OPENGENI_CLOUDFLARE_WORKER_URL"],
+    optional: ["OPENGENI_CLOUDFLARE_API_KEY"],
+  },
+  vercel: {
+    required: ["OPENGENI_VERCEL_TOKEN", "OPENGENI_VERCEL_PROJECT_ID"],
+    optional: ["OPENGENI_VERCEL_TEAM_ID", "OPENGENI_VERCEL_RUNTIME"],
+  },
+};
+
 export const SecretDeliveryMode = z.enum([
   "envFile",
   "kubernetesSecret",
@@ -873,9 +920,8 @@ export function requiredRuntimeEnvVars(
   if (contract.product.usageLimitsMode === "static") {
     vars.push("OPENGENI_STATIC_USAGE_LIMITS_JSON");
   }
-  if (contract.sandbox.backend === "modal") {
-    vars.push("OPENGENI_MODAL_APP_NAME", "OPENGENI_MODAL_TOKEN_ID", "OPENGENI_MODAL_TOKEN_SECRET", "OPENGENI_MODAL_TIMEOUT_SECONDS");
-  }
+  // Backend-gated: only the active backend's required creds enter the manifest.
+  vars.push(...SANDBOX_REQUIRED_ENV[contract.sandbox.backend].required);
   return [...new Set(vars)].sort();
 }
 
@@ -1429,15 +1475,17 @@ function runtimeEnvValues(
     );
   }
 
-  if (contract.sandbox.backend === "modal") {
-    entries.push(
-      requiredEnv("OPENGENI_MODAL_APP_NAME", env.OPENGENI_MODAL_APP_NAME),
-      valueEnv("OPENGENI_MODAL_ENVIRONMENT", env.OPENGENI_MODAL_ENVIRONMENT),
-      valueEnv("OPENGENI_MODAL_IMAGE_REF", env.OPENGENI_MODAL_IMAGE_REF),
-      requiredEnv("OPENGENI_MODAL_TIMEOUT_SECONDS", env.OPENGENI_MODAL_TIMEOUT_SECONDS),
-      requiredEnv("OPENGENI_MODAL_TOKEN_ID", env.OPENGENI_MODAL_TOKEN_ID),
-      requiredEnv("OPENGENI_MODAL_TOKEN_SECRET", env.OPENGENI_MODAL_TOKEN_SECRET),
-    );
+  // Backend-gated sandbox env render (table-driven; replaces the single
+  // modal-if). The active backend's required creds become requiredEnv (a
+  // missing one surfaces in missingEnvVars); its optional passthroughs become
+  // valueEnv (emitted only when set). Inactive backends contribute nothing, so
+  // a daytona deployment never demands Modal creds and vice versa.
+  const sandboxEnv = SANDBOX_REQUIRED_ENV[contract.sandbox.backend];
+  for (const key of sandboxEnv.required) {
+    entries.push(requiredEnv(key, env[key]));
+  }
+  for (const key of sandboxEnv.optional) {
+    entries.push(valueEnv(key, env[key]));
   }
 
   return dedupeRuntimeEnv(entries);

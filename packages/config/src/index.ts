@@ -450,6 +450,61 @@ export const defaultModelPricing: Record<string, ModelPricing> = {
   },
 };
 
+// --- backend-gated required-credential table (the single source of truth) ---
+// Each sandbox backend declares ONLY its own required credentials: a deployment
+// configured for `sandboxBackend=modal` must carry the Modal token, but a
+// daytona/e2b/local/none deployment must NOT be forced to set Modal creds (and
+// vice versa). validateSettings() iterates this table for the *active* backend
+// only — so the cred a backend doesn't use is never a boot blocker — and the
+// deployment package mirrors the same table to drive its env-render + the
+// required-env manifest (one table, two consumers).
+//
+// `field` is the parsed Settings key (boot validation reads the typed value);
+// `env` is the OPENGENI_* variable name (deployment renders/requires it). The
+// modal token is a both-or-neither pair handled by an extra refine in
+// validateSettings — this table holds the hard "must be present when active"
+// requirements.
+export type SandboxRequiredEnv = {
+  field: keyof Settings;
+  env: string;
+};
+
+export const SANDBOX_REQUIRED_ENV: Record<z.infer<typeof SandboxBackend>, readonly SandboxRequiredEnv[]> = {
+  // docker/local/none need no credentials (local dev container / in-process / off).
+  docker: [],
+  local: [],
+  none: [],
+  modal: [
+    { field: "modalAppName", env: "OPENGENI_MODAL_APP_NAME" },
+    { field: "modalTokenId", env: "OPENGENI_MODAL_TOKEN_ID" },
+    { field: "modalTokenSecret", env: "OPENGENI_MODAL_TOKEN_SECRET" },
+  ],
+  daytona: [
+    { field: "daytonaApiKey", env: "OPENGENI_DAYTONA_API_KEY" },
+  ],
+  runloop: [
+    { field: "runloopApiKey", env: "OPENGENI_RUNLOOP_API_KEY" },
+  ],
+  e2b: [
+    { field: "e2bApiKey", env: "OPENGENI_E2B_API_KEY" },
+  ],
+  blaxel: [
+    { field: "blaxelApiKey", env: "OPENGENI_BLAXEL_API_KEY" },
+  ],
+  cloudflare: [
+    { field: "cloudflareWorkerUrl", env: "OPENGENI_CLOUDFLARE_WORKER_URL" },
+  ],
+  vercel: [
+    { field: "vercelToken", env: "OPENGENI_VERCEL_TOKEN" },
+    { field: "vercelProjectId", env: "OPENGENI_VERCEL_PROJECT_ID" },
+  ],
+};
+
+/** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
+export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBackend>): string[] {
+  return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
+}
+
 function optional(name: string): string | undefined {
   const value = process.env[name];
   return value && value.trim().length > 0 ? value : undefined;
@@ -1075,8 +1130,21 @@ function validateSettings(settings: Settings): void {
       throw new Error("Azure OpenAI requires an API key or AD token");
     }
   }
+  // The Modal token is a both-or-neither pair regardless of the active backend
+  // (a half-configured token is always a misconfiguration). This is orthogonal
+  // to the backend-gated required-cred sweep below.
   if (Boolean(settings.modalTokenId) !== Boolean(settings.modalTokenSecret)) {
     throw new Error("OPENGENI_MODAL_TOKEN_ID and OPENGENI_MODAL_TOKEN_SECRET must both be set or both omitted");
+  }
+  // Backend-gated required credentials: only the *active* backend's creds are
+  // required. A modal deployment must carry the Modal token; a daytona/e2b/none
+  // deployment must NOT be forced to (and is not). Drives off the single
+  // SANDBOX_REQUIRED_ENV table that the deployment package also mirrors.
+  for (const required of SANDBOX_REQUIRED_ENV[settings.sandboxBackend] ?? []) {
+    const value = settings[required.field];
+    if (value === undefined || value === null || (typeof value === "string" && value.trim().length === 0)) {
+      throw new Error(`${required.env} is required when OPENGENI_SANDBOX_BACKEND=${settings.sandboxBackend}`);
+    }
   }
   if (settings.objectStorageBackend === "s3-compatible" || settings.objectStorageBackend === "aws-s3") {
     if (Boolean(settings.objectStorageAccessKeyId) !== Boolean(settings.objectStorageSecretAccessKey)) {

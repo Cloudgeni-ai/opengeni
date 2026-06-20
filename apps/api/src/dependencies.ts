@@ -6,6 +6,7 @@ import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./auth/managed-auth";
+import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox/access";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;
@@ -39,6 +40,21 @@ export type AppDependencies = {
   observability?: Observability;
   githubStateSecret?: string;
   managedAuth?: ManagedAuth | null;
+  // The API process's OWN agent-loop-free sandbox client (constructed from
+  // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
+  // This is the foundation of the API-direct control plane: the API resumes
+  // boxes by id in-process, no Temporal/worker for non-turn ops. Optional on
+  // construction (createApp builds it from settings when absent) so existing
+  // tests that pass a minimal deps bag keep working.
+  sandboxClient?: ApiSandboxClient;
+  /**
+   * Resume a box by id from a serialized resume_state envelope (the lease's
+   * `resume_state` + `resume_backend_id` from P1.1) and return a live session
+   * for a single in-process op. resume → use → drop; the lease owns lifecycle,
+   * the returned handle does NOT own the box. Throws SandboxResumeError on a
+   * backend mismatch or a resume failure.
+   */
+  resumeBoxById?: (input: ResumeBoxByIdInput) => Promise<ResumedSandboxSession>;
 };
 
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
@@ -48,4 +64,7 @@ export type ApiRouteDeps = AppDependencies & {
   githubStateSecret: string;
   documentIndexer: DocumentIndexClient;
   getDocumentServices: () => DocumentServices;
+  // Resolved by createApp from settings: routes always get a concrete
+  // resumeBoxById (it throws SandboxResumeError when sandboxBackend=none).
+  resumeBoxById: (input: ResumeBoxByIdInput) => Promise<ResumedSandboxSession>;
 };
