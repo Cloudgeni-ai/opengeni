@@ -124,6 +124,13 @@
     {
       "idx": 17,
       "version": "7",
+      "when": 1782432000000,
+      "tag": "0017_sandbox_leases",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
       "when": 1782518400000,
       "tag": "0018_sandbox_os",
       "breakpoints": true

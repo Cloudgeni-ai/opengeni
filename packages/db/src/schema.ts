@@ -388,6 +388,79 @@ export const sandboxSessionEnvelopes = pgTable("sandbox_session_envelopes", {
   sessionIdx: uniqueIndex("sandbox_session_envelopes_session_idx").on(table.workspaceId, table.sessionId),
 }));
 
+// The 4 liveness states of the singleton lease. Exported so the query layer and
+// the stateless resume-by-id path share one source of truth for the domain.
+export const sandboxLeaseLivenessValues = ["cold", "warming", "warm", "draining"] as const;
+
+// One row per GROUP: the SOLE enforcer of the strict-singleton-box invariant.
+// uniqueIndex(workspaceId, sandboxGroupId) + SELECT…FOR UPDATE + cold->warming
+// CAS + integer lease_epoch fence. Re-keyed to sandboxGroupId from the start
+// (addendum B.2) so today's 1:1 world (sandboxGroupId == session id, set in
+// 0018) is a behavior-preserving no-op. Mirrors the account/workspace FK chain
+// of sandboxSessionEnvelopes; sandboxGroupId is a BARE uuid (NOT an FK — the
+// value is a session id or an ancestor's, and an FK would let a founder's
+// deletion cascade-kill a box still in use by a spawned session).
+export const sandboxLeases = pgTable("sandbox_leases", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sandboxGroupId: uuid("sandbox_group_id").notNull(),
+
+  liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
+  refcount: integer("refcount").notNull().default(0),
+  turnHolders: integer("turn_holders").notNull().default(0),
+  viewerHolders: integer("viewer_holders").notNull().default(0),
+
+  instanceId: text("instance_id"),
+  backend: text("backend").notNull(),
+  os: text("os").notNull().default("linux"),
+  dataPlaneUrl: text("data_plane_url"),
+
+  // integer (NOT bigint): the lease-epoch spike proved a raw int8 read returns a
+  // JS STRING from postgres-js, breaking the strict epoch-fence comparison (it
+  // was always-true → every turn fenced); int4 returns a JS number, the fix.
+  // Epochs never approach 2^31, so the narrower type loses nothing.
+  leaseEpoch: integer("lease_epoch").notNull().default(0),
+
+  // The group box-envelope (the "envelope split" Critical): the small recovery
+  // descriptor to resume()-by-id the group's box without a per-session join.
+  resumeBackendId: text("resume_backend_id"),
+  resumeState: jsonb("resume_state").$type<Record<string, unknown>>(),
+
+  // Warm-time billing cursor: last_meter_at = accrual cursor; last_meter_tick =
+  // idempotency tick (warm_seconds accrued idempotent on
+  // (sandbox_group_id, lease_epoch, last_meter_tick) in P2.1).
+  lastMeterAt: timestamp("last_meter_at", { withTimezone: true }),
+  lastMeterTick: integer("last_meter_tick").notNull().default(0),
+
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  groupIdx: uniqueIndex("sandbox_leases_group_idx").on(table.workspaceId, table.sandboxGroupId),
+  reaperIdx: index("sandbox_leases_reaper_idx").on(table.expiresAt)
+    .where(sql`${table.liveness} in ('warming','warm','draining')`),
+}));
+
+// N rows per group: one per live holder. Makes release idempotent
+// (delete-my-row, never blind decrement) and lets the reaper recompute refcount.
+export const sandboxLeaseHolders = pgTable("sandbox_lease_holders", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  leaseId: uuid("lease_id").notNull().references(() => sandboxLeases.id, { onDelete: "cascade" }),
+  kind: text("kind", { enum: ["turn", "viewer"] }).notNull(),
+  holderId: text("holder_id").notNull(),
+  // The attributing session within the (possibly shared) group.
+  subjectId: uuid("subject_id"),
+  lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  holderIdx: uniqueIndex("sandbox_lease_holders_holder_idx").on(table.leaseId, table.kind, table.holderId),
+  staleIdx: index("sandbox_lease_holders_stale_idx").on(table.kind, table.lastHeartbeatAt),
+  leaseIdx: index("sandbox_lease_holders_lease_idx").on(table.leaseId),
+}));
+
 export const scheduledTasks = pgTable("scheduled_tasks", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

@@ -242,6 +242,13 @@ const SettingsSchema = z.object({
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
+  // --- sandbox lease cadences (cadence invariant validated at boot below) ---
+  // reaperPeriod < viewerHolderTTL < providerIdleTimeout (modalTimeoutSeconds).
+  // No keep-alive knob: between turns the box survives on the provider's
+  // existing idle-timeout; there is no keepalive loop to bound.
+  sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
+  sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(45_000),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
@@ -479,6 +486,9 @@ export function getSettings(): Settings {
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
+    sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
+    sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
+    sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
@@ -1033,6 +1043,28 @@ function validateSettings(settings: Settings): void {
       throw new Error(`OPENGENI_MCP_SERVERS contains duplicate id ${server.id}`);
     }
     serverIds.add(server.id);
+  }
+  // --- sandbox lease cadence invariant (fail fast at boot) ---
+  // reaperPeriod (30s) < viewerHolderTTL (90s) < providerIdleTimeout (900s):
+  // the reaper must run more often than the TTL it polices, and a viewer holder
+  // must be reapable before the box idles out from under it (the provider
+  // idle-timeout is the backstop). idleTimeout derives from modalTimeoutSeconds.
+  {
+    const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
+    const viewerTtl = settings.sandboxViewerHolderTtlMs;
+    const idleTimeoutMs = settings.modalTimeoutSeconds * 1000;
+    if (!(reaperPeriod < viewerTtl)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than `
+        + `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often `
+        + `than the TTL it polices, or stale viewer holders outlive a full reaper period.`);
+    }
+    if (!(viewerTtl < idleTimeoutMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the provider `
+        + `idle timeout (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${idleTimeoutMs}): a viewer holder must be `
+        + `reapable before the box idles out from under it (the provider idle-timeout is the backstop).`);
+    }
   }
 }
 
