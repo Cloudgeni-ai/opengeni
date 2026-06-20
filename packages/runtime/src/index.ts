@@ -907,6 +907,22 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
+  // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
+  // session resolved by the per-turn resume-by-id path. When present,
+  // runAgentStream does NOT build (or resume, or discard) a client — it threads
+  // these straight into runOptions.sandbox as a NON-OWNED session. The SDK
+  // registers a provided session non-owned (manager.js) and NEVER reaps it on a
+  // normal finish (proven by spikes/sdk-keystone) — that is the keystone: the
+  // one box survives across turns. Mutually exclusive with the per-run
+  // createSandboxClient path (the owned branch takes precedence when both set).
+  // Agent-dependent decorators (file-downloads, lifecycle/repo-clone hooks) are
+  // re-applied around the resumed client here; the live `session`/`sessionState`
+  // carry the box, so no create()/resume() is re-invoked inside run().
+  ownedSandbox?: {
+    client: unknown;          // built by the per-turn resume path (the raw provider client)
+    session: unknown;         // SandboxSessionLike — the live, NON-OWNED handle (never reaped)
+    sessionState?: unknown;   // SandboxSessionState the box was resumed from
+  };
 };
 
 /**
@@ -941,6 +957,49 @@ export function callModelInputFilterForSettings(settings: Settings): CallModelIn
 export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgentInput | string | RunState<any, any>, settings: Settings, overrides: RunAgentStreamOptions = {}) {
   const prepared: PreparedAgentInput = typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
+
+  // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
+  // live, externally-owned box. We thread the live `session` straight into
+  // runOptions.sandbox so the SDK registers it NON-OWNED and never reaps it on
+  // a normal finish (the keystone). We re-apply ONLY the agent-dependent
+  // decorators (file-downloads + lifecycle/repo-clone hooks) around the resumed
+  // client — the manifest-refresh-on-resume wrap is a no-op when a live
+  // `session` is supplied (resume is not re-invoked). This branch is reached
+  // ONLY when sandboxOwnershipEnabled gated the activity into resolving a box;
+  // with the flag off the activity never sets `ownedSandbox` and this whole
+  // block is skipped (byte-for-byte the legacy path).
+  if (overrides.ownedSandbox) {
+    const { client: ownedClient, session, sessionState } = overrides.ownedSandbox;
+    const runAs = sandboxRunAs(settings);
+    const fileDownloads = sandboxFileDownloadsForAgent(agent);
+    const resourceClient = fileDownloads.length > 0
+      ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
+        ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(runAs ? { runAs } : {}),
+      })
+      : (ownedClient as SandboxClient);
+    const decoratedClient = withSandboxLifecycleHooks(resourceClient, [
+      ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+      ...sandboxRepositoryCloneHooksForAgent(agent),
+    ], {
+      environment,
+      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+      ...(runAs ? { runAs } : {}),
+    });
+    const ownedFilter = callModelInputFilterForSettings(settings);
+    const ownedRunOptions: Parameters<typeof run>[2] = {
+      stream: true,
+      maxTurns: settings.agentMaxModelCallsPerTurn,
+      ...(ownedFilter ? { callModelInputFilter: ownedFilter } : {}),
+    };
+    ownedRunOptions.sandbox = {
+      client: decoratedClient,
+      session,
+      ...(sessionState ? { sessionState } : {}),
+    } as SandboxRunConfig;
+    return await run(agent, prepared.input, ownedRunOptions);
+  }
+
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
   const refreshedClient = rawClient
     ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest)

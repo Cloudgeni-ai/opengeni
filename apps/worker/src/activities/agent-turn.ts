@@ -20,6 +20,8 @@ import {
   setSessionStatus,
   setSessionLastInputTokens,
   sumUsageQuantity,
+  heartbeatLeaseHolder,
+  SandboxLeaseSupersededError,
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
@@ -57,6 +59,7 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./types";
+import { resumeBoxForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
 
@@ -189,6 +192,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let activityError: unknown;
     let turnId: string | undefined;
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
+    // P1.2 ownership inversion: when sandboxOwnershipEnabled, the turn resolves
+    // the one box by id from the group lease and injects it NON-OWNED into the
+    // run. null when the flag is off (byte-for-byte the legacy build-and-discard
+    // path) OR when the backend is "none". Released + dropped in `finally`.
+    let resolvedSandbox: ResumedTurnSandbox | null = null;
+    // The lease holder id (Temporal activityId, unique per scheduled execution)
+    // + the group id, captured so the lease heartbeat can refresh the lease TTL
+    // epoch-fenced (a superseded owner self-evicts) and finally can release.
+    let sandboxHolderId: string | null = null;
+    let sandboxGroupId: string | null = null;
+    // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
+    // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
+    // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
+    let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
@@ -321,6 +338,51 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // activity retry reuses the same activityId, so its re-emitted calls keep
       // deduping (no double charge).
       const dispatchId = activityContext?.info.activityId ?? null;
+      // P1.2 ownership inversion (gated, default OFF). With the flag off this
+      // block is skipped entirely: resolvedSandbox stays null and runStream
+      // takes the legacy per-run build-and-discard path — byte-for-byte today.
+      // With it on, acquire the group lease ('turn' holder = the activityId),
+      // resume the one box by id, and inject it NON-OWNED into the run. The box
+      // backend is "none" -> never resolve (no box to touch).
+      if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
+        sandboxHolderId = dispatchId ?? `turn:${turnId}`;
+        sandboxGroupId = session.sandboxGroupId;
+        resolvedSandbox = await resumeBoxForTurn(
+          { db, settings },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: session.sandboxGroupId,
+            sessionId: input.sessionId,
+            backend: turn.sandboxBackend,
+            os: session.sandboxOs,
+          },
+          "turn",
+          sandboxHolderId,
+        );
+        // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
+        // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
+        // is rejected (returns false) and we stop refreshing — the box rides the
+        // provider idle-timeout and the next dispatch re-establishes it. Best-
+        // effort: a transient DB error must never fail the turn.
+        const heartbeatEpoch = resolvedSandbox.leaseEpoch;
+        const heartbeatHolderId = sandboxHolderId;
+        const heartbeatGroupId = sandboxGroupId;
+        leaseHeartbeatTimer = setInterval(() => {
+          void heartbeatLeaseHolder(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: heartbeatGroupId,
+            kind: "turn",
+            holderId: heartbeatHolderId,
+            leaseTtlMs: settings.sandboxLeaseTtlMs,
+            expectedEpoch: heartbeatEpoch,
+          }).catch(() => undefined);
+        }, 10_000);
+        if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
+          leaseHeartbeatTimer.unref();
+        }
+      }
       publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
         const inputs = events.map((event) => ({
           ...event,
@@ -475,6 +537,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         onRuntimeEvent: async (event) => {
           await publish!([{ type: event.type, payload: event.payload }], true);
         },
+        // P1.2: inject the resumed box NON-OWNED (the SDK never reaps it — the
+        // keystone). Absent when the flag is off -> legacy build-and-discard.
+        ...(resolvedSandbox
+          ? {
+            ownedSandbox: {
+              client: resolvedSandbox.established.client,
+              session: resolvedSandbox.established.session,
+              sessionState: resolvedSandbox.established.sessionState,
+            },
+          }
+          : {}),
       });
       batcher = createRuntimeBatcher(async (events) => {
         await publish!(events);
@@ -635,6 +708,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // back to the workflow-claimed turn when the local lookup had not
       // finished yet.
       const preemptTurnId = turnId ?? input.turnId;
+      // P1.2: a lease supersession during resume (a newer epoch re-established
+      // the box concurrently) is NOT a session failure — re-dispatch the turn so
+      // it re-resumes by id under the current epoch. Requeue + idle, mirroring
+      // the worker-death re-dispatch (any worker re-resumes by id).
+      if (error instanceof SandboxLeaseSupersededError && preemptTurnId) {
+        try {
+          await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, input.triggerEventId);
+          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
+          activityStatus = "preempted";
+          return { status: "preempted" };
+        } catch (requeueError) {
+          console.error("sandbox lease supersession requeue failed; falling back", requeueError);
+        }
+      }
       if (isWorkerShutdownCancellation(error) && preemptTurnId) {
         try {
           await batcher?.flush().catch(() => undefined);
@@ -871,6 +958,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await preparedTools?.close().catch(() => undefined);
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
+      }
+      // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
+      // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
+      // and DROP the in-memory handle. Release NEVER stops the box — the reaper
+      // (P1.3) issues the provider stop() past the drain grace at refcount 0; the
+      // box rides the provider idle-timeout in the meantime. Best-effort: a
+      // release failure must never mask the turn's real outcome.
+      if (leaseHeartbeatTimer) {
+        clearInterval(leaseHeartbeatTimer);
+      }
+      if (resolvedSandbox) {
+        await resolvedSandbox.release().catch((releaseError) => {
+          console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
+        });
+        resolvedSandbox = null;   // drop the handle; the box survives the turn
       }
     }
   };

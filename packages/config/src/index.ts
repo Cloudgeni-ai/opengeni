@@ -288,6 +288,16 @@ const SettingsSchema = z.object({
   vercelProjectId: z.string().optional(),
   vercelTeamId: z.string().optional(),
   vercelRuntime: z.string().optional(),
+  // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
+  // The keystone flag for the stateless resume-by-id model. When FALSE the
+  // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
+  // lease acquire, no resume-by-id, no non-owned injection). When TRUE the turn
+  // activity acquires the group lease, resumes the one box by id from the lease
+  // envelope, injects it as a NON-OWNED RunConfig session (the SDK never reaps
+  // it — the proven keystone), and releases the holder in finally. Uses
+  // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
+  // turn the flag ON the moment anyone set the env var to disable it).
+  sandboxOwnershipEnabled: EnvBoolean.default(false),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL < providerIdleTimeout (modalTimeoutSeconds).
   // No keep-alive knob: between turns the box survives on the provider's
@@ -295,6 +305,11 @@ const SettingsSchema = z.object({
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(45_000),
+  // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
+  // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
+  // window a cold->warming spawner has to commit warm before a reaper resets it.
+  sandboxLeaseTtlMs: z.coerce.number().int().positive().default(90_000),
+  sandboxLeaseWarmingTtlMs: z.coerce.number().int().positive().default(120_000),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
@@ -624,9 +639,12 @@ export function getSettings(): Settings {
     vercelProjectId: optional("OPENGENI_VERCEL_PROJECT_ID"),
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
+    sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
+    sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
+    sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),

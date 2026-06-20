@@ -1,0 +1,189 @@
+// P1.2 ownership inversion — the keystone regression, run creds-free against the
+// in-tree unix_local backend (no provider creds, no OpenAI key — a ScriptedModel
+// drives the agent). This exercises the REAL production runAgentStream owned
+// branch (not a hand-rolled run() like spikes/sdk-keystone), proving:
+//
+//   (KEYSTONE) an injected NON-OWNED session SURVIVES a normal runAgentStream
+//              finish un-reaped (session.closed === false, workspace intact);
+//   (CONTROL)  an OWNED (sessionState-resumed) session IS reaped on the same
+//              normal finish — so the "survived" result is a real distinction.
+//
+// Plus unit coverage for the two new leaf primitives:
+//   - establishSandboxSessionFromEnvelope (cold create + warm resume-by-id)
+//   - isProviderSandboxNotFoundError (the per-backend NotFound discriminator)
+//   - createSandboxClientForBackend (explicit-backend builder)
+//
+// No DB, no Docker, no network. The lease-driven slice (acquire -> resume ->
+// release) is the DB-backed apps/worker/test/sandbox-resume.integration.ts.
+
+import { existsSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { run } from "@openai/agents";
+import { SandboxAgent } from "@openai/agents/sandbox";
+import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing";
+import {
+  buildOpenGeniAgent,
+  runAgentStream,
+  createSandboxClientForBackend,
+  establishSandboxSessionFromEnvelope,
+  isProviderSandboxNotFoundError,
+} from "../src/index";
+
+// local backend, web search OFF (the hosted web_search tool would try the
+// network), history in run_state mode (default), one model call per turn cap is
+// fine — the scripted model finishes in 2 calls (shell -> final message).
+function localSettings() {
+  return testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+}
+
+type LiveLocalSession = {
+  closed: boolean;
+  state: { workspaceRootPath: string };
+  close: () => Promise<void>;
+  exec: (args: { cmd: string }) => Promise<{ stdout?: string }>;
+  readFile: (args: { path: string }) => Promise<Uint8Array>;
+};
+
+const liveSessions: LiveLocalSession[] = [];
+
+afterEach(async () => {
+  // Drop any still-open live session we created (we own them; the SDK never did).
+  for (const s of liveSessions.splice(0)) {
+    if (!s.closed) {
+      await s.close().catch(() => undefined);
+    }
+  }
+});
+
+describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, creds-free)", () => {
+  test("KEYSTONE: an injected NON-OWNED session survives a normal runAgentStream finish un-reaped", async () => {
+    const settings = localSettings();
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (m?: unknown) => Promise<LiveLocalSession>;
+    };
+    expect(client.backendId).toBe("unix_local");
+
+    // The externally-owned live box (the lease owns it in production; here WE own
+    // it). We inject THIS exact handle non-owned — the SDK must never reap it.
+    const liveSession = await client.create({});
+    liveSessions.push(liveSession);
+    const root = liveSession.state.workspaceRootPath;
+    expect(liveSession.closed).toBe(false);
+    expect(existsSync(root)).toBe(true);
+
+    const model = new ScriptedModel([
+      { output: [functionCall("exec_command", { cmd: "echo KEYSTONE_P12 > /workspace/marker.txt" })] },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model });
+
+    const result = await runAgentStream(agent, "write the marker", settings, {
+      ownedSandbox: {
+        client,
+        session: liveSession,
+        // cold session: no prior sessionState. The owned branch threads the live
+        // session straight through; the SDK registers it NON-OWNED.
+      },
+    });
+    // Drain the stream so the run reaches its normal finish (end-of-run cleanup
+    // is where an OWNED session would be reaped — see the control below).
+    for await (const _ of result.toStream()) {
+      void _;
+    }
+    await result.completed;
+
+    // ── KEYSTONE ASSERTIONS ──
+    expect(liveSession.closed).toBe(false);          // never closed
+    expect(existsSync(root)).toBe(true);             // close() would rm -rf it
+    const marker = await liveSession.readFile({ path: "/workspace/marker.txt" })
+      .then((b) => Buffer.from(b).toString().trim(), () => "<missing>");
+    expect(marker).toBe("KEYSTONE_P12");             // the tool hit OUR box
+  });
+
+  test("CONTROL: an OWNED (sessionState-resumed) session IS reaped on a normal finish", async () => {
+    // The reap distinction at the SDK level: a session resumed from sessionState
+    // (priority-3) is marked OWNED and torn down on a normal finish — unlike the
+    // non-owned injected session above. We use a minimal SandboxAgent with NO
+    // runAs (so the unix_local manifest carries no users) + a raw SDK run(),
+    // mirroring spikes/sdk-keystone but inside the runtime package.
+    const settings = localSettings();
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (m?: unknown) => Promise<LiveLocalSession>;
+      serializeSessionState: (state: unknown) => Promise<Record<string, unknown>>;
+    };
+    const seed = await client.create({});
+    const ownedRoot = seed.state.workspaceRootPath;
+    await seed.exec({ cmd: "echo OWNED > /workspace/owned.txt" });
+    const ownedState = await client.serializeSessionState((seed as unknown as { state: unknown }).state);
+    expect(existsSync(ownedRoot)).toBe(true);
+
+    const model = new ScriptedModel([{ output: [assistantMessage("owned done")] }]);
+    const agent = new SandboxAgent({
+      name: "keystone-control",
+      instructions: "control agent",
+      model,
+    });
+
+    // sandbox: { client, sessionState } -> the SDK resumes a NEW session from the
+    // state (reusing the SAME workspace root) and marks it OWNED, so a normal
+    // finish reaps it (close() -> rm -rf the workspace root).
+    await run(agent, "owned turn", {
+      sandbox: { client: client as never, sessionState: ownedState as never },
+    });
+
+    expect(existsSync(ownedRoot)).toBe(false);   // the OWNED resumed session was reaped
+  });
+});
+
+describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
+  test("a null envelope cold-creates a live session (the cold-session path)", async () => {
+    const settings = localSettings();
+    const established = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: "sess-cold",
+      backendOverride: "local",
+    });
+    expect(established.backendId).toBe("unix_local");
+    expect(established.session).toBeDefined();
+    // close it (we own it) so the workspace dir is cleaned.
+    await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
+  });
+
+  test("backendOverride selects the client backend independent of settings.sandboxBackend", async () => {
+    // settings says 'none', but the override forces 'local' (resume-by-id is
+    // fenced to the box's ORIGINAL backend, not the process default).
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const established = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: "sess-override",
+      backendOverride: "local",
+    });
+    expect(established.backendId).toBe("unix_local");
+    await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
+  });
+});
+
+describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminator)", () => {
+  test("404 status -> NotFound (licenses cold-restore)", () => {
+    expect(isProviderSandboxNotFoundError("modal", { status: 404 })).toBe(true);
+    expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
+  });
+
+  test("box-gone phrasing -> NotFound", () => {
+    expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(true);
+    expect(isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running"))).toBe(true);
+    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(true);
+    expect(isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" })).toBe(true);
+  });
+
+  test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox already running"))).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", new Error("sandbox is still running"))).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", new Error("503 service unavailable"))).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", new Error("network timeout"))).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { status: 500 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", null)).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", undefined)).toBe(false);
+  });
+});

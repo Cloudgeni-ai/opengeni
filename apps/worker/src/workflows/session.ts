@@ -207,6 +207,20 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
 
     const scope = new CancellationScope();
     const workflowId = workflowInfo().workflowId;
+    // P1.2 STATELESS-LEASE GATE. The stateless resume-by-id model (lease acquire
+    // + non-owned injection + release) lives ENTIRELY in the runAgentSegment
+    // activity, gated by the sandboxOwnershipEnabled config flag — the workflow's
+    // command path is intentionally unchanged: the turn still dispatches on the
+    // EXISTING GLOBAL queue (the module-level `activity` proxy, NO taskQueue
+    // override, NO per-session worker, NO per-session queue), worker-death still
+    // re-dispatches via the `worker-death-redispatch` patch below (any worker
+    // re-resumes the box by id), and there is NO ownerHeartbeat / openStreamRequest
+    // / closeStreamRequest signal. This patched() marker records the
+    // stateless-lease cutover point in history so multi-day IN-FLIGHT workflow
+    // histories replay deterministically on the original lease-less path, and any
+    // future workflow-side lease change can branch on it without breaking replay.
+    const statelessLease = patched("sandbox-stateless-lease");
+    void statelessLease;   // command path unchanged today (see comment above)
     // Deliberately schedules the LEGACY activity name: in-flight session
     // workflows (multi-day by design) recorded this name in their histories,
     // and scheduling a different activity type at the same position is a

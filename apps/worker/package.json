@@ -25,6 +25,8 @@
     "@temporalio/workflow": "^1.17.0"
   },
   "devDependencies": {
+    "@opengeni/testing": "workspace:*",
+    "postgres": "^3.4.9",
     "typescript": "^6.0.3"
   }
 }
