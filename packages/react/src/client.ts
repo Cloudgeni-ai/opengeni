@@ -49,4 +49,21 @@ export type SessionClientLike = Pick<
   | "createWorkspace"
   | "updateWorkspace"
   | "getBillingUsage"
+  // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle
+  | "getClientConfig"
+  | "getStreamCapabilities"
+  | "acknowledgeStream"
+  | "attachViewer"
+  | "heartbeatViewer"
+  | "detachViewer"
+  // Channel-A structured services (terminal-as-events feed via fs/git/terminal)
+  | "fsList"
+  | "fsRead"
+  | "gitStatus"
+  | "gitDiff"
+  | "terminalExec"
+  | "terminalPtyOpen"
+  | "terminalPtyWrite"
+  | "terminalPtyResize"
+  | "terminalPtyClose"
 >;

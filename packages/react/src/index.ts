@@ -44,6 +44,31 @@ export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-work
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
 
+// Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
+export { useSessionCapabilities } from "./hooks/use-session-capabilities";
+export type {
+  SessionCapabilitiesState,
+  UseSessionCapabilitiesOptions,
+  UseSessionCapabilitiesResult,
+} from "./hooks/use-session-capabilities";
+export { useDesktopStream } from "./hooks/use-desktop-stream";
+export type { UseDesktopStreamOptions, UseDesktopStreamResult } from "./hooks/use-desktop-stream";
+export { useSandboxTerminal } from "./hooks/use-sandbox-terminal";
+export type {
+  TerminalChunk,
+  UseSandboxTerminalOptions,
+  UseSandboxTerminalResult,
+} from "./hooks/use-sandbox-terminal";
+export { useSandboxFiles } from "./hooks/use-sandbox-files";
+export type {
+  FileTreeNode,
+  FileTreeStatus,
+  UseSandboxFilesOptions,
+  UseSandboxFilesResult,
+} from "./hooks/use-sandbox-files";
+export { useSandboxGit } from "./hooks/use-sandbox-git";
+export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sandbox-git";
+
 // Pending-approvals projection
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
@@ -109,6 +134,16 @@ export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/sess
 export type { SessionStatusProps, StatusDotProps, SessionStatusMeta } from "./components/session-status";
 export { FleetTile, sessionDisplayTitle } from "./components/fleet-tile";
 export type { FleetTileProps } from "./components/fleet-tile";
+
+// Sandbox surfacing components (Phase 5)
+export { SandboxTerminal } from "./components/sandbox-terminal";
+export type { SandboxTerminalProps, XtermTheme } from "./components/sandbox-terminal";
+export { FileBrowser } from "./components/file-browser";
+export type { FileBrowserProps } from "./components/file-browser";
+export { DiffView } from "./components/diff-view";
+export type { DiffViewProps, DiffTheme } from "./components/diff-view";
+export { DesktopViewer } from "./components/desktop-viewer";
+export type { DesktopViewerProps } from "./components/desktop-viewer";
 
 // Utilities
 export { cn } from "./lib/cn";

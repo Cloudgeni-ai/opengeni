@@ -38,6 +38,7 @@ import {
 import { GoalCard, GoalChip } from "@/components/session/goal-card";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
+import { SandboxWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -162,8 +163,9 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
         <aside className="min-h-0 w-full min-w-0 overflow-hidden border-t border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 lg:border-t-0 lg:border-l">
           <Tabs defaultValue="run" className="flex h-full min-h-0 min-w-0 flex-col gap-0 overflow-hidden">
             <div className="min-w-0 border-b border-[color:var(--color-border)] px-2 py-2">
-              <TabsList className="grid h-8 w-full min-w-0 grid-cols-2 rounded-md bg-[color:var(--color-bg)] p-1">
+              <TabsList className="grid h-8 w-full min-w-0 grid-cols-3 rounded-md bg-[color:var(--color-bg)] p-1">
                 <TabsTrigger value="run" className="h-6 min-w-0 rounded px-1 text-[11px]">Run</TabsTrigger>
+                <TabsTrigger value="sandbox" className="h-6 min-w-0 rounded px-1 text-[11px]">Sandbox</TabsTrigger>
                 <TabsTrigger value="debug" className="h-6 min-w-0 rounded px-1 text-[11px]">Debug</TabsTrigger>
               </TabsList>
             </div>
@@ -174,6 +176,9 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
                   <GoalCard goal={goal} events={events} />
                 </div>
               </ScrollArea>
+            </TabsContent>
+            <TabsContent value="sandbox" className="min-h-0 min-w-0 flex-1 overflow-hidden">
+              <SandboxWorkspace workspaceId={workspaceId} sessionId={sessionId} events={events} />
             </TabsContent>
             <TabsContent value="debug" className="min-h-0 min-w-0 flex-1 overflow-hidden">
               <SessionInspector session={session} events={events} connectionState={connectionState} />

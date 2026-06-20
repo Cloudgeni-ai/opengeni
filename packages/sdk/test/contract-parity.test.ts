@@ -1,15 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
+  AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
+  AttachViewerRequest as ContractAttachViewerRequest,
   CAPABILITY_DESCRIPTORS,
+  ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   DESKTOP_STREAM_PORT,
   SandboxBackend as ContractSandboxBackend,
+  SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
+  SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
   SessionEventType as ContractSessionEventType,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
+  StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
+  ViewerHeartbeatRequest as ContractViewerHeartbeatRequest,
+  ViewerHeartbeatResponse as ContractViewerHeartbeatResponse,
+  ViewerHolder as ContractViewerHolder,
   ReasoningEffort as ContractReasoningEffort,
   ScheduledTask as ContractScheduledTask,
   ScheduledTaskOverlapPolicy as ContractScheduledTaskOverlapPolicy,
@@ -20,20 +30,30 @@ import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment
 import type { z } from "zod";
 import { SESSION_EVENT_TYPES } from "../src/types";
 import type {
+  AcknowledgeStreamRequest,
+  AcknowledgeStreamResponse,
+  AttachViewerRequest,
+  ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
   ReasoningEffort,
   SandboxBackend,
+  SandboxOs,
   ScheduledTask,
   ScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode,
   ScheduledTaskStatus,
   Session,
+  SessionCapabilities,
   SessionEvent,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
+  StreamUrlRotatedPayload,
+  ViewerHeartbeatRequest,
+  ViewerHeartbeatResponse,
+  ViewerHolder,
 } from "../src/types";
 
 // The SDK ships hand-written wire types so it carries zero runtime
@@ -182,5 +202,38 @@ describe("SDK / contracts parity", () => {
         expect(descriptor.capabilities.Recording.available).toBe(false);
       }
     }
+  });
+
+  test("stream-surfacing shapes are parity-pinned (Phase 5)", () => {
+    // Server -> client: contract-produced shapes are assignable to the SDK
+    // mirrors the capability-gated client consumes.
+    const acceptCapabilities = (v: z.infer<typeof ContractSessionCapabilities>): SessionCapabilities => v;
+    const acceptClientConfig = (v: z.infer<typeof ContractClientConfig>): ClientConfig => v;
+    const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
+    const acceptHeartbeatResponse = (v: z.infer<typeof ContractViewerHeartbeatResponse>): ViewerHeartbeatResponse => v;
+    const acceptAckResponse = (v: z.infer<typeof ContractAcknowledgeStreamResponse>): AcknowledgeStreamResponse => v;
+    const acceptRotated = (v: z.infer<typeof ContractStreamUrlRotatedPayload>): StreamUrlRotatedPayload => v;
+    // The desktop-cell alias is an exact view of the doc's DesktopStream cell.
+    const acceptDesktopCell = (
+      v: z.infer<typeof ContractSessionCapabilities>["DesktopStream"],
+    ): SessionCapabilities["DesktopStream"] => v;
+    const serverToClient = [
+      acceptCapabilities, acceptClientConfig, acceptViewerHolder,
+      acceptHeartbeatResponse, acceptAckResponse, acceptRotated, acceptDesktopCell,
+    ];
+    expect(serverToClient.every((fn) => typeof fn === "function")).toBe(true);
+
+    // Client -> server: SDK-sent request bodies parse under the contracts schema.
+    const attach: AttachViewerRequest = { viewerId: "33333333-3333-4333-8333-333333333333" };
+    const ack: AcknowledgeStreamRequest = { acknowledgeUnredacted: true, acknowledgeShared: true };
+    const heartbeat: ViewerHeartbeatRequest = { leaseEpoch: 7 };
+    expect(ContractAttachViewerRequest.safeParse(attach).success).toBe(true);
+    expect(ContractAcknowledgeStreamRequest.safeParse(ack).success).toBe(true);
+    expect(ContractViewerHeartbeatRequest.safeParse(heartbeat).success).toBe(true);
+
+    // The OS axis the capability doc carries is 3-value (only linux is reachable
+    // in v1; the axis exists so macOS/Windows light up without a schema change).
+    const sdkOs: readonly SandboxOs[] = ["linux", "macos", "windows"];
+    expect([...sdkOs].sort()).toEqual([...ContractSandboxOs.options].sort());
   });
 });

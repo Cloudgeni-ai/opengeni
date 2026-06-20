@@ -108,6 +108,108 @@ export type SessionCapabilities = {
   negotiatedAt: string;
 };
 
+// Convenience aliases for the per-surface cells of `SessionCapabilities`, so the
+// client hooks/components can take a single cell without restating the inline
+// shape. These are exact structural views of the cells above.
+export type FileSystemCapability = SessionCapabilities["FileSystem"];
+export type TerminalCapability = SessionCapabilities["Terminal"];
+export type GitCapability = SessionCapabilities["Git"];
+export type DesktopStreamCapability = SessionCapabilities["DesktopStream"];
+export type RecordingCapability = SessionCapabilities["Recording"];
+export type ComputerUseCapability = SessionCapabilities["ComputerUse"];
+
+// ── Stream-surfacing client surface (Phase 5) ───────────────────────────────
+// Mirrors of the contracts viewer-attach / acknowledge / heartbeat shapes that
+// the capability-gated client (`@opengeni/react`) drives. The desktop pixel
+// plane rides Channel B (direct-to-provider noVNC); the structured terminal/
+// files/git surfaces ride Channel A (the existing event spine + the synchronous
+// fs/git/terminal point queries above). These are TYPES only (the SDK keeps zero
+// runtime deps); the contract-parity test pins them.
+
+// Mirror of `@opengeni/contracts` StreamUrlRotatedPayload — the Channel-A event
+// the client folds in to hot-swap its noVNC socket on a box rollover, fenced on
+// leaseEpoch.
+export type StreamUrlRotatedPayload = {
+  url: string;
+  token: string | null;
+  expiresAt: string | null;
+  leaseEpoch: number;
+  transport: "vnc-ws";
+  viewerId: string | null;
+};
+export type StreamOpenedPayload = { viewerId: string; shared: boolean; viewerCount: number };
+export type StreamClosedPayload = {
+  viewerId: string;
+  reason: "client-disconnect" | "reaped" | "revoked" | "box-rollover";
+  viewerCount: number;
+};
+export type StreamRevokedPayload = {
+  viewerId: string | null;
+  reason: "grant-revoked" | "session-failed" | "admin";
+};
+
+// Mirror of `@opengeni/contracts` AttachViewerRequest. Omitting `viewerId` mints
+// a fresh holder id (returned on the response, carried through heartbeat/detach).
+export type AttachViewerRequest = { viewerId?: string | undefined };
+
+// Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
+// the POST /viewers handler folds in when the pixel plane is minted in-process.
+export type ViewerHolder = {
+  viewerId: string;
+  sandboxGroupId: string;
+  liveness: "cold" | "warming" | "warm" | "draining";
+  leaseEpoch: number;
+  viewerHeartbeatIntervalMs: number;
+  dataPlaneUrl: string | null;
+};
+export type AttachViewerResponse = ViewerHolder & {
+  // The scoped desktop-stream address minted for THIS holder (P4.2). Null when
+  // the deployment is headless / desktop is disabled / the mint degraded —
+  // the client then falls back to the Channel-A surfaces only.
+  streamToken: string | null;
+  streamExpiresAt: string | null;
+  resolution: [number, number] | null;
+  transport: "vnc-ws" | null;
+  client: "novnc" | null;
+};
+
+// Mirror of `@opengeni/contracts` AcknowledgeStreamRequest/Response — the
+// un-redacted-pixel + shared-exposure consent gate (P3.2).
+export type AcknowledgeStreamRequest = {
+  acknowledgeUnredacted?: boolean | undefined;
+  acknowledgeShared?: boolean | undefined;
+};
+export type AcknowledgeStreamResponse = { acknowledged: boolean; acknowledgedShared: boolean };
+
+// Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
+// Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
+// → the client re-attaches).
+export type ViewerHeartbeatRequest = { leaseEpoch: number };
+export type ViewerHeartbeatResponse = { alive: boolean };
+
+// Mirror of `@opengeni/contracts` ClientAuthConfig — how the client authenticates.
+export type ClientAuthConfig =
+  | { mode: "none" }
+  | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
+  | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
+  | { mode: "managedSession"; session: "cookie" };
+
+// Mirror of `@opengeni/contracts` ClientConfig — the deployment-wide hints the
+// client reads once (models, uploads, auth, and the coarse structured-services
+// on/off). Per-session capability is negotiated on /stream-capabilities.
+export type ClientConfig = {
+  deploymentRevision: string;
+  defaultModel: string;
+  allowedModels: string[];
+  defaultReasoningEffort: ReasoningEffort;
+  allowedReasoningEfforts: ReasoningEffort[];
+  mcpServers: { id: string; name: string }[];
+  fileUploads: { enabled: boolean; maxSizeBytes: number };
+  productAccessMode: ProductAccessMode;
+  auth: ClientAuthConfig;
+  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
+};
+
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export type RepositoryResourceRef = {

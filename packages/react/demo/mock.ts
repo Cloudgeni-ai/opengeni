@@ -9,16 +9,27 @@
    -------------------------------------------------------------------------- */
 
 import type {
+  AcknowledgeStreamResponse,
+  AttachViewerResponse,
   BillingUsageResponse,
   CapabilityPack,
+  ClientConfig,
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
   EnablePackRequest,
   FileAsset,
   FileDownloadUrlResponse,
+  FsListResponse,
+  FsReadResponse,
+  GitDiffResponse,
+  GitStatusResponse,
   ListPacksResponse,
   PackInstallation,
+  PtyOpenResponse,
   RegisterCapabilityPackRequest,
+  SessionCapabilities,
+  TerminalExecResponse,
+  ViewerHeartbeatResponse,
   ScheduledTask,
   SendMessageInput,
   Session,
@@ -436,6 +447,112 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async createFileDownloadUrl(_workspaceId: string, fileId: string): Promise<FileDownloadUrlResponse> {
     return { url: `https://example.invalid/files/${fileId}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
+  }
+
+  // ── Stream surfacing (Phase 5) — canned, headless demo (no live sandbox) ────
+  async getClientConfig(): Promise<ClientConfig> {
+    return {
+      deploymentRevision: "demo",
+      defaultModel: "demo-model",
+      allowedModels: ["demo-model"],
+      defaultReasoningEffort: "medium",
+      allowedReasoningEfforts: ["low", "medium", "high"],
+      mcpServers: [],
+      fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
+      productAccessMode: "local",
+      auth: { mode: "none" },
+      structuredServices: { fileSystem: true, git: true, terminalEvents: true },
+    };
+  }
+
+  async getStreamCapabilities(_workspaceId: string, sessionId: string): Promise<SessionCapabilities> {
+    return {
+      sessionId,
+      backend: "none",
+      os: "linux",
+      liveness: "cold",
+      leaseEpoch: 0,
+      viewerHeartbeatIntervalMs: 30_000,
+      FileSystem: { available: true, readOnly: false, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: null },
+      Terminal: { transport: "sse-events", ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: null },
+      Git: { available: true, repos: ["."], reason: null },
+      DesktopStream: {
+        transport: null, client: null, mode: "read-only", url: null, token: null, expiresAt: null,
+        resolution: [1024, 768], unredacted: true, requiresAcknowledgment: false, acknowledged: false,
+        shared: false, sharedSessionIds: [], reason: "tier_headless",
+      },
+      Recording: { available: false, modes: [], codecs: [], reason: "tier_headless" },
+      ComputerUse: { available: false, readOnly: true, reason: "tier_headless" },
+      negotiatedAt: new Date().toISOString(),
+    };
+  }
+
+  async acknowledgeStream(): Promise<AcknowledgeStreamResponse> {
+    return { acknowledged: true, acknowledgedShared: true };
+  }
+
+  async attachViewer(): Promise<AttachViewerResponse> {
+    return {
+      viewerId: "00000000-0000-4000-8000-000000000001",
+      sandboxGroupId: "00000000-0000-4000-8000-0000000000aa",
+      liveness: "cold",
+      leaseEpoch: 0,
+      viewerHeartbeatIntervalMs: 30_000,
+      dataPlaneUrl: null,
+      streamToken: null,
+      streamExpiresAt: null,
+      resolution: null,
+      transport: null,
+      client: null,
+    };
+  }
+
+  async heartbeatViewer(): Promise<ViewerHeartbeatResponse> {
+    return { alive: true };
+  }
+
+  async detachViewer(): Promise<void> {
+    // no-op in the demo
+  }
+
+  async fsList(): Promise<FsListResponse> {
+    return {
+      root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [] },
+      revision: 0,
+      truncated: false,
+    };
+  }
+
+  async fsRead(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsReadResponse> {
+    return { path: request.path, encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 };
+  }
+
+  async gitStatus(): Promise<GitStatusResponse> {
+    return { isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 };
+  }
+
+  async gitDiff(): Promise<GitDiffResponse> {
+    return { files: [], revision: 0 };
+  }
+
+  async terminalExec(): Promise<TerminalExecResponse> {
+    return { stdout: "", stderr: "", exitCode: 0, running: false, wallTimeSeconds: 0 };
+  }
+
+  async terminalPtyOpen(): Promise<PtyOpenResponse> {
+    return { ptyId: "00000000-0000-4000-8000-0000000000bb", streamVia: "sse-events", supportsInput: false };
+  }
+
+  async terminalPtyWrite(): Promise<void> {
+    // no-op
+  }
+
+  async terminalPtyResize(): Promise<void> {
+    // no-op
+  }
+
+  async terminalPtyClose(): Promise<void> {
+    // no-op
   }
 
   private fileAsset(workspaceId: string, overrides: Partial<FileAsset>): FileAsset {

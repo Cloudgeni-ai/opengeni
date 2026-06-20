@@ -8,7 +8,7 @@
    -------------------------------------------------------------------------- */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { afterAll } from "bun:test";
-import { act } from "react";
+import { act, type ReactElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 declare global {
@@ -87,4 +87,36 @@ export async function flush(ms = 0): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, ms));
   });
+}
+
+export type RenderedComponent = {
+  /** The mount container — query it with `.querySelector` etc. */
+  container: HTMLElement;
+  rerender: (node: ReactNode) => Promise<void>;
+  unmount: () => Promise<void>;
+};
+
+/** Render an arbitrary React element into a throwaway tree (for component tests). */
+export async function renderComponent(node: ReactNode): Promise<RenderedComponent> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: Root | undefined;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(node as ReactElement);
+  });
+  return {
+    container,
+    rerender: async (next: ReactNode) => {
+      await act(async () => {
+        root?.render(next as ReactElement);
+      });
+    },
+    unmount: async () => {
+      await act(async () => {
+        root?.unmount();
+      });
+      container.remove();
+    },
+  };
 }

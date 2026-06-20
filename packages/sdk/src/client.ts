@@ -49,6 +49,15 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionTurn,
+  // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
+  ClientConfig,
+  SessionCapabilities,
+  AttachViewerRequest,
+  AttachViewerResponse,
+  AcknowledgeStreamRequest,
+  AcknowledgeStreamResponse,
+  ViewerHeartbeatRequest,
+  ViewerHeartbeatResponse,
   // Channel-A structured services (P4.4).
   FsListRequest,
   FsListResponse,
@@ -491,6 +500,66 @@ export class OpenGeniClient {
   /** Terminal: close an open PTY (idempotent). */
   async terminalPtyClose(workspaceId: string, sessionId: string, request: PtyCloseRequest): Promise<void> {
     await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/close`, request);
+  }
+
+  // --- Stream surfacing: capability negotiation + viewer lifecycle (Phase 5) ---
+  // The capability doc is the single source of UI truth (degradation is always a
+  // value, never a crash). The desktop pixel plane (Channel B) is gated behind an
+  // un-redacted-acknowledgment + a viewer holder; the structured terminal/files/
+  // git surfaces (Channel A) ride the methods above and the event SSE.
+
+  /** Read this deployment's client config (models, uploads, auth, structured
+   *  services on/off). Auth-exempt; safe to call before any session exists. */
+  async getClientConfig(): Promise<ClientConfig> {
+    return await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+  }
+
+  /** Read the negotiated capability doc for a session WITHOUT acquiring a viewer
+   *  holder (no warm, no spawn). Drives capability-gated rendering: which
+   *  surfaces mount, the per-surface unavailability reasons, and the lease
+   *  liveness the client polls on while `cold`/`warming`. The desktop URL/token
+   *  are minted in-process only when the box is warm AND the principal has
+   *  acknowledged the un-redacted plane. */
+  async getStreamCapabilities(workspaceId: string, sessionId: string): Promise<SessionCapabilities> {
+    return await this.requestJson<SessionCapabilities>(
+      "GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`);
+  }
+
+  /** Record the calling principal's acknowledgment of the un-redacted desktop
+   *  pixel plane (and, when the box is shared, the shared-exposure disclosure).
+   *  The desktop viewer-attach path returns 409 until this is recorded. */
+  async acknowledgeStream(
+    workspaceId: string, sessionId: string, request: AcknowledgeStreamRequest = {},
+  ): Promise<AcknowledgeStreamResponse> {
+    return await this.requestJson<AcknowledgeStreamResponse>(
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities/acknowledge`, request);
+  }
+
+  /** Attach a viewer to the desktop stream: acquire a viewer holder (refcounted
+   *  liveness — keeps the box warm while watched), spinning the box up in-process
+   *  when cold, and mint the scoped direct-to-provider pixel URL for THIS holder.
+   *  Throws `OpenGeniApiError(409)` when the un-redacted/shared acknowledgment is
+   *  missing (the consent gate). An omitted `viewerId` mints a fresh one. */
+  async attachViewer(
+    workspaceId: string, sessionId: string, request: AttachViewerRequest = {},
+  ): Promise<AttachViewerResponse> {
+    return await this.requestJson<AttachViewerResponse>(
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers`, request);
+  }
+
+  /** Heartbeat a viewer holder (Channel-A app-level liveness). A closed laptop
+   *  stops sending these → the reaper drops the holder within ~90s. Echoes
+   *  `leaseEpoch` so a superseded epoch is rejected (`alive:false` → re-attach). */
+  async heartbeatViewer(
+    workspaceId: string, sessionId: string, viewerId: string, request: ViewerHeartbeatRequest,
+  ): Promise<ViewerHeartbeatResponse> {
+    return await this.requestJson<ViewerHeartbeatResponse>(
+      "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}/heartbeat`, request);
+  }
+
+  /** Detach a viewer (delete this holder; idempotent delete-my-row). */
+  async detachViewer(workspaceId: string, sessionId: string, viewerId: string): Promise<void> {
+    await this.requestVoid("DELETE", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/viewers/${viewerId}`);
   }
 
   // --- Access + workspaces -----------------------------------------------------

@@ -11,6 +11,15 @@ export {
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
+// Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
+// @opengeni/react). URL assembler + connection state machine + rotation fence.
+export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
+export type {
+  DesktopRfbLike,
+  DesktopRfbFactory,
+  DesktopConnectionState,
+  DesktopStreamEvent,
+} from "./desktop";
 export { streamSessionEvents } from "./stream";
 export type {
   SessionEventStreamTransport,
@@ -124,6 +133,27 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionCapabilities,
+  // Per-surface capability cell aliases (views of SessionCapabilities).
+  FileSystemCapability,
+  TerminalCapability,
+  GitCapability,
+  DesktopStreamCapability,
+  RecordingCapability,
+  ComputerUseCapability,
+  // Stream-surfacing client surface (Phase 5).
+  ClientConfig,
+  ClientAuthConfig,
+  StreamUrlRotatedPayload,
+  StreamOpenedPayload,
+  StreamClosedPayload,
+  StreamRevokedPayload,
+  AttachViewerRequest,
+  AttachViewerResponse,
+  ViewerHolder,
+  AcknowledgeStreamRequest,
+  AcknowledgeStreamResponse,
+  ViewerHeartbeatRequest,
+  ViewerHeartbeatResponse,
   SessionEvent,
   SessionEventType,
   SessionGoal,
