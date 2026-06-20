@@ -258,6 +258,11 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
+  // The desktop framebuffer geometry the pixel plane advertises + launches the
+  // display stack with (P4.2). v1 has no live RANDR resize; a change is a full
+  // down→up restart. Defaults match the proven spike geometry (1280x800).
+  streamResolutionWidth: z.coerce.number().int().positive().default(1280),
+  streamResolutionHeight: z.coerce.number().int().positive().default(800),
   // --- daytona ---
   daytonaApiKey: z.string().optional(),
   daytonaApiUrl: z.string().url().optional(),
@@ -628,6 +633,8 @@ export function getSettings(): Settings {
     modalIdleTimeoutSeconds: optional("OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS"),
     modalWorkspacePersistence: optional("OPENGENI_MODAL_WORKSPACE_PERSISTENCE"),
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
+    streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
+    streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
     daytonaApiKey: optional("OPENGENI_DAYTONA_API_KEY"),
     daytonaApiUrl: optional("OPENGENI_DAYTONA_API_URL"),
     daytonaTarget: optional("OPENGENI_DAYTONA_TARGET"),

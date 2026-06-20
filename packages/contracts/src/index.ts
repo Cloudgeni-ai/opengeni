@@ -1748,8 +1748,54 @@ export const SessionEventType = z.enum([
   "goal.paused",
   "goal.resumed",
   "goal.continuation",
+  // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
+  // carries opaque RFB and cannot carry a control message the client can act on,
+  // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.
+  "stream.url.rotated", // re-minted {url,token,expiresAt} on box rollover (event-driven)
+  "stream.opened", // a viewer attached (audit + refcount visibility)
+  "stream.closed", // a viewer detached / was reaped
+  "stream.revoked", // a grant was revoked → connected clients MUST disconnect now
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
+
+// Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
+// z.unknown() (NOT a discriminated union) — these are standalone schemas parsed
+// explicitly at the producer (the API-direct handshake/rotation) and the SDK/
+// React consumer. The rotation payload carries the freshly-minted data-plane URL
+// + the scoped stream token so a connected client hot-swaps its noVNC socket.
+export const StreamUrlRotatedPayload = z.object({
+  url: z.string().url(),
+  token: z.string().nullable(),
+  expiresAt: z.string().datetime().nullable(),
+  // The epoch the new URL was minted under (the box-rollover fence the client
+  // reconciles against). A client must drop a rotation event whose epoch it has
+  // already advanced past.
+  leaseEpoch: z.number().int().nonnegative(),
+  transport: z.literal("vnc-ws"),
+  // The viewer holder this URL is for (so a client filters out other viewers').
+  viewerId: z.string().uuid().nullable().default(null),
+});
+export type StreamUrlRotatedPayload = z.infer<typeof StreamUrlRotatedPayload>;
+
+export const StreamOpenedPayload = z.object({
+  viewerId: z.string().uuid(),
+  shared: z.boolean().default(false),
+  viewerCount: z.number().int().nonnegative(),
+});
+export type StreamOpenedPayload = z.infer<typeof StreamOpenedPayload>;
+
+export const StreamClosedPayload = z.object({
+  viewerId: z.string().uuid(),
+  reason: z.enum(["client-disconnect", "reaped", "revoked", "box-rollover"]),
+  viewerCount: z.number().int().nonnegative(),
+});
+export type StreamClosedPayload = z.infer<typeof StreamClosedPayload>;
+
+export const StreamRevokedPayload = z.object({
+  viewerId: z.string().uuid().nullable().default(null),
+  reason: z.enum(["grant-revoked", "session-failed", "admin"]),
+});
+export type StreamRevokedPayload = z.infer<typeof StreamRevokedPayload>;
 
 export const SessionEvent = z.object({
   id: z.string().uuid(),

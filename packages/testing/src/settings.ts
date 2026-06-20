@@ -107,6 +107,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modalIdleTimeoutSeconds: undefined,
     modalWorkspacePersistence: undefined,
     sandboxDesktopEnabled: false,
+    streamResolutionWidth: 1280,
+    streamResolutionHeight: 800,
     daytonaApiKey: undefined,
     daytonaApiUrl: undefined,
     daytonaTarget: undefined,

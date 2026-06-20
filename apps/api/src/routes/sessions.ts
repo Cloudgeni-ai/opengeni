@@ -36,7 +36,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
-import { attachViewer, detachViewer, heartbeatViewer, readGroupLease } from "../sandbox/viewer";
+import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, readGroupLease, type DesktopStreamMint } from "../sandbox/viewer";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   normalizeResources,
@@ -404,6 +404,36 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // shared box is the shared-consent bit, not the bare un-redacted one.
     const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
     const acknowledged = ack ? (shared ? ack.acknowledgedShared : ack.acknowledgedUnredacted) : false;
+
+    // P4.2 — the pixel DATA PLANE, served API-direct. When the backend is
+    // desktop-capable AND sandboxDesktopEnabled AND the (shared, if shared)
+    // acknowledgment is present AND the box is WARM, mint the REAL DesktopStream
+    // cell IN-PROCESS: resume the box by id, ensureDisplayStack (idempotent),
+    // exposeStreamPort (resolve the 6080 tunnel + mint the scoped token), record
+    // data_plane_url under the epoch fence, and emit stream.url.rotated to other
+    // viewers on a box rollover. The handshake never SPINS UP a cold box (that is
+    // the viewer-attach path) — a cold lease stays lease_cold. A degraded mint
+    // (no secret / display-stack or tunnel failure) returns null → transport:null.
+    let desktopStream: DesktopStreamMint | null = null;
+    const desktopUnlocked =
+      settings.sandboxDesktopEnabled
+      && !streamTokenDegraded(settings)
+      && acknowledged
+      && (lease?.liveness === "warm" || lease?.liveness === "draining");
+    if (desktopUnlocked && lease) {
+      desktopStream = await mintDesktopStream({ db, settings, bus }, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        // The handshake's token is scoped to the calling principal (it is a read,
+        // not a viewer-holder acquire); the per-holder token is re-minted on
+        // POST /viewers. A previousEpoch != current would have rotated already
+        // via the warming-commit; the read does not itself drive rotation.
+        viewerId: grant.subjectId,
+        lease,
+      });
+    }
+
     const capabilities = negotiateCapabilities({
       sessionId,
       backend: session.sandboxBackend as SandboxBackend,
@@ -418,6 +448,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       desktopAcknowledged: acknowledged,
       shared,
       sharedSessionIds,
+      // The minted live address (null when not unlocked/degraded). The resolver
+      // only folds it in when the desktop gates pass + the ack is present.
+      ...(desktopStream
+        ? {
+            desktopStream: {
+              url: desktopStream.url,
+              token: desktopStream.token,
+              expiresAt: desktopStream.expiresAt,
+              resolution: desktopStream.resolution,
+            },
+          }
+        : {}),
     });
     return c.json(capabilities);
   });
@@ -489,7 +531,39 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       session,
       ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
     });
-    return c.json(result, 201);
+
+    // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
+    // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
+    // viewer holder, record data_plane_url, and fold the live address into the
+    // response. A degraded mint (no secret / headless / display-stack or tunnel
+    // failure) leaves dataPlaneUrl null — the client falls back to Channel-A. The
+    // box is warm here (attachViewer spun it up or attached), so the handshake's
+    // never-spin-up rule does not apply.
+    let stream: DesktopStreamMint | null = null;
+    if (settings.sandboxDesktopEnabled && !streamTokenDegraded(settings)) {
+      const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+      if (lease) {
+        stream = await mintDesktopStream({ db, settings, bus }, {
+          accountId: grant.accountId,
+          workspaceId,
+          session,
+          viewerId: result.viewerId,
+          lease,
+        });
+      }
+    }
+    return c.json(
+      {
+        ...result,
+        dataPlaneUrl: stream?.url ?? result.dataPlaneUrl,
+        streamToken: stream?.token ?? null,
+        streamExpiresAt: stream?.expiresAt ?? null,
+        resolution: stream?.resolution ?? null,
+        transport: stream ? ("vnc-ws" as const) : null,
+        client: stream ? ("novnc" as const) : null,
+      },
+      201,
+    );
   });
 
   // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL (epoch-fenced).

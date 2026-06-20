@@ -75,3 +75,53 @@ describe("negotiateCapabilities — desktop graceful degrade (I8/OD-8)", () => {
     expect(caps.DesktopStream.transport).toBe("vnc-ws");
   });
 });
+
+describe("negotiateCapabilities — the minted pixel cell folds in ONLY behind the gates (P4.2)", () => {
+  const minted = {
+    url: "wss://box.modal.host/",
+    token: "ogs_fake.signature",
+    expiresAt: "2026-06-20T00:02:00.000Z",
+    resolution: [1280, 800] as [number, number],
+  };
+  const warmAcked = {
+    sessionId: "22222222-2222-4222-8222-222222222222",
+    backend: "modal" as const,
+    os: "linux" as const,
+    liveness: "warm" as const,
+    leaseEpoch: 4,
+    desktopEnabled: true,
+    streamTokenSecretAvailable: true,
+    desktopAcknowledged: true,
+  };
+
+  test("desktop available + acknowledged -> the live url/token/expiresAt/resolution are handed out", () => {
+    const caps = negotiateCapabilities({ ...warmAcked, desktopStream: minted });
+    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.url).toBe(minted.url);
+    expect(caps.DesktopStream.token).toBe(minted.token);
+    expect(caps.DesktopStream.expiresAt).toBe(minted.expiresAt);
+    expect(caps.DesktopStream.resolution).toEqual([1280, 800]);
+    expect(caps.DesktopStream.acknowledged).toBe(true);
+  });
+
+  test("NOT acknowledged -> the minted cell is DROPPED (no live url leaks before consent)", () => {
+    const caps = negotiateCapabilities({ ...warmAcked, desktopAcknowledged: false, desktopStream: minted });
+    expect(caps.DesktopStream.url).toBeNull();
+    expect(caps.DesktopStream.token).toBeNull();
+    expect(caps.DesktopStream.expiresAt).toBeNull();
+    expect(caps.DesktopStream.acknowledged).toBe(false);
+  });
+
+  test("cold lease -> transport null + lease_cold; a minted cell would never be passed but is dropped if it were", () => {
+    const caps = negotiateCapabilities({ ...warmAcked, liveness: "cold", desktopStream: minted });
+    expect(caps.DesktopStream.transport).toBeNull();
+    expect(caps.DesktopStream.reason).toBe("lease_cold");
+    expect(caps.DesktopStream.url).toBeNull();
+  });
+
+  test("degraded (no secret) -> the minted cell is dropped (transport null)", () => {
+    const caps = negotiateCapabilities({ ...warmAcked, streamTokenSecretAvailable: false, desktopStream: minted });
+    expect(caps.DesktopStream.transport).toBeNull();
+    expect(caps.DesktopStream.url).toBeNull();
+  });
+});

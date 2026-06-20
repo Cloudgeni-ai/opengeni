@@ -36,7 +36,10 @@ import {
   ensureDisplayStack as ensureDisplayStackOnBox,
   desktopCapableBackend,
   DisplayStackUnsupportedError,
+  buildStreamUrl,
+  StreamPortUnavailableError,
   type EstablishedSandboxSession,
+  type ExposedPortEndpoint,
 } from "@opengeni/runtime";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 
@@ -315,16 +318,56 @@ export async function ensureDisplayStack(
   }
 }
 
+// The structural slice of a provider session we need to resolve the tunnel.
+type PortResolvableSession = {
+  resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+};
+
 /**
- * Mint/re-resolve the scoped desktop tunnel URL (resolveExposedPort(6080)).
- * Returns null on a headless backend / when desktop is disabled (degradation is
- * a value, never a throw). NO-OP today (returns null): no desktop tier yet. Real
- * body: P4.2.
+ * Resolve the desktop tunnel URL (resolveExposedPort(6080)) and assemble the
+ * direct-to-provider WS URL, recorded on the lease as `data_plane_url` at
+ * commit. The per-viewer scoped token is minted at viewer-attach time (the
+ * handshake), NOT here — the spawner records only the box-scoped tunnel URL so
+ * the lease carries a fresh value across a rollover. P4.2 productionizes the
+ * P4.1 stub.
+ *
+ * Returns null (degradation is a value, NEVER a throw):
+ *   - the desktop tier is off (sandboxDesktopEnabled=false), or
+ *   - the backend is headless-only (no desktop), or
+ *   - the provider session cannot resolve the port (no resolveExposedPort), or
+ *   - the tunnel lookup transiently failed.
+ * In every null case the lease's data_plane_url stays null and the next
+ * API-direct viewer op re-mints it; the turn never fails on a desktop hiccup.
  */
 export async function exposeStreamPort(
-  _settings: Settings,
-  _established: EstablishedSandboxSession,
+  settings: Settings,
+  established: EstablishedSandboxSession,
 ): Promise<{ url: string; expiresAt: Date } | null> {
   // Headless rollover branch (I5): tier !== desktop -> no stream port to expose.
-  return null;
+  if (!settings.sandboxDesktopEnabled) {
+    return null;
+  }
+  if (!desktopCapableBackend(established.backendId)) {
+    return null;
+  }
+  const session = established.session as PortResolvableSession;
+  if (typeof session?.resolveExposedPort !== "function") {
+    return null;
+  }
+  try {
+    const endpoint = await session.resolveExposedPort(DESKTOP_STREAM_PORT);
+    const url = buildStreamUrl(endpoint);
+    // The provider tunnel URL is box-lifetime-valid (Modal raw TLS) or
+    // provider-TTL-signed (Daytona/Blaxel); the per-viewer token's TTL bounds the
+    // viewer's freshness. We record only the URL on the lease; expiresAt here is a
+    // soft hint (the box's idle horizon), not a hard token expiry.
+    return { url, expiresAt: new Date(Date.now() + settings.sandboxLeaseTtlMs) };
+  } catch (error) {
+    // Degradation is a value: a transient resolve failure leaves data_plane_url
+    // null and the next viewer op re-mints. Never fail the turn on a desktop op.
+    if (error instanceof StreamPortUnavailableError) {
+      return null;
+    }
+    return null;
+  }
 }

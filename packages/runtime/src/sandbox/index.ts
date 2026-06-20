@@ -88,6 +88,18 @@ export {
   type EnsureDisplayStackResult,
 } from "./display-stack";
 
+// The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
+// for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
+// mints the scoped stream token. Called API-direct on the resumed handle.
+export {
+  exposeStreamPort,
+  buildStreamUrl,
+  StreamPortUnavailableError,
+  type ExposedPortEndpoint,
+  type ExposeStreamPortInput,
+  type ExposeStreamPortResult,
+} from "./stream-port";
+
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
  * driven (the old flat if/else is gone): the backend's ProviderRegistration owns

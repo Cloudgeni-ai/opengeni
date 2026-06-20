@@ -220,6 +220,12 @@ export const SESSION_EVENT_TYPES = [
   "goal.paused",
   "goal.resumed",
   "goal.continuation",
+  // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
+  // the contract-parity test asserts sorted equality).
+  "stream.url.rotated",
+  "stream.opened",
+  "stream.closed",
+  "stream.revoked",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];

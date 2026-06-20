@@ -18,8 +18,9 @@
 // scoped token are P3/P4. Here we surface only the holder lifecycle + the
 // lease's recorded data_plane_url (null until P4 mints it).
 
+import { resolveStreamTokenSecret } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
-import type { Session } from "@opengeni/contracts";
+import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
   commitWarmingToWarm,
@@ -27,25 +28,35 @@ import {
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
   readLease,
+  recordLeaseDataPlaneUrl,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   type Database,
   type LeaseSnapshot,
 } from "@opengeni/db";
+import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 
 // The leaf — agent-loop-free. apps/api imports sandbox symbols ONLY from here
 // (enforced by sandbox-access-import-guard.test.ts).
 import {
+  ensureDisplayStack,
   establishSandboxSessionFromEnvelope,
+  exposeStreamPort,
+  desktopCapableBackend,
+  DisplayStackUnsupportedError,
+  StreamPortUnavailableError,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
- *  the sandbox client construction the leaf reads from settings). */
+ *  the sandbox client construction the leaf reads from settings). The bus is
+ *  optional — only the rotation path (emitting stream.url.rotated to OTHER
+ *  viewers) needs it. */
 export type ViewerServices = {
   db: Database;
   settings: Settings;
+  bus?: EventBus;
 };
 
 /** A coherent snapshot the routes echo back: the holder id (the viewer's fence-
@@ -254,4 +265,197 @@ async function dropEstablishedHandle(established: EstablishedSandboxSession | un
       // non-owned handle; the lease owns lifecycle.
     }
   }
+}
+
+// ============================================================================
+// P4.2 — the pixel DATA PLANE, served API-DIRECT.
+//
+// mintDesktopStream resumes the WARM box BY ID in-process, idempotently ensures
+// the display stack, resolves the provider's scoped tunnel for port 6080, mints
+// the scoped per-viewer stream token, records the resolved URL on the lease under
+// the epoch fence, and (on a box rollover — a lease_epoch advance vs what the
+// caller last saw) emits a `stream.url.rotated` Channel-A event so OTHER
+// connected viewers reconnect. NO Temporal, NO worker, NO NATS req/reply: the API
+// process holds the live handle for the duration of the call and drops it on
+// return (the lease, not this handle, owns the box).
+//
+// Rotation is EVENT-DRIVEN, not a timer: the URL only changes when the box is
+// re-keyed (Modal 24h ceiling / death → re-establish under a new epoch). The
+// requester always gets the fresh cell as the HTTP response; the rotation event
+// is the out-of-band signal to the OTHER viewers of the same session.
+// ============================================================================
+
+/** The minted pixel cell the handshake/attach folds into the DesktopStream
+ *  capability. Null when degraded (no secret, headless backend, display-stack
+ *  failure, provider tunnel failure) — degradation is a value, never a throw. */
+export type DesktopStreamMint = {
+  url: string;
+  token: string;
+  expiresAt: string;
+  resolution: [number, number];
+  leaseEpoch: number;
+};
+
+export type MintDesktopStreamInput = {
+  accountId: string;
+  workspaceId: string;
+  session: Session;
+  /** The viewer holder id the scoped token is minted for. */
+  viewerId: string;
+  /** The live lease (must be warm/draining — the box is up). */
+  lease: LeaseSnapshot;
+  /** The epoch the CALLER last observed the URL minted under. When the live
+   *  lease epoch is greater, the box rolled over → emit stream.url.rotated to the
+   *  other viewers. Omit on a first mint (no prior URL to rotate from). */
+  previousEpoch?: number;
+  /** Test seam: override how the box is re-established by id. Defaults to the
+   *  real leaf `establishSandboxSessionFromEnvelope`. Production NEVER passes
+   *  this; it exists so a real-lease integration test can inject a fake provider
+   *  session carrying `resolveExposedPort` without a live cloud box. */
+  establish?: (
+    envelope: Record<string, unknown> | null,
+  ) => Promise<EstablishedSandboxSession>;
+};
+
+/**
+ * Mint (or re-mint) the desktop pixel cell for a viewer against a WARM box,
+ * IN-PROCESS. Returns the minted cell, or null when the desktop tier degrades
+ * (no resolvable stream-token secret, a headless backend, a display-stack
+ * failure, or a provider-tunnel failure) — the caller surfaces transport:null,
+ * never an exception to the user.
+ *
+ * Idempotent display-stack + resolveExposedPort are safe to call N times. The
+ * resolved URL is recorded on the lease (data_plane_url) under the epoch fence; a
+ * stale-epoch write (the box re-established under a newer epoch mid-call) is a
+ * no-op and we return the freshly-minted cell anyway (it is for the epoch we
+ * resumed under; the next op reconciles).
+ */
+export async function mintDesktopStream(
+  services: ViewerServices,
+  input: MintDesktopStreamInput,
+): Promise<DesktopStreamMint | null> {
+  const { db, settings, bus } = services;
+  const { accountId, workspaceId, session, viewerId, lease } = input;
+
+  // GATE 1: a desktop tier that is off, headless, or lacks a stream-token secret
+  // cannot mint a live URL. (The handshake's negotiateCapabilities already
+  // reports the typed reason; here we just refuse to mint.)
+  if (!settings.sandboxDesktopEnabled) {
+    return null;
+  }
+  if (!desktopCapableBackend(session.sandboxBackend)) {
+    return null;
+  }
+  const secret = resolveStreamTokenSecret(settings);
+  if (!secret) {
+    return null;
+  }
+  // GATE 2: the box must be live (the handshake never spins one up — a cold box
+  // returns lease_cold; the viewer-attach path warms it first, then mints).
+  if (lease.liveness !== "warm" && lease.liveness !== "draining") {
+    return null;
+  }
+
+  // Resume the LIVE box by id. The lease's resume_state is authoritative (it is
+  // the box the lease currently fences); fall back to the session envelope only
+  // when the lease has none (a freshly-warmed lease always has it).
+  const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  let established: EstablishedSandboxSession | undefined;
+  try {
+    established = input.establish
+      ? await input.establish(envelope)
+      : await establishSandboxSessionFromEnvelope(settings, envelope, {
+          sessionId: session.id,
+          backendOverride: session.sandboxBackend,
+        });
+
+    // Idempotent display stack (flock-guarded; a no-op when already up). A box
+    // that genuinely can't run the stack degrades to transport:null, not a throw.
+    try {
+      await ensureDisplayStack(established.session);
+    } catch (error) {
+      if (error instanceof DisplayStackUnsupportedError) {
+        return null;
+      }
+      throw error;
+    }
+
+    // Resolve the provider tunnel + mint the scoped token, IN-PROCESS.
+    let exposed: Awaited<ReturnType<typeof exposeStreamPort>>;
+    try {
+      exposed = await exposeStreamPort(established.session, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId,
+        leaseEpoch: lease.leaseEpoch,
+        streamTokenSecret: secret,
+        resolution: defaultResolution(settings),
+      });
+    } catch (error) {
+      // A transient/headless provider failure degrades the desktop cell.
+      if (error instanceof StreamPortUnavailableError) {
+        return null;
+      }
+      throw error;
+    }
+
+    // Record the resolved URL on the lease under the epoch fence (rotation +
+    // disclosure). A fence miss (the box re-established under a newer epoch
+    // mid-call) is a no-op; we still return the cell we minted for our epoch.
+    await recordLeaseDataPlaneUrl(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: lease.leaseEpoch,
+      dataPlaneUrl: exposed.url,
+    });
+
+    const mint: DesktopStreamMint = {
+      url: exposed.url,
+      token: exposed.token,
+      expiresAt: exposed.expiresAt,
+      resolution: exposed.resolution,
+      leaseEpoch: lease.leaseEpoch,
+    };
+
+    // ROLLOVER ROTATION (event-driven): when the live epoch advanced past what
+    // the caller last saw, the box was re-keyed → the OLD data-plane URL is
+    // stale. Emit stream.url.rotated so OTHER connected viewers hot-swap their
+    // noVNC socket. The requester already has the fresh cell as its response, so
+    // this is purely the out-of-band signal to the rest. Best-effort: a publish
+    // failure must never fail the mint.
+    if (bus && input.previousEpoch !== undefined && lease.leaseEpoch > input.previousEpoch) {
+      const payload: StreamUrlRotatedPayload = {
+        url: exposed.url,
+        token: exposed.token,
+        expiresAt: exposed.expiresAt,
+        leaseEpoch: lease.leaseEpoch,
+        transport: "vnc-ws",
+        viewerId,
+      };
+      try {
+        await appendAndPublishEvents(db, bus, workspaceId, session.id, [
+          { type: "stream.url.rotated", payload },
+        ]);
+      } catch {
+        // The durable SSE spine retries; a dropped publish here is not fatal.
+      }
+    }
+
+    return mint;
+  } catch {
+    // Any other failure (resume error, exec error) degrades the desktop cell to
+    // transport:null rather than failing the whole handshake — Channel-A still
+    // works. The capability resolver reports the desktop as available; the live
+    // URL is simply absent until the next op succeeds.
+    return null;
+  } finally {
+    await dropEstablishedHandle(established);
+  }
+}
+
+// The framebuffer geometry from settings (streamResolutionWidth/Height; default
+// 1280x800, the spike's proven geometry).
+function defaultResolution(settings: Settings): [number, number] {
+  return [settings.streamResolutionWidth, settings.streamResolutionHeight];
 }

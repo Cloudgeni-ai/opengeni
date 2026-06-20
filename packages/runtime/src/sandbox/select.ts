@@ -45,6 +45,23 @@ export interface NegotiationContext {
   /** The OTHER sessions whose agents may appear on the shared desktop — IDS
    *  ONLY, never their conversation/metadata (stress g). Empty for a solo box. */
   sharedSessionIds?: string[];
+  /**
+   * The minted pixel-plane endpoint (P4.2): the direct-to-provider WS URL + the
+   * scoped stream token + its expiry + the framebuffer geometry. Threaded by the
+   * API-direct handshake AFTER it has resumed the box, ensured the display stack,
+   * and resolved the provider tunnel. When ABSENT (the negotiation-only read, a
+   * cold lease, or a degraded desktop) the DesktopStream cell reports url/token/
+   * expiresAt as null — the capability is advertised, the live address is not yet
+   * minted (the caller POSTs to /viewers to mint it). Presence does NOT override
+   * the gates: a degraded/cold/unacked desktop still reports transport:null and
+   * the minted endpoint is dropped.
+   */
+  desktopStream?: {
+    url: string;
+    token: string;
+    expiresAt: string;
+    resolution: [number, number];
+  };
   /** Override the negotiation clock (tests). */
   now?: Date;
 }
@@ -178,14 +195,21 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       reason = "lease_cold";
     }
     const shared = available ? Boolean(ctx.shared) : false;
+    // The minted pixel endpoint is handed out ONLY when the desktop is actually
+    // available (the gates passed) AND acknowledged: an unacked/cold/degraded
+    // desktop never leaks a live URL (the un-redacted-pixel consent gate). When
+    // absent the cell advertises the capability with a null live address — the
+    // caller mints it via POST /viewers.
+    const acknowledged = available ? Boolean(ctx.desktopAcknowledged) : false;
+    const minted = available && acknowledged ? ctx.desktopStream : undefined;
     return {
       transport: available ? cap.transport : null,
       client: available ? ("novnc" as const) : null,
       mode: "read-only" as const,
-      url: null,
-      token: null,
-      expiresAt: null,
-      resolution: [1024, 768] as [number, number],
+      url: minted?.url ?? null,
+      token: minted?.token ?? null,
+      expiresAt: minted?.expiresAt ?? null,
+      resolution: minted?.resolution ?? ([1024, 768] as [number, number]),
       // Desktop pixels are ALWAYS un-redacted when present (the literal
       // framebuffer); the acknowledgment gate rests on this.
       unredacted: true,

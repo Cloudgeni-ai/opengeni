@@ -3254,6 +3254,36 @@ export async function readLease(db: Database, workspaceId: string, sandboxGroupI
   });
 }
 
+// P4.2 — record the (re-)resolved desktop data-plane URL on an ALREADY-WARM
+// lease, EPOCH-FENCED. commitWarmingToWarm records the URL at cold→warming→warm
+// (the spawn path); this is the WARM-path counterpart used when a viewer mints
+// the URL against a box that some other holder already brought up, and on
+// rollover-rotation (re-resolve under the current epoch). The fence is the
+// split-brain guard: a stale-epoch writer (a box re-established under a newer
+// epoch) updates ZERO rows and the caller backs off. Returns the updated
+// snapshot, or null on a fence miss (epoch advanced / lease vanished).
+export async function recordLeaseDataPlaneUrl(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  dataPlaneUrl: string | null;
+}): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          data_plane_url = ${input.dataPlaneUrl ?? null},
+          updated_at     = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and liveness in ('warm', 'draining')
+        returning *
+      `);
+      return rows[0] ? mapLeaseRow(rows[0]) : null;
+    });
+}
+
 // ============================================================================
 // P3.2 — the un-redacted-pixel consent gate + viewer revocation.
 //
