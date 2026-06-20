@@ -115,6 +115,19 @@ export const sessions = pgTable("sessions", {
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   model: text("model").notNull(),
   sandboxBackend: text("sandbox_backend").notNull(),
+  // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
+  // every existing + new row is a behavior-preserving no-op). CHECK-constrained
+  // to the SandboxOs enum (linux|macos|windows) in migration 0018.
+  sandboxOs: text("sandbox_os").notNull().default("linux"),
+  // The shared-sandbox group this session's box belongs to. Defaults to the
+  // session's OWN id (a singleton group: group === session — today's 1:1
+  // behavior). When spawned shared via session_create, set to the PARENT's
+  // sandboxGroupId so both run in ONE box. Immutable once set. NOT an FK (the
+  // value is this row's id or an ancestor session's id in the same workspace;
+  // the live lease row, not a sandbox_groups table, materializes the group).
+  // The app generates the uuid and uses it for both id and sandbox_group_id in
+  // one insert — it cannot SQL-default to id (id is defaultRandom()).
+  sandboxGroupId: uuid("sandbox_group_id").notNull(),
   environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.
@@ -151,6 +164,9 @@ export const sessions = pgTable("sessions", {
   workspaceCreated: index("sessions_workspace_created_idx").on(table.workspaceId, table.createdAt),
   environment: index("sessions_environment_idx").on(table.workspaceId, table.environmentId),
   parent: index("sessions_parent_idx").on(table.workspaceId, table.parentSessionId),
+  // Routing index: resolve session_id -> sandbox_group_id at every lease entry
+  // point and enumerate all sessions in a group for attribution/disclosure.
+  sandboxGroup: index("sessions_sandbox_group_idx").on(table.workspaceId, table.sandboxGroupId),
   // Partial unique index: one session per (workspace, create_idempotency_key)
   // when a key is present. Concurrent creates racing on the same key see a
   // unique violation on all but one; the domain layer catches it and returns
@@ -258,6 +274,9 @@ export const sessionTurns = pgTable("session_turns", {
   model: text("model").notNull(),
   reasoningEffort: text("reasoning_effort").notNull(),
   sandboxBackend: text("sandbox_backend").notNull(),
+  // Per-turn OS override. NULL = inherit the session's sandbox_os. CHECK-
+  // constrained to the SandboxOs enum (or NULL) in migration 0018.
+  sandboxOs: text("sandbox_os"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),

@@ -1025,6 +1025,8 @@ export const SessionTurn = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sandboxBackend: SandboxBackend,
+  // Per-turn OS override. NULL = inherit the session's sandboxOs.
+  sandboxOs: SandboxOs.nullable(),
   metadata: z.record(z.string(), z.unknown()),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
@@ -1573,6 +1575,12 @@ export const Session = z.object({
   metadata: z.record(z.string(), z.unknown()),
   model: z.string(),
   sandboxBackend: SandboxBackend,
+  // The OS the session's box runs. Defaults to 'linux' (today's only OS).
+  sandboxOs: SandboxOs,
+  // The shared-sandbox group the session's box belongs to. Equals the session's
+  // own id for a singleton group (today's 1:1 default); equals the parent's
+  // group when spawned shared (both sessions run in ONE box).
+  sandboxGroupId: z.string().uuid(),
   environmentId: z.string().uuid().nullable(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.

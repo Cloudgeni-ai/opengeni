@@ -18,6 +18,7 @@ import type {
   PackInstallationStatus,
   ResourceRef,
   SandboxBackend,
+  SandboxOs,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   ScheduledTaskOverlapPolicy,
@@ -1977,9 +1978,18 @@ export async function createSession(db: Database, input: {
   firstPartyMcpPermissions?: Permission[] | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
+  // The shared-sandbox group to join. Omit (or null) for a singleton group:
+  // the new row's own id is used (group === session), today's 1:1 behavior. A
+  // shared spawn passes the parent's sandboxGroupId so both run in ONE box.
+  sandboxGroupId?: string | null;
+  sandboxOs?: SandboxOs;
 }): Promise<Session> {
+  // Generate the id up front so the same uuid can seed sandbox_group_id for a
+  // singleton group (sandbox_group_id cannot SQL-default to id).
+  const id = crypto.randomUUID();
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [row] = await scopedDb.insert(schema.sessions).values({
+      id,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
@@ -1988,6 +1998,8 @@ export async function createSession(db: Database, input: {
       metadata: input.metadata,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
+      sandboxOs: input.sandboxOs ?? "linux",
+      sandboxGroupId: input.sandboxGroupId ?? id,
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -2024,9 +2036,17 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
   firstPartyMcpPermissions?: Permission[] | null;
   parentSessionId?: string | null;
   createIdempotencyKey: string;
+  // The shared-sandbox group to join. Omit (or null) for a singleton group
+  // (group === the new row's own id); a shared spawn passes the parent's group.
+  sandboxGroupId?: string | null;
+  sandboxOs?: SandboxOs;
 }): Promise<{ session: Session; created: boolean }> {
+  // Generate the id up front so the same uuid can seed sandbox_group_id for a
+  // singleton group (sandbox_group_id cannot SQL-default to id).
+  const id = crypto.randomUUID();
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [inserted] = await scopedDb.insert(schema.sessions).values({
+      id,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
@@ -2035,6 +2055,8 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       metadata: input.metadata,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
+      sandboxOs: input.sandboxOs ?? "linux",
+      sandboxGroupId: input.sandboxGroupId ?? id,
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
       parentSessionId: input.parentSessionId ?? null,
@@ -3547,6 +3569,8 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     metadata: row.metadata,
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
+    sandboxOs: row.sandboxOs as SandboxOs,
+    sandboxGroupId: row.sandboxGroupId,
     environmentId: row.environmentId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     parentSessionId: row.parentSessionId ?? null,
@@ -3590,6 +3614,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
+    sandboxOs: (row.sandboxOs as SandboxOs | null) ?? null,
     metadata: row.metadata,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
     finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
