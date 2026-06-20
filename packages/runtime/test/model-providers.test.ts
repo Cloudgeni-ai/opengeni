@@ -3,7 +3,7 @@ import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 import { configuredProviders, resolveModelProvider, type ResolvedModelProvider } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
-import { buildModelInstance, buildOpenGeniAgent, buildProviderClient, resolveTurnModel } from "../src/index";
+import { buildModelInstance, buildOpenGeniAgent, buildProviderClient, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
 
 // A host exposing the built-in OpenAI provider plus Fireworks (the `chat` wire
 // API) serving GLM 5.2, mirroring the canonical example in
@@ -169,5 +169,50 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     const builtin = resolveModelProvider(settings, "gpt-5.5");
     expect(builtin?.provider.compactionMode).toBe("server");
     expect(builtin?.provider.api).toBe("responses");
+  });
+});
+
+describe("MultiProviderModelProvider — routes a model NAME to its provider (the sandbox-path fix)", () => {
+  // The bug: on the SandboxAgent/Modal path the per-agent Model instance is
+  // dropped and the model NAME is re-resolved through the default model
+  // provider. Without this router that hit the built-in (Azure) client, so a
+  // Fireworks model 404'd ("deployment does not exist"). The router resolves
+  // names back to their provider regardless of path.
+  const FIREWORKS_MODEL = "accounts/fireworks/models/glm-5p2";
+
+  test("routes a registry model name to a chat-completions Model (NOT the built-in)", async () => {
+    const provider = new MultiProviderModelProvider(multiProviderSettings());
+    const model = await provider.getModel(FIREWORKS_MODEL);
+    expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
+    expect(model).not.toBeInstanceOf(OpenAIResponsesModel);
+  });
+
+  test("with an AZURE built-in (the staging config), glm still routes to Fireworks chat, not Azure", async () => {
+    const settings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+    });
+    const provider = new MultiProviderModelProvider(settings);
+    const glm = await provider.getModel(FIREWORKS_MODEL);
+    expect(glm).toBeInstanceOf(OpenAIChatCompletionsModel);
+    const builtin = await provider.getModel("gpt-5.5");
+    expect(builtin).toBeInstanceOf(OpenAIResponsesModel);
+  });
+
+  test("falls back to the built-in default provider for a model in no provider's allow-list", async () => {
+    // In production configureOpenAI sets a global default key/client; mirror that
+    // so the SDK fallback OpenAIProvider can construct a model rather than erroring
+    // on missing credentials.
+    const prev = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "sk-test-fallback";
+    try {
+      const provider = new MultiProviderModelProvider(multiProviderSettings());
+      const model = await provider.getModel("some-unconfigured-model");
+      expect(model).toBeDefined();
+    } finally {
+      if (prev === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prev;
+    }
   });
 });

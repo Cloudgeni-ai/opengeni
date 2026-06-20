@@ -399,15 +399,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
-        // Resolved-model routing (legacy global-client path when null). The
-        // provider-bound Model instance plus its gating: server-side store/
-        // compaction follow the provider's compaction mode (registry providers
-        // resolve to "client"); encrypted reasoning is only round-tripped on the
-        // Responses wire API; hosted web search is attached only when the model
-        // opts in; the effective context window drives the compaction threshold.
+        // Resolved-model routing + gating (legacy defaults when null). The model
+        // is passed as the model *string* (agent.model = runSettings.openaiModel),
+        // NOT a Model instance: an instance only survives the in-process
+        // ("none") run, whereas the SandboxAgent/Modal path drops it and
+        // re-resolves the model *name* through the global MultiProviderModelProvider
+        // configureOpenAI installed — so registry models (Fireworks GLM) route to
+        // their own client instead of 404ing against the built-in Azure/OpenAI
+        // client. The gating still comes from the resolved provider: server-side
+        // store/compaction follow the provider's compaction mode (registry
+        // providers resolve to "client"); encrypted reasoning is only
+        // round-tripped on the Responses wire API; hosted web search is attached
+        // only when the model opts in; the effective context window drives the
+        // compaction threshold.
         ...(resolvedModel
           ? {
-            model: resolvedModel.model,
             compactionMode: resolvedModel.provider.compactionMode,
             hostedWebSearch: resolvedModel.configured.hostedWebSearch,
             encryptedReasoning: resolvedModel.provider.api === "responses" && runSettings.openaiReasoningEncryptedContent,

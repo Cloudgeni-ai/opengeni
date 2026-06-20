@@ -5,6 +5,8 @@ import {
   Agent,
   AgentsError,
   connectMcpServers,
+  OpenAIProvider,
+  setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
   // Provider-bound Model instances. Both are re-exported from
@@ -33,6 +35,7 @@ import {
   type CallModelInputFilter,
   type MCPServer,
   type Model,
+  type ModelProvider,
   type RunStreamEvent,
 } from "@openai/agents";
 import {
@@ -326,10 +329,51 @@ export function resolveTurnModel(
   };
 }
 
+/**
+ * Routes a model *name* to its provider-bound Model (Fireworks chat model for a
+ * registry model id, the built-in OpenAI/Azure responses model otherwise) via
+ * `resolveTurnModel`. This is the load-bearing piece for the sandbox path:
+ * passing a Model *instance* as `agent.model` only survives the in-process
+ * (`sandboxBackend: "none"`) run — on the SandboxAgent/Modal path the instance
+ * is dropped and the model *name* is re-resolved through the run's
+ * `modelProvider` (or the global default). Without this router that re-resolution
+ * hits the default client (e.g. Azure) and a registry model 404s
+ * ("deployment does not exist"); with it the name resolves back to the right
+ * provider. Installed both as the run-scoped `RunConfig.modelProvider` (see
+ * runAgentStream) and as the process default (see configureOpenAI), so whichever
+ * path the SDK takes, names route correctly. Falls back to the SDK default
+ * provider for a model that is in no provider's allow-list.
+ */
+export class MultiProviderModelProvider implements ModelProvider {
+  private fallback: OpenAIProvider | undefined;
+
+  constructor(private readonly settings: Settings) {}
+
+  async getModel(modelName?: string): Promise<Model> {
+    if (modelName) {
+      const resolved = resolveTurnModel(this.settings, modelName);
+      if (resolved) {
+        return resolved.model;
+      }
+    }
+    // A model in no provider's allow-list falls back to the SDK's default
+    // OpenAIProvider, which uses the global default client/key configureOpenAI
+    // set up (the built-in OpenAI/Azure provider).
+    this.fallback ??= new OpenAIProvider();
+    return this.fallback.getModel(modelName);
+  }
+}
+
 export function configureOpenAI(settings: Settings): void {
   setOpenAIResponsesTransport(settings.openaiResponsesTransport);
+  // Install the registry-aware router as the process default model provider so a
+  // model name re-resolved on the SandboxAgent/Modal path (where a Model instance
+  // does not survive) routes to its provider instead of the built-in client.
+  // Built before the default-client calls below so it captures the same settings.
+  const router = new MultiProviderModelProvider(settings);
   if (settings.openaiProvider === "azure") {
     setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
+    setDefaultModelProvider(router);
     return;
   }
   if (settings.openaiApiKey) {
@@ -338,6 +382,7 @@ export function configureOpenAI(settings: Settings): void {
   if (settings.openaiBaseUrl) {
     setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
   }
+  setDefaultModelProvider(router);
 }
 
 /**

@@ -144,6 +144,21 @@ export type ClientModel = z.infer<typeof ClientModel>;
 models: z.array(ClientModel).default([]),
 ```
 
+### Sandbox-path model routing (critical)
+
+Binding a provider's `Model` **instance** to `agent.model` only routes correctly
+on the in-process run (`sandboxBackend: "none"`). On the **SandboxAgent / Modal**
+path the instance is dropped and the model **name** is re-resolved through the
+run's model provider — which, by default, is the built-in (OpenAI/Azure) client,
+so a registry model 404s ("The API deployment for this resource does not exist").
+The fix: `configureOpenAI` installs a **`MultiProviderModelProvider`** as the
+process default model provider (`setDefaultModelProvider`). It routes any model
+name back to its provider via `resolveTurnModel` (falling back to the SDK default
+provider for unconfigured names). The worker therefore passes the model as a
+**string** (`agent.model = runSettings.openaiModel`), not an instance, so every
+path resolves through the router. Gating (compaction/web-search/encrypted
+reasoning/context window) still comes from `resolveTurnModel` in the worker.
+
 ## Runtime — `packages/runtime/src/index.ts`
 
 - Import `OpenAIResponsesModel`, `OpenAIChatCompletionsModel` from the agents SDK
