@@ -14,3 +14,6 @@ export {
   scheduledTaskFireWorkflow,
   type ScheduledTaskFireWorkflowInput,
 } from "./workflows/scheduled-tasks";
+export {
+  sandboxReaperWorkflow,
+} from "./workflows/sandbox-reaper";

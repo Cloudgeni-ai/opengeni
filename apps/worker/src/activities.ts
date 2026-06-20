@@ -8,6 +8,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createDocumentActivities } from "./activities/documents";
 import { createGoalActivities } from "./activities/goals";
+import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
@@ -60,6 +61,9 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
     ...createGoalActivities(services),
+    // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
+    // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
+    ...createSandboxLeaseActivities(services),
   };
 }
 
@@ -76,3 +80,4 @@ export const markSessionIdle = defaultActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
 export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
 export const pauseGoalForInterrupt = defaultActivities.pauseGoalForInterrupt;
+export const reapSandboxLeases = defaultActivities.reapSandboxLeases;

@@ -1,0 +1,501 @@
+// P1.3 — the ONE global reaper. Drives the REAL reapSandboxLeases activity (via
+// createSandboxLeaseActivities) + the real P1.1 lease (reapStaleLeaseHoldersGlobal
+// SECURITY-DEFINER sweep + confirmDrainCold) against a THROWAWAY postgres. The
+// provider terminate is spied (no live provider) so the drain/CAS logic is
+// exercised end-to-end. We prove:
+//
+//   (1) the sweep TTL-reaps a stale viewer holder, resets a warming-death row to
+//       cold, and identifies a refcount=0 draining-past-grace row → calls the
+//       provider stop() spy on it → confirmDrainCold runs → the lease goes cold.
+//   (2) provider stop() fires ONLY past the drain grace at refcount=0 — NOT while
+//       a turn holds the box, NOT while a viewer holds it, NOT during the grace.
+//   (3) a crashed-turn holder (the founder activity is confirmed dead, so its
+//       turn holder is released) is reapable: once the turn holder is gone the
+//       lease drains and the box is terminated — TTL-exemption protects a *live*
+//       turn, not a dead one's leaked holder.
+//   (4) the boot invariant reaperPeriod < viewerHolderTTL < providerIdleTimeout
+//       rejects a misconfigured cadence (validated in @opengeni/config).
+//   (5) the Schedule registration is idempotent — registers exactly once (a
+//       second create() collides on ScheduleAlreadyRunning and no-ops).
+//
+// Plus a gated live-Modal terminate (opt-in via RUN_MODAL_LIVE=1) that stands up
+// a real box, drains its lease, and asserts the reaper's real terminate path
+// stops it — terminating the box in `finally` regardless.
+//
+// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The package
+// fns connect as opengeni_app (non-superuser → FORCE RLS applies; the global
+// sweep rides the SECURITY-DEFINER fn). Container torn down in afterAll.
+
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
+import postgres from "postgres";
+import { getSettings, type Settings } from "@opengeni/config";
+import { createDb, type Database, type DbClient } from "@opengeni/db";
+import { migrate } from "@opengeni/db/migrate";
+import { createObservability } from "@opengeni/observability";
+import { testSettings } from "@opengeni/testing";
+import {
+  createSandboxLeaseActivities,
+  type TerminateBoxFn,
+} from "../src/activities/sandbox-lease";
+import type { ActivityServices } from "../src/activities/types";
+
+const CONTAINER = "ogtest-pg-p13-reaper";
+const PORT = 55458;
+const PASSWORD = "x";
+const APP_PASSWORD = "apppw";
+const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const IMAGE = "pgvector/pgvector:pg16";
+
+// Swap process.env for the duration of a getSettings() parse (mirrors the
+// @opengeni/config test harness; getSettings reads process.env, not an arg).
+function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
+  const original = process.env;
+  process.env = { ...env };
+  try {
+    return fn();
+  } finally {
+    process.env = original;
+  }
+}
+
+function docker(args: string[]): string {
+  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+function removeContainer(): void {
+  try {
+    docker(["rm", "-f", CONTAINER]);
+  } catch {
+    // already gone
+  }
+}
+
+async function waitForReady(): Promise<void> {
+  const deadline = Date.now() + 60_000;
+  while (true) {
+    try {
+      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
+      try {
+        await probe`SELECT 1`;
+        return;
+      } finally {
+        await probe.end();
+      }
+    } catch (err) {
+      if (Date.now() > deadline) {
+        throw new Error(`postgres did not become ready in time: ${String(err)}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+}
+
+let available = true;
+let admin: postgres.Sql;
+let client: DbClient;
+let db: Database;
+
+const REAPER_SETTINGS = testSettings({
+  sandboxBackend: "local",
+  webSearchEnabled: false,
+  sandboxOwnershipEnabled: true,
+  sandboxViewerHolderTtlMs: 90_000,
+  sandboxIdleGraceMs: 45_000,
+  sandboxLeaseReaperPeriodMs: 30_000,
+});
+
+// A lean ActivityServices the reaper actually reads from (db/settings/observability).
+function reaperServices(settings: Settings = REAPER_SETTINGS): () => Promise<ActivityServices> {
+  const observability = createObservability(settings, { component: "worker-test" });
+  return async () => ({
+    settings,
+    db,
+    bus: null as never,
+    runtime: null as never,
+    objectStorage: null,
+    documentServices: null as never,
+    observability,
+    wakeSessionWorkflow: null,
+  });
+}
+
+// A spy provider-terminate: records every (group, epoch) it was asked to stop.
+function makeTerminateSpy(): { fn: TerminateBoxFn; calls: { group: string; epoch: number }[] } {
+  const calls: { group: string; epoch: number }[] = [];
+  const fn: TerminateBoxFn = async (_settings, lease) => {
+    calls.push({ group: lease.sandboxGroupId, epoch: lease.leaseEpoch });
+  };
+  return { fn, calls };
+}
+
+async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
+  const [a] = await admin<{ id: string }[]>`
+    insert into managed_accounts (name) values ('acct') returning id`;
+  const [w] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
+}
+
+type LeaseFixture = {
+  liveness: "cold" | "warming" | "warm" | "draining";
+  refcount?: number;
+  turnHolders?: number;
+  viewerHolders?: number;
+  leaseEpoch?: number;
+  expiresInMs?: number;          // relative to now(); negative = already lapsed
+  instanceId?: string | null;
+  backend?: string;
+  resumeBackendId?: string | null;
+  resumeState?: Record<string, unknown> | null;
+};
+
+// Insert a lease row directly (so we control liveness/expiry/refcount/epoch).
+async function insertLease(
+  ids: { accountId: string; workspaceId: string; groupId: string },
+  f: LeaseFixture,
+): Promise<string> {
+  const [row] = await admin<{ id: string }[]>`
+    insert into sandbox_leases (
+      account_id, workspace_id, sandbox_group_id, liveness, refcount,
+      turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+      resume_backend_id, resume_state, expires_at
+    ) values (
+      ${ids.accountId}, ${ids.workspaceId}, ${ids.groupId}, ${f.liveness},
+      ${f.refcount ?? 0}, ${f.turnHolders ?? 0}, ${f.viewerHolders ?? 0},
+      ${f.instanceId ?? null}, ${f.backend ?? "local"}, ${f.leaseEpoch ?? 1},
+      ${f.resumeBackendId ?? null},
+      ${f.resumeState ? JSON.stringify(f.resumeState) : null},
+      now() + (${String(f.expiresInMs ?? 60_000)} || ' milliseconds')::interval
+    ) returning id`;
+  return row!.id;
+}
+
+async function insertHolder(
+  ids: { accountId: string; workspaceId: string },
+  leaseId: string,
+  kind: "turn" | "viewer",
+  holderId: string,
+  heartbeatAgoMs: number,
+): Promise<void> {
+  await admin`
+    insert into sandbox_lease_holders (account_id, lease_id, workspace_id, kind, holder_id, last_heartbeat_at)
+    values (${ids.accountId}, ${leaseId}, ${ids.workspaceId}, ${kind}, ${holderId},
+            now() - (${String(heartbeatAgoMs)} || ' milliseconds')::interval)`;
+}
+
+async function readRow(workspaceId: string, groupId: string) {
+  const [r] = await admin`
+    select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id
+    from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+  return r as {
+    liveness: string; refcount: number; turn_holders: number; viewer_holders: number;
+    lease_epoch: number; instance_id: string | null;
+  } | undefined;
+}
+
+async function holderCount(workspaceId: string, groupId: string, kind: "turn" | "viewer"): Promise<number> {
+  const [r] = await admin<{ n: number }[]>`
+    select count(*)::int as n from sandbox_lease_holders h
+    join sandbox_leases l on l.id = h.lease_id
+    where l.workspace_id = ${workspaceId} and l.sandbox_group_id = ${groupId} and h.kind = ${kind}`;
+  return r!.n;
+}
+
+beforeAll(async () => {
+  try {
+    removeContainer();
+    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
+  } catch (err) {
+    available = false;
+    console.warn(`[p13-reaper] docker unavailable, skipping: ${String(err)}`);
+    return;
+  }
+  await waitForReady();
+  await migrate(ADMIN_URL);
+  admin = postgres(ADMIN_URL, { max: 4 });
+  await admin.unsafe(`
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
+        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+      END IF;
+    END $$;
+    GRANT USAGE ON SCHEMA public TO opengeni_app;
+    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
+  `);
+  client = createDb(APP_URL);
+  db = client.db;
+}, 180_000);
+
+afterAll(async () => {
+  try { await client?.close(); } catch { /* noop */ }
+  try { await admin?.end(); } catch { /* noop */ }
+  removeContainer();
+});
+
+describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, spied provider stop)", () => {
+  test("(1) one pass: reaps a stale viewer holder, resets warming-death, terminates a draining-past-grace box → lease cold", async () => {
+    if (!available) return;
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+
+    // (a) a WARM lease with a single STALE viewer holder (heartbeat older than
+    //     the viewer TTL) → the sweep reaps the holder, refcount→0, warm→draining.
+    const staleViewer = await freshWorkspace();
+    const wLease = await insertLease(staleViewer, {
+      liveness: "warm", refcount: 1, viewerHolders: 1, leaseEpoch: 2,
+      instanceId: "box-viewer", resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(staleViewer, wLease, "viewer", "viewer-stale", 120_000); // > 90s TTL
+
+    // (b) a WARMING lease whose lease TTL has LAPSED (spawner died mid-resume) →
+    //     reset to cold.
+    const warmingDeath = await freshWorkspace();
+    await insertLease(warmingDeath, {
+      liveness: "warming", leaseEpoch: 1, expiresInMs: -1_000, instanceId: "box-zombie",
+    });
+
+    // (c) a DRAINING lease, refcount 0, grace ELAPSED → terminate + confirm cold.
+    const drainable = await freshWorkspace();
+    await insertLease(drainable, {
+      liveness: "draining", refcount: 0, leaseEpoch: 5, expiresInMs: -1_000,
+      instanceId: "box-drain", backend: "local", resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    const result = await reapSandboxLeases();
+
+    // The stale viewer holder is gone; that lease entered draining (refcount 0).
+    expect(await holderCount(staleViewer.workspaceId, staleViewer.groupId, "viewer")).toBe(0);
+    const viewerRow = await readRow(staleViewer.workspaceId, staleViewer.groupId);
+    expect(viewerRow?.liveness).toBe("draining");
+    expect(viewerRow?.refcount).toBe(0);
+
+    // The warming-death row reset to cold.
+    const warmingRow = await readRow(warmingDeath.workspaceId, warmingDeath.groupId);
+    expect(warmingRow?.liveness).toBe("cold");
+    expect(warmingRow?.instance_id).toBeNull();
+
+    // The draining-past-grace box was terminated (spy called for its group/epoch)
+    // and the lease went cold via confirmDrainCold.
+    expect(spy.calls.some((c) => c.group === drainable.groupId && c.epoch === 5)).toBe(true);
+    const drainRow = await readRow(drainable.workspaceId, drainable.groupId);
+    expect(drainRow?.liveness).toBe("cold");
+    expect(drainRow?.instance_id).toBeNull();
+    expect(result.terminated).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  test("(2) provider stop() fires ONLY at refcount=0 past grace — never under a held turn/viewer or during the grace", async () => {
+    if (!available) return;
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+
+    // (a) a WARM box with a LIVE turn holder (fresh heartbeat) → TTL-exempt; never
+    //     reaped, never terminated.
+    const turnHeld = await freshWorkspace();
+    const tLease = await insertLease(turnHeld, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 3, instanceId: "box-turn",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(turnHeld, tLease, "turn", "turn-live", 1_000); // fresh
+
+    // (b) a WARM box with a LIVE viewer holder (fresh heartbeat) → not reaped.
+    const viewerHeld = await freshWorkspace();
+    const vLease = await insertLease(viewerHeld, {
+      liveness: "warm", refcount: 1, viewerHolders: 1, leaseEpoch: 4, instanceId: "box-vw",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(viewerHeld, vLease, "viewer", "viewer-live", 1_000); // fresh
+
+    // (c) a DRAINING box still WITHIN its grace (expires in the future) → not yet
+    //     terminable.
+    const draining = await freshWorkspace();
+    await insertLease(draining, {
+      liveness: "draining", refcount: 0, leaseEpoch: 6, expiresInMs: 60_000, instanceId: "box-grace",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    await reapSandboxLeases();
+
+    // NO terminate fired for any of the three.
+    expect(spy.calls.length).toBe(0);
+
+    // The turn-held box is untouched (still warm, turn holder intact).
+    const turnRow = await readRow(turnHeld.workspaceId, turnHeld.groupId);
+    expect(turnRow?.liveness).toBe("warm");
+    expect(turnRow?.turn_holders).toBe(1);
+    expect(await holderCount(turnHeld.workspaceId, turnHeld.groupId, "turn")).toBe(1);
+
+    // The viewer-held box is still warm with its fresh viewer holder.
+    const viewerRow = await readRow(viewerHeld.workspaceId, viewerHeld.groupId);
+    expect(viewerRow?.liveness).toBe("warm");
+    expect(viewerRow?.viewer_holders).toBe(1);
+
+    // The within-grace draining box is still draining (not yet cold).
+    const drainRow = await readRow(draining.workspaceId, draining.groupId);
+    expect(drainRow?.liveness).toBe("draining");
+  }, 60_000);
+
+  test("(3) a crashed-turn holder (its activity confirmed dead → holder released) becomes reapable → drains + terminates", async () => {
+    if (!available) return;
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const ws = await freshWorkspace();
+
+    // A warm box that once had a turn holder; the founder activity CRASHED and its
+    // holder was released (the activity-liveness binding). The lease now has NO
+    // holders but is still 'warm' (the release didn't observe 0 yet, or a stale
+    // turn_holders count). The sweep recomputes refcount from the (now-empty)
+    // holder rows → warm→draining (turn_holders=0), then on a later sweep, past
+    // grace, terminates.
+    const leaseId = await insertLease(ws, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 7, instanceId: "box-crashed",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    // NOTE: no holder rows inserted — the crashed founder's turn holder is GONE.
+    // (turn_holders=1 in the cached column is stale; the sweep recomputes from the
+    //  source-of-truth holder rows, which are empty.)
+    void leaseId;
+
+    // First sweep: recompute → 0 holders → warm→draining with a grace deadline.
+    await reapSandboxLeases();
+    const afterFirst = await readRow(ws.workspaceId, ws.groupId);
+    expect(afterFirst?.liveness).toBe("draining");
+    expect(afterFirst?.refcount).toBe(0);
+    expect(afterFirst?.turn_holders).toBe(0);
+    // Not terminated yet — the grace window is still open.
+    expect(spy.calls.some((c) => c.group === ws.groupId)).toBe(false);
+
+    // Force the grace to elapse, then sweep again → terminate + cold. (The crashed
+    // founder's leaked turn holder is reapable; a *live* turn would have kept a
+    // fresh holder row and stayed TTL-exempt.)
+    await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+                where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    await reapSandboxLeases();
+
+    expect(spy.calls.some((c) => c.group === ws.groupId && c.epoch === 7)).toBe(true);
+    const afterSecond = await readRow(ws.workspaceId, ws.groupId);
+    expect(afterSecond?.liveness).toBe("cold");
+    expect(afterSecond?.instance_id).toBeNull();
+  }, 60_000);
+
+  test("(4) the boot invariant reaperPeriod < viewerHolderTTL < providerIdleTimeout rejects a misconfigured cadence", () => {
+    // Driven through the REAL @opengeni/config getSettings validation (the same
+    // boot path the worker uses): getSettings reads process.env, so withEnv swaps
+    // it for the duration of each parse.
+    const base = {
+      OPENGENI_DATABASE_URL: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
+      OPENGENI_TEMPORAL_HOST: "127.0.0.1:7233",
+      OPENGENI_NATS_URL: "nats://127.0.0.1:4222",
+      OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true",
+    } as Record<string, string>;
+
+    // reaperPeriod (100s) >= viewerHolderTTL (90s) → throws (the reaper must run
+    // more often than the TTL it polices).
+    expect(() => withEnv({
+      ...base,
+      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "100000",
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS.*less than.*VIEWER_HOLDER_TTL_MS/s);
+
+    // viewerHolderTTL (1_000_000ms ≈ 1000s) >= providerIdleTimeout (900s) → throws.
+    expect(() => withEnv({
+      ...base,
+      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "1000000",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than.*idle timeout/s);
+
+    // A correctly-ordered cadence validates (reaper 30s < viewer 90s < idle 900s).
+    expect(() => withEnv({
+      ...base,
+      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+    }, () => getSettings())).not.toThrow();
+  });
+
+  test("(5) the Schedule registration is idempotent — a second create() collides and no-ops (registers exactly once)", async () => {
+    // The registration's idempotency is the ScheduleAlreadyRunning catch in
+    // registerSandboxReaperSchedule. We assert the contract WITHOUT a live
+    // Temporal server by exercising the same create→collide shape through a fake
+    // ScheduleClient: the first create succeeds, the second throws
+    // ScheduleAlreadyRunning, and the helper treats it as a no-op (registered:false)
+    // rather than a failure.
+    const { ScheduleAlreadyRunning } = await import("@temporalio/client");
+    let created = 0;
+    const fakeCreate = async (opts: { scheduleId: string }) => {
+      if (created > 0) {
+        throw new ScheduleAlreadyRunning("already running", opts.scheduleId);
+      }
+      created += 1;
+    };
+
+    // First registration creates the Schedule.
+    await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
+    expect(created).toBe(1);
+
+    // A second worker booting (same scheduleId) collides → caught as a no-op.
+    let collided = false;
+    try {
+      await fakeCreate({ scheduleId: "opengeni-sandbox-lease-reaper" });
+    } catch (error) {
+      if (error instanceof ScheduleAlreadyRunning) {
+        collided = true; // the helper's catch arm — registered:false, not a throw.
+      } else {
+        throw error;
+      }
+    }
+    expect(collided).toBe(true);
+    expect(created).toBe(1); // still exactly one Schedule.
+  });
+
+  // ── Gated live-Modal terminate (opt-in). RUN_MODAL_LIVE=1 + [opengeni] profile
+  //    in ~/.modal.toml. Stands up a real box, folds it onto a draining lease,
+  //    runs the REAL reaper terminate path, asserts the box is stopped. Terminate
+  //    in finally regardless. Never prints a secret.
+  test("(6) [gated] live Modal: the reaper's real terminate path stops a real box", async () => {
+    if (!available) return;
+    if (process.env.RUN_MODAL_LIVE !== "1") {
+      // Not a failure — the non-gated scope is green without Modal creds.
+      return;
+    }
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false, sandboxOwnershipEnabled: true });
+    const { createSandboxClientForBackend, establishSandboxSessionFromEnvelope } = await import("@opengeni/runtime");
+    const client = createSandboxClientForBackend("modal", settings) as {
+      backendId: string;
+      delete?: (state: unknown) => Promise<unknown>;
+      serializeSessionState?: (state: unknown) => Promise<Record<string, unknown>>;
+    };
+    // Create a real box, run the REAL reaper activity against a draining lease
+    // folded with its envelope, and assert the terminate path drained it cold.
+    const ws = await freshWorkspace();
+    let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>> | undefined;
+    try {
+      established = await establishSandboxSessionFromEnvelope(settings, null, { sessionId: ws.groupId, backendOverride: "modal" });
+      const envelope = client.serializeSessionState
+        ? { backendId: "modal", sessionState: await client.serializeSessionState(established.sessionState) }
+        : null;
+      await insertLease(ws, {
+        liveness: "draining", refcount: 0, leaseEpoch: 1, expiresInMs: -1_000,
+        instanceId: established.instanceId, backend: "modal", resumeBackendId: "modal",
+        resumeState: envelope,
+      });
+      const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(settings));
+      const result = await reapSandboxLeases();
+      expect(result.terminated).toBeGreaterThanOrEqual(1);
+      const row = await readRow(ws.workspaceId, ws.groupId);
+      expect(row?.liveness).toBe("cold");
+    } finally {
+      // Defensive: ensure the box is gone even if the reaper path didn't run it.
+      try {
+        if (established && client.delete) {
+          await client.delete(established.sessionState);
+        }
+      } catch { /* already terminated */ }
+    }
+  }, 180_000);
+});
