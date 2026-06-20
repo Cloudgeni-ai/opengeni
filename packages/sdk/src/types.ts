@@ -1030,6 +1030,9 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "document.indexed",
   "scheduled_task.fired",
   "api_key.request",
+  // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
+  "sandbox.warm_seconds",
+  "sandbox.warm_cost",
 ] as const;
 
 export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];

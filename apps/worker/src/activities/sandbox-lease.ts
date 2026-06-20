@@ -31,12 +31,18 @@
 // holder.
 
 import {
+  accrueWarmSeconds,
   confirmDrainCold,
+  forceDrainOverLimitViewerOnlyBoxes,
+  getBillingBalance,
+  listMeterableWarmLeases,
   readLease,
   reapStaleLeaseHoldersGlobal,
   rlsContextForWorkspace,
+  type MeterableWarmLease,
   type ReapDrainable,
 } from "@opengeni/db";
+import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import {
   // The reaper attaches to the box by id to terminate it. It does NOT use
   // establishSandboxSessionFromEnvelope (which cold-RESTORES via create() on a
@@ -59,6 +65,11 @@ export type ReapSandboxLeasesResult = {
    *  epoch / already drained by a concurrent sweep) — provider stop() did NOT
    *  fire. */
   skipped: number;
+  /** Warm viewer-only leases that accrued warm-seconds this tick (P2.1). */
+  metered: number;
+  /** Viewer-only boxes force-drained because their workspace is over a limit
+   *  (0 balance / over the warm cap) — turn-held boxes are never drained (P2.1). */
+  forceDrained: number;
 };
 
 // The structural slice of a provider SandboxClient we need to resume-by-id and
@@ -111,8 +122,20 @@ export function createSandboxLeaseActivities(
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
     const { db, settings, observability } = await services();
     if (!settings.sandboxOwnershipEnabled) {
-      return { examined: 0, terminated: 0, skipped: 0 };
+      return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0 };
     }
+
+    // (0) Warm-meter tick (P2.1) — accrue warm-seconds for every WARM viewer-only
+    // box (turn-held boxes meter on the turn heartbeat, so the list fn excludes
+    // them). GROUP+epoch+tick idempotent → a shared box is one stream; an
+    // overlapping/re-fired sweep cannot double-charge. Best-effort per row.
+    const metered = await accrueWarmTick(db, settings, observability);
+
+    // (0b) Per-workspace warm-cap + force-drain (P2.1) — under the usage lock, a
+    // workspace at 0 balance / over its warm cap force-drains its VIEWER-ONLY
+    // boxes (guarded turn_holders=0 — a paying turn is NEVER killed). The newly
+    // draining rows are caught by the same sweep's terminate below.
+    const forceDrained = await forceDrainOverLimitWorkspaces(db, settings, metered.workspaceIds, observability);
 
     // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
     const drainable: ReapDrainable[] = await reapStaleLeaseHoldersGlobal(db, {
@@ -145,18 +168,119 @@ export function createSandboxLeaseActivities(
       }
     }
 
-    if (drainable.length > 0) {
+    if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0) {
       observability.info("sandbox reaper swept", {
         drainable: drainable.length,
         terminated,
         skipped,
+        metered: metered.accrued,
+        forceDrained,
       });
     }
 
-    return { examined: drainable.length, terminated, skipped };
+    return { examined: drainable.length, terminated, skipped, metered: metered.accrued, forceDrained };
   }
 
   return { reapSandboxLeases };
+}
+
+/**
+ * The reaper-tick warm-meter pass (P2.1). Accrues warm-seconds for every WARM
+ * viewer-only lease cross-workspace (the list fn excludes turn-held boxes — those
+ * meter on the turn heartbeat). Returns the count accrued + the distinct
+ * workspaces touched (so the force-drain pass only checks workspaces that have a
+ * live warm box, not the whole fleet). Per-row best-effort: one row's metering
+ * error must not abort the sweep.
+ */
+async function accrueWarmTick(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+): Promise<{ accrued: number; workspaceIds: Set<string> }> {
+  const workspaceIds = new Set<string>();
+  let accrued = 0;
+  let leases: MeterableWarmLease[] = [];
+  try {
+    leases = await listMeterableWarmLeases(db);
+  } catch (error) {
+    observability.warn("sandbox reaper: warm-lease read failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { accrued, workspaceIds };
+  }
+  for (const lease of leases) {
+    workspaceIds.add(lease.workspaceId);
+    try {
+      const rate = sandboxWarmRateMicrosPerSecond(settings, lease.backend);
+      const result = await accrueWarmSeconds(db, {
+        accountId: lease.accountId,
+        workspaceId: lease.workspaceId,
+        sandboxGroupId: lease.sandboxGroupId,
+        expectedEpoch: lease.leaseEpoch,
+        warmRateMicrosPerSecond: rate,
+        subjectId: lease.sandboxGroupId,
+      });
+      if (result.accrued) {
+        accrued += 1;
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: warm-seconds accrual failed for lease", {
+        workspaceId: lease.workspaceId,
+        sandboxGroupId: lease.sandboxGroupId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { accrued, workspaceIds };
+}
+
+/**
+ * The per-workspace warm-cap + force-drain pass (P2.1). For each workspace with a
+ * live warm box, under the usage lock: if it is at 0 balance (when a billing /
+ * managed mode is on) or over its warm cap, force-drain its VIEWER-ONLY boxes
+ * (guarded turn_holders=0 — a paying turn is never killed). Returns the count of
+ * viewer-only boxes force-drained. Per-workspace best-effort.
+ */
+async function forceDrainOverLimitWorkspaces(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  workspaceIds: Set<string>,
+  observability: ActivityServices["observability"],
+): Promise<number> {
+  const enforceBalance = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const cap = settings.sandboxMaxWarmSecondsPerWorkspace;
+  // Nothing to enforce → skip the whole pass (no lock churn).
+  if (!enforceBalance && cap <= 0) {
+    return 0;
+  }
+  let forceDrained = 0;
+  for (const workspaceId of workspaceIds) {
+    try {
+      const { accountId } = await rlsContextForWorkspace(db, workspaceId);
+      const balance = enforceBalance ? await getBillingBalance(db, accountId) : { balanceMicros: 1 } as { balanceMicros: number };
+      const result = await forceDrainOverLimitViewerOnlyBoxes(db, {
+        workspaceId,
+        balanceMicros: balance.balanceMicros,
+        enforceBalance,
+        maxWarmSecondsPerWorkspace: cap,
+        idleGraceMs: settings.sandboxIdleGraceMs,
+      });
+      if (result.overLimit && result.drained.length > 0) {
+        forceDrained += result.drained.length;
+        observability.info("sandbox reaper: force-drained viewer-only boxes (over limit)", {
+          workspaceId,
+          reason: result.reason,
+          drained: result.drained.length,
+        });
+      }
+    } catch (error) {
+      observability.warn("sandbox reaper: force-drain check failed for workspace", {
+        workspaceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return forceDrained;
 }
 
 /**

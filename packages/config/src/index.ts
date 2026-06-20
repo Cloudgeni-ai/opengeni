@@ -310,6 +310,17 @@ const SettingsSchema = z.object({
   // window a cold->warming spawner has to commit warm before a reaper resets it.
   sandboxLeaseTtlMs: z.coerce.number().int().positive().default(90_000),
   sandboxLeaseWarmingTtlMs: z.coerce.number().int().positive().default(120_000),
+  // --- sandbox warm-time billing (P2.1) ---
+  // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
+  // means warm-cost is not debited (warm-seconds are still metered for audit).
+  // Shape: { "modal": 5, "runloop": 4, ... }. Backends absent here meter
+  // warm-seconds but accrue NO warm_cost / debit (rate 0).
+  sandboxWarmRateMicrosPerSecondJson: z.string().default("{}"),
+  // Per-workspace warm cap (cumulative warm-seconds since the start of the UTC
+  // month, summed over sandbox.warm_seconds). 0 = unbounded. A workspace over the
+  // cap force-drains its VIEWER-ONLY boxes (guarded AND turn_holders=0 — a paying
+  // turn is never killed); the reaper then stop()s at refcount 0.
+  sandboxMaxWarmSecondsPerWorkspace: z.coerce.number().int().nonnegative().default(0),
   sandboxPreparationProfiles: z.string().default("none"),
   sandboxEnvAllowlist: z.string().default(""),
   objectStorageEndpoint: z.string().url().optional(),
@@ -645,6 +656,8 @@ export function getSettings(): Settings {
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
+    sandboxWarmRateMicrosPerSecondJson: optional("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON"),
+    sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),
     sandboxEnvAllowlist: optional("OPENGENI_SANDBOX_ENV_ALLOWLIST"),
     objectStorageEndpoint: optional("OPENGENI_OBJECT_STORAGE_ENDPOINT"),
@@ -965,6 +978,45 @@ export function parseModelPricingJson(raw: string): Record<string, ModelPricing>
   return out;
 }
 
+// --- sandbox warm-rate table (P2.1) ---
+// Per-backend usd_micros/sec, parsed from sandboxWarmRateMicrosPerSecondJson the
+// same way model pricing is. An empty {} (the default) means no warm-cost is
+// debited — warm-seconds are still metered for audit, just at rate 0.
+export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
+  if (!raw.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be valid JSON: ${message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON must be a JSON object keyed by backend name");
+  }
+  const out: Record<string, number> = {};
+  for (const [backend, value] of Object.entries(parsed)) {
+    if (!backend.trim()) {
+      throw new Error("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON contains an empty backend name");
+    }
+    const rate = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(rate) || rate < 0) {
+      throw new Error(`OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON rate for ${backend} must be a non-negative number`);
+    }
+    out[backend] = rate;
+  }
+  return out;
+}
+
+// Resolve the warm rate (usd_micros/sec) for a backend; 0 when the backend has no
+// configured rate (the box is metered in seconds but not cost-debited).
+export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: string): number {
+  const table = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  return table[backend] ?? 0;
+}
+
 export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
@@ -1206,6 +1258,8 @@ function validateSettings(settings: Settings): void {
   parseExposedPorts(settings.dockerExposedPorts);
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
+  // Fail fast on a malformed warm-rate table (P2.1).
+  parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
   const serverIds = new Set<string>();
   for (const server of settings.mcpServers) {
     if (serverIds.has(server.id)) {

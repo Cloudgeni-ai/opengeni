@@ -589,6 +589,15 @@ export const UsageEventType = z.enum([
   "document.indexed",
   "scheduled_task.fired",
   "api_key.request",
+  // --- sandbox warm-time metering (P2.1) ---
+  // Wall-clock seconds a box was warm — the billable warm-time meter. Accrued on
+  // the two stateless ticks (turn heartbeat + reaper sweep), idempotent on
+  // (sandbox_group_id, lease_epoch, tick) so a shared box (N sessions) is metered
+  // EXACTLY ONCE per tick (N sessions != N x bill). Orthogonal to model.tokens /
+  // model.cost (model API cost vs provider compute cost — both real, no overlap).
+  "sandbox.warm_seconds",
+  // usd_micros: warm-seconds x the per-provider per-second warm rate.
+  "sandbox.warm_cost",
 ]);
 export type UsageEventType = z.infer<typeof UsageEventType>;
 

@@ -3171,6 +3171,33 @@ export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   }));
 }
 
+// §2.2 (global) — the warm-meter read for the REAPER tick (P2.1). Returns one row
+// per WARM viewer-only group (turn-held boxes are metered by the turn heartbeat,
+// so they are EXCLUDED here — no double-meter). Cross-workspace via the
+// SECURITY-DEFINER list fn (FORCE RLS would hide other workspaces from the scoped
+// connection). DB-only read; the worker accrues per row via accrueWarmSeconds.
+export interface MeterableWarmLease {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  backend: string;
+}
+
+export async function listMeterableWarmLeases(db: Database): Promise<MeterableWarmLease[]> {
+  const rows = await db.execute<{ account_id: string; workspace_id: string; sandbox_group_id: string; lease_epoch: number | string; backend: string }>(sql`
+    select account_id, workspace_id, sandbox_group_id, lease_epoch, backend
+    from opengeni_private.list_meterable_warm_leases()
+  `);
+  return rows.map((r) => ({
+    accountId: r.account_id,
+    workspaceId: r.workspace_id,
+    sandboxGroupId: r.sandbox_group_id,
+    leaseEpoch: Number(r.lease_epoch),
+    backend: r.backend,
+  }));
+}
+
 // §4.7 — explicit re-arm seam (D1). acquireLease already re-arms a draining
 // lease inline; this is the standalone version for callers that learn a holder
 // is wanted during the grace window without going through acquireLease first.
@@ -3224,6 +3251,281 @@ export async function readLease(db: Database, workspaceId: string, sandboxGroupI
       limit 1
     `);
     return rows[0] ? mapLeaseRow(rows[0]) : null;
+  });
+}
+
+// ============================================================================
+// Warm-time metering (P2.1) — the COST hole the lease design opens.
+//
+// A box held warm by a viewer with no agent turn running emits ZERO model usage
+// today; the provider bills by wall-clock and OpenGeni meters nothing. Warm-time
+// accrues on TWO stateless ticks: (a) the turn's existing activity heartbeat
+// (while a turn runs); (b) the reaper sweep (for viewer-only boxes between turns).
+//
+// The meter is GROUP-KEYED + epoch-keyed + tick-keyed:
+//   idempotencyKey = usage:sandbox.warm_seconds:<group>:<epoch>:<tick>
+// so a SHARED box (N sessions on one group) is metered EXACTLY ONCE per tick
+// (N sessions != N x bill — a session-keyed meter would N x-over-bill), and a
+// re-dispatched/overlapping tick at the same (group,epoch,tick) can never
+// double-charge (recordUsageEvent is onConflictDoNothing on idempotencyKey).
+//
+// Cursor advance + usage insert are ATOMIC: both run inside ONE FOR UPDATE txn on
+// the lease row (the M3 cross-statement-atomicity fix). The insert uses ON
+// CONFLICT DO NOTHING on idempotency_key (matching recordUsageEvent), and the
+// cursor (last_meter_at/last_meter_tick) is advanced in the SAME txn — so the tick
+// index and the metered seconds can never desync, and a partial-failure rollback
+// leaves BOTH the cursor and the event untouched.
+// ============================================================================
+
+export interface AccrueWarmSecondsResult {
+  /** false when nothing was accrued (epoch fenced / not warm / no elapsed / the
+   *  first tick that only seeds the cursor). */
+  accrued: boolean;
+  /** Whole seconds metered this tick (0 when accrued:false). */
+  seconds: number;
+  /** The monotonic tick index this accrual was recorded under. */
+  tick: number;
+  /** usd_micros charged for this tick (0 when rate is 0). */
+  costMicros: number;
+}
+
+/**
+ * Accrue warm-seconds for the elapsed wall-clock since the lease's last meter
+ * cursor, idempotent on (sandbox_group_id, lease_epoch, tick). EPOCH-FENCED +
+ * liveness-guarded (warm only): a stale-epoch tick or a draining/cold lease is a
+ * no-op, so a superseded writer that re-fires cannot mis-meter. The FIRST tick on
+ * a never-metered lease (last_meter_at IS NULL) only SEEDS the cursor — it
+ * accrues nothing (there is no prior cursor to diff against), matching the
+ * "delta since last tick" contract. warmRateMicrosPerSecond > 0 also records a
+ * sandbox.warm_cost event (cost = seconds x rate) AND debits the same micros from
+ * the credit balance via applyCreditDebitUpToBalance (the model-cost precedent),
+ * idempotent on the SAME (group, epoch, tick) key. The usage event is the
+ * REQUESTED cost; the ledger is the ACTUAL debit (they legitimately differ when
+ * balance is low — M2). Set debitCredits:false to meter without debiting.
+ */
+export async function accrueWarmSeconds(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  /** The epoch the tick observed; the fence — a stale writer no-ops. */
+  expectedEpoch: number;
+  /** usd_micros per warm-second for this box's backend (0 = meter only, no cost). */
+  warmRateMicrosPerSecond: number;
+  /** Optional attribution: the founding/observing session (visibility only — the
+   *  group meter key makes the workspace charge correct regardless). */
+  subjectId?: string | null;
+  /** Debit credits for warm-cost (default true). The force-drain at 0 balance
+   *  depends on this decrementing the balance. */
+  debitCredits?: boolean;
+}): Promise<AccrueWarmSecondsResult> {
+  const none: AccrueWarmSecondsResult = { accrued: false, seconds: 0, tick: 0, costMicros: 0 };
+  const result = await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => await scopedDb.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Database;
+      // Lock the group's lease row so the cursor advance + the usage insert are
+      // one atomic step (no other tick can interleave between the diff and the
+      // cursor write).
+      const rows = await tx.execute<LeaseRow & { meter_elapsed_s: number | null }>(sql`
+        select *,
+          case when last_meter_at is null then null
+               else floor(extract(epoch from (now() - last_meter_at)))::int end as meter_elapsed_s
+        from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+        for update
+      `);
+      const row = rows[0];
+      if (!row) return none;
+
+      // Epoch fence + liveness guard: only a live-epoch warm box meters. A stale
+      // (superseded) tick or a draining/cold/warming lease is a no-op.
+      if (Number(row.lease_epoch) !== input.expectedEpoch || row.liveness !== "warm") {
+        return none;
+      }
+
+      // First tick on a never-metered lease: SEED the cursor, accrue nothing.
+      if (row.last_meter_at == null) {
+        await tx.execute(sql`
+          update sandbox_leases set last_meter_at = now(), updated_at = now()
+          where id = ${row.id}
+        `);
+        return none;
+      }
+
+      const elapsedS = Number(row.meter_elapsed_s ?? 0);
+      if (elapsedS <= 0) {
+        // No whole second elapsed yet — leave the cursor untouched so the
+        // remainder accrues on the next tick (no silent seconds loss).
+        return none;
+      }
+
+      const tick = Number(row.last_meter_tick) + 1;
+      const costMicros = Math.round(elapsedS * Math.max(0, input.warmRateMicrosPerSecond));
+
+      // (1) The warm-seconds meter — GROUP+epoch+tick keyed, ON CONFLICT DO
+      // NOTHING (the idempotency that makes a shared box one stream + a re-fire a
+      // no-op). sourceResourceId is keyed on (group, epoch).
+      await tx.execute(sql`
+        insert into usage_events
+          (account_id, workspace_id, subject_id, event_type, quantity, unit,
+           source_resource_type, source_resource_id, idempotency_key, occurred_at)
+        values
+          (${input.accountId}, ${input.workspaceId}, ${input.subjectId ?? null},
+           'sandbox.warm_seconds', ${elapsedS}, 'seconds',
+           'sandbox_lease', ${`${input.sandboxGroupId}:${input.expectedEpoch}`},
+           ${`usage:sandbox.warm_seconds:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`},
+           now())
+        on conflict (idempotency_key) do nothing
+      `);
+
+      // (2) The warm-cost meter (only when a rate is configured). Same keying.
+      if (costMicros > 0) {
+        await tx.execute(sql`
+          insert into usage_events
+            (account_id, workspace_id, subject_id, event_type, quantity, unit,
+             source_resource_type, source_resource_id, idempotency_key, occurred_at)
+          values
+            (${input.accountId}, ${input.workspaceId}, ${input.subjectId ?? null},
+             'sandbox.warm_cost', ${costMicros}, 'usd_micros',
+             'sandbox_lease', ${`${input.sandboxGroupId}:${input.expectedEpoch}`},
+             ${`usage:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${tick}`},
+             now())
+          on conflict (idempotency_key) do nothing
+        `);
+      }
+
+      // (3) Advance the cursor IN THE SAME TXN — the atomicity that makes the tick
+      // index and the metered seconds inseparable.
+      await tx.execute(sql`
+        update sandbox_leases set
+          last_meter_at = now(), last_meter_tick = ${tick}, updated_at = now()
+        where id = ${row.id}
+      `);
+
+      return { accrued: true, seconds: elapsedS, tick, costMicros };
+    }));
+
+  // Debit credits for the warm-cost OUTSIDE the lease-row txn (applyCreditDebit
+  // takes its own per-account advisory lock — never nest it under the lease row
+  // lock). Idempotent on the SAME (group, epoch, tick) key so a re-fire of an
+  // already-committed tick cannot double-debit. The ledger records the ACTUAL
+  // debit (min(requested, balance)); the warm_cost usage event above is the
+  // requested cost.
+  if (result.accrued && result.costMicros > 0 && (input.debitCredits ?? true)) {
+    await applyCreditDebitUpToBalance(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      type: "sandbox.warm_cost",
+      requestedAmountMicros: result.costMicros,
+      sourceType: "sandbox_lease",
+      sourceId: `${input.sandboxGroupId}:${input.expectedEpoch}`,
+      idempotencyKey: `debit:sandbox.warm_cost:${input.sandboxGroupId}:${input.expectedEpoch}:${result.tick}`,
+    }).catch(() => undefined);
+  }
+
+  return result;
+}
+
+// §2.2/2.3 — the per-workspace warm-cap + force-drain. Under the EXISTING usage
+// lock (withWorkspaceUsageLock — NOT a bare count, so two concurrent ticks in
+// different sessions of one workspace can't both read "under cap" and race past
+// it). A workspace at 0 balance OR over its warm-second cap force-drains its
+// VIEWER-ONLY boxes: CAS warm->draining guarded `AND turn_holders = 0` so a box
+// with a running (paying) turn is NEVER killed. The reaper then issues the
+// provider stop() at refcount 0 (this fn is DB-only — no provider call).
+//
+// Group-wide force-drain on workspace balance exhaustion is deliberate (one
+// balance drains a multi-session box): the workspace, not the session, is the
+// billing unit — correctness (charged once) is automatic from the group meter key.
+export interface ForceDrainResult {
+  /** Whether the workspace was over a limit (0 balance or over the warm cap). */
+  overLimit: boolean;
+  /** The reason, for observability. */
+  reason: "balance" | "warm_cap" | null;
+  /** The (workspaceId, sandboxGroupId) viewer-only boxes CASed warm->draining. */
+  drained: { workspaceId: string; sandboxGroupId: string }[];
+}
+
+// Start of the current UTC month (the default warm-cap window). Local helper so
+// packages/db has no dependency on a worker/api date util; callers may override
+// via capWindowStart to keep the fn time-source-agnostic for tests.
+function startOfUtcMonthDefault(date = new Date()): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1, 0, 0, 0, 0));
+}
+
+export async function forceDrainOverLimitViewerOnlyBoxes(db: Database, input: {
+  workspaceId: string;
+  /** account balance gate: when <= 0 (and a billing/managed mode is on) drain. */
+  balanceMicros: number;
+  enforceBalance: boolean;
+  /** warm-second cap (cumulative this UTC month). 0 = unbounded (no cap gate). */
+  maxWarmSecondsPerWorkspace: number;
+  /** start of the cap window (caller passes startOfUtcMonth() so the fn stays
+   *  time-source-agnostic for tests). */
+  capWindowStart?: Date;
+  /** drain-grace horizon stamped on the newly-draining rows (matches the reaper). */
+  idleGraceMs: number;
+}): Promise<ForceDrainResult> {
+  return await withWorkspaceUsageLock(db, input.workspaceId, async (scopedDb) => {
+    // Determine over-limit under the lock (so the cap read + the drain are one
+    // serialized critical section per workspace).
+    let reason: "balance" | "warm_cap" | null = null;
+    if (input.enforceBalance && input.balanceMicros <= 0) {
+      reason = "balance";
+    } else if (input.maxWarmSecondsPerWorkspace > 0) {
+      const since = input.capWindowStart ?? startOfUtcMonthDefault();
+      const [{ total } = { total: 0 }] = await scopedDb.select({
+        total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+      }).from(schema.usageEvents).where(and(
+        eq(schema.usageEvents.workspaceId, input.workspaceId),
+        eq(schema.usageEvents.eventType, "sandbox.warm_seconds"),
+        gt(schema.usageEvents.occurredAt, since),
+      ));
+      if (Number(total) >= input.maxWarmSecondsPerWorkspace) {
+        reason = "warm_cap";
+      }
+    }
+
+    if (!reason) {
+      return { overLimit: false, reason: null, drained: [] };
+    }
+
+    // Force-drain VIEWER-ONLY warm boxes: CAS warm->draining guarded
+    // turn_holders = 0 (a paying turn is NEVER killed). Stamp the grace deadline
+    // so the reaper terminates at refcount 0 past the grace, exactly as a normal
+    // refcount->0 drain would.
+    // Drop the viewer holders of every warm VIEWER-ONLY lease (turn_holders=0 — a
+    // paying turn is never killed) so refcount → 0 (otherwise the viewer holder
+    // pins refcount > 0 and the reaper never terminates at refcount=0, and the
+    // holder heartbeat would re-arm the lease). Scoped to the warm viewer-only
+    // leases via a subselect so a turn-held box's holders are untouched.
+    await scopedDb.execute(sql`
+      delete from sandbox_lease_holders h
+      where h.kind = 'viewer'
+        and h.lease_id in (
+          select id from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and liveness = 'warm' and turn_holders = 0
+        )
+    `);
+    // CAS the now-holderless leases warm→draining at refcount 0 with the grace
+    // deadline stamped — so the SAME reaper sweep's refcount=0 drain predicate
+    // then terminates the box.
+    const drained = await scopedDb.execute<{ sandbox_group_id: string }>(sql`
+      update sandbox_leases set
+        liveness = 'draining',
+        refcount = 0, turn_holders = 0, viewer_holders = 0,
+        expires_at = now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval,
+        updated_at = now()
+      where workspace_id = ${input.workspaceId}
+        and liveness = 'warm' and turn_holders = 0
+      returning sandbox_group_id
+    `);
+
+    return {
+      overLimit: true,
+      reason,
+      drained: drained.map((r) => ({ workspaceId: input.workspaceId, sandboxGroupId: r.sandbox_group_id })),
+    };
   });
 }
 

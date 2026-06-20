@@ -262,10 +262,41 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- Warm-meter read (P2.1) — the reaper-tick metering input.
+--
+-- The reaper sweep is the warm-meter tick for VIEWER-ONLY boxes between turns (a
+-- turn-held box is metered by the turn's own activity heartbeat, so we EXCLUDE
+-- turn_holders > 0 here to avoid double-metering). Like the reaper sweep this is
+-- a cross-workspace read that FORCE RLS would hide from a scoped connection, so
+-- it is a SECURITY DEFINER read fn (DB-only, no mutation — the worker calls
+-- accrueWarmSeconds per row, which does the epoch-fenced cursor advance + the
+-- (group, epoch, tick)-idempotent usage insert under the lease row lock).
+--
+-- Returns ONE row per WARM group with no turn holders (a singleton group is one
+-- box → one row → one warm-seconds stream regardless of N viewer sessions).
+CREATE OR REPLACE FUNCTION opengeni_private.list_meterable_warm_leases()
+RETURNS TABLE (
+  account_id        uuid,
+  workspace_id      uuid,
+  sandbox_group_id  uuid,
+  lease_epoch       integer,
+  backend           text
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public, opengeni_private
+AS $$
+  SELECT L.account_id, L.workspace_id, L.sandbox_group_id, L.lease_epoch, L.backend
+  FROM sandbox_leases L
+  WHERE L.liveness = 'warm' AND L.turn_holders = 0;
+$$;
+
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
     GRANT EXECUTE ON FUNCTION opengeni_private.reap_sandbox_leases(bigint, bigint) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_meterable_warm_leases() TO opengeni_app;
   END IF;
 END $$;

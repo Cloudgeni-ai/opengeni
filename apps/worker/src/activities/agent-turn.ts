@@ -21,6 +21,7 @@ import {
   setSessionLastInputTokens,
   sumUsageQuantity,
   heartbeatLeaseHolder,
+  accrueWarmSeconds,
   SandboxLeaseSupersededError,
   type AppendEventInput,
 } from "@opengeni/db";
@@ -35,7 +36,7 @@ import {
   type SandboxFileDownload,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, type ModelUsageInput, type Settings } from "@opengeni/config";
+import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
@@ -368,6 +369,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const heartbeatEpoch = resolvedSandbox.leaseEpoch;
         const heartbeatHolderId = sandboxHolderId;
         const heartbeatGroupId = sandboxGroupId;
+        // P2.1 warm-meter (tick A): while a turn runs, the heartbeat is also the
+        // warm-seconds tick. GROUP+epoch+tick keyed (one box = one stream, shared
+        // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
+        // metered when a per-backend rate is configured. Best-effort: a metering
+        // failure must never fail the turn.
+        const warmRate = sandboxWarmRateMicrosPerSecond(settings, turn.sandboxBackend);
         leaseHeartbeatTimer = setInterval(() => {
           void heartbeatLeaseHolder(db, {
             accountId: input.accountId,
@@ -377,6 +384,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             holderId: heartbeatHolderId,
             leaseTtlMs: settings.sandboxLeaseTtlMs,
             expectedEpoch: heartbeatEpoch,
+          }).catch(() => undefined);
+          void accrueWarmSeconds(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sandboxGroupId: heartbeatGroupId,
+            expectedEpoch: heartbeatEpoch,
+            warmRateMicrosPerSecond: warmRate,
+            subjectId: input.sessionId,
           }).catch(() => undefined);
         }, 10_000);
         if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
