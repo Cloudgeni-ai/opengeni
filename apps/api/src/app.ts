@@ -184,6 +184,10 @@ export function createApp(deps: AppDependencies): Hono {
     },
     productAccessMode: deps.settings.productAccessMode,
     auth: clientAuthConfig(deps.settings),
+    // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
+    // available on every real backend; `none` has no box so they are all off.
+    // Per-session availability is still negotiated on /stream-capabilities.
+    structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
   })));
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
@@ -222,6 +226,11 @@ function clientAuthConfig(settings: AppDependencies["settings"]) {
     return { mode: "deploymentKey" as const, headerName: "x-opengeni-access-key" as const };
   }
   return { mode: "none" as const };
+}
+
+function structuredServicesHint(backend: string): { fileSystem: boolean; git: boolean; terminalEvents: boolean } {
+  const hasBox = backend !== "none";
+  return { fileSystem: hasBox, git: hasBox, terminalEvents: hasBox };
 }
 
 export function allowedCorsOrigin(pattern: string, origin: string): boolean {

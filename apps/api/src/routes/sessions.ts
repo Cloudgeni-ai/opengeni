@@ -4,19 +4,39 @@ import {
   ClearSessionContextRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
+  FsDeleteRequest,
+  FsListRequest,
+  FsReadRequest,
+  FsWriteRequest,
+  GitDiffRequest,
+  GitLogRequest,
+  GitShowRequest,
+  GitStatusRequest,
+  PtyCloseRequest,
+  PtyOpenRequest,
+  PtyResizeRequest,
+  PtyWriteRequest,
   ReorderSessionTurnsRequest,
+  TerminalExecRequest,
   UpdateSessionGoalRequest,
   UpdateSessionTurnRequest,
   ViewerHeartbeatRequest,
   type SandboxBackend,
+  type Session,
+  type TerminalPtyExitedPayload,
+  type TerminalPtyOutputDeltaPayload,
+  type TerminalPtyStartedPayload,
 } from "@opengeni/contracts";
 import { resolveContextCompactionMode, streamTokenDegraded } from "@opengeni/config";
 import {
   cancelQueuedSessionTurn,
   clearSessionContext,
+  closePtySession,
+  getOpenPtySession,
   getSession,
   getSessionGoal,
   getStreamAcknowledgment,
+  insertPtySession,
   listSessionEvents,
   listSessionIdsInGroup,
   listSessions,
@@ -27,12 +47,14 @@ import {
   requireSession,
   revokeViewer,
   setSessionGoalStatus,
+  updatePtySessionActivity,
   updateQueuedSessionTurn,
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
+import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
@@ -638,6 +660,205 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
     return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
+  });
+
+  // ══════════════════════ Channel-A structured services (P4.4) ══════════════
+  //
+  // FileSystem (list/read/write/delete) + Git (status/diff/log/show) + Terminal
+  // (exec + interactive PTY), all served API-DIRECT: each route does
+  //   requireAccessGrant BEFORE Zod parse  ->  resume the box by id in-process
+  //   (cold->warming CAS + viewer holder)  ->  SandboxChannelAService method
+  //   ->  inline JSON  ->  release holder + drop handle.
+  // NO Temporal, NO worker RPC, NO NATS round-trip — reads never ride the bus
+  // (which would corrupt SSE gap-fill). The notifications (fs.changed/git.changed
+  // /terminal.pty.*) ride A1 via appendAndPublishEvents. Gated behind
+  // sandboxOwnershipEnabled (the lease is dormant otherwise). Explicit
+  // HTTPException(400/404/409) — never a raw ZodError -> 500.
+
+  // FS uses files:read for reads, files:write for mutations; Git is read-only
+  // (rides files:read); Terminal exec + PTY ride terminal:attach.
+
+  type ChannelARouteCtx = {
+    accountId: string;
+    workspaceId: string;
+    session: Session;
+    subjectId: string;
+  };
+
+  // Shared preamble: grant BEFORE parse, ownership gate, session lookup. Returns
+  // the resolved context the channel-a seam needs (session narrowed non-null).
+  async function channelAPreamble(
+    c: Context,
+    permission: "files:read" | "files:write" | "terminal:attach",
+  ): Promise<ChannelARouteCtx> {
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const grant = await requireAccessGrant(c, deps, workspaceId, permission);
+    assertOwnershipEnabled();
+    const sessionId = c.req.param("sessionId") ?? "";
+    const session = await getSession(db, workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return { accountId: grant.accountId, workspaceId, session, subjectId: grant.subjectId };
+  }
+
+  async function parseChannelABody<T>(c: Context, schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } }): Promise<T> {
+    const raw = await c.req.json().catch(() => undefined);
+    const result = schema.safeParse(raw ?? {});
+    if (!result.success) {
+      throw new HTTPException(400, { message: "invalid request body" });
+    }
+    return result.data;
+  }
+
+  // ── FileSystem ──────────────────────────────────────────────────────────
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/list", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, FsListRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsList(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, FsReadRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsRead(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", async (c) => {
+    const ctx = await channelAPreamble(c, "files:write");
+    const req = await parseChannelABody(c, FsWriteRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsWrite(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", async (c) => {
+    const ctx = await channelAPreamble(c, "files:write");
+    const req = await parseChannelABody(c, FsDeleteRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsDelete(req));
+    return c.json(out);
+  });
+
+  // ── Git (read-only) ─────────────────────────────────────────────────────
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, GitStatusRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitStatus(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, GitDiffRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitDiff(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, GitLogRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitLog(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/git/show", async (c) => {
+    const ctx = await channelAPreamble(c, "files:read");
+    const req = await parseChannelABody(c, GitShowRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.gitShow(req));
+    return c.json(out);
+  });
+
+  // ── Terminal: synchronous exec ────────────────────────────────────────────
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/exec", async (c) => {
+    const ctx = await channelAPreamble(c, "terminal:attach");
+    const req = await parseChannelABody(c, TerminalExecRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.terminalExec(req));
+    return c.json(out);
+  });
+
+  // ── Terminal: interactive PTY control (output rides A1) ───────────────────
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
+    const ctx = await channelAPreamble(c, "terminal:attach");
+    const req = await parseChannelABody(c, PtyOpenRequest);
+    const ptyId = crypto.randomUUID();
+    const out = await withChannelA({ db, settings, bus }, ctx, async ({ service, lease }) => {
+      const opened = await service.ptyOpen(req, ptyId);
+      // Persist the ptyId<->exec-session map fenced to the box's epoch.
+      await insertPtySession(db, {
+        id: ptyId,
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
+        execSessionId: opened.execSessionId,
+        leaseEpoch: lease.leaseEpoch,
+        cols: req.cols,
+        rows: req.rows,
+        shell: opened.shell,
+        cwd: req.cwd,
+        openedBy: ctx.subjectId,
+      });
+      // Emit terminal.pty.started + any initial banner output on A1.
+      const started: TerminalPtyStartedPayload = { ptyId, cols: req.cols, rows: req.rows, shell: opened.shell, cwd: req.cwd };
+      const events: AppendEventInput[] = [{ type: "terminal.pty.started", payload: started }];
+      if (opened.initialOutput) {
+        const delta: TerminalPtyOutputDeltaPayload = { ptyId, stream: "stdout", chunk: opened.initialOutput, seq: 0 };
+        events.push({ type: "terminal.pty.output.delta", payload: delta });
+      }
+      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, events);
+      return opened.response;
+    });
+    return c.json(out, 201);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write", async (c) => {
+    const ctx = await channelAPreamble(c, "terminal:attach");
+    const req = await parseChannelABody(c, PtyWriteRequest);
+    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    if (!pty) {
+      throw new HTTPException(404, { message: "pty not found or closed" });
+    }
+    if (pty.execSessionId === null) {
+      throw new HTTPException(409, { message: "interactive terminal unsupported on this backend" });
+    }
+    let seq = 1;
+    await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
+      const output = await service.ptyWrite(req, pty.execSessionId!, req.data);
+      await updatePtySessionActivity(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId, execSessionId: pty.execSessionId });
+      if (output) {
+        const delta: TerminalPtyOutputDeltaPayload = { ptyId: req.ptyId, stream: "stdout", chunk: output, seq: seq++ };
+        await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [{ type: "terminal.pty.output.delta", payload: delta }]);
+      }
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize", async (c) => {
+    const ctx = await channelAPreamble(c, "terminal:attach");
+    const req = await parseChannelABody(c, PtyResizeRequest);
+    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    if (!pty) {
+      throw new HTTPException(404, { message: "pty not found or closed" });
+    }
+    if (pty.execSessionId !== null) {
+      await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.ptyResize(req, pty.execSessionId!));
+    }
+    await updatePtySessionActivity(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId, cols: req.cols, rows: req.rows });
+    return c.body(null, 204);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close", async (c) => {
+    const ctx = await channelAPreamble(c, "terminal:attach");
+    const req = await parseChannelABody(c, PtyCloseRequest);
+    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    // Idempotent: closing an already-closed/absent PTY is a 204 no-op.
+    if (pty) {
+      await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.ptyClose(req, pty.execSessionId));
+      await closePtySession(db, { accountId: ctx.accountId, workspaceId: ctx.workspaceId, ptyId: req.ptyId });
+      const exited: TerminalPtyExitedPayload = { ptyId: req.ptyId, exitCode: 0, reason: "exit" };
+      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [{ type: "terminal.pty.exited", payload: exited }]);
+    }
+    return c.body(null, 204);
   });
 }
 

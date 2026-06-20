@@ -1762,6 +1762,19 @@ export const SessionEventType = z.enum([
   "recording.started", // ffmpeg launched on :0 (mode/codec/dimensions)
   "recording.available", // finalized: bytes PUT to storage, replayable
   "recording.failed", // ffmpeg/box-death/rollover/upload error — no artifact
+  // Channel-A structured-service notifications (P4.4 / modules/08-channel-a.md
+  // §2.2). The A2 reads (fs/git/terminal exec) are SYNCHRONOUS API-direct point
+  // queries (their result is the HTTP response, NEVER an event). What rides A1
+  // here are the side-effect NOTIFICATIONS — a path changed, git state changed,
+  // a pty opened/printed/exited — durable, sequenced, gap-filled like every
+  // other session event, so any viewer's Pierre tree / diff / terminal stays
+  // live. fs.changed/git.changed are cache-invalidation signals; the pty.*
+  // events carry the interactive terminal byte stream.
+  "fs.changed", // a path was created/modified/deleted (write or agent mutation)
+  "git.changed", // working-tree/index/HEAD changed (debounced re-probe)
+  "terminal.pty.started", // an interactive PTY session opened (carries ptyId)
+  "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
+  "terminal.pty.exited", // PTY session ended (exitCode/reason)
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 
@@ -1865,6 +1878,341 @@ export const RecordingFailedPayload = z.object({
   detail: z.string().nullable().optional(),
 });
 export type RecordingFailedPayload = z.infer<typeof RecordingFailedPayload>;
+
+// ── Channel-A structured services (P4.4 / modules/08-channel-a.md) ───────────
+// Two transports on one spine: the A2 request/response shapes (FsNode tree,
+// GitDiff hunks, terminal exec) are returned INLINE on synchronous API-direct
+// routes (never the bus); the A1 notification payloads below ride the durable
+// SSE event log so every viewer's Pierre tree / diff / terminal stays live.
+
+// --- A1 event payloads -------------------------------------------------------
+
+// The agent's command-output firehose, enriched. Backward-compatible widening
+// of the existing sandbox.command.output.delta (consumers read `chunk`); the
+// producer may now also stamp stream/commandId/seq for finer terminal rendering.
+export const SandboxCommandOutputDeltaPayload = z.object({
+  stream: z.enum(["stdout", "stderr"]).default("stdout"),
+  chunk: z.string(), // raw bytes, utf-8 (lossy) — terminal is opaque-ish
+  commandId: z.string().optional(), // groups deltas to one agent command
+  seq: z.number().int().nonnegative().optional(), // intra-command ordering hint
+});
+export type SandboxCommandOutputDeltaPayload = z.infer<typeof SandboxCommandOutputDeltaPayload>;
+
+export const FsChangeKind = z.enum(["created", "modified", "deleted", "renamed"]);
+export type FsChangeKind = z.infer<typeof FsChangeKind>;
+export const FsChangedPayload = z.object({
+  changes: z.array(z.object({
+    path: z.string(), // workspace-relative POSIX path
+    kind: FsChangeKind,
+    isDir: z.boolean().default(false),
+    sizeBytes: z.number().int().nonnegative().nullable().default(null),
+    oldPath: z.string().optional(), // for "renamed"
+  })).min(1),
+  source: z.enum(["write", "watch", "agent"]).default("write"),
+  // Monotonic FS revision (per-lease, paired with leaseEpoch for staleness).
+  revision: z.number().int().nonnegative(),
+  // The lease epoch the revision was minted under: a client invalidates on a
+  // (leaseEpoch, revision) tuple change, never a bare revision compare (H3 —
+  // revision resets to 0 on box re-key, so a bare monotonic compare goes stale).
+  leaseEpoch: z.number().int().nonnegative().default(0),
+});
+export type FsChangedPayload = z.infer<typeof FsChangedPayload>;
+
+export const GitChangedPayload = z.object({
+  head: z.string().nullable(), // current branch or detached SHA
+  dirty: z.boolean(), // working tree has uncommitted changes
+  ahead: z.number().int().nonnegative().default(0),
+  behind: z.number().int().nonnegative().default(0),
+  changedFileCount: z.number().int().nonnegative(),
+  reason: z.enum(["commit", "checkout", "stage", "worktree", "fetch", "unknown"]).default("unknown"),
+  revision: z.number().int().nonnegative().default(0),
+  leaseEpoch: z.number().int().nonnegative().default(0),
+});
+export type GitChangedPayload = z.infer<typeof GitChangedPayload>;
+
+export const TerminalPtyStartedPayload = z.object({
+  ptyId: z.string().uuid(),
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive(),
+  shell: z.string(), // resolved shell, e.g. "/bin/bash"
+  cwd: z.string(),
+});
+export type TerminalPtyStartedPayload = z.infer<typeof TerminalPtyStartedPayload>;
+
+export const TerminalPtyOutputDeltaPayload = z.object({
+  ptyId: z.string().uuid(),
+  stream: z.enum(["stdout", "stderr"]).default("stdout"),
+  chunk: z.string(), // raw terminal bytes (incl. ANSI), utf-8 lossy
+  seq: z.number().int().nonnegative(), // strict per-pty ordering (owner-assigned)
+});
+export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDeltaPayload>;
+
+export const TerminalPtyExitedPayload = z.object({
+  ptyId: z.string().uuid(),
+  exitCode: z.number().int().nullable(),
+  reason: z.enum(["exit", "killed", "owner_gone", "timeout"]),
+});
+export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
+
+// --- A2 FileSystem request/response (NOT events; returned inline) ------------
+export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
+export type FsNodeType = z.infer<typeof FsNodeType>;
+// The Pierre-tree node. `children` is present only when the dir was listed with
+// depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
+export interface FsTreeNode {
+  name: string;
+  path: string; // workspace-relative POSIX, no leading slash
+  type: z.infer<typeof FsNodeType>;
+  sizeBytes: number | null; // null for dirs
+  mtimeMs: number | null;
+  mode: number | null; // unix mode bits, for Pierre tree icons/perms
+  children?: FsTreeNode[] | undefined;
+  truncated: boolean; // dir had more entries than the cap
+}
+export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() => z.object({
+  name: z.string(),
+  path: z.string(),
+  type: FsNodeType,
+  sizeBytes: z.number().int().nonnegative().nullable(),
+  mtimeMs: z.number().int().nonnegative().nullable(),
+  mode: z.number().int().nullable(),
+  children: z.array(FsTreeNode).optional(),
+  truncated: z.boolean().default(false),
+})) as z.ZodType<FsTreeNode>;
+
+export const FsListRequest = z.object({
+  path: z.string().default(""), // "" = workspace root
+  depth: z.number().int().min(0).max(8).default(1),
+  maxEntries: z.number().int().positive().max(20_000).default(2_000),
+  includeHidden: z.boolean().default(true),
+});
+export type FsListRequest = z.infer<typeof FsListRequest>;
+export const FsListResponse = z.object({
+  root: FsTreeNode,
+  revision: z.number().int().nonnegative(),
+  truncated: z.boolean(), // global cap hit
+});
+export type FsListResponse = z.infer<typeof FsListResponse>;
+
+export const FsEncoding = z.enum(["utf8", "base64"]);
+export type FsEncoding = z.infer<typeof FsEncoding>;
+export const FsReadRequest = z.object({
+  path: z.string(),
+  encoding: FsEncoding.default("utf8"),
+  maxBytes: z.number().int().positive().max(25 * 1024 * 1024).default(5 * 1024 * 1024),
+});
+export type FsReadRequest = z.infer<typeof FsReadRequest>;
+export const FsReadResponse = z.object({
+  path: z.string(),
+  encoding: FsEncoding,
+  content: z.string(), // text or base64 per encoding
+  sizeBytes: z.number().int().nonnegative(), // bytes returned (== content size)
+  truncated: z.boolean(), // sizeBytes hit maxBytes; content is the prefix
+  isBinary: z.boolean(), // sniffed NUL byte in first 8KB
+  revision: z.number().int().nonnegative(),
+});
+export type FsReadResponse = z.infer<typeof FsReadResponse>;
+
+export const FsWriteRequest = z.object({
+  path: z.string(),
+  encoding: FsEncoding.default("utf8"),
+  content: z.string(),
+  overwrite: z.boolean().default(true), // false + existing path => 409
+  createParents: z.boolean().default(true),
+});
+export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
+export const FsWriteResponse = z.object({
+  path: z.string(),
+  sizeBytes: z.number().int().nonnegative(),
+  revision: z.number().int().nonnegative(), // == the fs.changed revision
+});
+export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
+
+export const FsDeleteRequest = z.object({
+  path: z.string(),
+  recursive: z.boolean().default(false), // required true to delete a non-empty dir
+});
+export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
+export const FsDeleteResponse = z.object({ revision: z.number().int().nonnegative() });
+export type FsDeleteResponse = z.infer<typeof FsDeleteResponse>;
+
+// --- A2 Git request/response (read-only; feeds Pierre diff/tree) -------------
+export const GitFileStatusCode = z.enum([
+  "added", "modified", "deleted", "renamed", "copied", "untracked", "ignored", "conflicted", "typechange",
+]);
+export type GitFileStatusCode = z.infer<typeof GitFileStatusCode>;
+export const GitFileStatus = z.object({
+  path: z.string(),
+  oldPath: z.string().nullable(), // for renamed/copied
+  index: GitFileStatusCode.nullable(), // staged change (X in porcelain XY)
+  worktree: GitFileStatusCode.nullable(), // unstaged change (Y in porcelain XY)
+  isConflicted: z.boolean().default(false),
+});
+export type GitFileStatus = z.infer<typeof GitFileStatus>;
+export const GitStatusRequest = z.object({
+  path: z.string().default(""), // repo root within workspace (multi-repo support)
+});
+export type GitStatusRequest = z.infer<typeof GitStatusRequest>;
+export const GitStatusResponse = z.object({
+  isRepo: z.boolean(),
+  head: z.string().nullable(), // branch name
+  detached: z.boolean().default(false),
+  upstream: z.string().nullable(),
+  ahead: z.number().int().nonnegative().default(0),
+  behind: z.number().int().nonnegative().default(0),
+  files: z.array(GitFileStatus),
+  revision: z.number().int().nonnegative(),
+});
+export type GitStatusResponse = z.infer<typeof GitStatusResponse>;
+
+// The structured hunk shape that feeds Pierre diff — the whole point of Git.
+export const GitDiffLineType = z.enum(["context", "add", "del", "meta"]);
+export type GitDiffLineType = z.infer<typeof GitDiffLineType>;
+export const GitDiffLine = z.object({
+  type: GitDiffLineType,
+  // null on the side that doesn't have the line (add => oldNo null; del => newNo null)
+  oldNo: z.number().int().positive().nullable(),
+  newNo: z.number().int().positive().nullable(),
+  text: z.string(), // line WITHOUT leading +/-/space marker
+});
+export type GitDiffLine = z.infer<typeof GitDiffLine>;
+export const GitDiffHunk = z.object({
+  oldStart: z.number().int().nonnegative(),
+  oldLines: z.number().int().nonnegative(),
+  newStart: z.number().int().nonnegative(),
+  newLines: z.number().int().nonnegative(),
+  header: z.string(), // the @@ ... @@ section heading
+  lines: z.array(GitDiffLine),
+});
+export type GitDiffHunk = z.infer<typeof GitDiffHunk>;
+export const GitFileDiff = z.object({
+  path: z.string(),
+  oldPath: z.string().nullable(),
+  status: GitFileStatusCode,
+  isBinary: z.boolean().default(false),
+  isImage: z.boolean().default(false),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  hunks: z.array(GitDiffHunk), // empty if binary or truncated
+  truncated: z.boolean().default(false), // diff exceeded maxBytes; hunks omitted
+});
+export type GitFileDiff = z.infer<typeof GitFileDiff>;
+export const GitDiffRequest = z.object({
+  path: z.string().default(""), // repo root
+  // diff selectors, mutually exclusive precedence: refs > staged > worktree
+  staged: z.boolean().default(false), // --cached (index vs HEAD)
+  fromRef: z.string().optional(),
+  toRef: z.string().optional(),
+  pathspec: z.array(z.string()).default([]),
+  contextLines: z.number().int().min(0).max(10).default(3),
+  maxBytesPerFile: z.number().int().positive().max(2 * 1024 * 1024).default(512 * 1024),
+});
+export type GitDiffRequest = z.infer<typeof GitDiffRequest>;
+export const GitDiffResponse = z.object({
+  files: z.array(GitFileDiff),
+  revision: z.number().int().nonnegative(),
+});
+export type GitDiffResponse = z.infer<typeof GitDiffResponse>;
+
+export const GitLogRequest = z.object({
+  path: z.string().default(""),
+  ref: z.string().default("HEAD"),
+  maxCount: z.number().int().positive().max(1_000).default(100),
+  skip: z.number().int().nonnegative().default(0),
+  pathspec: z.array(z.string()).default([]),
+});
+export type GitLogRequest = z.infer<typeof GitLogRequest>;
+export const GitCommit = z.object({
+  sha: z.string(),
+  shortSha: z.string(),
+  parents: z.array(z.string()),
+  author: z.object({ name: z.string(), email: z.string(), timestamp: z.number().int() }),
+  committer: z.object({ name: z.string(), email: z.string(), timestamp: z.number().int() }),
+  subject: z.string(),
+  body: z.string(),
+  refs: z.array(z.string()).default([]), // decorations: branch/tag pointers
+});
+export type GitCommit = z.infer<typeof GitCommit>;
+export const GitLogResponse = z.object({ commits: z.array(GitCommit), hasMore: z.boolean() });
+export type GitLogResponse = z.infer<typeof GitLogResponse>;
+
+export const GitShowRequest = z.object({
+  path: z.string().default(""),
+  ref: z.string(), // a commit/tag/tree-ish
+  filePath: z.string().optional(), // ref + filePath => raw blob ("open file at commit")
+  encoding: FsEncoding.default("utf8"),
+  maxBytesPerFile: z.number().int().positive().max(2 * 1024 * 1024).default(512 * 1024),
+});
+export type GitShowRequest = z.infer<typeof GitShowRequest>;
+export const GitShowResponse = z.object({
+  commit: GitCommit.nullable(), // null when fetching a raw blob
+  files: z.array(GitFileDiff), // commit diff vs first parent
+  blob: z.object({ content: z.string(), encoding: FsEncoding, sizeBytes: z.number().int(), truncated: z.boolean() }).nullable(),
+  revision: z.number().int().nonnegative(),
+});
+export type GitShowResponse = z.infer<typeof GitShowResponse>;
+
+// --- A2 Terminal exec (run a command in-box, stream stdout/stderr) -----------
+// The command-output FIREHOSE rides A1 (sandbox.command.output.delta). This is
+// the SYNCHRONOUS exec: run a bounded command and return its stdout/stderr +
+// exit code inline (the result IS the HTTP response). Full interactive PTY
+// (open/write/resize) layers on top via the pty.* events; exec ships now.
+export const TerminalExecRequest = z.object({
+  command: z.string().min(1),
+  cwd: z.string().default(""), // workspace-relative
+  // Soft per-call wall-clock bound (the box yields output back when reached).
+  timeoutMs: z.number().int().positive().max(120_000).default(30_000),
+  // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
+  // in addition to returning the buffered result inline.
+  emitStream: z.boolean().default(true),
+});
+export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
+export const TerminalExecResponse = z.object({
+  stdout: z.string(),
+  stderr: z.string(),
+  exitCode: z.number().int().nullable(),
+  // True when the process was still running when the call yielded (a long
+  // command); the remaining output drains onto A1 if emitStream was set.
+  running: z.boolean(),
+  wallTimeSeconds: z.number().nonnegative(),
+});
+export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;
+
+// --- A2 Terminal PTY control (output rides A1) -------------------------------
+export const PtyOpenRequest = z.object({
+  cols: z.number().int().positive().max(500).default(80),
+  rows: z.number().int().positive().max(300).default(24),
+  cwd: z.string().default(""), // workspace-relative
+  shell: z.string().optional(), // default: resolved login shell
+});
+export type PtyOpenRequest = z.infer<typeof PtyOpenRequest>;
+export const PtyOpenResponse = z.object({
+  ptyId: z.string().uuid(),
+  // output streams as terminal.pty.output.delta on the SSE channel the client holds
+  streamVia: z.literal("sse-events"),
+  supportsInput: z.boolean(), // false on backends without writeStdin
+});
+export type PtyOpenResponse = z.infer<typeof PtyOpenResponse>;
+export const PtyWriteRequest = z.object({ ptyId: z.string().uuid(), data: z.string() }); // utf-8 stdin
+export type PtyWriteRequest = z.infer<typeof PtyWriteRequest>;
+export const PtyResizeRequest = z.object({ ptyId: z.string().uuid(), cols: z.number().int().positive(), rows: z.number().int().positive() });
+export type PtyResizeRequest = z.infer<typeof PtyResizeRequest>;
+export const PtyCloseRequest = z.object({ ptyId: z.string().uuid() });
+export type PtyCloseRequest = z.infer<typeof PtyCloseRequest>;
+
+// Per-session structured-service capabilities (the Channel-A slice of the
+// negotiation). The full SessionCapabilities doc already carries FileSystem /
+// Terminal / Git blocks (P0.1); this is the compact projection the SDK mirrors.
+export const SessionStructuredCapabilities = z.object({
+  FileSystem: z.object({ available: z.boolean(), readOnly: z.boolean(), root: z.string() }),
+  Terminal: z.object({
+    events: z.boolean(), // command.output firehose (always on if a box exists)
+    exec: z.boolean(), // synchronous terminal exec
+    pty: z.object({ available: z.boolean() }), // interactive stdin (writeStdin)
+  }),
+  Git: z.object({ available: z.boolean(), repos: z.array(z.string()) }),
+});
+export type SessionStructuredCapabilities = z.infer<typeof SessionStructuredCapabilities>;
 
 export const SessionEvent = z.object({
   id: z.string().uuid(),
@@ -2171,6 +2519,15 @@ export const ClientConfig = z.object({
   }),
   productAccessMode: ProductAccessMode,
   auth: ClientAuthConfig.default({ mode: "none" }),
+  // Server-wide hint: does this deployment support Channel-A structured services
+  // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
+  // (it depends on the session's pinned backend); this is the coarse on/off the
+  // client uses to decide whether to even attempt the fs/git/terminal panels.
+  structuredServices: z.object({
+    fileSystem: z.boolean(),
+    git: z.boolean(),
+    terminalEvents: z.boolean(),
+  }).default({ fileSystem: false, git: false, terminalEvents: false }),
 });
 export type ClientConfig = z.infer<typeof ClientConfig>;
 

@@ -49,6 +49,30 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionTurn,
+  // Channel-A structured services (P4.4).
+  FsListRequest,
+  FsListResponse,
+  FsReadRequest,
+  FsReadResponse,
+  FsWriteRequest,
+  FsWriteResponse,
+  FsDeleteRequest,
+  FsDeleteResponse,
+  GitStatusRequest,
+  GitStatusResponse,
+  GitDiffRequest,
+  GitDiffResponse,
+  GitLogRequest,
+  GitLogResponse,
+  GitShowRequest,
+  GitShowResponse,
+  TerminalExecRequest,
+  TerminalExecResponse,
+  PtyOpenRequest,
+  PtyOpenResponse,
+  PtyWriteRequest,
+  PtyResizeRequest,
+  PtyCloseRequest,
   ToolRef,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
@@ -396,6 +420,77 @@ export class OpenGeniClient {
    */
   async compactSessionContext(workspaceId: string, sessionId: string): Promise<CompactSessionContextResult> {
     return await this.requestJson<CompactSessionContextResult>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/context/compact`, {});
+  }
+
+  // --- Channel-A structured services (P4.4) ------------------------------------
+  // FileSystem (Pierre tree), Git (Pierre diff), Terminal (exec + PTY). Each is a
+  // synchronous API-direct point query; the fs.changed/git.changed/terminal.pty.*
+  // notifications + the PTY output stream arrive on the existing event SSE.
+
+  /** FileSystem: list a directory tree (feeds the Pierre file tree). */
+  async fsList(workspaceId: string, sessionId: string, request: FsListRequest = {}): Promise<FsListResponse> {
+    return await this.requestJson<FsListResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`, request);
+  }
+
+  /** FileSystem: read a file (text or base64; binary-safe, size-capped). */
+  async fsRead(workspaceId: string, sessionId: string, request: FsReadRequest): Promise<FsReadResponse> {
+    return await this.requestJson<FsReadResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`, request);
+  }
+
+  /** FileSystem: write a file (last-writer-wins; emits fs.changed). */
+  async fsWrite(workspaceId: string, sessionId: string, request: FsWriteRequest): Promise<FsWriteResponse> {
+    return await this.requestJson<FsWriteResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/write`, request);
+  }
+
+  /** FileSystem: delete a path (emits fs.changed). */
+  async fsDelete(workspaceId: string, sessionId: string, request: FsDeleteRequest): Promise<FsDeleteResponse> {
+    return await this.requestJson<FsDeleteResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/delete`, request);
+  }
+
+  /** Git: working-tree/index status (the Pierre file-status feed). */
+  async gitStatus(workspaceId: string, sessionId: string, request: GitStatusRequest = {}): Promise<GitStatusResponse> {
+    return await this.requestJson<GitStatusResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`, request);
+  }
+
+  /** Git: structured diff hunks (the Pierre diff feed). */
+  async gitDiff(workspaceId: string, sessionId: string, request: GitDiffRequest = {}): Promise<GitDiffResponse> {
+    return await this.requestJson<GitDiffResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`, request);
+  }
+
+  /** Git: commit log. */
+  async gitLog(workspaceId: string, sessionId: string, request: GitLogRequest = {}): Promise<GitLogResponse> {
+    return await this.requestJson<GitLogResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/log`, request);
+  }
+
+  /** Git: show a commit (diff vs first parent) or fetch a raw blob at a ref. */
+  async gitShow(workspaceId: string, sessionId: string, request: GitShowRequest): Promise<GitShowResponse> {
+    return await this.requestJson<GitShowResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/show`, request);
+  }
+
+  /** Terminal: run a bounded command, returning buffered stdout/stderr inline. */
+  async terminalExec(workspaceId: string, sessionId: string, request: TerminalExecRequest): Promise<TerminalExecResponse> {
+    return await this.requestJson<TerminalExecResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/exec`, request);
+  }
+
+  /** Terminal: open an interactive PTY. Output streams on the event SSE as
+   *  terminal.pty.output.delta; drive it with terminalPtyWrite. */
+  async terminalPtyOpen(workspaceId: string, sessionId: string, request: PtyOpenRequest = {}): Promise<PtyOpenResponse> {
+    return await this.requestJson<PtyOpenResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty`, request);
+  }
+
+  /** Terminal: send stdin to an open PTY (output rides A1). */
+  async terminalPtyWrite(workspaceId: string, sessionId: string, request: PtyWriteRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/write`, request);
+  }
+
+  /** Terminal: resize an open PTY. */
+  async terminalPtyResize(workspaceId: string, sessionId: string, request: PtyResizeRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/resize`, request);
+  }
+
+  /** Terminal: close an open PTY (idempotent). */
+  async terminalPtyClose(workspaceId: string, sessionId: string, request: PtyCloseRequest): Promise<void> {
+    await this.requestVoid("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/terminal/pty/close`, request);
   }
 
   // --- Access + workspaces -----------------------------------------------------

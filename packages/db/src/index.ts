@@ -2813,6 +2813,154 @@ export async function listRecordings(db: Database, workspaceId: string, sessionI
 }
 
 // ============================================================================
+// Channel-A interactive PTY sessions (P4.4) — the ptyId <-> exec-session-id map.
+// The ONLY new persistent state Channel A needs; FS/Git reads persist nothing.
+// ============================================================================
+
+export type SandboxPtySessionRow = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  execSessionId: number | null;
+  leaseEpoch: number;
+  cols: number;
+  rows: number;
+  shell: string;
+  cwd: string;
+  status: "open" | "closed";
+  openedBy: string;
+  lastInputAt: string;
+  createdAt: string;
+  closedAt: string | null;
+};
+
+function mapPtySession(row: typeof schema.sandboxPtySessions.$inferSelect): SandboxPtySessionRow {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    execSessionId: row.execSessionId ?? null,
+    leaseEpoch: row.leaseEpoch,
+    cols: row.cols,
+    rows: row.rows,
+    shell: row.shell,
+    cwd: row.cwd,
+    status: row.status as "open" | "closed",
+    openedBy: row.openedBy,
+    lastInputAt: row.lastInputAt.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+    closedAt: row.closedAt ? row.closedAt.toISOString() : null,
+  };
+}
+
+export async function insertPtySession(db: Database, input: {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  execSessionId?: number | null;
+  leaseEpoch: number;
+  cols: number;
+  rows: number;
+  shell: string;
+  cwd: string;
+  openedBy: string;
+}): Promise<SandboxPtySessionRow> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sandboxPtySessions).values({
+      id: input.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      execSessionId: input.execSessionId ?? null,
+      leaseEpoch: input.leaseEpoch,
+      cols: input.cols,
+      rows: input.rows,
+      shell: input.shell,
+      cwd: input.cwd,
+      status: "open",
+      openedBy: input.openedBy,
+    }).returning();
+    return mapPtySession(row!);
+  });
+}
+
+/** Read an OPEN PTY row by ptyId. Returns null when absent or already closed. */
+export async function getOpenPtySession(db: Database, workspaceId: string, ptyId: string): Promise<SandboxPtySessionRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sandboxPtySessions)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, workspaceId),
+        eq(schema.sandboxPtySessions.id, ptyId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
+      .limit(1);
+    return row ? mapPtySession(row) : null;
+  });
+}
+
+/** Stamp the SDK exec-session id (known only after the open exec yields a still-
+ *  running process) + refresh the input-activity TTL. */
+export async function updatePtySessionActivity(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  ptyId: string;
+  execSessionId?: number | null;
+  cols?: number;
+  rows?: number;
+}): Promise<SandboxPtySessionRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const set: Partial<typeof schema.sandboxPtySessions.$inferInsert> = { lastInputAt: new Date() };
+    if (input.execSessionId !== undefined) set.execSessionId = input.execSessionId;
+    if (input.cols !== undefined) set.cols = input.cols;
+    if (input.rows !== undefined) set.rows = input.rows;
+    const [row] = await scopedDb.update(schema.sandboxPtySessions)
+      .set(set)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+        eq(schema.sandboxPtySessions.id, input.ptyId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
+      .returning();
+    return row ? mapPtySession(row) : null;
+  });
+}
+
+/** Mark a PTY closed (idempotent — a double close on a closed row is a no-op). */
+export async function closePtySession(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  ptyId: string;
+}): Promise<SandboxPtySessionRow | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sandboxPtySessions)
+      .set({ status: "closed", closedAt: new Date() })
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+        eq(schema.sandboxPtySessions.id, input.ptyId),
+      ))
+      .returning();
+    return row ? mapPtySession(row) : null;
+  });
+}
+
+/** List a session's OPEN PTYs (reattach + reap). */
+export async function listOpenPtySessions(db: Database, workspaceId: string, sessionId: string): Promise<SandboxPtySessionRow[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sandboxPtySessions)
+      .where(and(
+        eq(schema.sandboxPtySessions.workspaceId, workspaceId),
+        eq(schema.sandboxPtySessions.sessionId, sessionId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ))
+      .orderBy(desc(schema.sandboxPtySessions.createdAt));
+    return rows.map(mapPtySession);
+  });
+}
+
+// ============================================================================
 // Sandbox singleton lease — the SOLE enforcer of one-box-per-group (P1.1).
 //
 // Group-keyed (workspace_id, sandbox_group_id) from the start. The sole

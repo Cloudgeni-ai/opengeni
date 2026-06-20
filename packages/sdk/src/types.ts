@@ -235,6 +235,13 @@ export const SESSION_EVENT_TYPES = [
   "recording.started",
   "recording.available",
   "recording.failed",
+  // Channel-A structured-service notifications (P4.4; mirror of contracts
+  // SessionEventType — the contract-parity test asserts sorted equality).
+  "fs.changed",
+  "git.changed",
+  "terminal.pty.started",
+  "terminal.pty.output.delta",
+  "terminal.pty.exited",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
@@ -310,6 +317,99 @@ export type RecordingFailedPayload = {
   turnId: string | null;
   reason: RecordingFailedReason;
   detail?: string | null | undefined;
+};
+
+// ── Channel-A structured services (P4.4) — hand-written wire mirrors ─────────
+
+// A1 notification payloads.
+export type SandboxCommandOutputDeltaPayload = {
+  stream: "stdout" | "stderr";
+  chunk: string;
+  commandId?: string | undefined;
+  seq?: number | undefined;
+};
+export type FsChangeKind = "created" | "modified" | "deleted" | "renamed";
+export type FsChangedPayload = {
+  changes: { path: string; kind: FsChangeKind; isDir: boolean; sizeBytes: number | null; oldPath?: string | undefined }[];
+  source: "write" | "watch" | "agent";
+  revision: number;
+  leaseEpoch: number;
+};
+export type GitChangedPayload = {
+  head: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  changedFileCount: number;
+  reason: "commit" | "checkout" | "stage" | "worktree" | "fetch" | "unknown";
+  revision: number;
+  leaseEpoch: number;
+};
+export type TerminalPtyStartedPayload = { ptyId: string; cols: number; rows: number; shell: string; cwd: string };
+export type TerminalPtyOutputDeltaPayload = { ptyId: string; stream: "stdout" | "stderr"; chunk: string; seq: number };
+export type TerminalPtyExitedPayload = { ptyId: string; exitCode: number | null; reason: "exit" | "killed" | "owner_gone" | "timeout" };
+
+// A2 FileSystem request/response.
+export type FsNodeType = "file" | "dir" | "symlink" | "other";
+export type FsTreeNode = {
+  name: string;
+  path: string;
+  type: FsNodeType;
+  sizeBytes: number | null;
+  mtimeMs: number | null;
+  mode: number | null;
+  children?: FsTreeNode[] | undefined;
+  truncated: boolean;
+};
+export type FsEncoding = "utf8" | "base64";
+export type FsListRequest = { path?: string; depth?: number; maxEntries?: number; includeHidden?: boolean };
+export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
+export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
+export type FsReadResponse = { path: string; encoding: FsEncoding; content: string; sizeBytes: number; truncated: boolean; isBinary: boolean; revision: number };
+export type FsWriteRequest = { path: string; encoding?: FsEncoding; content: string; overwrite?: boolean; createParents?: boolean };
+export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
+export type FsDeleteRequest = { path: string; recursive?: boolean };
+export type FsDeleteResponse = { revision: number };
+
+// A2 Git request/response (the Pierre-diff feed).
+export type GitFileStatusCode = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "ignored" | "conflicted" | "typechange";
+export type GitFileStatus = { path: string; oldPath: string | null; index: GitFileStatusCode | null; worktree: GitFileStatusCode | null; isConflicted: boolean };
+export type GitStatusRequest = { path?: string };
+export type GitStatusResponse = { isRepo: boolean; head: string | null; detached: boolean; upstream: string | null; ahead: number; behind: number; files: GitFileStatus[]; revision: number };
+export type GitDiffLineType = "context" | "add" | "del" | "meta";
+export type GitDiffLine = { type: GitDiffLineType; oldNo: number | null; newNo: number | null; text: string };
+export type GitDiffHunk = { oldStart: number; oldLines: number; newStart: number; newLines: number; header: string; lines: GitDiffLine[] };
+export type GitFileDiff = { path: string; oldPath: string | null; status: GitFileStatusCode; isBinary: boolean; isImage: boolean; additions: number; deletions: number; hunks: GitDiffHunk[]; truncated: boolean };
+export type GitDiffRequest = { path?: string; staged?: boolean; fromRef?: string; toRef?: string; pathspec?: string[]; contextLines?: number; maxBytesPerFile?: number };
+export type GitDiffResponse = { files: GitFileDiff[]; revision: number };
+export type GitLogRequest = { path?: string; ref?: string; maxCount?: number; skip?: number; pathspec?: string[] };
+export type GitCommit = {
+  sha: string;
+  shortSha: string;
+  parents: string[];
+  author: { name: string; email: string; timestamp: number };
+  committer: { name: string; email: string; timestamp: number };
+  subject: string;
+  body: string;
+  refs: string[];
+};
+export type GitLogResponse = { commits: GitCommit[]; hasMore: boolean };
+export type GitShowRequest = { path?: string; ref: string; filePath?: string; encoding?: FsEncoding; maxBytesPerFile?: number };
+export type GitShowResponse = { commit: GitCommit | null; files: GitFileDiff[]; blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null; revision: number };
+
+// A2 Terminal exec + PTY.
+export type TerminalExecRequest = { command: string; cwd?: string; timeoutMs?: number; emitStream?: boolean };
+export type TerminalExecResponse = { stdout: string; stderr: string; exitCode: number | null; running: boolean; wallTimeSeconds: number };
+export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
+export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
+export type PtyWriteRequest = { ptyId: string; data: string };
+export type PtyResizeRequest = { ptyId: string; cols: number; rows: number };
+export type PtyCloseRequest = { ptyId: string };
+
+export type SessionStructuredCapabilities = {
+  FileSystem: { available: boolean; readOnly: boolean; root: string };
+  Terminal: { events: boolean; exec: boolean; pty: { available: boolean } };
+  Git: { available: boolean; repos: string[] };
 };
 
 export type ScheduledTaskStatus = "active" | "paused";

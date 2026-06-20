@@ -119,6 +119,29 @@ export {
   type FinalizeRecordingResult,
 } from "./recording";
 
+// P4.4 Channel-A structured services — the provider-agnostic SandboxChannelAService
+// (FileSystem + Git + Terminal) over a live, resumed-by-id session handle. The
+// API constructs one per request around the box it just resumed; no ownership.
+// Agent-loop-free, so the API-direct control plane imports it from this leaf.
+export {
+  SandboxChannelAService,
+  ChannelAValidationError,
+  ChannelAConflictError,
+  ChannelANotFoundError,
+  ChannelAUnsupportedError,
+  stripExecBanner,
+  assertSafeRelPath,
+  parsePorcelainV2,
+  parseNumstatZ,
+  parseUnifiedPatch,
+  type ChannelASession,
+  type ChannelAExecArgs,
+  type ChannelAExecResult,
+  type ChannelAEmitter,
+  type SandboxChannelAServiceOptions,
+  type NumstatEntry,
+} from "./channel-a";
+
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
  * driven (the old flat if/else is gone): the backend's ProviderRegistration owns

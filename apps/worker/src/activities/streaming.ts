@@ -9,6 +9,9 @@ export function createRuntimeBatcher(flushEvents: (events: AppendEventInput[]) =
     "agent.message.delta",
     "agent.reasoning.delta",
     "sandbox.command.output.delta",
+    // Channel-A PTY bytes flush promptly (P4.4) — a terminal stream is useless
+    // batched 33ms behind; the structural set bypasses the batcher's coalesce.
+    "terminal.pty.output.delta",
     "agent.toolCall.created",
     "agent.toolCall.output",
     "agent.message.completed",

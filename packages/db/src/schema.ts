@@ -499,6 +499,40 @@ export const sessionRecordings = pgTable("session_recordings", {
   sessionIdx: index("session_recordings_session_idx").on(table.workspaceId, table.sessionId, table.createdAt),
 }));
 
+// Channel-A interactive PTY sessions (P4.4 / modules/08-channel-a.md §3.1). The
+// ONLY new persistent state Channel A needs — FS/Git reads are stateless point
+// queries; an interactive PTY is a live in-box process keyed by the SDK's numeric
+// exec-session id (writeStdin({sessionId})). We map our UUID ptyId <-> that id,
+// the owning workspace/session, the lease_epoch that fences it to the box it was
+// opened on (a box re-key strands the PTY -> reaped with reason owner_gone), and
+// a last_input_at heartbeat so the reaper can kill idle/orphaned PTYs. Mirrors
+// the account/workspace/session FK chain of sandboxSessionEnvelopes.
+export const sandboxPtySessions = pgTable("sandbox_pty_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(), // == ptyId on the wire
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  // The SDK numeric exec-session id used by writeStdin({ sessionId }). Null until
+  // the open exec yields a still-running process (a fast-exiting shell has none).
+  execSessionId: integer("exec_session_id"),
+  leaseEpoch: integer("lease_epoch").notNull(), // fenced to the box that opened it
+  cols: integer("cols").notNull(),
+  rows: integer("rows").notNull(),
+  shell: text("shell").notNull(),
+  cwd: text("cwd").notNull(),
+  status: text("status").notNull().default("open"), // 'open' | 'closed'
+  // The viewer grant/subject that opened it (free-text — access subjects are not
+  // always UUIDs, M5; so a text column, never a uuid NOT NULL).
+  openedBy: text("opened_by").notNull(),
+  lastInputAt: timestamp("last_input_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+}, (table) => ({
+  openIdx: index("sandbox_pty_sessions_session_idx")
+    .on(table.workspaceId, table.sessionId)
+    .where(sql`${table.status} = 'open'`),
+}));
+
 export const scheduledTasks = pgTable("scheduled_tasks", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

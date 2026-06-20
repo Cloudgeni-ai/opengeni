@@ -148,6 +148,13 @@
       "when": 1782691200000,
       "tag": "0020_session_recordings",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1782777600000,
+      "tag": "0021_sandbox_pty_sessions",
+      "breakpoints": true
     }
   ]
 }

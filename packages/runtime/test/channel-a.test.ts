@@ -1,0 +1,349 @@
+// P4.4 — Channel-A structured services against a REAL creds-free local box.
+//
+// The unix_local backend runs in-process (no provider creds, no OpenAI key), so
+// these tests exercise the FULL SandboxChannelAService over a real session:
+// fsWrite/fsRead round-trip text + binary, fsList returns a coherent tree,
+// git status/diff parse into structured hunks, terminal exec streams output. The
+// parsers are also unit-tested in isolation (no box) for the porcelain/numstat/
+// unified-diff shapes the Pierre diff consumes.
+
+import { afterEach, describe, expect, test } from "bun:test";
+import { testSettings } from "@opengeni/testing";
+import {
+  SandboxChannelAService,
+  parsePorcelainV2,
+  parseNumstatZ,
+  parseUnifiedPatch,
+  stripExecBanner,
+  type ChannelASession,
+} from "../src/sandbox";
+import { createSandboxClientForBackend } from "../src/index";
+
+const NUL = String.fromCharCode(0);
+
+type LiveLocalSession = ChannelASession & {
+  closed: boolean;
+  state: { workspaceRootPath: string };
+  close: () => Promise<void>;
+};
+
+const liveSessions: LiveLocalSession[] = [];
+
+async function makeBox(): Promise<{ session: LiveLocalSession; root: string }> {
+  const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+  const client = createSandboxClientForBackend("local", settings) as unknown as {
+    backendId: string;
+    create: (m?: unknown) => Promise<LiveLocalSession>;
+  };
+  expect(client.backendId).toBe("unix_local");
+  const session = await client.create({});
+  liveSessions.push(session);
+  return { session, root: session.state.workspaceRootPath };
+}
+
+afterEach(async () => {
+  for (const s of liveSessions.splice(0)) {
+    if (!s.closed) await s.close().catch(() => undefined);
+  }
+});
+
+describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
+  test("write then read-back round-trips text", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+
+    const write = await svc.fsWrite({ path: "hello.txt", encoding: "utf8", content: "hello channel-a\n", overwrite: true, createParents: true });
+    expect(write.path).toBe("hello.txt");
+    expect(write.sizeBytes).toBe("hello channel-a\n".length);
+    expect(write.revision).toBe(1);
+
+    const read = await svc.fsRead({ path: "hello.txt", encoding: "utf8", maxBytes: 1024 });
+    expect(read.encoding).toBe("utf8");
+    expect(read.content).toBe("hello channel-a\n");
+    expect(read.isBinary).toBe(false);
+    expect(read.truncated).toBe(false);
+  });
+
+  test("write then read-back round-trips a BINARY file (base64)", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    // A few bytes including a NUL — the binary sniff must catch it.
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0xff]);
+    const b64 = bytes.toString("base64");
+
+    await svc.fsWrite({ path: "blob.bin", encoding: "base64", content: b64, overwrite: true, createParents: true });
+
+    const read = await svc.fsRead({ path: "blob.bin", encoding: "base64", maxBytes: 1024 });
+    expect(read.encoding).toBe("base64");
+    expect(read.isBinary).toBe(true);
+    expect(Buffer.from(read.content, "base64").equals(bytes)).toBe(true);
+  });
+
+  test("a utf8 read of a binary file auto-detects + returns base64", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const bytes = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+    await svc.fsWrite({ path: "raw.dat", encoding: "base64", content: bytes.toString("base64"), overwrite: true, createParents: true });
+    const read = await svc.fsRead({ path: "raw.dat", encoding: "utf8", maxBytes: 1024 });
+    expect(read.isBinary).toBe(true);
+    expect(read.encoding).toBe("base64"); // forced to base64 despite the utf8 request
+  });
+
+  test("fsList returns a coherent tree of a known directory", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsWrite({ path: "src/a.ts", encoding: "utf8", content: "export const a = 1;\n", overwrite: true, createParents: true });
+    await svc.fsWrite({ path: "src/b.ts", encoding: "utf8", content: "export const b = 2;\n", overwrite: true, createParents: true });
+    await svc.fsWrite({ path: "README.md", encoding: "utf8", content: "# hi\n", overwrite: true, createParents: true });
+
+    const list = await svc.fsList({ path: "", depth: 3, maxEntries: 1000, includeHidden: true });
+    expect(list.root.type).toBe("dir");
+    // collect all node paths
+    const paths: string[] = [];
+    const walk = (n: typeof list.root): void => { paths.push(n.path); n.children?.forEach(walk); };
+    walk(list.root);
+    expect(paths).toContain("src");
+    expect(paths).toContain("src/a.ts");
+    expect(paths).toContain("src/b.ts");
+    expect(paths).toContain("README.md");
+    // a.ts is a file with a non-null size; src is a dir with null size + children
+    const findNode = (path: string): typeof list.root | undefined => {
+      let found: typeof list.root | undefined;
+      const rec = (n: typeof list.root): void => { if (n.path === path) found = n; n.children?.forEach(rec); };
+      rec(list.root);
+      return found;
+    };
+    const aNode = findNode("src/a.ts");
+    expect(aNode?.type).toBe("file");
+    expect(typeof aNode?.sizeBytes).toBe("number");
+    const srcNode = findNode("src");
+    expect(srcNode?.type).toBe("dir");
+    expect(Array.isArray(srcNode?.children)).toBe(true);
+  });
+
+  test("write with overwrite:false on an existing path throws conflict", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsWrite({ path: "x.txt", encoding: "utf8", content: "first", overwrite: true, createParents: true });
+    await expect(svc.fsWrite({ path: "x.txt", encoding: "utf8", content: "second", overwrite: false, createParents: true }))
+      .rejects.toThrow(/exists/);
+  });
+
+  test("path traversal is rejected with a validation error", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await expect(svc.fsRead({ path: "../escape", encoding: "utf8", maxBytes: 16 })).rejects.toThrow(/traversal/);
+    await expect(svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 })).rejects.toThrow(/absolute/);
+  });
+
+  test("fsWrite emits an fs.changed notification through the emitter", async () => {
+    const { session } = await makeBox();
+    const emitted: { type: string; payload: unknown }[] = [];
+    const svc = new SandboxChannelAService({
+      session,
+      leaseEpoch: 7,
+      emit: async (events) => { emitted.push(...events); },
+    });
+    await svc.fsWrite({ path: "noted.txt", encoding: "utf8", content: "hi", overwrite: true, createParents: true });
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]!.type).toBe("fs.changed");
+    const payload = emitted[0]!.payload as { changes: { path: string; kind: string }[]; revision: number; leaseEpoch: number };
+    expect(payload.changes[0]!.path).toBe("noted.txt");
+    expect(payload.changes[0]!.kind).toBe("modified");
+    expect(payload.revision).toBe(1);
+    expect(payload.leaseEpoch).toBe(7);
+  });
+});
+
+describe("P4.4 SandboxChannelAService — Git (real local box)", () => {
+  async function makeRepoWithStagedChange(): Promise<{ svc: SandboxChannelAService; session: LiveLocalSession }> {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    // init a repo, commit a baseline, then make a staged change.
+    await svc.terminalExec({ command: "git init -q && git config user.email t@t.io && git config user.name t && git config commit.gpgsign false", cwd: "", timeoutMs: 20000, emitStream: false });
+    await svc.fsWrite({ path: "file.txt", encoding: "utf8", content: "line one\nline two\nline three\n", overwrite: true, createParents: true });
+    await svc.terminalExec({ command: "git add file.txt && git commit -q -m baseline", cwd: "", timeoutMs: 20000, emitStream: false });
+    // modify + stage
+    await svc.fsWrite({ path: "file.txt", encoding: "utf8", content: "line one\nline two changed\nline three\nline four\n", overwrite: true, createParents: true });
+    await svc.terminalExec({ command: "git add file.txt", cwd: "", timeoutMs: 20000, emitStream: false });
+    return { svc, session };
+  }
+
+  test("git status on a repo with a staged change reports the file", async () => {
+    const { svc } = await makeRepoWithStagedChange();
+    const status = await svc.gitStatus({ path: "" });
+    expect(status.isRepo).toBe(true);
+    expect(status.files.length).toBeGreaterThanOrEqual(1);
+    const file = status.files.find((f) => f.path === "file.txt");
+    expect(file).toBeDefined();
+    expect(file!.index).toBe("modified"); // staged
+  });
+
+  test("git diff --staged parses into structured hunks (the Pierre feed)", async () => {
+    const { svc } = await makeRepoWithStagedChange();
+    const diff = await svc.gitDiff({ path: "", staged: true, pathspec: [], contextLines: 3, maxBytesPerFile: 512 * 1024 });
+    expect(diff.files.length).toBe(1);
+    const f = diff.files[0]!;
+    expect(f.path).toBe("file.txt");
+    expect(f.isBinary).toBe(false);
+    expect(f.additions).toBeGreaterThan(0);
+    expect(f.hunks.length).toBeGreaterThanOrEqual(1);
+    const hunk = f.hunks[0]!;
+    // the hunk carries typed add/del/context lines with gutter line numbers
+    expect(hunk.lines.some((l) => l.type === "add" && l.newNo !== null && l.oldNo === null)).toBe(true);
+    expect(hunk.lines.some((l) => l.type === "del" && l.oldNo !== null && l.newNo === null)).toBe(true);
+    expect(hunk.lines.some((l) => l.type === "context")).toBe(true);
+  });
+
+  test("git status outside a repo returns isRepo:false (not an error)", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const status = await svc.gitStatus({ path: "" });
+    expect(status.isRepo).toBe(false);
+    expect(status.files).toEqual([]);
+  });
+
+  test("git log returns the commit chain", async () => {
+    const { svc } = await makeRepoWithStagedChange();
+    await svc.terminalExec({ command: "git commit -q -m second", cwd: "", timeoutMs: 20000, emitStream: false });
+    const log = await svc.gitLog({ path: "", ref: "HEAD", maxCount: 10, skip: 0, pathspec: [] });
+    expect(log.commits.length).toBeGreaterThanOrEqual(2);
+    expect(log.commits[0]!.subject).toBe("second");
+    expect(log.commits[1]!.subject).toBe("baseline");
+    expect(log.commits[0]!.author.name).toBe("t");
+  });
+});
+
+describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () => {
+  test("terminal exec 'echo $DISPLAY' streams output", async () => {
+    const { session } = await makeBox();
+    const emitted: { type: string; payload: unknown }[] = [];
+    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
+    const out = await svc.terminalExec({ command: "echo display=$DISPLAY; echo marker_channel_a", cwd: "", timeoutMs: 10000, emitStream: true });
+    expect(out.stdout).toContain("marker_channel_a");
+    expect(out.exitCode).toBe(0);
+    // the buffered output is also published on A1 as the firehose
+    expect(emitted.some((e) => e.type === "sandbox.command.output.delta")).toBe(true);
+  });
+
+  test("terminal exec reports a non-zero exit code", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const out = await svc.terminalExec({ command: "exit 3", cwd: "", timeoutMs: 10000, emitStream: false });
+    expect(out.exitCode).toBe(3);
+  });
+
+  test("PTY capability probe reports the local backend supports interactive input", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    // The local backend exposes supportsPty()=true + writeStdin -> the compact
+    // capability projection advertises interactive PTY. (Actually OPENING a PTY on
+    // the local backend needs a python3 pty-bridge, exercised in the next test
+    // when available; the capability gate itself does not.)
+    const caps = svc.capabilities();
+    expect(caps.Terminal.pty.available).toBe(true);
+    expect(caps.Terminal.exec).toBe(true);
+    expect(caps.FileSystem.available).toBe(true);
+    expect(caps.Git.available).toBe(true);
+  });
+
+  test("PTY open yields a ptyId + supportsInput when a pty-bridge is available", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    const ptyId = crypto.randomUUID();
+    let opened: Awaited<ReturnType<typeof svc.ptyOpen>>;
+    try {
+      opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "" }, ptyId);
+    } catch (error) {
+      // The unix_local backend drives interactive PTYs through a python3 bridge
+      // the SDK spawns with a sanitized PATH; when that bridge is unavailable the
+      // open throws a configuration_error. Treat that as "no pty-bridge here" and
+      // skip the live-open assertion (the capability gate above still proves the
+      // shape). On the real docker/Modal images the bridge is present, so the e2e
+      // PTY path is exercised there.
+      const msg = error instanceof Error ? error.message : String(error);
+      expect(msg).toMatch(/PTY|python/i);
+      return;
+    }
+    expect(opened.response.ptyId).toBe(ptyId);
+    expect(opened.response.streamVia).toBe("sse-events");
+    expect(opened.response.supportsInput).toBe(true);
+  });
+});
+
+// ── pure parser unit tests (no box) ─────────────────────────────────────────
+describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
+  test("parsePorcelainV2 reads branch + file XY codes", () => {
+    const z = [
+      "# branch.head main",
+      "# branch.upstream origin/main",
+      "# branch.ab +2 -1",
+      "1 M. N... 100644 100644 100644 aaa bbb staged.txt",
+      "1 .M N... 100644 100644 100644 aaa bbb dirty.txt",
+      "? untracked.txt",
+    ].join(NUL) + NUL;
+    const out = parsePorcelainV2(z);
+    expect(out.isRepo).toBe(true);
+    expect(out.head).toBe("main");
+    expect(out.upstream).toBe("origin/main");
+    expect(out.ahead).toBe(2);
+    expect(out.behind).toBe(1);
+    const staged = out.files.find((f) => f.path === "staged.txt");
+    expect(staged?.index).toBe("modified");
+    expect(staged?.worktree).toBeNull();
+    const dirty = out.files.find((f) => f.path === "dirty.txt");
+    expect(dirty?.worktree).toBe("modified");
+    const untracked = out.files.find((f) => f.path === "untracked.txt");
+    expect(untracked?.worktree).toBe("untracked");
+  });
+
+  test("parseNumstatZ reads additions/deletions + binary + rename", () => {
+    // normal: "5\t2\tfile.ts", binary: "-\t-\timg.png", rename: "1\t0\t" then old, new
+    const z = ["5\t2\tfile.ts", "-\t-\timg.png", "1\t0\t", "old.ts", "new.ts"].join(NUL) + NUL;
+    const out = parseNumstatZ(z);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toMatchObject({ additions: 5, deletions: 2, binary: false, newPath: "file.ts", oldPath: null });
+    expect(out[1]).toMatchObject({ binary: true, newPath: "img.png" });
+    expect(out[2]).toMatchObject({ oldPath: "old.ts", newPath: "new.ts" });
+  });
+
+  test("parseUnifiedPatch builds hunks with typed add/del/context + gutter numbers", () => {
+    const patch = [
+      "diff --git a/f.txt b/f.txt",
+      "index 111..222 100644",
+      "--- a/f.txt",
+      "+++ b/f.txt",
+      "@@ -1,3 +1,4 @@",
+      " line one",
+      "-line two",
+      "+line two changed",
+      " line three",
+      "+line four",
+    ].join("\n");
+    const { hunks, status } = parseUnifiedPatch(patch);
+    expect(status).toBe("modified");
+    expect(hunks).toHaveLength(1);
+    const h = hunks[0]!;
+    expect(h.oldStart).toBe(1);
+    expect(h.newStart).toBe(1);
+    const add = h.lines.find((l) => l.type === "add" && l.text === "line two changed");
+    expect(add?.oldNo).toBeNull();
+    expect(add?.newNo).toBe(2);
+    const del = h.lines.find((l) => l.type === "del" && l.text === "line two");
+    expect(del?.newNo).toBeNull();
+    expect(del?.oldNo).toBe(2);
+  });
+
+  test("parseUnifiedPatch detects added/deleted file status", () => {
+    const added = ["diff --git a/n b/n", "new file mode 100644", "--- /dev/null", "+++ b/n", "@@ -0,0 +1,1 @@", "+hi"].join("\n");
+    expect(parseUnifiedPatch(added).status).toBe("added");
+    const deleted = ["diff --git a/d b/d", "deleted file mode 100644", "--- a/d", "+++ /dev/null", "@@ -1,1 +0,0 @@", "-bye"].join("\n");
+    expect(parseUnifiedPatch(deleted).status).toBe("deleted");
+  });
+
+  test("stripExecBanner removes the formatExecResponse banner", () => {
+    const banner = "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nactual output here";
+    expect(stripExecBanner(banner)).toBe("actual output here");
+    expect(stripExecBanner("no banner here")).toBe("no banner here");
+  });
+});
