@@ -589,6 +589,8 @@ describe("deployment contract", () => {
       OPENGENI_MODAL_TOKEN_ID: "modal-token-id",
       OPENGENI_MODAL_TOKEN_SECRET: "modal-token-secret",
       OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      OPENGENI_MODAL_IMAGE_REF: "opengenistgneuacr.azurecr.io/opengeni-desktop:preview-123",
+      OPENGENI_STREAM_TOKEN_SECRET: "ogs_preview_stream_secret",
       OPENGENI_IMAGE_TAG: "preview-123",
       OPENGENI_API_IMAGE_DIGEST: "sha256:api",
       OPENGENI_WORKER_IMAGE_DIGEST: "sha256:worker",
@@ -596,11 +598,17 @@ describe("deployment contract", () => {
     });
 
     expect(artifacts.missingEnvVars).toEqual([]);
+    // The sandbox-surfacing HMAC secret is NEVER required (graceful-degrade /
+    // delegation-secret fallback) — it must not enter missingEnvVars.
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_STREAM_TOKEN_SECRET");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_DATABASE_URL=");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ENDPOINT=");
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=https://preview-123.app.opengeni.ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SANDBOX_BACKEND=modal");
+    // Recognized sandbox-surfacing passthroughs reach the runtime secret when set.
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_STREAM_TOKEN_SECRET=ogs_preview_stream_secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MODAL_IMAGE_REF=opengenistgneuacr.azurecr.io/opengeni-desktop:preview-123");
     expect(artifacts.helmValuesYaml).toContain("publicEndpoint: \"https://preview-123.app.opengeni.ai\"");
     expect(artifacts.helmValuesYaml).toContain("OPENGENI_WEB_ALLOWED_HOSTS: \"preview-123.app.opengeni.ai\"");
     expect(artifacts.helmValuesYaml).toContain("tag: \"preview-123\"");

@@ -94,6 +94,24 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   },
 };
 
+// Sandbox-surfacing runtime env (the desktop/Channel-A giga-PR). These are
+// recognized by the runtime-artifacts generator so a surfacing-enabled
+// deployment (e.g. preview) carries them into the opengeni-runtime secret, but
+// they are all passthroughs (emitted only when set) — none are required, so
+// they never enter missingEnvVars:
+//   - OPENGENI_STREAM_TOKEN_SECRET: HMAC secret minting scoped desktop stream
+//     tokens; falls back to OPENGENI_DELEGATION_SECRET when unset.
+//   - the three feature flags default off in @opengeni/config; preview flips
+//     them on through the helm config map, not here.
+//   - OPENGENI_MODAL_IMAGE_REF is also a modal-backend optional passthrough; it
+//     is injected at deploy time (--set) when a desktop image ref is built.
+export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_STREAM_TOKEN_SECRET",
+  "OPENGENI_STREAM_CONTROL_ENABLED",
+  "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+  "OPENGENI_SANDBOX_DESKTOP_ENABLED",
+];
+
 export const SecretDeliveryMode = z.enum([
   "envFile",
   "kubernetesSecret",
@@ -1485,6 +1503,18 @@ function runtimeEnvValues(
     entries.push(requiredEnv(key, env[key]));
   }
   for (const key of sandboxEnv.optional) {
+    entries.push(valueEnv(key, env[key]));
+  }
+
+  // Sandbox-surfacing passthroughs (the desktop/Channel-A giga-PR). These are
+  // recognized runtime env vars so a surfacing-enabled deployment carries them
+  // into runtime.env, but they are valueEnv passthroughs (emitted only when set,
+  // never forced into missingEnvVars): OPENGENI_STREAM_TOKEN_SECRET gracefully
+  // falls back to OPENGENI_DELEGATION_SECRET when unset (config's
+  // resolveStreamTokenSecret), and the three feature flags default off in
+  // @opengeni/config. Preview turns them ON via the helm config map; here we
+  // ensure the HMAC secret + the modal image ref reach the runtime secret.
+  for (const key of SANDBOX_SURFACING_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 
