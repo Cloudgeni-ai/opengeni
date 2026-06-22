@@ -29,12 +29,14 @@ export type UseDesktopStreamResult = {
 
 /** Lazy-load @novnc/novnc's RFB as the default factory. Imported inside the
  *  connect effect so SSR / non-desktop bundles never pull the DOM-only lib.
- *  @novnc/novnc ships no types and a single `export default class RFB`; the
- *  package specifier is resolved at runtime (an optional peer dep), so the
- *  import is wrapped to avoid a hard module reference at bundle time. */
+ *  @novnc/novnc ships no types and a single `export default class RFB`. The
+ *  specifier is STATIC (`import("@novnc/novnc")`) so Vite can pre-bundle and
+ *  resolve it — a runtime-string indirection with `@vite-ignore` (the previous
+ *  approach) hands the browser a bare specifier and throws
+ *  "Failed to resolve module specifier '@novnc/novnc'". The dynamic form keeps
+ *  it out of the SSR / non-desktop critical path while staying resolvable. */
 async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
-  const specifier = "@novnc/novnc";
-  const mod = (await import(/* @vite-ignore */ specifier)) as {
+  const mod = (await import("@novnc/novnc")) as unknown as {
     default: new (
       t: HTMLElement,
       u: string,

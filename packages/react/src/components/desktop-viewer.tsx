@@ -1,13 +1,20 @@
 import type { CapabilityUnavailableReason, DesktopRfbFactory, DesktopStreamCapability } from "@opengeni/sdk";
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
 
 export type DesktopViewerProps = {
   /** The desktop cell of the negotiated capabilities (`capabilities.DesktopStream`). */
   capability: DesktopStreamCapability | null;
-  /** read-only vs interactive. Forced read-only when `capability.mode === "read-only"`. */
+  /**
+   * Initial control mode. Default false (watch). When the user flips
+   * "Take control" the viewer drives input — but only if `capability.mode`
+   * permits it (server-gated; a read-only deployment disables the toggle).
+   * Pass a value to control it externally; omit to let the viewer own the state.
+   */
   interactive?: boolean | undefined;
+  /** Render the built-in Watching ⇄ Take control toggle (default true). */
+  showControlToggle?: boolean | undefined;
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
@@ -46,6 +53,7 @@ export type DesktopViewerProps = {
 export function DesktopViewer({
   capability,
   interactive,
+  showControlToggle = true,
   scaleViewport,
   rfbFactory,
   renderConsentGate,
@@ -58,6 +66,14 @@ export function DesktopViewer({
 }: DesktopViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [consented, setConsented] = useState(false);
+  // Local control state when not externally controlled. The server gate
+  // (`capability.mode`) is the hard ceiling — a read-only deployment can never
+  // be flipped to interactive regardless of this toggle.
+  const [takeControl, setTakeControl] = useState(interactive ?? false);
+  const externallyControlled = interactive !== undefined;
+  const serverAllowsControl = capability?.mode !== "read-only";
+  const wantControl = externallyControlled ? interactive : takeControl;
+  const inControl = Boolean(wantControl) && serverAllowsControl;
 
   // Decide what to render before touching the stream hook (don't connect until
   // a usable url is present — the hook stays idle on a null/incomplete cap).
@@ -71,15 +87,36 @@ export function DesktopViewer({
     onAcknowledge?.();
   };
 
+  // Esc / blur returns control to watch so the pointer is never trapped.
+  useEffect(() => {
+    if (!inControl || externallyControlled) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTakeControl(false);
+    };
+    const onBlur = () => setTakeControl(false);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, [inControl, externallyControlled]);
+
   // The hook is always called (rules of hooks); it stays idle until `url` is set.
   const connectCapability = !transportNull && !needsAck ? capability : null;
   const stream = useDesktopStream({
     capability: connectCapability,
     containerRef,
-    ...(interactive !== undefined ? { interactive } : {}),
+    interactive: inControl,
     ...(scaleViewport !== undefined ? { scaleViewport } : {}),
     ...(rfbFactory ? { rfbFactory } : {}),
   });
+
+  const connected = stream.state === "connected";
+  const showToggle = showControlToggle && !transportNull && !needsAck && !noLiveAddress && !overlayBlocks();
+  function overlayBlocks(): boolean {
+    return Boolean(viewerCapReached) || Boolean(stream.error);
+  }
 
   let overlay: ReactNode = null;
   if (viewerCapReached) {
@@ -103,17 +140,91 @@ export function DesktopViewer({
   }
 
   return (
-    <div className={cn("relative h-full w-full overflow-hidden bg-black", className)} data-opengeni-desktop>
+    <div
+      className={cn(
+        "relative h-full w-full overflow-hidden bg-black",
+        inControl &&
+          "ring-2 ring-inset ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+        className,
+      )}
+      data-opengeni-desktop
+      data-in-control={inControl ? "true" : undefined}
+    >
       <div
         ref={containerRef}
         className="h-full w-full"
         data-opengeni-desktop-canvas
         data-state={stream.state}
       />
+
+      {/* Watch ⇄ Take control bar (top-right). Server-gated; framed when driving. */}
+      {showToggle && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2">
+          {inControl ? (
+            <span className="pointer-events-auto rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] px-2 py-0.5 text-[11px] font-medium text-[color:var(--og-color-accent-fg,#fff)] shadow-[var(--og-shadow-md)]">
+              You&apos;re in control
+            </span>
+          ) : (
+            <span />
+          )}
+          <div className="pointer-events-auto flex items-center gap-1.5">
+            {capability?.shared && inControl && (
+              <span className="rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-danger,var(--color-danger,#f85149))]/85 px-2 py-0.5 text-[10px] text-white">
+                Shared box — others are watching
+              </span>
+            )}
+            {!externallyControlled && (
+              <ControlToggle
+                inControl={inControl}
+                disabled={!serverAllowsControl || !connected}
+                disabledReason={
+                  !serverAllowsControl
+                    ? "This deployment streams the desktop read-only"
+                    : !connected
+                      ? "Waiting for the desktop to connect"
+                      : undefined
+                }
+                onChange={(next) => setTakeControl(next)}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
       {overlay && (
         <div className="absolute inset-0 flex items-center justify-center p-4">{overlay}</div>
       )}
     </div>
+  );
+}
+
+function ControlToggle({
+  inControl,
+  disabled,
+  disabledReason,
+  onChange,
+}: {
+  inControl: boolean;
+  disabled: boolean;
+  disabledReason?: string | undefined;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={disabled ? disabledReason : inControl ? "Return control (Esc)" : "Take control of the desktop"}
+      onClick={() => onChange(!inControl)}
+      className={cn(
+        "rounded-[var(--og-radius-sm,4px)] border px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors",
+        disabled && "cursor-not-allowed opacity-50",
+        inControl
+          ? "border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]/15 text-[color:var(--og-color-fg,#e6e6e6)]"
+          : "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,#0d0d0d)]/70 text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))] hover:text-[color:var(--og-color-fg,#e6e6e6)]",
+      )}
+    >
+      {inControl ? "Return control" : "Take control"}
+    </button>
   );
 }
 

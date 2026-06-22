@@ -148,8 +148,18 @@ export { FileBrowser } from "./components/file-browser";
 export type { FileBrowserProps } from "./components/file-browser";
 export { DiffView } from "./components/diff-view";
 export type { DiffViewProps, DiffTheme } from "./components/diff-view";
+export { PierreDiff } from "./components/pierre-diff";
+export type { PierreDiffProps } from "./components/pierre-diff";
+export { SandboxFiles } from "./components/sandbox-files";
+export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";
 export type { DesktopViewerProps } from "./components/desktop-viewer";
+export { WorkspaceDock } from "./components/workspace-dock";
+export type { WorkspaceDockProps, WorkspaceTab } from "./components/workspace-dock";
+
+// Sandbox helpers
+export { gitFileDiffToPatch } from "./lib/git-patch";
+export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";

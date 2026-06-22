@@ -38,16 +38,15 @@ import {
 import { GoalCard, GoalChip } from "@/components/session/goal-card";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
-import { SandboxWorkspace } from "@/components/session/sandbox-workspace";
+import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { isMidTurn } from "@/lib/queue";
 import { buildTools } from "@/lib/session-tools";
-import { cn } from "@/lib/utils";
-import type { Session } from "@/types";
+import type { Session, SessionEvent } from "@/types";
 
 export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
   const context = useAppContext();
@@ -144,48 +143,37 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     return <LoadingPanel label="Opening session" />;
   }
 
-  return (
-    <div className={cn("grid min-h-0 w-full min-w-0 flex-1 grid-cols-1 overflow-hidden", context.inspectorOpen && "lg:grid-cols-[minmax(0,1fr)_minmax(0,390px)]")}>
-      <SessionChatPane
-        session={session}
-        timeline={timeline}
-        approvals={approvals}
-        failure={failure}
-        goal={goal}
-        onClearView={clearView}
-        onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
-        onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
-        onApprove={(approvalId) => void approve(approvalId, "approve")}
-        onReject={(approvalId) => void approve(approvalId, "reject")}
-      />
+  const chatPane = (
+    <SessionChatPane
+      session={session}
+      timeline={timeline}
+      approvals={approvals}
+      failure={failure}
+      goal={goal}
+      onClearView={clearView}
+      onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
+      onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
+      onApprove={(approvalId) => void approve(approvalId, "approve")}
+      onReject={(approvalId) => void approve(approvalId, "reject")}
+    />
+  );
 
-      {context.inspectorOpen ? (
-        <aside className="min-h-0 w-full min-w-0 overflow-hidden border-t border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 lg:border-t-0 lg:border-l">
-          <Tabs defaultValue="run" className="flex h-full min-h-0 min-w-0 flex-col gap-0 overflow-hidden">
-            <div className="min-w-0 border-b border-[color:var(--color-border)] px-2 py-2">
-              <TabsList className="grid h-8 w-full min-w-0 grid-cols-3 rounded-md bg-[color:var(--color-bg)] p-1">
-                <TabsTrigger value="run" className="h-6 min-w-0 rounded px-1 text-[11px]">Run</TabsTrigger>
-                <TabsTrigger value="sandbox" className="h-6 min-w-0 rounded px-1 text-[11px]">Sandbox</TabsTrigger>
-                <TabsTrigger value="debug" className="h-6 min-w-0 rounded px-1 text-[11px]">Debug</TabsTrigger>
-              </TabsList>
-            </div>
-            <TabsContent value="run" className="min-h-0 min-w-0 flex-1 overflow-hidden">
-              <ScrollArea className="h-full min-w-0">
-                <div className="min-w-0 space-y-5 p-3">
-                  <QueueRail queue={queue} sessionStatus={session.status} />
-                  <GoalCard goal={goal} events={events} />
-                </div>
-              </ScrollArea>
-            </TabsContent>
-            <TabsContent value="sandbox" className="min-h-0 min-w-0 flex-1 overflow-hidden">
-              <SandboxWorkspace workspaceId={workspaceId} sessionId={sessionId} events={events} />
-            </TabsContent>
-            <TabsContent value="debug" className="min-h-0 min-w-0 flex-1 overflow-hidden">
-              <SessionInspector session={session} events={events} connectionState={connectionState} />
-            </TabsContent>
-          </Tabs>
-        </aside>
-      ) : null}
+  if (!context.inspectorOpen) {
+    return <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">{chatPane}</div>;
+  }
+
+  return (
+    <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      <SessionDock
+        workspaceId={workspaceId}
+        sessionId={sessionId}
+        session={session}
+        events={events}
+        queue={queue}
+        goal={goal}
+        connectionState={connectionState}
+        primary={chatPane}
+      />
     </div>
   );
 
@@ -196,6 +184,51 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       toast.error("Failed to submit the approval decision", { description: error instanceof Error ? error.message : String(error) });
     }
   }
+}
+
+/**
+ * The resizable Workspace dock: chat on the left, a collapsible/maximizable dock
+ * on the right with Run + the capability-gated sandbox surfaces (Files |
+ * Terminal | Desktop) + Debug. Replaces the old fixed 390px aside.
+ */
+function SessionDock(props: {
+  workspaceId: string;
+  sessionId: string;
+  session: Session;
+  events: SessionEvent[];
+  queue: ReturnType<typeof useTurnQueue>;
+  goal: ReturnType<typeof useGoal>;
+  connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
+  primary: React.ReactNode;
+}) {
+  const { tabs: sandboxTabs } = useSandboxWorkspaceTabs({
+    workspaceId: props.workspaceId,
+    sessionId: props.sessionId,
+    events: props.events,
+  });
+
+  const tabs: WorkspaceTab[] = [
+    {
+      id: "run",
+      label: "Run",
+      content: (
+        <ScrollArea className="h-full min-w-0">
+          <div className="min-w-0 space-y-5 p-3">
+            <QueueRail queue={props.queue} sessionStatus={props.session.status} />
+            <GoalCard goal={props.goal} events={props.events} />
+          </div>
+        </ScrollArea>
+      ),
+    },
+    ...sandboxTabs,
+    {
+      id: "debug",
+      label: "Debug",
+      content: <SessionInspector session={props.session} events={props.events} connectionState={props.connectionState} />,
+    },
+  ];
+
+  return <WorkspaceDock primary={props.primary} tabs={tabs} autoSaveId="og.session.dock" />;
 }
 
 function SessionChatPane(props: {

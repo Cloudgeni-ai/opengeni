@@ -21,6 +21,7 @@ import type {
   FileDownloadUrlResponse,
   FsListResponse,
   FsReadResponse,
+  FsTreeNode,
   GitDiffResponse,
   GitStatusResponse,
   ListPacksResponse,
@@ -453,37 +454,25 @@ export class MockOpenGeniClient implements SessionClientLike {
     return { url: `https://example.invalid/files/${fileId}`, expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
   }
 
-  // ── Stream surfacing (Phase 5) — canned, headless demo (no live sandbox) ────
-  async getClientConfig(): Promise<ClientConfig> {
-    return {
-      deploymentRevision: "demo",
-      defaultModel: "demo-model",
-      allowedModels: ["demo-model"],
-      defaultReasoningEffort: "medium",
-      allowedReasoningEfforts: ["low", "medium", "high"],
-      mcpServers: [],
-      fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
-      productAccessMode: "local",
-      auth: { mode: "none" },
-      structuredServices: { fileSystem: true, git: true, terminalEvents: true },
-    };
-  }
-
   async getStreamCapabilities(_workspaceId: string, sessionId: string): Promise<SessionCapabilities> {
+    // A full-surface advertisement so the headless harness lights up all three
+    // dock tabs: a lazy FileSystem, a Git repo, an interactive PTY, and a
+    // warm desktop stream (vnc-ws) in interactive mode.
     return {
       sessionId,
-      backend: "none",
+      backend: "modal",
       os: "linux",
-      liveness: "cold",
-      leaseEpoch: 0,
+      liveness: "warm",
+      leaseEpoch: 1,
       viewerHeartbeatIntervalMs: 30_000,
       FileSystem: { available: true, readOnly: false, root: "/workspace", pathSep: "/", treeMode: "lazy", reason: null },
-      Terminal: { transport: "sse-events", ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: null },
+      Terminal: { transport: "pty-ws", ptyCapable: true, shell: "/bin/bash", url: null, token: null, reason: null },
       Git: { available: true, repos: ["."], reason: null },
       DesktopStream: {
-        transport: null, client: null, mode: "read-only", url: null, token: null, expiresAt: null,
-        resolution: [1024, 768], unredacted: true, requiresAcknowledgment: false, acknowledged: false,
-        shared: false, sharedSessionIds: [], reason: "tier_headless",
+        transport: "vnc-ws", client: "novnc", mode: "interactive",
+        url: "wss://desktop.invalid/vnc", token: null, expiresAt: null,
+        resolution: [1024, 768], unredacted: true, requiresAcknowledgment: false, acknowledged: true,
+        shared: false, sharedSessionIds: [], reason: null,
       },
       Recording: { available: false, modes: [], codecs: [], reason: "tier_headless" },
       ComputerUse: { available: false, readOnly: true, reason: "tier_headless" },
@@ -519,24 +508,132 @@ export class MockOpenGeniClient implements SessionClientLike {
     // no-op in the demo
   }
 
-  async fsList(): Promise<FsListResponse> {
-    return {
-      root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [] },
-      revision: 0,
-      truncated: false,
-    };
+  async fsList(_workspaceId: string, _sessionId: string, request?: { path?: string }): Promise<FsListResponse> {
+    const dir = (name: string, path: string, children?: FsTreeNode[]): FsTreeNode => ({
+      name, path, type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false,
+      ...(children ? { children } : {}),
+    });
+    const file = (name: string, path: string, sizeBytes = 512): FsTreeNode => ({
+      name, path, type: "file", sizeBytes, mtimeMs: Date.now(), mode: 0o644, truncated: false,
+    });
+    const path = request?.path ?? "";
+    // Root level (depth 1) — dirs come back without children (lazy expand).
+    if (path === "") {
+      return {
+        root: dir("", "", [
+          dir("src", "src"),
+          dir("infra", "infra"),
+          file("package.json", "package.json", 842),
+          file("README.md", "README.md", 1280),
+        ]),
+        revision: 1,
+        truncated: false,
+      };
+    }
+    if (path === "src") {
+      return {
+        root: dir("src", "src", [
+          file("index.ts", "src/index.ts", 2048),
+          file("server.ts", "src/server.ts", 3120),
+          file("config.ts", "src/config.ts", 640),
+        ]),
+        revision: 1,
+        truncated: false,
+      };
+    }
+    if (path === "infra") {
+      return {
+        root: dir("infra", "infra", [
+          file("main.tf", "infra/main.tf", 1860),
+          file("variables.tf", "infra/variables.tf", 420),
+        ]),
+        revision: 1,
+        truncated: false,
+      };
+    }
+    return { root: dir(path, path, []), revision: 1, truncated: false };
   }
 
   async fsRead(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsReadResponse> {
-    return { path: request.path, encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 };
+    const content = `// ${request.path}\nexport const ok = true;\n`;
+    return { path: request.path, encoding: "utf8", content, sizeBytes: content.length, truncated: false, isBinary: false, revision: 1 };
   }
 
   async gitStatus(): Promise<GitStatusResponse> {
-    return { isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 };
+    return {
+      isRepo: true,
+      head: "feat/sandbox-dock",
+      detached: false,
+      upstream: "origin/feat/sandbox-dock",
+      ahead: 2,
+      behind: 1,
+      files: [
+        { path: "src/server.ts", oldPath: null, index: null, worktree: "modified", isConflicted: false },
+        { path: "infra/main.tf", oldPath: null, index: null, worktree: "modified", isConflicted: false },
+        { path: "src/config.ts", oldPath: null, index: null, worktree: "added", isConflicted: false },
+      ],
+      revision: 1,
+    };
   }
 
-  async gitDiff(): Promise<GitDiffResponse> {
-    return { files: [], revision: 0 };
+  async gitDiff(_workspaceId: string, _sessionId: string, request?: { staged?: boolean }): Promise<GitDiffResponse> {
+    if (request?.staged) {
+      return { files: [], revision: 1 };
+    }
+    return {
+      files: [
+        {
+          path: "src/server.ts", oldPath: null, status: "modified", isBinary: false, isImage: false,
+          additions: 3, deletions: 1, truncated: false,
+          hunks: [
+            {
+              oldStart: 12, oldLines: 4, newStart: 12, newLines: 6,
+              header: "@@ -12,4 +12,6 @@ export function createServer() {",
+              lines: [
+                { type: "context", oldNo: 12, newNo: 12, text: "  const app = express();" },
+                { type: "del", oldNo: 13, newNo: null, text: "  app.use(cors());" },
+                { type: "add", oldNo: null, newNo: 13, text: "  app.use(cors({ origin: ALLOWED_ORIGINS }));" },
+                { type: "add", oldNo: null, newNo: 14, text: "  app.use(helmet());" },
+                { type: "add", oldNo: null, newNo: 15, text: "  app.use(rateLimit());" },
+                { type: "context", oldNo: 14, newNo: 16, text: "  return app;" },
+              ],
+            },
+          ],
+        },
+        {
+          path: "infra/main.tf", oldPath: null, status: "modified", isBinary: false, isImage: false,
+          additions: 2, deletions: 0, truncated: false,
+          hunks: [
+            {
+              oldStart: 4, oldLines: 2, newStart: 4, newLines: 4,
+              header: "@@ -4,2 +4,4 @@ resource \"aws_instance\" \"api\" {",
+              lines: [
+                { type: "context", oldNo: 4, newNo: 4, text: "  instance_type = \"t3.small\"" },
+                { type: "add", oldNo: null, newNo: 5, text: "  monitoring    = true" },
+                { type: "add", oldNo: null, newNo: 6, text: "  ebs_optimized = true" },
+                { type: "context", oldNo: 5, newNo: 7, text: "  tags = local.tags" },
+              ],
+            },
+          ],
+        },
+        {
+          path: "src/config.ts", oldPath: null, status: "added", isBinary: false, isImage: false,
+          additions: 3, deletions: 0, truncated: false,
+          hunks: [
+            {
+              oldStart: 0, oldLines: 0, newStart: 1, newLines: 3,
+              header: "@@ -0,0 +1,3 @@",
+              lines: [
+                { type: "add", oldNo: null, newNo: 1, text: "export const ALLOWED_ORIGINS = [" },
+                { type: "add", oldNo: null, newNo: 2, text: "  \"https://app.acme.dev\"," },
+                { type: "add", oldNo: null, newNo: 3, text: "];" },
+              ],
+            },
+          ],
+        },
+      ],
+      revision: 1,
+    };
   }
 
   async terminalExec(): Promise<TerminalExecResponse> {
@@ -544,7 +641,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async terminalPtyOpen(): Promise<PtyOpenResponse> {
-    return { ptyId: "00000000-0000-4000-8000-0000000000bb", streamVia: "sse-events", supportsInput: false };
+    return { ptyId: "00000000-0000-4000-8000-0000000000bb", streamVia: "sse-events", supportsInput: true };
   }
 
   async terminalPtyWrite(): Promise<void> {
@@ -669,6 +766,15 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   await sleep(900);
   bus.append("sandbox.operation.completed", { name: "prepare" }, turn);
 
+  // Seed the Terminal surface: an interactive PTY + a little command firehose so
+  // the xterm-backed terminal tab renders real output in the headless harness.
+  bus.append("terminal.pty.started", { ptyId: "00000000-0000-4000-8000-0000000000bb" }, turn);
+  bus.append(
+    "sandbox.command.output.delta",
+    { stream: "stdout", chunk: "$ kubectl get pods -n api-staging\r\nNAME                   READY   STATUS    RESTARTS   AGE\r\napi-7c9d4f8b6-2xk4q    1/1     Running   0          42s\r\napi-7c9d4f8b6-9mlz7    1/1     Running   0          42s\r\n$ [32mDeploy reachable at https://api-staging.acme.dev[0m\r\n" },
+    turn,
+  );
+
   await streamText(bus, turn, "Worker is up and cloning the repo. For the drift check I'm triggering the existing scheduled drift task against prod rather than spawning a second worker — it already has the read-only credentials.");
   await sleep(400);
 
@@ -772,6 +878,7 @@ const CLIENT_CONFIG: ClientConfig = {
   fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
   productAccessMode: "managed",
   auth: { mode: "none" },
+  structuredServices: { fileSystem: true, git: true, terminalEvents: true },
 };
 
 function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
