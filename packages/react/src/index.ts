@@ -109,6 +109,8 @@ export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { Markdown } from "./components/markdown";
+export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type { SessionStatusProps, StatusDotProps, SessionStatusMeta } from "./components/session-status";
 export { FleetTile, sessionDisplayTitle } from "./components/fleet-tile";
