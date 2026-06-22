@@ -84,6 +84,29 @@ export function SandboxTerminal({
     if (!el) return;
     let disposed = false;
 
+    // Wait for the container to have a real measured size before opening xterm.
+    // If `term.open()` runs while the panel is 0-wide (tab still mounting, dock
+    // mid-resize), xterm renders at its 80×24 fallback and the first frame's
+    // grid is rasterized into the canvas; a later fit reflows the text but the
+    // stale first paint lingers as a `]]]bbb` smear on the top row. Gating the
+    // open on a non-zero size removes that first wrong-width render entirely.
+    const waitForSize = (el: HTMLElement) =>
+      new Promise<void>((resolve) => {
+        if (el.clientWidth > 0 && el.clientHeight > 0) return resolve();
+        const ro = new ResizeObserver(() => {
+          if (el.clientWidth > 0 && el.clientHeight > 0) {
+            ro.disconnect();
+            resolve();
+          }
+        });
+        ro.observe(el);
+        // Safety: never hang if the observer somehow never fires.
+        setTimeout(() => {
+          ro.disconnect();
+          resolve();
+        }, 1000);
+      });
+
     void (async () => {
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
         import("@xterm/xterm"),
@@ -91,12 +114,18 @@ export function SandboxTerminal({
         import("@xterm/addon-web-links"),
       ]);
       if (disposed) return;
+      await waitForSize(el);
+      if (disposed) return;
       const term = new Terminal({
         convertEol: true,
         disableStdin: !interactive,
         cursorBlink: interactive,
         fontFamily: fontFamily ?? "var(--og-font-mono, var(--font-mono, monospace))",
         fontSize: fontSize ?? 13,
+        lineHeight: 1.25,
+        // A little breathing room from the panel edge so output isn't flush to
+        // the border (matches a real terminal app's inner gutter).
+        ...({ padding: 8 } as Record<string, unknown>),
         ...(theme ? { theme } : {}),
       }) as unknown as XtermLike;
       const fit = new FitAddon() as unknown as FitAddonLike;
@@ -106,14 +135,26 @@ export function SandboxTerminal({
         new WebLinksAddon((_e: MouseEvent, uri: string) => window.open(uri, "_blank", "noopener,noreferrer")) as unknown,
       );
       term.open(el);
-      try {
-        fit.fit();
-      } catch {
-        // ignore early fit before layout
-      }
       termRef.current = term;
       fitRef.current = fit;
-      setReady(true);
+      // Critical: the column count must be settled BEFORE any output is written,
+      // or seeded transcript lines reflow/garble against the default 80×24 grid
+      // (the trailing prompt's escape codes smear into `]]]bbb` artifacts). Fit
+      // once now, then again on the next frame after layout has measured the
+      // real container width, and only then unblock the write effect.
+      const settle = () => {
+        try {
+          fit.fit();
+        } catch {
+          // ignore fit before layout
+        }
+      };
+      settle();
+      requestAnimationFrame(() => {
+        if (disposed) return;
+        settle();
+        setReady(true);
+      });
     })();
 
     return () => {
@@ -213,7 +254,7 @@ export function SandboxTerminal({
           </span>
         </div>
       )}
-      <div className="relative min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1 bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))] px-2 py-1.5">
         {!ready && (placeholder ?? <TerminalPlaceholder />)}
         <div ref={containerRef} className="h-full w-full" data-opengeni-terminal />
       </div>

@@ -1,6 +1,7 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import {
   type ComponentType,
+  type CSSProperties,
   type ReactNode,
   lazy,
   Suspense,
@@ -95,8 +96,26 @@ export function PierreDiff({
     themeType: themeType ?? "dark",
   };
 
+  // Pierre renders inside a shadow DOM, so host CSS can't reach it — but it reads
+  // a set of `--diffs-*-override` custom properties through the shadow boundary.
+  // Pin the diff's own base background to the dock surface (Pierre's dark default
+  // is pure #000, which reads as a seam against our #0d0d0d panel) and quiet the
+  // hunk-separator slab so the collapsed-context row isn't a heavy gray bar.
+  const pierreVars = {
+    "--diffs-dark-bg": "var(--og-color-bg, #0d0d0d)",
+    "--diffs-light-bg": "var(--og-color-bg, #ffffff)",
+    "--diffs-bg-buffer-override": "var(--og-color-surface-1, #161616)",
+    "--diffs-bg-separator-override": "var(--og-color-surface-1, #161616)",
+    "--diffs-font-size": "12.5px",
+    "--diffs-line-height": "20px",
+  } as CSSProperties;
+
   return (
-    <div className={cn("min-w-0", className)} data-opengeni-pierre-diff>
+    <div
+      className={cn("min-w-0", className)}
+      data-opengeni-pierre-diff
+      style={pierreVars}
+    >
       <Suspense fallback={loading ?? <DiffSkeleton />}>
         {diff.map((file) => (
           <div key={file.path} className="mb-2">

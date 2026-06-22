@@ -27,6 +27,7 @@ import {
   type XtermTheme,
 } from "../src/index";
 import { MANAGER_SESSION_ID, MockOpenGeniClient } from "./mock";
+import { fakeRfbFactory } from "./fake-desktop";
 import "./styles.css";
 
 const ALL_STATUSES: SessionStatusValue[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
@@ -190,7 +191,7 @@ function useSandboxTabs(sessionId: string): WorkspaceTab[] {
       tabs.push({
         id: "desktop",
         label: "Desktop",
-        content: <DesktopViewer capability={capabilities?.DesktopStream ?? null} viewerCapReached={caps.viewerCapReached} className="h-full" />,
+        content: <DesktopViewer capability={capabilities?.DesktopStream ?? null} viewerCapReached={caps.viewerCapReached} rfbFactory={fakeRfbFactory} className="h-full" />,
       });
     }
     return tabs;
