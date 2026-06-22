@@ -15,6 +15,7 @@ import {
   parseNumstatZ,
   parseUnifiedPatch,
   stripExecBanner,
+  parseExecBannerSessionId,
   type ChannelASession,
 } from "../src/sandbox";
 import { createSandboxClientForBackend } from "../src/index";
@@ -345,5 +346,49 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const banner = "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\nactual output here";
     expect(stripExecBanner(banner)).toBe("actual output here");
     expect(stripExecBanner("no banner here")).toBe("no banner here");
+  });
+
+  test("parseExecBannerSessionId recovers a running PTY's session id from the banner", () => {
+    // A STILL-RUNNING process (an interactive shell) carries the session-id line.
+    const running = "Chunk ID: 6497fe\nWall time: 1.0360 seconds\nProcess running with session ID 7\nOutput:\nroot@modal:~# ";
+    expect(parseExecBannerSessionId(running)).toBe(7);
+    // A finished command carries `Process exited with code N` — no session id.
+    const exited = "Chunk ID: abc\nWall time: 0.05 seconds\nProcess exited with code 0\nOutput:\ndone";
+    expect(parseExecBannerSessionId(exited)).toBeNull();
+    // A session-id-looking line in the command OUTPUT (after the marker) must NOT
+    // be mistaken for the banner's id.
+    const spoof = "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\nProcess running with session ID 99";
+    expect(parseExecBannerSessionId(spoof)).toBeNull();
+    expect(parseExecBannerSessionId("no banner")).toBeNull();
+  });
+
+  test("ptyOpen surfaces an execSessionId on an execCommand-only backend (Modal shape)", async () => {
+    // Reproduce the Modal session surface: NO structural `exec()`, only
+    // `execCommand()` returning a banner string, plus supportsPty()+writeStdin.
+    // The fix: run() must recover the session id from the banner so ptyOpen
+    // reports a non-null execSessionId (else pty/write 409s -> read-only).
+    let nextId = 1;
+    const open = new Map<number, boolean>();
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      execCommand: async (args) => {
+        if (args.tty) {
+          const id = nextId++;
+          open.set(id, true);
+          return `Chunk ID: zzz\nWall time: 0.4 seconds\nProcess running with session ID ${id}\nOutput:\nroot@box:~# `;
+        }
+        return "Chunk ID: zzz\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\n";
+      },
+      writeStdin: async ({ sessionId, chars }) => {
+        expect(open.get(sessionId)).toBe(true);
+        return `Chunk ID: yyy\nWall time: 0.1 seconds\nProcess running with session ID ${sessionId}\nOutput:\n${(chars ?? "").trim()}\n`;
+      },
+    };
+    const svc = new SandboxChannelAService({ session });
+    const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "" }, "pty-1");
+    expect(opened.response.supportsInput).toBe(true);
+    expect(opened.execSessionId).toBe(1); // recovered from the banner (was null before the fix)
+    const out = await svc.ptyWrite({ ptyId: "pty-1", data: "echo hi\n" }, opened.execSessionId!, "echo hi\n");
+    expect(out).toContain("echo hi");
   });
 });

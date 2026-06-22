@@ -185,7 +185,22 @@ export class SandboxChannelAService {
     }
     if (this.session.execCommand) {
       const raw = await this.session.execCommand(withRunAs);
-      return { stdout: stripExecBanner(raw), stderr: "", exitCode: null, wallTimeSeconds: 0 };
+      // The SDK's execCommand returns the formatExecResponse BANNER string. When a
+      // command stays running (an interactive `bash` opened with tty:true), the
+      // banner carries a `Process running with session ID <N>` line — the numeric
+      // exec-session id writeStdin() needs to drive that PTY. The exec() fast-path
+      // above surfaces sessionId structurally; this fallback must recover it from
+      // the banner or the PTY appears non-interactive (execSessionId=null ->
+      // pty/write 409) even on backends (Modal) whose only exec surface is
+      // execCommand. We DON'T close over the banner for stdout (that is stripped).
+      const sessionId = parseExecBannerSessionId(raw);
+      return {
+        stdout: stripExecBanner(raw),
+        stderr: "",
+        exitCode: null,
+        ...(sessionId !== null ? { sessionId } : {}),
+        wallTimeSeconds: 0,
+      };
     }
     throw new ChannelAUnsupportedError("the box does not support command execution");
   }
@@ -631,6 +646,23 @@ export function stripExecBanner(raw: string): string {
   if (marker >= 0) return raw.slice(marker + "\nOutput:\n".length);
   if (raw.startsWith("Output:\n")) return raw.slice("Output:\n".length);
   return raw;
+}
+
+// Recover the numeric exec-session id the SDK embeds in a formatExecResponse
+// banner for a STILL-RUNNING process (`Process running with session ID <N>`).
+// A finished command emits `Process exited with code <N>` instead (no session
+// id) — that yields null. Only the banner region (before the `Output:` marker)
+// is scanned so a session-id-looking line in the command's own output can't
+// spoof it. This is what makes the interactive PTY work on backends whose only
+// exec surface is execCommand (Modal): without it ptyOpen reports execSessionId
+// = null and every pty/write 409s ("interactive terminal unsupported").
+export function parseExecBannerSessionId(raw: string): number | null {
+  const outputIdx = raw.indexOf("\nOutput:\n");
+  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
+  const match = banner.match(/Process running with session ID (\d+)/);
+  if (!match) return null;
+  const n = Number.parseInt(match[1]!, 10);
+  return Number.isFinite(n) ? n : null;
 }
 
 function sniffBinary(bytes: Buffer): boolean {

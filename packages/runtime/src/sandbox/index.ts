@@ -130,6 +130,7 @@ export {
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   stripExecBanner,
+  parseExecBannerSessionId,
   assertSafeRelPath,
   parsePorcelainV2,
   parseNumstatZ,
