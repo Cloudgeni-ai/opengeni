@@ -24,6 +24,12 @@ export type UseSandboxFilesOptions = ClientOverride & {
   rootPath?: string | undefined;
   /** Hold off the initial list (e.g. panel collapsed). Default true. */
   enabled?: boolean | undefined;
+  /** The lease liveness ("cold" | "warm" | "draining"). The structured FileSystem
+   *  capability is advertised even on a COLD box, so the mount-time list can race
+   *  the box: it lists before the box is warm, gets an empty/errored result, and
+   *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
+   *  the box first becomes warm, so the tree populates as soon as the box is up. */
+  liveness?: string | undefined;
 };
 
 export type UseSandboxFilesResult = {
@@ -194,6 +200,23 @@ export function useSandboxFiles(
       void refresh();
     }
   }, [enabled, events, refresh]);
+
+  // Re-list when the box first becomes warm. The FileSystem capability is
+  // advertised on a cold box too, so the mount-time `refresh()` can run before
+  // the box is up (empty/errored result); without an `fs.changed` event the tree
+  // would stay empty forever. A cold->warm transition re-lists once the box is
+  // actually serving — the real fix for the "No files" the deployed app showed.
+  const wasLiveRef = useRef(false);
+  const liveness = options.liveness;
+  useEffect(() => {
+    const live = liveness === "warm" || liveness === "draining";
+    if (enabled && live && !wasLiveRef.current) {
+      wasLiveRef.current = true;
+      void refresh();
+    } else if (!live) {
+      wasLiveRef.current = false;
+    }
+  }, [enabled, liveness, refresh]);
 
   return { tree, expand, readFile, refresh, loading, error };
 }

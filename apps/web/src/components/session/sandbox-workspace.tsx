@@ -60,7 +60,7 @@ export function useSandboxWorkspaceTabs({
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
 
-  const files = useSandboxFiles(sessionId, { events, enabled: fileSystemOn });
+  const files = useSandboxFiles(sessionId, { events, enabled: fileSystemOn, liveness: capabilities?.liveness });
   const git = useSandboxGit(sessionId, { events, enabled: gitOn });
   const stagedGit = useSandboxGit(sessionId, { events, enabled: gitOn, staged: true });
 

@@ -36,6 +36,10 @@ export type UseSandboxTerminalOptions = ClientOverride & {
    * false — a caller that only wants the read-only firehose stays projection-only.
    */
   interactive?: boolean | undefined;
+  /** Lease liveness ("cold" | "warm" | "draining"). The interactive PTY is only
+   *  opened once the box is warm — opening on a cold box (ptyCapable is advertised
+   *  cold too) races the box and leaves a dead read-only terminal. */
+  liveness?: string | undefined;
 };
 
 export type UseSandboxTerminalResult = {
