@@ -155,3 +155,25 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ----------------------------------------------------------------------------
+   xterm.js hardening (SandboxTerminal)
+
+   xterm 6's DOM renderer measures glyph widths by stamping a scratch element
+   (`.xterm-width-cache-measure-container`) full of repeated characters
+   (`]]]]bbbb yyyy…`). The shipped xterm.css hides the older
+   `.xterm-char-measure-element` but NOT this newer container, so on first paint
+   it leaks a row of garbage glyphs across the top of the terminal. Clip every
+   xterm measurement scratch element off-screen so the transcript is the only
+   thing visible.
+   -------------------------------------------------------------------------- */
+.xterm .xterm-width-cache-measure-container,
+.xterm-width-cache-measure-container,
+.xterm .xterm-char-measure-element {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
+}

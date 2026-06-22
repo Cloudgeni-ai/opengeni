@@ -18,17 +18,34 @@ const URL = "http://localhost:3100/";
 
 // Outer viewport is fixed; we vary the DOCK width by dragging the separator.
 const VIEWPORT = { width: 1440, height: 900 };
+// deviceScaleFactor 2 doubles the backing store; under memory pressure swiftshader
+// OOM-crashes the renderer. 1.5 keeps the screenshots crisp without the blow-up.
+const SCALE = 1.5;
 
-const LAUNCH = {
+const COMMON_ARGS = [
+  "--no-sandbox",
+  "--disable-dev-shm-usage",
+  // Trim the renderer's appetite so it survives a memory-starved host.
+  "--js-flags=--max-old-space-size=512",
+  "--renderer-process-limit=1",
+  "--disable-background-timer-throttling",
+];
+
+// The Files / Terminal / git-diff surfaces are pure DOM (xterm uses its DOM
+// renderer here, no WebGL). Software GL compositing under swiftshader leaves a
+// stale-texture smear on the top scanline of the xterm viewport — a capture
+// artifact, NOT a product defect (the live DOM text is clean). Disabling the GPU
+// for these surfaces composites on the CPU and screenshots them clean.
+const LAUNCH_DOM = {
   executablePath: EXE,
-  args: [
-    "--no-sandbox",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--use-gl=swiftshader",
-    "--in-process-gpu",
-    "--disable-software-rasterizer",
-  ],
+  args: [...COMMON_ARGS, "--disable-gpu", "--disable-software-rasterizer", "--disable-gpu-compositing"],
+};
+
+// The Desktop surface is a noVNC <canvas> that needs a working WebGL context, so
+// it gets swiftshader software GL.
+const LAUNCH_GPU = {
+  executablePath: EXE,
+  args: [...COMMON_ARGS, "--use-gl=angle", "--use-angle=swiftshader", "--in-process-gpu", "--disable-features=Vulkan"],
 };
 
 // Dock target widths (px) at the three steps. "max" uses the maximize control.
@@ -40,7 +57,7 @@ function log(...a) {
 }
 
 async function newPage(browser) {
-  const ctx = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 2 });
+  const ctx = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: SCALE });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => log("pageerror:", e.message));
   await page.goto(URL, { waitUntil: "networkidle" });
@@ -126,25 +143,35 @@ async function captureSurface(browser, tab, fileBase, { skipMax = false } = {}) 
   }
 }
 
-async function main() {
-  const browser = await chromium.launch(LAUNCH);
-  try {
-    // Files surface (review-first git tree)
-    await captureSurface(browser, "Files", "files");
-    // Terminal surface (xterm)
-    await captureSurface(browser, "Terminal", "terminal");
-    // Git diff: same Files tab, but ensure a changed file is selected + diff shows.
-    // (The Files surface IS the review-first diff; gitdiff-* = Files scrolled to diff.)
-    await captureSurface(browser, "Files", "gitdiff");
-    // Desktop surface — noVNC canvas can crash the headless renderer; isolate each.
+// One surface = one fresh browser. A renderer crash on a memory-starved host
+// then only loses that surface; the next launch starts clean. We also retry a
+// crashed surface once.
+async function captureIsolated(tab, fileBase, opts = {}) {
+  const launch = opts.gpu ? LAUNCH_GPU : LAUNCH_DOM;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const browser = await chromium.launch(launch);
     try {
-      await captureSurface(browser, "Desktop", "desktop");
+      await captureSurface(browser, tab, fileBase, opts);
+      await browser.close().catch(() => {});
+      return;
     } catch (e) {
-      log("desktop capture error (continuing):", e.message);
+      await browser.close().catch(() => {});
+      log(`${fileBase} capture error (attempt ${attempt}):`, e.message);
+      if (attempt === 2) log(`${fileBase}: giving up after retry`);
     }
-  } finally {
-    await browser.close().catch(() => {});
   }
+}
+
+async function main() {
+  // Files surface (review-first git tree)
+  await captureIsolated("Files", "files");
+  // Terminal surface (xterm)
+  await captureIsolated("Terminal", "terminal");
+  // Git diff: the Files surface IS the review-first diff; gitdiff-* = Files with a
+  // changed file selected + diff shown.
+  await captureIsolated("Files", "gitdiff");
+  // Desktop surface — noVNC canvas needs WebGL; isolate it with software GL.
+  await captureIsolated("Desktop", "desktop", { gpu: true });
   log("done");
 }
 

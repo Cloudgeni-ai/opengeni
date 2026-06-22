@@ -13,11 +13,13 @@ import type { DesktopRfbFactory, DesktopRfbLike } from "@opengeni/sdk";
 type Listener = (e?: unknown) => void;
 
 /** Draw a small fake Linux desktop: wallpaper, a terminal window, a cursor. */
-function paintDesktop(canvas: HTMLCanvasElement) {
+function paintDesktop(canvas: HTMLCanvasElement, dpr = 1) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const W = canvas.width;
-  const H = canvas.height;
+  // Work in CSS pixels; the bitmap is dpr-scaled so text stays crisp.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const W = canvas.width / dpr;
+  const H = canvas.height / dpr;
 
   // Wallpaper — a soft vertical gradient.
   const grad = ctx.createLinearGradient(0, 0, 0, H);
@@ -32,15 +34,18 @@ function paintDesktop(canvas: HTMLCanvasElement) {
   ctx.fillStyle = "#9aa4b2";
   ctx.font = "13px system-ui, sans-serif";
   ctx.fillText("Activities", 16, 19);
-  ctx.textAlign = "right";
-  ctx.fillText("agent@sandbox    14:02", W - 16, 19);
+  // Centre the session clock in the top bar so it never collides with the real
+  // DesktopViewer toolbar (the "Take control" pill lives top-right).
+  ctx.textAlign = "center";
+  ctx.fillText("agent@sandbox · 14:02", W / 2, 19);
   ctx.textAlign = "left";
 
-  // A terminal window, centered-ish.
-  const wx = Math.round(W * 0.12);
+  // A terminal window, centered-ish. Clamp to a sensible minimum so a narrow
+  // dock doesn't squash the window title into the traffic-light dots.
+  const ww = Math.round(Math.max(Math.min(W - 48, 320), W * 0.66));
+  const wh = Math.round(Math.max(Math.min(H - 64, 240), H * 0.6));
+  const wx = Math.round((W - ww) / 2);
   const wy = Math.round(H * 0.16);
-  const ww = Math.round(W * 0.66);
-  const wh = Math.round(H * 0.6);
   // window shadow
   ctx.fillStyle = "rgba(0,0,0,0.35)";
   ctx.fillRect(wx + 6, wy + 8, ww, wh);
@@ -106,18 +111,35 @@ class FakeRfb implements DesktopRfbLike {
   private listeners = new Map<string, Set<Listener>>();
   private canvas: HTMLCanvasElement;
   private raf = 0;
+  private ro: ResizeObserver | null = null;
 
   constructor(target: HTMLElement) {
     const canvas = document.createElement("canvas");
-    canvas.width = 1024;
-    canvas.height = 768;
     canvas.style.width = "100%";
     canvas.style.height = "100%";
     canvas.style.display = "block";
-    canvas.style.objectFit = "contain";
     target.appendChild(canvas);
     this.canvas = canvas;
-    paintDesktop(canvas);
+
+    // A real noVNC session with `resizeSession` fills the viewport: the remote
+    // framebuffer is resized to the client. Mimic that — paint the fake desktop
+    // at the mount's actual pixel size so it fills edge-to-edge at every dock
+    // width instead of letterboxing a fixed 4:3 bitmap into black side bars.
+    const render = () => {
+      const w = Math.max(1, Math.round(target.clientWidth));
+      const h = Math.max(1, Math.round(target.clientHeight));
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+      }
+      paintDesktop(canvas, dpr);
+    };
+    render();
+    if (typeof ResizeObserver !== "undefined") {
+      this.ro = new ResizeObserver(() => render());
+      this.ro.observe(target);
+    }
     // Fire `connect` on the next frame so the hook's listener is already wired.
     this.raf = requestAnimationFrame(() => this.emit("connect"));
   }
@@ -135,6 +157,8 @@ class FakeRfb implements DesktopRfbLike {
   }
   disconnect(): void {
     cancelAnimationFrame(this.raf);
+    this.ro?.disconnect();
+    this.ro = null;
     this.canvas.remove();
   }
 }

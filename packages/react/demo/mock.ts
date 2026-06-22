@@ -777,7 +777,7 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
 
   bus.append(
     "sandbox.command.output.delta",
-    { stream: "stdout", chunk: "operator@api-staging:~/api$ kubectl rollout status deploy/api -n api-staging\r\ndeployment \"api\" successfully rolled out\r\noperator@api-staging:~/api$ [32mDeploy reachable at https://api-staging.acme.dev[0m\r\n" },
+    { stream: "stdout", chunk: `kubectl rollout status deploy/api -n api-staging\r\ndeployment "api" successfully rolled out\r\n${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${GREEN}Deploy reachable at https://api-staging.acme.dev${RESET}\r\n` },
     turn,
   );
 
