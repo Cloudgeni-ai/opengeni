@@ -677,6 +677,38 @@ export const CreateApiKeyResponse = z.object({
 });
 export type CreateApiKeyResponse = z.infer<typeof CreateApiKeyResponse>;
 
+// A person (or API key) with access to a workspace: one workspace_memberships
+// row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
+// surface lists the `user:` subjects (api_key subjects belong to API keys).
+export const WorkspaceMember = z.object({
+  subjectId: z.string().min(1),
+  subjectLabel: z.string().nullable(),
+  role: z.string(),
+  permissions: z.array(Permission),
+  createdAt: z.string(),
+});
+export type WorkspaceMember = z.infer<typeof WorkspaceMember>;
+
+export const ListWorkspaceMembersResponse = z.object({
+  members: z.array(WorkspaceMember),
+});
+export type ListWorkspaceMembersResponse = z.infer<typeof ListWorkspaceMembersResponse>;
+
+export const AddWorkspaceMemberRequest = z.object({
+  // Resolved against the managed (Better Auth) users; email invites for
+  // not-yet-registered users are deferred, so an unknown email returns 404.
+  email: z.string().email(),
+  role: z.string().min(1).optional(),
+  permissions: z.array(Permission),
+});
+export type AddWorkspaceMemberRequest = z.infer<typeof AddWorkspaceMemberRequest>;
+
+export const UpdateWorkspaceMemberRequest = z.object({
+  role: z.string().min(1).optional(),
+  permissions: z.array(Permission),
+});
+export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
+
 export const UsageEventType = z.enum([
   "agent_run.created",
   "agent_run.completed",
@@ -2503,10 +2535,30 @@ export const ViewerHeartbeatResponse = z.object({
 });
 export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
 
+/**
+ * A single host-exposed model + the provider that serves it, as surfaced to
+ * clients (SDK + React composer) by GET /v1/config/client. The wire `api`
+ * ("responses" | "chat") lets a client reason about provider capabilities; the
+ * provider id/label drive the picker's grouping. This mirrors the runtime's
+ * ConfiguredModel (packages/config) projected to the client-safe fields.
+ */
+export const ClientModel = z.object({
+  id: z.string(),
+  label: z.string(),
+  provider: z.string(),        // provider id
+  providerLabel: z.string(),
+  api: z.enum(["responses", "chat"]),
+  contextWindowTokens: z.number().int().positive().optional(),
+});
+export type ClientModel = z.infer<typeof ClientModel>;
+
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),
   defaultModel: z.string(),
   allowedModels: z.array(z.string()).min(1),
+  // Richer model list (provider-grouped) for the picker. Defaults to [] for
+  // back-compat: callers that only read allowedModels are unaffected.
+  models: z.array(ClientModel).default([]),
   defaultReasoningEffort: ReasoningEffort,
   allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
   mcpServers: z.array(z.object({

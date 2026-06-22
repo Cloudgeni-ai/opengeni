@@ -4,6 +4,7 @@ import {
   CapabilityCatalogResponse,
   CapabilityPack,
   ClientConfig,
+  ClientModel,
   ClientSessionEvent,
   CreateCapabilityCatalogItemRequest,
   CreateSocialConnectionRequest,
@@ -95,6 +96,52 @@ describe("contracts", () => {
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
+    // models defaults to [] for back-compat (callers reading only allowedModels
+    // are unaffected when the host hasn't populated the richer list).
+    expect(payload.models).toEqual([]);
+  });
+
+  test("round-trips the provider-grouped models list on client config", () => {
+    const models = [
+      {
+        id: "gpt-5.5",
+        label: "gpt-5.5",
+        provider: "openai",
+        providerLabel: "OpenAI",
+        api: "responses" as const,
+        contextWindowTokens: 1_050_000,
+      },
+      {
+        id: "accounts/fireworks/models/glm-5p2",
+        label: "GLM 5.2",
+        provider: "fireworks",
+        providerLabel: "Fireworks AI",
+        api: "chat" as const,
+        contextWindowTokens: 1_048_576,
+      },
+    ];
+    const payload = ClientConfig.parse({
+      deploymentRevision: "test-sha",
+      defaultModel: "gpt-5.5",
+      allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
+      models,
+      defaultReasoningEffort: "high",
+      allowedReasoningEfforts: ["low", "medium", "high"],
+      fileUploads: { enabled: true, maxSizeBytes: 5_000_000_000 },
+      productAccessMode: "managed",
+    });
+    expect(payload.models).toEqual(models);
+    expect(payload.models[1]?.api).toBe("chat");
+  });
+
+  test("rejects a client model with an unknown wire api", () => {
+    expect(() => ClientModel.parse({
+      id: "m",
+      label: "m",
+      provider: "p",
+      providerLabel: "P",
+      api: "grpc",
+    })).toThrow();
   });
 
   test("accepts checkout requests that use the caller default account", () => {

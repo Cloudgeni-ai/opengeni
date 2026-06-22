@@ -106,6 +106,46 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
 
 export const sessionMcpPermissionGroups = buildSessionMcpPermissionGroups();
 
+/**
+ * Groups offered when editing a workspace member's permissions. Workspace
+ * scopes only: the account-level scopes (billing, account admin, member
+ * management, workspace creation) are granted on the organization, not on a
+ * per-workspace membership row, so they are excluded here. `members:manage`
+ * and `workspace:admin` stay (they are workspace-scoped membership powers).
+ */
+export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
+  const accountOnly = new Set<string>(["account:read", "account:admin", "billing:read", "billing:manage", "workspace:create"]);
+  return buildApiKeyPermissionGroups()
+    .map((group) => ({
+      label: group.label,
+      permissions: group.permissions.filter((permission) => !accountOnly.has(permission)),
+    }))
+    .filter((group) => group.permissions.length > 0);
+}
+
+export const workspaceMemberPermissionGroups = buildWorkspaceMemberPermissionGroups();
+
+/**
+ * The default permission set for a newly-added workspace member: full
+ * collaborator access minus the admin/management powers (which an admin grants
+ * deliberately). Mirrors the API-key default set plus goals management.
+ */
+export const defaultWorkspaceMemberPermissions = new Set<string>([
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "documents:manage",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "github:use",
+  "environments:use",
+  "goals:manage",
+]);
+
 export function hasWorkspacePermission(context: AccessContext | null, workspaceId: string, permission: string): boolean {
   const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
   return Boolean(grant && (grant.permissions.includes(permission) || grant.permissions.includes("workspace:admin")));

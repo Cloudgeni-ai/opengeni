@@ -1,9 +1,10 @@
-// The sessions index: composer-first session creation with the full create
-// surface (model, effort, sandbox backend, environment, repositories, tools,
-// goal, first-party MCP permissions) plus the workspace session list.
-import { SessionStatus as SessionStatusBadge, useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
+// The sessions index: the centered "Start a session" composer with the full
+// create surface (model, effort, sandbox backend, environment, repositories,
+// tools, goal, first-party MCP permissions). The session list itself now lives
+// in the left rail, not on this page.
+import { useEnvironments, type ComposerState } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
-import { BoxIcon, ChevronDownIcon, FlagIcon, RefreshCwIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import { BoxIcon, ChevronDownIcon, FlagIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
@@ -13,12 +14,10 @@ import {
   ModelPicker,
 } from "@/components/pickers";
 import { RepositoryContextPicker } from "@/components/repository-picker";
-import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAppContext } from "@/context";
-import { displayModel } from "@/lib/format";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import {
   emptyAdvancedSessionDraft,
@@ -137,9 +136,6 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
             </button>
           ))}
         </div>
-        <WorkspaceSessions
-          onSelect={(id) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: id } })}
-        />
       </div>
     </div>
   );
@@ -334,44 +330,3 @@ function AdvancedSessionOptions(props: {
   );
 }
 
-function WorkspaceSessions({ onSelect }: { onSelect: (id: string) => void }) {
-  // Workspace + credentials come from <OpenGeniProvider>; a new access key
-  // produces a new client, which re-runs the hook.
-  const { sessions, loading, error, refresh } = useWorkspaceSessions({ limit: 50 });
-
-  return (
-    <section className="mt-12">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">Workspace sessions</h2>
-        {error ? (
-          <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()}>
-            <RefreshCwIcon className="size-4" />
-            Retry
-          </Button>
-        ) : null}
-      </div>
-      <div className="mt-3 grid gap-2">
-        {loading ? (
-          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">Loading sessions...</div>
-        ) : error ? (
-          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">Session history is unavailable.</div>
-        ) : sessions.length === 0 ? (
-          <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 text-sm text-[color:var(--color-fg-muted)]">No sessions in this workspace yet.</div>
-        ) : sessions.map((item) => (
-          <button key={item.id} type="button" onClick={() => onSelect(item.id)} className="min-w-0 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-left text-sm hover:bg-[color:var(--color-surface-2)]">
-            <div className="flex min-w-0 items-center justify-between gap-3">
-              <div className="min-w-0 truncate font-medium">{item.initialMessage}</div>
-              <SessionStatusBadge status={item.status} />
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[color:var(--color-fg-subtle)]">
-              <span>{new Date(item.createdAt).toLocaleString()}</span>
-              <span>{displayModel(item.model)}</span>
-              <span>{item.sandboxBackend}</span>
-              {item.environmentId ? <span>env attached</span> : null}
-            </div>
-          </button>
-        ))}
-      </div>
-    </section>
-  );
-}

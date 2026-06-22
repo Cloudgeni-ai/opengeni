@@ -7,6 +7,8 @@ import type { OpenGeniClient } from "@opengeni/sdk";
  */
 export type SessionClientLike = Pick<
   OpenGeniClient,
+  // Deployment config (host-exposed models, auth, upload limits)
+  | "getClientConfig"
   // Sessions, events, composer
   | "getSession"
   | "listSessions"

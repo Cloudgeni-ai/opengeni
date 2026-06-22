@@ -1,12 +1,25 @@
-import type { Settings } from "@opengeni/config";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, resolveContextCompactionMode, sandboxLifecycleHookIds } from "@opengeni/config";
+import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
   connectMcpServers,
+  OpenAIProvider,
+  setDefaultModelProvider,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
+  // Provider-bound Model instances. Both are re-exported from
+  // @openai/agents-openai via `export * from '@openai/agents-openai'` in
+  // @openai/agents' index (0.11.6), so the multi-provider routing imports them
+  // from the same entrypoint as the rest of the SDK rather than reaching into
+  // the openai subpackage. OpenAIChatCompletionsModel speaks /v1/chat/completions
+  // (the registry "chat" wire API, e.g. Fireworks); OpenAIResponsesModel speaks
+  // /v1/responses (the built-in OpenAI/Azure "responses" wire API). Both bind a
+  // model id to a specific OpenAI client, which is what routes a turn to its
+  // provider without touching the global default client.
+  OpenAIChatCompletionsModel,
+  OpenAIResponsesModel,
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
   run,
@@ -22,6 +35,7 @@ import {
   type CallModelInputFilter,
   type MCPServer,
   type Model,
+  type ModelProvider,
   type RunStreamEvent,
 } from "@openai/agents";
 import {
@@ -92,6 +106,13 @@ export * from "./sandbox";
 
 export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
+
+// The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
+// Re-exported so callers (and routing tests) can assert which wire API a
+// resolved turn was bound to — OpenAIChatCompletionsModel for registry "chat"
+// providers (Fireworks), OpenAIResponsesModel for the built-in "responses" path
+// — without reaching into @openai/agents directly.
+export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
 
 export {
   planCompaction,
@@ -194,6 +215,11 @@ export type SandboxFileDownload = {
 
 export type OpenGeniRuntime = {
   configure: (settings: Settings) => void;
+  // Multi-provider per-turn model routing. Returns the resolved provider, its
+  // (cached) client, the provider-bound Model instance, and the configured-model
+  // shape; null when the turn's model is not in the registry, so the caller
+  // falls back to the legacy global-client path (settings.openaiModel).
+  resolveTurnModel: (settings: Settings, modelId: string) => ReturnType<typeof resolveTurnModel>;
   buildAgent: (settings: Settings, resources: ResourceRef[], options?: BuildAgentOptions) => Agent<any, any>;
   prepareTools: (settings: Settings, tools: ToolRef[], options?: PrepareToolsOptions) => Promise<PreparedAgentTools>;
   prepareInput: (agent: Agent<any, any>, input: AgentSegmentInput, options?: PrepareInputOptions) => Promise<PreparedAgentInput>;
@@ -209,6 +235,11 @@ export type ProductionRuntimeOverrides = {
 export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrides = {}): OpenGeniRuntime {
   return {
     configure: configureOpenAI,
+    // A test/override model shadows the registry routing entirely (the scripted
+    // model used in worker tests is not in any provider's allow-list), so when
+    // one is supplied resolveTurnModel reports "no resolution" and the caller
+    // keeps the legacy global-client path with the override model.
+    resolveTurnModel: (settings, modelId) => (overrides.model ? null : resolveTurnModel(settings, modelId)),
     buildAgent: (settings, resources, options) => buildOpenGeniAgent(settings, resources, {
       ...options,
       ...(overrides.model ? { model: overrides.model } : {}),
@@ -251,10 +282,124 @@ export function buildOpenAIClientFromSettings(settings: Settings): OpenAI {
   });
 }
 
+/**
+ * One OpenAI client per resolved provider id, built lazily and cached for the
+ * process. The built-in openai/azure provider reuses
+ * buildOpenAIClientFromSettings verbatim (so its Azure AD/api-version/base-URL
+ * construction stays byte-for-byte identical to configureOpenAI); a registry
+ * provider gets a plain client pointed at its base URL with its resolved key,
+ * the shared maxRetries budget, and its declared defaultQuery/defaultHeaders.
+ * Caching by provider.id keeps concurrent multi-provider turns sharing one
+ * connection pool per provider rather than reconstructing a client per turn.
+ */
+const providerClientCache = new Map<string, OpenAI>();
+
+export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  const cached = providerClientCache.get(provider.id);
+  if (cached) {
+    return cached;
+  }
+  const client = provider.builtin
+    ? buildOpenAIClientFromSettings(settings)
+    // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
+    // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
+    // is passed straight through here rather than re-resolved.
+    : new OpenAI({
+      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+      ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+      maxRetries: settings.openaiMaxRetries,
+      ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
+      ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+    });
+  providerClientCache.set(provider.id, client);
+  return client;
+}
+
+/**
+ * Bind a model id to a provider's OpenAI client as an @openai/agents `Model`
+ * instance, choosing the wire API by the provider's declared `api`: the "chat"
+ * providers (e.g. Fireworks) get an OpenAIChatCompletionsModel that speaks
+ * /v1/chat/completions, the "responses" providers (built-in OpenAI/Azure) get
+ * an OpenAIResponsesModel that speaks /v1/responses. Passing this Model into
+ * the agent is what routes a turn to its provider without mutating the global
+ * default client.
+ */
+export function buildModelInstance(provider: ResolvedModelProvider, client: OpenAI, modelId: string): Model {
+  return provider.api === "chat"
+    ? new OpenAIChatCompletionsModel(client, modelId)
+    : new OpenAIResponsesModel(client, modelId);
+}
+
+/**
+ * Resolved per-turn model routing: the provider that serves `modelId`, its
+ * (cached) OpenAI client, the provider-bound `Model` instance, and the
+ * configured-model shape (label/api/contextWindow/reasoningEffort/hostedWebSearch).
+ * Returns null when the model is not in the registry — the caller then falls
+ * back to the legacy global-client path (settings.openaiModel + the default
+ * client configured by configureOpenAI), preserved byte-for-byte.
+ */
+export function resolveTurnModel(
+  settings: Settings,
+  modelId: string,
+): { provider: ResolvedModelProvider; client: OpenAI; model: Model; configured: ConfiguredModel } | null {
+  const resolved = resolveModelProvider(settings, modelId);
+  if (!resolved) {
+    return null;
+  }
+  const client = buildProviderClient(resolved.provider, settings);
+  return {
+    provider: resolved.provider,
+    client,
+    model: buildModelInstance(resolved.provider, client, resolved.model.id),
+    configured: resolved.model,
+  };
+}
+
+/**
+ * Routes a model *name* to its provider-bound Model (Fireworks chat model for a
+ * registry model id, the built-in OpenAI/Azure responses model otherwise) via
+ * `resolveTurnModel`. This is the load-bearing piece for the sandbox path:
+ * passing a Model *instance* as `agent.model` only survives the in-process
+ * (`sandboxBackend: "none"`) run — on the SandboxAgent/Modal path the instance
+ * is dropped and the model *name* is re-resolved through the run's
+ * `modelProvider` (or the global default). Without this router that re-resolution
+ * hits the default client (e.g. Azure) and a registry model 404s
+ * ("deployment does not exist"); with it the name resolves back to the right
+ * provider. Installed both as the run-scoped `RunConfig.modelProvider` (see
+ * runAgentStream) and as the process default (see configureOpenAI), so whichever
+ * path the SDK takes, names route correctly. Falls back to the SDK default
+ * provider for a model that is in no provider's allow-list.
+ */
+export class MultiProviderModelProvider implements ModelProvider {
+  private fallback: OpenAIProvider | undefined;
+
+  constructor(private readonly settings: Settings) {}
+
+  async getModel(modelName?: string): Promise<Model> {
+    if (modelName) {
+      const resolved = resolveTurnModel(this.settings, modelName);
+      if (resolved) {
+        return resolved.model;
+      }
+    }
+    // A model in no provider's allow-list falls back to the SDK's default
+    // OpenAIProvider, which uses the global default client/key configureOpenAI
+    // set up (the built-in OpenAI/Azure provider).
+    this.fallback ??= new OpenAIProvider();
+    return this.fallback.getModel(modelName);
+  }
+}
+
 export function configureOpenAI(settings: Settings): void {
   setOpenAIResponsesTransport(settings.openaiResponsesTransport);
+  // Install the registry-aware router as the process default model provider so a
+  // model name re-resolved on the SandboxAgent/Modal path (where a Model instance
+  // does not survive) routes to its provider instead of the built-in client.
+  // Built before the default-client calls below so it captures the same settings.
+  const router = new MultiProviderModelProvider(settings);
   if (settings.openaiProvider === "azure") {
     setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
+    setDefaultModelProvider(router);
     return;
   }
   if (settings.openaiApiKey) {
@@ -263,28 +408,56 @@ export function configureOpenAI(settings: Settings): void {
   if (settings.openaiBaseUrl) {
     setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
   }
+  setDefaultModelProvider(router);
 }
 
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
- * call against the configured provider. `system`/`user` come from
+ * call against the resolved provider. `system`/`user` come from
  * buildCompactionMessages. Returns the trimmed summary text, or null on any
  * failure (the caller treats a failed summarize as "skip compaction this turn"
  * — never fatal). The call deliberately does NOT request reasoning encryption,
  * tools, or server-side compaction; it is a self-contained summarize.
+ *
+ * Provider-aware: the summary always runs on the SAME provider that serves the
+ * turn (registry providers can't summarize through OpenAI/Azure, and vice
+ * versa). `api: "chat"` providers (Fireworks) speak /v1/chat/completions, where
+ * the summary is choices[0].message.content; `api: "responses"` (the default,
+ * built-in OpenAI/Azure) speaks /v1/responses as before. When no client/api is
+ * supplied it falls back to the built-in OpenAI/Azure Responses path so the
+ * legacy global-client callers are byte-for-byte unchanged. store:false is set
+ * only on the OpenAI-platform Responses path (Azure rejects it; chat ignores it).
  */
 export async function summarizeForCompaction(
   settings: Settings,
   messages: { system: string; user: string },
-  options: { client?: OpenAI; maxOutputTokens?: number; model?: string } = {},
+  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
+  const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
+  const maxTokens = options.maxOutputTokens ?? settings.contextSummaryMaxTokens;
   try {
+    if (api === "chat") {
+      const completion = await client.chat.completions.create({
+        model,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system", content: messages.system },
+          { role: "user", content: messages.user },
+        ],
+      } as any);
+      const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
+      const trimmed = typeof text === "string" ? text.trim() : "";
+      return trimmed.length > 0 ? trimmed : null;
+    }
     const response = await client.responses.create({
       model,
+      // store:false is the OpenAI-platform-only storeless precondition; Azure
+      // rejects it. The summarizer's resolved client is OpenAI/Azure on the
+      // built-in path (api "responses"), so gate it on the built-in provider.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
-      max_output_tokens: options.maxOutputTokens ?? settings.contextSummaryMaxTokens,
+      max_output_tokens: maxTokens,
       input: [
         { role: "system", content: messages.system },
         { role: "user", content: messages.user },
@@ -299,7 +472,14 @@ export async function summarizeForCompaction(
   }
 }
 
-/** Pull the assistant text out of a Responses API result, shape-tolerant. */
+/**
+ * Pull the assistant text out of a Responses API result, shape-tolerant. Only
+ * `role === "assistant"` message items contribute: a provider whose Responses
+ * endpoint echoes the user input back as an output `message` item (Fireworks'
+ * beta /v1/responses does exactly this — see docs/model-providers.md) would
+ * otherwise corrupt the summary with the prompt it was given. The OpenAI/Azure
+ * Responses API only emits assistant messages, so this guard is a no-op there.
+ */
 export function extractResponseOutputText(response: unknown): string {
   if (!response || typeof response !== "object") {
     return "";
@@ -320,6 +500,10 @@ export function extractResponseOutputText(response: unknown): string {
     if ((item as { type?: unknown }).type !== "message") {
       continue;
     }
+    // Read assistant messages only; skip any input-echo (role "user"/"system").
+    if ((item as { role?: unknown }).role !== "assistant") {
+      continue;
+    }
     const content = (item as { content?: unknown }).content;
     if (!Array.isArray(content)) {
       continue;
@@ -336,6 +520,30 @@ export function extractResponseOutputText(response: unknown): string {
 export type BuildAgentOptions = {
   model?: Model;
   reasoningEffort?: ReasoningEffort;
+  // Per-turn gating overrides for the multi-provider path. Each defaults to
+  // today's settings-derived behaviour when omitted, so the legacy
+  // global-client callers (no model resolution) are byte-for-byte unchanged.
+  //
+  // - compactionMode: the resolved context-compaction path. Drives whether the
+  //   sandbox `compaction()` capability is attached AND whether `store: false`
+  //   is set (the OpenAI-platform-only storeless precondition). Registry
+  //   providers resolve to "client", so neither is applied to them.
+  //   Default: resolveContextCompactionMode(settings).
+  // - hostedWebSearch: attach the hosted web_search tool. Only the providers
+  //   that actually execute it (built-in OpenAI/Azure; a registry model that
+  //   opts in) should get it — Fireworks accepts the param but no-ops it, which
+  //   would hand the agent a dead tool. Default: settings.webSearchEnabled.
+  // - encryptedReasoning: round-trip reasoning.encrypted_content via
+  //   providerData.include. Only the Responses API carries it; the chat wire
+  //   API has no such field, so registry "chat" providers turn it off.
+  //   Default: settings.openaiReasoningEncryptedContent.
+  // - contextWindowTokens: the model's effective window, used to derive the
+  //   server-path compaction threshold. A registry model can declare its own
+  //   (e.g. GLM 5.2's 1,048,576). Default: settings.contextWindowTokens.
+  compactionMode?: ContextCompactionMode;
+  hostedWebSearch?: boolean;
+  encryptedReasoning?: boolean;
+  contextWindowTokens?: number;
   sandboxEnvironment?: Record<string, string>;
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
@@ -434,14 +642,25 @@ const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
+  // Resolved per-turn gating. Each override defaults to today's settings-derived
+  // behaviour, so the legacy global-client callers (no resolved model) build the
+  // exact same agent as before; the multi-provider worker path passes the
+  // resolved provider's mode/api/window/web-search instead.
+  const compactionMode = options.compactionMode ?? resolveContextCompactionMode(settings);
+  const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
+  const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
+  const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
   // Native hosted tools attached to every constructed agent. webSearchEnabled
-  // is ON by default and provider-unconditional (the live Azure Responses path
-  // executes the hosted web_search tool). The SDK merges this explicit `tools`
-  // array with the MCP-server tools (Agent.getAllTools = [...mcpTools, ...tools])
-  // and, on the SandboxAgent path, with the sandbox capability tools
-  // (prepareSandboxAgent: tools = [...agent.tools, ...capability.tools()]), so
-  // hosted web_search coexists with both rather than overriding them.
-  const hostedTools = settings.webSearchEnabled ? [webSearchTool()] : [];
+  // is ON by default and provider-unconditional on the built-in path (the live
+  // Azure Responses path executes the hosted web_search tool); a registry model
+  // only gets it when it opts in (resolved via options.hostedWebSearch), since
+  // a provider that no-ops the param would hand the agent a dead tool. The SDK
+  // merges this explicit `tools` array with the MCP-server tools
+  // (Agent.getAllTools = [...mcpTools, ...tools]) and, on the SandboxAgent path,
+  // with the sandbox capability tools (prepareSandboxAgent: tools =
+  // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
+  // both rather than overriding them.
+  const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -464,15 +683,19 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       // the request rather than being anchored to a stored response. OpenGeni
       // already runs storeless (provider item ids stripped, encrypted reasoning
       // round-tripped), so this is consistent with the existing design and
-      // only set where the server compaction capability is attached.
-      ...(resolveContextCompactionMode(settings) === "server" ? { store: false } : {}),
+      // only set where the server compaction capability is attached. Gated on
+      // the RESOLVED compaction mode (registry providers resolve to "client",
+      // so they never carry store:false).
+      ...(compactionMode === "server" ? { store: false } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
       // stripProviderItemIds). providerData.include replaces any
       // tool-derived include entries; OpenGeni's tools are MCP/sandbox
-      // function tools, which contribute none.
-      ...(settings.openaiReasoningEncryptedContent
+      // function tools, which contribute none. Gated on the resolved
+      // encryptedReasoning flag: the chat wire API has no encrypted_content
+      // field, so registry "chat" providers turn it off.
+      ...(encryptedReasoning
         ? { providerData: { include: ["reasoning.encrypted_content"] } }
         : {}),
     },
@@ -493,7 +716,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ...baseConfig,
     defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
     ...(runAs ? { runAs } : {}),
-    capabilities: buildAgentCapabilities(settings, options.packSkills ?? []),
+    capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], { compactionMode, contextWindowTokens }),
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
   agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources));
@@ -516,12 +739,24 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
  * is absent from the SDK's hardcoded context-window map and would otherwise hit
  * the wrong 240k fallback — gets the correct threshold. The SDK has no
  * window-registration API, so an explicit threshold is the only way to fix it.
+ *
+ * The resolved compaction mode and the effective context window are now passed
+ * IN (the multi-provider caller resolves them per provider/model) rather than
+ * re-derived from settings here. Both default to the settings-derived value so
+ * callers that don't route per-model (and the existing tests) keep today's exact
+ * behaviour; the effective window only changes the server-path threshold when a
+ * resolved model declares its own contextWindowTokens.
  */
-export function buildAgentCapabilities(settings: Settings, packSkills: PackSkill[]): ReturnType<typeof Capabilities.default> {
-  const mode = resolveContextCompactionMode(settings);
+export function buildAgentCapabilities(
+  settings: Settings,
+  packSkills: PackSkill[],
+  options: { compactionMode?: ContextCompactionMode; contextWindowTokens?: number } = {},
+): ReturnType<typeof Capabilities.default> {
+  const mode = options.compactionMode ?? resolveContextCompactionMode(settings);
+  const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
   const caps: ReturnType<typeof Capabilities.default> = [filesystem(), shell()];
   if (mode === "server") {
-    caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold(settings)) }));
+    caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold({ ...settings, contextWindowTokens })) }));
   }
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +

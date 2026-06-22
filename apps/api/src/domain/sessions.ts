@@ -1,4 +1,4 @@
-import type { Settings } from "@opengeni/config";
+import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
   reasoningEffortForMetadata,
@@ -228,6 +228,31 @@ export function workflowIdForSession(sessionId: string): string {
   return `session-${sessionId}`;
 }
 
+/**
+ * Reject an explicit model that the host does not expose. The set of usable
+ * models is the union surfaced by `configuredAllowedModels` (the built-in
+ * provider's allow-list plus every registry provider's ids); a `model` outside
+ * it cannot be resolved to a provider at run time, so we fail the request at
+ * the API edge with 422 rather than enqueuing a turn the worker can't honor.
+ *
+ * `model` is the explicit, caller-supplied value (null/undefined when omitted).
+ * An omitted model defaults to `settings.openaiModel` downstream — which is
+ * always first in `configuredAllowedModels` — so only an explicit value is
+ * checked. Centralized here so every model-carrying choke point
+ * (create-session, user-message/turn-accept, queued-turn update, and
+ * scheduled-task agentConfig — a scheduled task is a session the worker runs
+ * later) and the MCP surfaces that share them validate identically and cannot
+ * drift.
+ */
+export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
+  if (model === null || model === undefined) {
+    return;
+  }
+  if (!configuredAllowedModels(settings).includes(model)) {
+    throw new HTTPException(422, { message: `model is not available: ${model}` });
+  }
+}
+
 export async function requireQueuedTurnForApi(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
   const turn = await getSessionTurn(db, workspaceId, turnId);
   if (!turn || turn.sessionId !== sessionId) {
@@ -268,6 +293,9 @@ export async function postUserMessageTurn(input: {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // Reject an explicit per-message model the host does not expose; an omitted
+  // model inherits the session's model downstream (always a configured id).
+  assertConfiguredModel(settings, requestedModel);
   const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, (lockedSession) => {
     // Cancelled is the one terminal state: an explicit user act. A FAILED
     // session stays revivable by talking to it — conversation truth lives in
@@ -372,6 +400,7 @@ export async function createSessionForRequest(
   const environment = payload.environmentId
     ? await validateEnvironmentAttachment({ settings, db }, grant, workspaceId, payload.environmentId)
     : null;
+  assertConfiguredModel(settings, payload.model);
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
   // A session's first-party MCP token can carry a non-default permission set

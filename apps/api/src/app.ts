@@ -1,6 +1,7 @@
 import {
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
+  configuredModels,
 } from "@opengeni/config";
 import { ClientConfig } from "@opengeni/contracts";
 import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@opengeni/documents";
@@ -172,6 +173,18 @@ export function createApp(deps: AppDependencies): Hono {
     deploymentRevision: deps.settings.deploymentRevision,
     defaultModel: deps.settings.openaiModel,
     allowedModels: configuredAllowedModels(deps.settings),
+    // Provider-grouped model list for the picker. configuredModels() carries the
+    // union of the built-in allow-list and every registry provider's models, in
+    // selection order (default model first); project each to the client-safe
+    // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
+    models: configuredModels(deps.settings).map((model) => ({
+      id: model.id,
+      label: model.label,
+      provider: model.providerId,
+      providerLabel: model.providerLabel,
+      api: model.api,
+      ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }),
+    })),
     defaultReasoningEffort: deps.settings.openaiReasoningEffort,
     allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
     mcpServers: deps.settings.mcpServers.map((server) => ({

@@ -9,6 +9,7 @@ import type { SessionEvent, SessionTurn, WorkspaceEnvironment } from "@opengeni/
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { OpenGeniApiError } from "@opengeni/sdk";
+import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
@@ -598,6 +599,55 @@ describe("useBillingUsage", () => {
     expect(seen).toEqual([{ accountId: "acc-1", workspaceId: WORKSPACE_ID }]);
     expect(hook.result.current.balance?.balanceMicros).toBe(12_000_000);
     expect(hook.result.current.usage).toHaveLength(1);
+    await hook.unmount();
+  });
+});
+
+describe("useAvailableModels", () => {
+  test("returns the host-exposed models and the default model from getClientConfig", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getClientConfig: async () => {
+        calls += 1;
+        return {
+          deploymentRevision: "rev-1",
+          defaultModel: "gpt-5.5",
+          allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
+          models: [
+            { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+            {
+              id: "accounts/fireworks/models/glm-5p2",
+              label: "GLM 5.2",
+              provider: "fireworks",
+              providerLabel: "Fireworks AI",
+              api: "chat",
+            },
+          ],
+          defaultReasoningEffort: "medium",
+          allowedReasoningEfforts: ["medium"],
+          mcpServers: [],
+          fileUploads: { enabled: true, maxSizeBytes: 1024 },
+          productAccessMode: "managed",
+          auth: { mode: "none" },
+        } as never;
+      },
+    });
+    const hook = await renderHook(() => useAvailableModels({ client }), undefined);
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.defaultModel).toBe("gpt-5.5");
+    expect(hook.result.current.models.map((model) => model.label)).toEqual(["gpt-5.5", "GLM 5.2"]);
+    expect(hook.result.current.models.map((model) => model.providerLabel)).toEqual(["OpenAI", "Fireworks AI"]);
+    await hook.unmount();
+  });
+
+  test("starts with empty models and a null default before the config loads", async () => {
+    const client = fakeClient({ getClientConfig: async () => new Promise(() => {}) as never });
+    const hook = await renderHook(() => useAvailableModels({ client }), undefined);
+    expect(hook.result.current.loading).toBe(true);
+    expect(hook.result.current.models).toEqual([]);
+    expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
   });
 });

@@ -4,6 +4,7 @@ import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client
 import { HTTPException } from "hono/http-exception";
 import {
   allowedCorsOrigin,
+  createApp,
   httpStatusForError,
   normalizeResources,
   replaySessionEvents,
@@ -12,12 +13,14 @@ import {
   withDefaultEnabledCapabilityMcpTools,
   workflowIdForSession,
 } from "../src/app";
+import type { AppDependencies } from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
 import { discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "../src/domain/capabilities";
+import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import type { CapabilityCatalogItem, SessionEvent } from "@opengeni/contracts";
+import { ClientConfig, type CapabilityCatalogItem, type SessionEvent } from "@opengeni/contracts";
 
 describe("API helpers", () => {
   test("normalizes repository resources into sandbox mount paths", () => {
@@ -425,6 +428,70 @@ describe("API helpers", () => {
       { after: 0, limit: 1000 },
       { after: 1000, limit: 1000 },
     ]);
+  });
+});
+
+describe("GET /v1/config/client", () => {
+  // The route only reads settings (+ the storage derived from them); db / bus /
+  // workflowClient are never touched, so we stub them. managedAuth is forced to
+  // null so createApp does not try to stand up Better Auth.
+  function appFor(settings: Settings) {
+    const deps = {
+      settings,
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    } satisfies AppDependencies;
+    return createApp(deps);
+  }
+
+  async function fetchClientConfig(settings: Settings) {
+    const response = await appFor(settings).request("/v1/config/client");
+    expect(response.status).toBe(200);
+    return ClientConfig.parse(await response.json());
+  }
+
+  test("returns a models[] whose ids match configuredAllowedModels", async () => {
+    const settings = testSettings();
+    const config = await fetchClientConfig(settings);
+
+    expect(config.models.length).toBeGreaterThan(0);
+    expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
+    // Built-in provider models project the openai/azure responses shape.
+    const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
+    expect(defaultModel).toMatchObject({ provider: "openai", api: "responses" });
+  });
+
+  test("includes a registry model when OPENGENI_MODEL_PROVIDERS_JSON is set", async () => {
+    const settings = testSettings({
+      modelProvidersJson: JSON.stringify([{
+        id: "fireworks",
+        label: "Fireworks AI",
+        api: "chat",
+        baseUrl: "https://api.fireworks.ai/inference/v1",
+        apiKey: "fw_test",
+        models: [{
+          id: "accounts/fireworks/models/glm-5p2",
+          label: "GLM 5.2",
+          contextWindowTokens: 1_048_576,
+          reasoningEffort: true,
+          hostedWebSearch: false,
+        }],
+      }]),
+    });
+    const config = await fetchClientConfig(settings);
+
+    expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
+    const glm = config.models.find((model) => model.id === "accounts/fireworks/models/glm-5p2");
+    expect(glm).toEqual({
+      id: "accounts/fireworks/models/glm-5p2",
+      label: "GLM 5.2",
+      provider: "fireworks",
+      providerLabel: "Fireworks AI",
+      api: "chat",
+      contextWindowTokens: 1_048_576,
+    });
   });
 });
 

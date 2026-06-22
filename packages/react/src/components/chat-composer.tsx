@@ -1,4 +1,4 @@
-import type { SessionStatus } from "@opengeni/sdk";
+import type { ClientModel, SessionStatus } from "@opengeni/sdk";
 import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
@@ -12,6 +12,7 @@ import { useSlashCommands, type ConfirmState, type SlashCommandContext } from ".
 import { cn } from "../lib/cn";
 import { formatBytes } from "../lib/format";
 import { CommandPalette } from "./command-palette";
+import { ModelPicker } from "./model-picker";
 
 export type ChatComposerProps = {
   composer: ComposerState;
@@ -37,6 +38,20 @@ export type ChatComposerProps = {
    * Absent → no attachment UI renders and the composer behaves exactly as before.
    */
   attachments?: UseFileAttachmentsResult | undefined;
+  /**
+   * Opt-in model picker. When supplied (e.g. from {@link useAvailableModels}),
+   * the composer renders a {@link ModelPicker} at the start of `controlsStart`
+   * so the operator can choose which host-exposed model serves the next message.
+   * The host owns the selection (`selectedModel`/`onSelectModel`) and is
+   * responsible for threading it into the composer's `sendExtras` (typically
+   * `useComposer({ sendExtras: () => ({ model }) })`) so `composeSendInput`
+   * carries it. Absent → no picker renders and the composer behaves as before.
+   */
+  models?: ClientModel[] | undefined;
+  /** The currently selected model id (the picker's controlled value). */
+  selectedModel?: string | undefined;
+  /** Called with the chosen model id when the operator picks one. */
+  onSelectModel?: ((modelId: string) => void) | undefined;
   className?: string | undefined;
   /**
    * Slash-command palette. Defaults to the built-in {@link defaultCommands};
@@ -77,6 +92,9 @@ export function ChatComposer({
   header,
   onPaste,
   attachments,
+  models,
+  selectedModel,
+  onSelectModel,
   className,
   commands = defaultCommands,
   commandContext,
@@ -376,7 +394,7 @@ export function ChatComposer({
             />
           ) : (
             <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
-              {attachments || controlsStart ? (
+              {attachments || models || controlsStart ? (
                 <span className="flex min-w-0 items-center gap-1.5">
                   {attachments ? (
                     <>
@@ -402,6 +420,14 @@ export function ChatComposer({
                         <PaperclipIcon className="size-4" />
                       </button>
                     </>
+                  ) : null}
+                  {models ? (
+                    <ModelPicker
+                      models={models}
+                      value={selectedModel}
+                      onChange={(modelId) => onSelectModel?.(modelId)}
+                      disabled={disabled === true}
+                    />
                   ) : null}
                   {controlsStart}
                 </span>

@@ -524,14 +524,28 @@ describe("extractResponseOutputText", () => {
   test("reads output_text directly", () => {
     expect(extractResponseOutputText({ output_text: "hello" })).toBe("hello");
   });
-  test("reads message content parts", () => {
+  test("reads assistant message content parts", () => {
     const response = {
       output: [
         { type: "reasoning", content: [] },
-        { type: "message", content: [{ type: "output_text", text: "part-A" }, { type: "output_text", text: "-B" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "part-A" }, { type: "output_text", text: "-B" }] },
       ],
     };
     expect(extractResponseOutputText(response)).toBe("part-A-B");
+  });
+  test("skips input-echo message items (role !== assistant) so a provider that echoes the prompt back can't corrupt the summary", () => {
+    // Fireworks' beta /v1/responses echoes the user input back as an output
+    // `message` item (see docs/model-providers.md); only the assistant message
+    // is the real completion. The guard must read the assistant message and drop
+    // the echoed user/system ones.
+    const response = {
+      output: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "ECHOED PROMPT" }] },
+        { type: "message", role: "system", content: [{ type: "input_text", text: "SYSTEM ECHO" }] },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "real-summary" }] },
+      ],
+    };
+    expect(extractResponseOutputText(response)).toBe("real-summary");
   });
   test("returns empty string for unknown shapes", () => {
     expect(extractResponseOutputText(null)).toBe("");

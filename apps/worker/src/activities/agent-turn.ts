@@ -33,6 +33,7 @@ import {
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
+  summarizeForCompaction,
   type SandboxFileDownload,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
@@ -391,6 +392,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
+      // Multi-provider per-turn routing → the provider gating (compaction mode,
+      // hosted web search, encrypted reasoning, context window) the agent and
+      // compaction summarizer must use; null falls back to the legacy global
+      // client. Resolve against `capabilitySettings` (whose openaiModel is the
+      // deployment default), NOT `runSettings`: runSettings.openaiModel is the
+      // turn's model, so for a turn ON a registry model the built-in provider
+      // would otherwise claim that id (configuredModels builds the built-in's
+      // models from openaiModel) and shadow the registry entry — resolving the
+      // turn to the built-in (Azure) gating while the global model router routes
+      // the name to its registry provider. That mismatch attaches web_search to
+      // a chat-only Fireworks model. Resolving against the default-model settings
+      // keeps gating consistent with the router. Cost accounting covers registry
+      // models via configuredModelPricing.
+      const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       const turnTools = mergeToolRefs(session.tools, turn.tools);
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
@@ -525,6 +540,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        // Resolved-model routing + gating (legacy defaults when null). The model
+        // is passed as the model *string* (agent.model = runSettings.openaiModel),
+        // NOT a Model instance: an instance only survives the in-process
+        // ("none") run, whereas the SandboxAgent/Modal path drops it and
+        // re-resolves the model *name* through the global MultiProviderModelProvider
+        // configureOpenAI installed — so registry models (Fireworks GLM) route to
+        // their own client instead of 404ing against the built-in Azure/OpenAI
+        // client. The gating still comes from the resolved provider: server-side
+        // store/compaction follow the provider's compaction mode (registry
+        // providers resolve to "client"); encrypted reasoning is only
+        // round-tripped on the Responses wire API; hosted web search is attached
+        // only when the model opts in; the effective context window drives the
+        // compaction threshold.
+        ...(resolvedModel
+          ? {
+            compactionMode: resolvedModel.provider.compactionMode,
+            hostedWebSearch: resolvedModel.configured.hostedWebSearch,
+            encryptedReasoning: resolvedModel.provider.api === "responses" && runSettings.openaiReasoningEncryptedContent,
+            contextWindowTokens: resolvedModel.configured.contextWindowTokens ?? runSettings.contextWindowTokens,
+          }
+          : {}),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceEnvironment
@@ -557,7 +593,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             runSettings,
             { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId },
             session.lastInputTokens,
-            undefined,
+            // Provider-aware summarizer: when the turn's model resolved to a
+            // registry provider, summarize on THAT provider's client + wire API
+            // (a chat provider can't summarize through OpenAI/Azure). Null
+            // resolution keeps the default built-in Responses summarizer.
+            resolvedModel
+              ? (s, m) => summarizeForCompaction(s, m, {
+                client: resolvedModel.client,
+                api: resolvedModel.provider.api,
+                model: resolvedModel.configured.id,
+                maxOutputTokens: s.contextSummaryMaxTokens,
+              })
+              : undefined,
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {

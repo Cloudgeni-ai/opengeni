@@ -187,29 +187,6 @@ export type AcknowledgeStreamResponse = { acknowledged: boolean; acknowledgedSha
 export type ViewerHeartbeatRequest = { leaseEpoch: number };
 export type ViewerHeartbeatResponse = { alive: boolean };
 
-// Mirror of `@opengeni/contracts` ClientAuthConfig — how the client authenticates.
-export type ClientAuthConfig =
-  | { mode: "none" }
-  | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
-  | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
-  | { mode: "managedSession"; session: "cookie" };
-
-// Mirror of `@opengeni/contracts` ClientConfig — the deployment-wide hints the
-// client reads once (models, uploads, auth, and the coarse structured-services
-// on/off). Per-session capability is negotiated on /stream-capabilities.
-export type ClientConfig = {
-  deploymentRevision: string;
-  defaultModel: string;
-  allowedModels: string[];
-  defaultReasoningEffort: ReasoningEffort;
-  allowedReasoningEfforts: ReasoningEffort[];
-  mcpServers: { id: string; name: string }[];
-  fileUploads: { enabled: boolean; maxSizeBytes: number };
-  productAccessMode: ProductAccessMode;
-  auth: ClientAuthConfig;
-  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
-};
-
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export type RepositoryResourceRef = {
@@ -639,6 +616,58 @@ export type Permission = KnownPermission | (string & {});
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
+/**
+ * One model a client may select at send time, plus the provider that serves it.
+ * The wire API (`responses` | `chat`) lets a client reason about provider
+ * capabilities; the provider id/label drive a picker's grouping. Mirrors the
+ * `ClientModel` shape projected into `ClientConfig` by the server.
+ */
+export type ClientModel = {
+  id: string;
+  label: string;
+  /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
+  provider: string;
+  providerLabel: string;
+  api: "responses" | "chat";
+  contextWindowTokens?: number | undefined;
+};
+
+/**
+ * How a deployment expects clients to authenticate to it, surfaced so a UI can
+ * wire up the right header/cookie without prior knowledge of the host setup.
+ * Discriminated on `mode`; `none` is the back-compat default.
+ */
+export type ClientAuthConfig =
+  | { mode: "none" }
+  | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
+  | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
+  | { mode: "managedSession"; session: "cookie" };
+
+/**
+ * Public, unauthenticated-by-default client bootstrap config returned by
+ * `GET /v1/config/client`: which models + reasoning efforts are exposed, the
+ * MCP servers and file-upload limits a composer should offer, and how the
+ * deployment expects the client to authenticate. `allowedModels` is kept for
+ * back-compat; `models` carries the richer provider-grouped list for a picker.
+ */
+export type ClientConfig = {
+  deploymentRevision: string;
+  defaultModel: string;
+  allowedModels: string[];
+  models: ClientModel[];
+  defaultReasoningEffort: ReasoningEffort;
+  allowedReasoningEfforts: ReasoningEffort[];
+  mcpServers: { id: string; name: string }[];
+  fileUploads: { enabled: boolean; maxSizeBytes: number };
+  productAccessMode: ProductAccessMode;
+  auth: ClientAuthConfig;
+  // Server-wide hint: does this deployment support Channel-A structured services
+  // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
+  // this is the coarse on/off the client uses to decide whether to even attempt
+  // the fs/git/terminal panels.
+  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
+};
+
 export type AccountRole = "owner" | "admin" | "member";
 
 export type AccountGrant = {
@@ -724,6 +753,32 @@ export type CreateApiKeyResponse = {
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// A person (or API key) with access to a workspace. `subjectId` is
+// `user:<betterAuthUserId>` or `api_key:<id>`; the People surface lists the
+// `user:` subjects (api_key subjects belong to the API keys section).
+export type WorkspaceMember = {
+  subjectId: string;
+  subjectLabel: string | null;
+  role: string;
+  permissions: Permission[];
+  createdAt: string;
+};
+
+export type ListWorkspaceMembersResponse = {
+  members: WorkspaceMember[];
+};
+
+export type AddWorkspaceMemberRequest = {
+  email: string;
+  role?: string | undefined;
+  permissions: Permission[];
+};
+
+export type UpdateWorkspaceMemberRequest = {
+  role?: string | undefined;
+  permissions: Permission[];
 };
 
 // --- Goals -------------------------------------------------------------------

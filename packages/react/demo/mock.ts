@@ -131,6 +131,10 @@ export class MockOpenGeniClient implements SessionClientLike {
     return bus;
   }
 
+  async getClientConfig(): Promise<ClientConfig> {
+    return CLIENT_CONFIG;
+  }
+
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
   }
@@ -672,13 +676,103 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   await sleep(700);
 
   await streamText(bus, turn, "I'll report back when the worker has staging reachable. If the drift check finds anything that needs a decision (destructive changes, spend), I'll ask you here first.");
+  await sleep(600);
+
+  // A rich, formatted status report — exercises the full markdown surface
+  // (headings, emphasis, lists incl. nested + task lists, inline + fenced
+  // code, a blockquote, a table, a link, and a rule) so the timeline's
+  // default renderer can be judged end-to-end.
+  await streamText(bus, turn, MARKDOWN_REPORT, 6);
+
   bus.append("turn.completed", {}, turn);
   bus.setStatus("idle");
 }
 
+/** A formatted "staging is live" report covering every common markdown element. */
+const MARKDOWN_REPORT = `## Staging is live
+
+Staging for the **api** service is reachable and the prod drift check finished. Here's the rundown.
+
+### What landed
+
+- Namespace \`api-staging\` created on the cluster
+  - Ingress wired with a *temporary* TLS cert (auto-renews)
+  - HPA set to **2–6** replicas
+- Managed Postgres provisioned and migrated
+- Deploy pipeline connected to [the api repo](https://example.com/acme/api)
+
+### Drift check
+
+Prod is mostly clean. Outstanding items:
+
+1. One untracked security group rule (port 6379, Redis)
+2. A manually-bumped instance size on \`api-prod-2\`
+3. Two stale DNS records
+
+> **Heads up:** the Redis rule looks like a hotfix from last week — I'd confirm before reverting, since removing it could drop cache connectivity.
+
+### Cost delta
+
+| Resource | Before | After | Δ |
+| --- | ---: | ---: | ---: |
+| Compute | $420 | $510 | +$90 |
+| Postgres | $0 | $85 | +$85 |
+| Egress | $30 | $34 | +$4 |
+
+### Next steps
+
+- [x] Stand up staging namespace
+- [x] Run prod drift check
+- [ ] Decide on the Redis rule (needs you)
+- [ ] Schedule the DNS cleanup
+
+You can reach staging with:
+
+\`\`\`ts
+const res = await fetch("https://api-staging.acme.dev/healthz", {
+  headers: { authorization: \`Bearer \${process.env.STAGING_TOKEN}\` },
+});
+console.log(res.status); // 200
+\`\`\`
+
+Run \`og sessions tail\` to follow the worker, or reply here and I'll fold it into the plan.
+
+---
+
+Everything above is staged behind the \`staging\` flag — nothing prod-facing changed.`;
+
 /* --- fixtures ------------------------------------------------------------------ */
 
 const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+/**
+ * A two-provider deployment config so the demo composer exercises the
+ * <ModelPicker>: the built-in OpenAI provider serving gpt-5.5 (the default,
+ * `responses` wire API) plus a Fireworks AI registry provider serving GLM 5.2
+ * (`chat` wire API) — exactly the host config example in model-providers.md.
+ */
+const CLIENT_CONFIG: ClientConfig = {
+  deploymentRevision: "demo",
+  defaultModel: "gpt-5.5",
+  allowedModels: ["gpt-5.5", "accounts/fireworks/models/glm-5p2"],
+  models: [
+    { id: "gpt-5.5", label: "gpt-5.5", provider: "openai", providerLabel: "OpenAI", api: "responses" },
+    {
+      id: "accounts/fireworks/models/glm-5p2",
+      label: "GLM 5.2",
+      provider: "fireworks",
+      providerLabel: "Fireworks AI",
+      api: "chat",
+      contextWindowTokens: 1_048_576,
+    },
+  ],
+  defaultReasoningEffort: "medium",
+  allowedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+  mcpServers: [{ id: "opengeni", name: "OpenGeni" }],
+  fileUploads: { enabled: true, maxSizeBytes: 25 * 1024 * 1024 },
+  productAccessMode: "managed",
+  auth: { mode: "none" },
+};
 
 function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
   const now = new Date(Date.now() - (10 - position) * 60_000).toISOString();

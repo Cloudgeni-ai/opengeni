@@ -68,6 +68,7 @@ import {
 } from "../domain/resources";
 import {
   acceptSessionUserMessage,
+  assertConfiguredModel,
   createSessionForRequest,
   requireQueuedTurnForApi,
   workflowIdForSession,
@@ -268,6 +269,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const existing = await requireQueuedTurnForApi(db, workspaceId, sessionId, turnId);
     const payload = UpdateSessionTurnRequest.parse(await c.req.json());
+    // A turn-update may switch the queued turn's model; reject one the host
+    // does not expose (omitted leaves the existing model unchanged).
+    assertConfiguredModel(settings, payload.model);
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
     const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
     const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, runtimeSettings) : existing.tools;

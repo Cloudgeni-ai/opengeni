@@ -200,6 +200,13 @@ const SettingsSchema = z.object({
   openaiModel: z.string().default("gpt-5.5"),
   openaiAllowedModels: z.string().default("gpt-5.5,gpt-5.4,gpt-5.4-mini"),
   modelPricingJson: z.string().default("{}"),
+  // Extra (non-built-in) model providers, declared by the host as a JSON
+  // provider registry. Each entry carries its own base URL, API key, wire API
+  // ("responses" | "chat") and the models it exposes. The models a client may
+  // use are the UNION of the built-in provider's allowed models and every
+  // registry provider's models. validateSettings parses this at boot so a
+  // malformed registry / unresolvable key / id collision fails fast.
+  modelProvidersJson: z.string().default("[]"),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -442,6 +449,71 @@ const ModelPricingSchema = z.object({
   marginBps: z.number().int().min(0).max(100_000).optional(),
 });
 
+/**
+ * Wire API a provider speaks. The built-in OpenAI/Azure provider always uses
+ * "responses" (the OpenAI Responses API). Extra registry providers default to
+ * "chat" (the broadly compatible /v1/chat/completions surface); Fireworks is
+ * wired as "chat" because its beta Responses endpoint echoes input back and
+ * silently no-ops hosted tools (see docs/model-providers.md).
+ */
+export const ModelProviderApi = z.enum(["responses", "chat"]);
+export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
+
+/** A single model exposed by a registry provider. */
+const RegistryModelSchema = z.object({
+  id: z.string().min(1),                 // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
+  label: z.string().min(1).optional(),   // display name; defaults to id
+  contextWindowTokens: z.number().int().positive().optional(),
+  reasoningEffort: z.boolean().optional(),  // model accepts a reasoning-effort control
+  hostedWebSearch: z.boolean().optional(),  // provider executes the hosted web_search tool for this model
+  pricing: ModelPricingSchema.optional(),
+});
+
+/** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
+const RegistryProviderSchema = z.object({
+  id: z.string().min(1).regex(registryId),  // stable provider id, e.g. "fireworks"
+  label: z.string().min(1).optional(),
+  api: ModelProviderApi.default("chat"),
+  baseUrl: z.string().url(),
+  apiKey: z.string().optional(),         // inline key (pragmatic) ...
+  apiKeyEnv: z.string().optional(),      // ... OR name of the env var holding the key (preferred)
+  defaultQuery: z.record(z.string(), z.string()).optional(),
+  defaultHeaders: z.record(z.string(), z.string()).optional(),
+  models: z.array(RegistryModelSchema).min(1),
+});
+export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
+
+/**
+ * Runtime-resolved provider (built-in or registry), client-construction-ready.
+ * The built-in OpenAI/Azure provider is always present and always "responses";
+ * registry providers carry their own base URL / key / wire API. compactionMode
+ * is "server" only for the built-in OpenAI platform provider (its Responses API
+ * honors server-side context_management) and "client" for everything else.
+ */
+export interface ResolvedModelProvider {
+  id: string;                  // "openai" | "azure" | registry id
+  label: string;
+  api: ModelProviderApi;
+  builtin: boolean;
+  baseUrl?: string | undefined;
+  apiKey?: string | undefined;
+  defaultQuery?: Record<string, string> | undefined;
+  defaultHeaders?: Record<string, string> | undefined;
+  compactionMode: ContextCompactionMode;   // "server" only for built-in OpenAI; "client" otherwise
+}
+
+/** A single exposed model + the provider that serves it. */
+export interface ConfiguredModel {
+  id: string;
+  label: string;
+  providerId: string;
+  providerLabel: string;
+  api: ModelProviderApi;
+  contextWindowTokens?: number | undefined;
+  reasoningEffort: boolean;
+  hostedWebSearch: boolean;
+}
+
 export const defaultModelPricing: Record<string, ModelPricing> = {
   "gpt-5.5": {
     inputMicrosPerMillionTokens: 5_000_000,
@@ -501,6 +573,16 @@ export const defaultModelPricing: Record<string, ModelPricing> = {
     inputMicrosPerMillionTokens: 50_000,
     cachedInputMicrosPerMillionTokens: 5_000,
     outputMicrosPerMillionTokens: 400_000,
+    marginBps: 2_500,
+  },
+  // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
+  // built-in default pricing entry makes managed billing work out of the box
+  // for hosts that expose this model via OPENGENI_MODEL_PROVIDERS_JSON without
+  // also setting OPENGENI_MODEL_PRICING_JSON.
+  "accounts/fireworks/models/glm-5p2": {
+    inputMicrosPerMillionTokens: 1_400_000,
+    cachedInputMicrosPerMillionTokens: 260_000,
+    outputMicrosPerMillionTokens: 4_400_000,
     marginBps: 2_500,
   },
 };
@@ -619,6 +701,7 @@ export function getSettings(): Settings {
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
+    modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
@@ -769,14 +852,170 @@ export function collectSandboxEnvironment(settings: Settings, source: NodeJS.Pro
   return out;
 }
 
-export function configuredAllowedModels(settings: Settings): string[] {
-  return uniqueValues([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
+/**
+ * Resolved API key for a registry provider: the inline `apiKey` when present,
+ * else the value of the env var named by `apiKeyEnv`. The preferred form is
+ * `apiKeyEnv` (the secret stays out of OPENGENI_MODEL_PROVIDERS_JSON). Reads
+ * from `source` (defaults to process.env) so callers can resolve against an
+ * explicit environment in tests.
+ */
+export function resolveProviderApiKey(
+  provider: Pick<RegistryProvider, "apiKey" | "apiKeyEnv">,
+  source: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (provider.apiKey) {
+    return provider.apiKey;
+  }
+  if (provider.apiKeyEnv) {
+    const value = source[provider.apiKeyEnv];
+    return value && value.trim().length > 0 ? value : undefined;
+  }
+  return undefined;
 }
 
+/** The built-in provider's stable id: "openai" on the OpenAI platform, "azure" on Azure. */
+function builtinProviderId(settings: Pick<Settings, "openaiProvider">): string {
+  return settings.openaiProvider === "azure" ? "azure" : "openai";
+}
+
+function builtinProviderLabel(settings: Pick<Settings, "openaiProvider">): string {
+  return settings.openaiProvider === "azure" ? "Azure OpenAI" : "OpenAI";
+}
+
+/**
+ * Every provider a client may route to: the built-in OpenAI/Azure provider
+ * first (id "openai"/"azure", always "responses", compactionMode from
+ * resolveContextCompactionMode), then each registry provider in declaration
+ * order (compactionMode "client"). Client-construction inputs are filled from
+ * the existing flat openai/azure settings for the built-in, and from the
+ * registry entry for the rest. Registry ids may not collide with the built-in
+ * id — validateSettings rejects that at boot.
+ */
+export function configuredProviders(settings: Settings): ResolvedModelProvider[] {
+  const builtin: ResolvedModelProvider = {
+    id: builtinProviderId(settings),
+    label: builtinProviderLabel(settings),
+    api: "responses",
+    builtin: true,
+    compactionMode: resolveContextCompactionMode(settings),
+  };
+  if (settings.openaiProvider === "azure") {
+    builtin.baseUrl = settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+    builtin.apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken;
+  } else {
+    builtin.baseUrl = settings.openaiBaseUrl;
+    builtin.apiKey = settings.openaiApiKey;
+  }
+  const registry = parseModelProvidersJson(settings.modelProvidersJson).map((provider): ResolvedModelProvider => ({
+    id: provider.id,
+    label: provider.label ?? provider.id,
+    api: provider.api,
+    builtin: false,
+    baseUrl: provider.baseUrl,
+    apiKey: resolveProviderApiKey(provider),
+    defaultQuery: provider.defaultQuery,
+    defaultHeaders: provider.defaultHeaders,
+    compactionMode: "client",
+  }));
+  return [builtin, ...registry];
+}
+
+/**
+ * Every model a client may use, the built-in provider's models first
+ * (configuredAllowedModels-from-openai, mapped to "responses" with
+ * hostedWebSearch/contextWindow/reasoningEffort from the flat settings), then
+ * each registry provider's models (label→id, hostedWebSearch/reasoningEffort
+ * default false). De-duplicated by id (first wins) so the default model stays
+ * first and the built-in allow-list takes precedence over registry entries.
+ */
+export function configuredModels(settings: Settings): ConfiguredModel[] {
+  const builtinId = builtinProviderId(settings);
+  const builtinLabel = builtinProviderLabel(settings);
+  const out: ConfiguredModel[] = uniqueValues([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]).map((id) => ({
+    id,
+    label: id,
+    providerId: builtinId,
+    providerLabel: builtinLabel,
+    api: "responses" as const,
+    contextWindowTokens: settings.contextWindowTokens,
+    reasoningEffort: true,
+    hostedWebSearch: settings.webSearchEnabled,
+  }));
+  for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
+    const providerLabel = provider.label ?? provider.id;
+    for (const model of provider.models) {
+      out.push({
+        id: model.id,
+        label: model.label ?? model.id,
+        providerId: provider.id,
+        providerLabel,
+        api: provider.api,
+        ...(model.contextWindowTokens === undefined ? {} : { contextWindowTokens: model.contextWindowTokens }),
+        reasoningEffort: model.reasoningEffort ?? false,
+        hostedWebSearch: model.hostedWebSearch ?? false,
+      });
+    }
+  }
+  const seen = new Set<string>();
+  return out.filter((model) => {
+    if (seen.has(model.id)) {
+      return false;
+    }
+    seen.add(model.id);
+    return true;
+  });
+}
+
+/**
+ * Allowed model ids in selection order. Reimplemented on top of
+ * configuredModels so it is the union of the built-in allow-list and every
+ * registry provider's ids, de-duplicated. INVARIANT (existing callers + tests
+ * depend on it): settings.openaiModel is always first, then the rest of the
+ * openai allow-list, then registry ids.
+ */
+export function configuredAllowedModels(settings: Settings): string[] {
+  return configuredModels(settings).map((model) => model.id);
+}
+
+/**
+ * Resolve a model string to the provider that serves it and its configured
+ * shape. Returns undefined when the id is not exposed (built-in allow-list nor
+ * any registry provider), so the runtime can fall back to the legacy global
+ * client path.
+ */
+export function resolveModelProvider(
+  settings: Settings,
+  modelId: string,
+): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined {
+  const model = configuredModels(settings).find((candidate) => candidate.id === modelId);
+  if (!model) {
+    return undefined;
+  }
+  const provider = configuredProviders(settings).find((candidate) => candidate.id === model.providerId);
+  if (!provider) {
+    return undefined;
+  }
+  return { provider, model };
+}
+
+/**
+ * Effective per-model pricing. Merge order (later wins):
+ *   defaultModelPricing → registry model `pricing` entries (keyed by model id)
+ *   → parseModelPricingJson(settings.modelPricingJson) (explicit JSON wins).
+ */
 export function configuredModelPricing(settings: Settings): Record<string, ModelPricing> {
+  const registry: Record<string, ModelPricing> = {};
+  for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
+    for (const model of provider.models) {
+      if (model.pricing) {
+        registry[model.id] = model.pricing;
+      }
+    }
+  }
   const configured = parseModelPricingJson(settings.modelPricingJson);
   return {
     ...defaultModelPricing,
+    ...registry,
     ...configured,
   };
 }
@@ -1055,6 +1294,34 @@ export function parseSandboxWarmRateJson(raw: string): Record<string, number> {
 export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: string): number {
   const table = parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
   return table[backend] ?? 0;
+}
+
+/**
+ * Parse + validate the extra-provider registry JSON. `[]` (or empty/whitespace)
+ * yields an empty list. Surfaces JSON and zod errors prefixed with the env-var
+ * name so a malformed registry fails fast at boot (validateSettings calls this).
+ */
+export function parseModelProvidersJson(raw: string): RegistryProvider[] {
+  if (!raw.trim() || raw.trim() === "[]") {
+    return [];
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON must be valid JSON: ${message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("OPENGENI_MODEL_PROVIDERS_JSON must be a JSON array of providers");
+  }
+  return parsed.map((entry, index) => {
+    const result = RegistryProviderSchema.safeParse(entry);
+    if (!result.success) {
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${result.error.message}`);
+    }
+    return result.data;
+  });
 }
 
 export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
@@ -1344,6 +1611,28 @@ function validateSettings(settings: Settings): void {
       + "(DesktopStream.transport=null — no scoped stream tokens can be minted). Set "
       + "OPENGENI_STREAM_TOKEN_SECRET to enable the live desktop stream.",
     );
+  }
+  // Model provider registry: parse it here so JSON/zod errors surface at boot,
+  // reject a registry id colliding with the built-in provider id (it would
+  // shadow the built-in in configuredProviders), reject duplicate registry
+  // ids, and require a resolvable API key for every registry provider (a
+  // provider with no usable key can never serve a turn). Registry models flow
+  // through configuredAllowedModels, so the managed-billing pricing check above
+  // already covers them.
+  const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
+  const builtinId = builtinProviderId(settings);
+  const providerIds = new Set<string>();
+  for (const provider of registryProviders) {
+    if (provider.id === builtinId) {
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider id ${provider.id} collides with the built-in provider id`);
+    }
+    if (providerIds.has(provider.id)) {
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON contains duplicate provider id ${provider.id}`);
+    }
+    providerIds.add(provider.id);
+    if (!resolveProviderApiKey(provider)) {
+      throw new Error(`OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`);
+    }
   }
 }
 

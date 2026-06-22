@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 import {
   AcknowledgeStreamRequest as ContractAcknowledgeStreamRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
+  AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   AttachViewerRequest as ContractAttachViewerRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   DESKTOP_STREAM_PORT,
+  ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
@@ -25,6 +27,8 @@ import {
   ScheduledTaskOverlapPolicy as ContractScheduledTaskOverlapPolicy,
   ScheduledTaskRunMode as ContractScheduledTaskRunMode,
   ScheduledTaskStatus as ContractScheduledTaskStatus,
+  UpdateWorkspaceMemberRequest as ContractUpdateWorkspaceMemberRequest,
+  WorkspaceMember as ContractWorkspaceMember,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
@@ -32,10 +36,12 @@ import { SESSION_EVENT_TYPES } from "../src/types";
 import type {
   AcknowledgeStreamRequest,
   AcknowledgeStreamResponse,
+  AddWorkspaceMemberRequest,
   AttachViewerRequest,
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
+  ListWorkspaceMembersResponse,
   ReasoningEffort,
   SandboxBackend,
   SandboxOs,
@@ -51,9 +57,11 @@ import type {
   SessionTurnSource,
   SessionTurnStatus,
   StreamUrlRotatedPayload,
+  UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
   ViewerHolder,
+  WorkspaceMember,
 } from "../src/types";
 
 // The SDK ships hand-written wire types so it carries zero runtime
@@ -144,6 +152,31 @@ describe("SDK / contracts parity", () => {
     for (const event of [message, interrupt, approval]) {
       expect(ClientSessionEvent.safeParse(event).success).toBe(true);
     }
+  });
+
+  test("workspace member shapes match the contracts (compile-time + runtime)", () => {
+    // Server -> client: anything the contract produces, the SDK type accepts.
+    const acceptMember = (value: z.infer<typeof ContractWorkspaceMember>): WorkspaceMember => value;
+    const acceptList = (value: z.infer<typeof ContractListWorkspaceMembersResponse>): ListWorkspaceMembersResponse => value;
+    // Client -> server: anything the SDK sends, the contracts accept. `permissions`
+    // is deliberately the open `Permission[]` in the SDK (forward compatible with
+    // new server-side permissions), so like firstPartyMcpPermissions it is checked
+    // at runtime by the server (the safeParse calls below) rather than here.
+    const acceptAdd = (value: Omit<AddWorkspaceMemberRequest, "permissions">): Omit<z.input<typeof ContractAddWorkspaceMemberRequest>, "permissions"> => value;
+    const acceptUpdate = (value: Omit<UpdateWorkspaceMemberRequest, "permissions">): Omit<z.input<typeof ContractUpdateWorkspaceMemberRequest>, "permissions"> => value;
+    expect([acceptMember, acceptList, acceptAdd, acceptUpdate].every((fn) => typeof fn === "function")).toBe(true);
+
+    const add: AddWorkspaceMemberRequest = { email: "teammate@example.com", role: "member", permissions: ["sessions:read"] };
+    const update: UpdateWorkspaceMemberRequest = { permissions: ["sessions:read", "members:manage"] };
+    expect(ContractAddWorkspaceMemberRequest.safeParse(add).success).toBe(true);
+    expect(ContractUpdateWorkspaceMemberRequest.safeParse(update).success).toBe(true);
+    expect(ContractWorkspaceMember.safeParse({
+      subjectId: "user:u1",
+      subjectLabel: "teammate@example.com",
+      role: "member",
+      permissions: ["sessions:read"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    }).success).toBe(true);
   });
 
   test("SDK-built create-session requests parse under the contracts schema", () => {

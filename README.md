@@ -4,6 +4,8 @@ OpenGeni is a self-hostable managed agent service for long-running workspace and
 
 It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs. The included React app is one client for that API; other products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
 
+If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
+
 ## What It Does
 
 - Runs OpenAI Agents SDK agents behind a durable API.

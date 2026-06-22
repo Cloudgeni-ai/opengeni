@@ -5,6 +5,7 @@ export type {
   AccessContext,
   AccessGrant,
   AccountGrant,
+  AddWorkspaceMemberRequest,
   ApiKey,
   BillingBalance,
   BillingEntitlementsResponse,
@@ -42,13 +43,16 @@ export type {
   SessionStatus,
   SessionTurn,
   ToolRef,
+  UpdateWorkspaceMemberRequest,
   UsageEvent,
   Workspace,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
+  WorkspaceMember,
 } from "@opengeni/sdk";
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
-import type { GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";
+import type { ClientModel, GoalSpec, ReasoningEffort, ResourceRef, SandboxBackend, ToolRef } from "@opengeni/sdk";
+export type { ClientModel } from "@opengeni/sdk";
 
 export type TurnSubmission = {
   text: string;
@@ -66,6 +70,10 @@ export type ClientConfig = {
   deploymentRevision: string;
   defaultModel: string;
   allowedModels: string[];
+  // Richer provider-grouped model list the host exposes for the picker (labels +
+  // provider grouping). Empty on older hosts, where the picker falls back to the
+  // flat `allowedModels` id list. Mirrors the SDK's `ClientConfig.models`.
+  models: ClientModel[];
   defaultReasoningEffort: ReasoningEffort;
   allowedReasoningEfforts: ReasoningEffort[];
   mcpServers: Array<{

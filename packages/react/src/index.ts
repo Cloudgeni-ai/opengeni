@@ -43,6 +43,8 @@ export { useWorkspaces } from "./hooks/use-workspaces";
 export type { UseWorkspacesOptions, UseWorkspacesResult } from "./hooks/use-workspaces";
 export { useBillingUsage } from "./hooks/use-billing-usage";
 export type { UseBillingUsageOptions, UseBillingUsageResult } from "./hooks/use-billing-usage";
+export { useAvailableModels } from "./hooks/use-available-models";
+export type { UseAvailableModelsOptions, UseAvailableModelsResult } from "./hooks/use-available-models";
 
 // Sandbox surfacing (Phase 5): capability negotiation + terminal/files/diff/desktop
 export { useSessionCapabilities } from "./hooks/use-session-capabilities";
@@ -128,8 +130,12 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { ModelPicker } from "./components/model-picker";
+export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export { Markdown } from "./components/markdown";
+export type { MarkdownProps } from "./components/markdown";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
 export type { SessionStatusProps, StatusDotProps, SessionStatusMeta } from "./components/session-status";
 export { FleetTile, sessionDisplayTitle } from "./components/fleet-tile";

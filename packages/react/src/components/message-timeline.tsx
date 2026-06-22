@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, stringifyPayload, truncate } from "../lib/format";
+import { Markdown } from "./markdown";
 import {
   buildTimeline,
   compactPayloadPreview,
@@ -175,8 +176,8 @@ function UserMessageRow({
 }) {
   return (
     <div className="animate-og-enter flex justify-end">
-      <div className="max-w-[85%] rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-[15px] leading-6 text-og-fg">
-        {renderMessageText ? renderMessageText(item.text, item) : <span className="whitespace-pre-wrap">{item.text}</span>}
+      <div className="max-w-[85%] min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-[15px] leading-6 text-og-fg">
+        {renderMessageText ? renderMessageText(item.text, item) : <Markdown>{item.text}</Markdown>}
       </div>
     </div>
   );
@@ -189,10 +190,25 @@ function AgentMessageRow({
   item: AgentMessageItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
 }) {
+  const caret = item.streaming ? (
+    <span className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent" aria-hidden />
+  ) : null;
   return (
-    <div className="animate-og-enter text-[15px] leading-7 text-og-fg">
-      {renderMessageText ? renderMessageText(item.text, item) : <span className="whitespace-pre-wrap">{item.text}</span>}
-      {item.streaming ? <span className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent" aria-hidden /> : null}
+    <div className="animate-og-enter min-w-0 text-[15px] leading-7 text-og-fg">
+      {renderMessageText ? (
+        <>
+          {renderMessageText(item.text, item)}
+          {caret}
+        </>
+      ) : (
+        // While streaming, let the caret ride the end of the last rendered line:
+        // the trailing block (usually a <p>) flows inline so the caret sits on
+        // its baseline instead of dropping to a new line.
+        <div className={item.streaming ? "[&_>div>:last-child]:inline" : undefined}>
+          <Markdown>{item.text}</Markdown>
+          {caret}
+        </div>
+      )}
     </div>
   );
 }

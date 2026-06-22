@@ -10,8 +10,10 @@
 //   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
-//   /workspaces/:id/account                  → account, usage, API keys
-//   /billing?checkout=success|cancelled      → Stripe return → default account
+//   /workspaces/:id/settings                 → workspace settings (name, API keys, danger zone)
+//   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
+//   /workspaces/:id/account                  → legacy redirect to /organization
+//   /billing?checkout=success|cancelled      → Stripe return → default organization
 import {
   Navigate,
   RouterProvider,
@@ -23,13 +25,14 @@ import {
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
-import { AccountRoute } from "@/routes/account";
 import { CapabilitiesRoute } from "@/routes/capabilities";
 import { DocumentsRoute } from "@/routes/documents";
 import { EnvironmentsRoute } from "@/routes/environments";
+import { OrgSettingsRoute } from "@/routes/org-settings";
 import { SchedulesRoute } from "@/routes/schedules";
 import { SessionRoute } from "@/routes/session";
 import { SessionsIndexRoute } from "@/routes/sessions-index";
+import { WorkspaceSettingsRoute } from "@/routes/workspace-settings";
 import { WorkspaceShellRoute } from "@/routes/workspace";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
@@ -45,8 +48,8 @@ const indexRoute = createRoute({
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
-// shopper onto their default workspace account (where the balance lives) so the
-// redirect resolves instead of hitting the not-found page.
+// shopper onto their default workspace's organization settings (where the
+// balance lives) so the redirect resolves instead of hitting the not-found page.
 const billingReturnRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "billing",
@@ -114,16 +117,32 @@ const workspaceDocumentsRoute = createRoute({
   path: "documents",
   component: Documents,
 });
-const workspaceAccountRoute = createRoute({
+const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "account",
+  path: "settings",
+  component: WorkspaceSettings,
+});
+const workspaceOrganizationRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "organization",
   // `?checkout=success|cancelled` arrives via the /billing Stripe-return
-  // redirect so the account page can confirm the top-up.
+  // redirect so the organization page can confirm the top-up.
   validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
     const checkout = parseCheckoutOutcome(search);
     return checkout ? { checkout } : {};
   },
-  component: Account,
+  component: Organization,
+});
+// Legacy URL: the old "account" surface is now "organization". Forward, keeping
+// the checkout outcome so post-payment confirmations still land.
+const workspaceAccountRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "account",
+  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
+    const checkout = parseCheckoutOutcome(search);
+    return checkout ? { checkout } : {};
+  },
+  component: AccountRedirect,
 });
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -138,6 +157,8 @@ const routeTree = rootRoute.addChildren([
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
+    workspaceSettingsRoute,
+    workspaceOrganizationRoute,
     workspaceAccountRoute,
   ]),
 ]);
@@ -215,10 +236,28 @@ function Documents() {
   return <DocumentsRoute workspaceId={workspaceId} />;
 }
 
-function Account() {
+function WorkspaceSettings() {
+  const { workspaceId } = workspaceSettingsRoute.useParams();
+  return <WorkspaceSettingsRoute workspaceId={workspaceId} />;
+}
+
+function Organization() {
+  const { workspaceId } = workspaceOrganizationRoute.useParams();
+  const { checkout } = workspaceOrganizationRoute.useSearch();
+  return <OrgSettingsRoute workspaceId={workspaceId} checkout={checkout} />;
+}
+
+function AccountRedirect() {
   const { workspaceId } = workspaceAccountRoute.useParams();
   const { checkout } = workspaceAccountRoute.useSearch();
-  return <AccountRoute workspaceId={workspaceId} checkout={checkout} />;
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/organization"
+      params={{ workspaceId }}
+      search={checkout ? { checkout } : {}}
+      replace
+    />
+  );
 }
 
 function BillingReturnRoute() {
@@ -230,7 +269,7 @@ function BillingReturnRoute() {
   }
   return (
     <Navigate
-      to="/workspaces/$workspaceId/account"
+      to="/workspaces/$workspaceId/organization"
       params={{ workspaceId }}
       search={checkout ? { checkout } : {}}
       replace
