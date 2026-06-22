@@ -107,6 +107,10 @@ export function SandboxTerminal({
         }, 1000);
       });
 
+    // Inject xterm's structural CSS before the first open so the helper-textarea
+    // ghost is clipped from frame one (no top-left input box flash).
+    ensureXtermBaseCss();
+
     void (async () => {
       const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
         import("@xterm/xterm"),
@@ -260,6 +264,56 @@ export function SandboxTerminal({
       </div>
     </div>
   );
+}
+
+// xterm.js ships a stylesheet (`@xterm/xterm/css/xterm.css`) that is REQUIRED for
+// correct layout — without it the `.xterm-helper-textarea` (an off-screen input
+// xterm uses for IME/keystrokes) is NOT clipped and renders as a visible 1-line
+// box in the top-left (the "weird input box" bug), and the viewport/screen aren't
+// positioned. The host app never imports that CSS (no global stylesheet here), so
+// we inject the structural rules once, idempotently (keyed by id), the first time
+// any terminal mounts. Scoped under `.xterm` so it can't leak into host styles.
+const XTERM_STYLE_ID = "opengeni-xterm-base-css";
+const XTERM_BASE_CSS = `
+.xterm{cursor:text;position:relative;user-select:none;-ms-user-select:none;-webkit-user-select:none}
+.xterm.focus,.xterm:focus{outline:none}
+.xterm .xterm-helpers{position:absolute;top:0;z-index:5}
+.xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none}
+.xterm .composition-view{background:#000;color:#FFF;display:none;position:absolute;white-space:nowrap;z-index:1}
+.xterm .composition-view.active{display:block}
+.xterm .xterm-viewport{background-color:transparent;overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0}
+.xterm .xterm-screen{position:relative}
+.xterm .xterm-screen canvas{position:absolute;left:0;top:0}
+.xterm .xterm-scroll-area{visibility:hidden}
+.xterm-char-measure-element{display:inline-block;visibility:hidden;position:absolute;top:0;left:-9999em;line-height:normal}
+.xterm.enable-mouse-events{cursor:default}
+.xterm.xterm-cursor-pointer,.xterm .xterm-cursor-pointer{cursor:pointer}
+.xterm.column-select.focus{cursor:crosshair}
+.xterm .xterm-accessibility:not(.debug),.xterm .xterm-message{position:absolute;left:0;top:0;bottom:0;right:0;z-index:10;color:transparent;pointer-events:none}
+.xterm .xterm-accessibility-tree:not(.debug) *::selection{color:transparent}
+.xterm .xterm-accessibility-tree{user-select:text;white-space:pre}
+.xterm .live-region{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+.xterm-dim{opacity:1!important}
+.xterm-underline-1{text-decoration:underline}
+.xterm-underline-2{text-decoration:double underline}
+.xterm-underline-3{text-decoration:wavy underline}
+.xterm-underline-4{text-decoration:dotted underline}
+.xterm-underline-5{text-decoration:dashed underline}
+.xterm-overline{text-decoration:overline}
+.xterm-strikethrough{text-decoration:line-through}
+.xterm-screen .xterm-decoration-container .xterm-decoration{z-index:6;position:absolute}
+.xterm-screen .xterm-decoration-container .xterm-decoration.xterm-decoration-top-layer{z-index:7}
+.xterm-decoration-overview-ruler{z-index:8;position:absolute;top:0;right:0;pointer-events:none}
+.xterm-decoration-top{z-index:2;position:relative}
+`;
+
+function ensureXtermBaseCss(): void {
+  if (typeof document === "undefined") return;
+  if (document.getElementById(XTERM_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = XTERM_STYLE_ID;
+  style.textContent = XTERM_BASE_CSS;
+  document.head.appendChild(style);
 }
 
 function TerminalPlaceholder() {

@@ -234,6 +234,49 @@ describe("useSandboxTerminal", () => {
     await hook.unmount();
   });
 
+  test("interactive mode OPENS a pty and exposes write before the started event arrives", async () => {
+    // The read-only bug: nothing ever opened a PTY, so write stayed null and the
+    // terminal could only watch. interactive:true must call terminalPtyOpen and
+    // surface `write` immediately (bound to the returned ptyId), then close on
+    // unmount.
+    const opens: unknown[] = [];
+    const writes: { ptyId: string; data: string }[] = [];
+    const closes: string[] = [];
+    const client = fakeClient({
+      terminalPtyOpen: async () => { opens.push(true); return { ptyId: "opened-1", streamVia: "sse-events" as const, supportsInput: true }; },
+      terminalPtyWrite: async (_ws, _s, req) => { writes.push(req); },
+      terminalPtyClose: async (_ws, _s, req) => { closes.push(req.ptyId); },
+    });
+    const hook = await renderHook(
+      // No started event yet — write must still be live off the open's response.
+      () => useSandboxTerminal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [], interactive: true }),
+      undefined,
+    );
+    await flush();
+    expect(opens.length).toBe(1);
+    expect(hook.result.current.activePtyId).toBe("opened-1");
+    expect(typeof hook.result.current.write).toBe("function");
+    hook.result.current.write?.("ls\n");
+    await flush();
+    expect(writes).toEqual([{ ptyId: "opened-1", data: "ls\n" }]);
+    await hook.unmount();
+    await flush();
+    expect(closes).toContain("opened-1");
+  });
+
+  test("non-interactive (default) NEVER opens a pty (projection-only)", async () => {
+    let opened = false;
+    const client = fakeClient({ terminalPtyOpen: async () => { opened = true; return { ptyId: "x", streamVia: "sse-events" as const, supportsInput: true }; } });
+    const hook = await renderHook(
+      () => useSandboxTerminal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush();
+    expect(opened).toBe(false);
+    expect(hook.result.current.write).toBeNull();
+    await hook.unmount();
+  });
+
   test("a closed pty stops running and drops the write fn", async () => {
     const events: SessionEvent[] = [
       fakeEvent(1, "terminal.pty.started", { ptyId: "p1", cols: 80, rows: 24, shell: "/bin/bash", cwd: "" }),
@@ -292,6 +335,62 @@ describe("useSandboxFiles", () => {
     // The modified file carries the git-status overlay.
     expect(src?.children?.[0]?.status).toBe("modified");
     expect(listCalls).toContain("src");
+    await hook.unmount();
+  });
+
+  test("a depth-bounded dir (children: []) is treated as unexpanded so lazy expand fires", async () => {
+    // The REAL bug: a live depth-1 fsList returns each dir at the boundary with
+    // `children: []` (listed, but grandchildren not). If we kept `[]` the
+    // FileBrowser's `children === undefined` lazy-expand guard never fires and
+    // clicking the folder does nothing. fsNodeToTree must map empty -> undefined.
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0,
+      }),
+      fsList: async () => ({
+        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+          // The provider returns an EMPTY children array for the depth-boundary dir.
+          { name: ".config", path: ".config", type: "dir", sizeBytes: null, mtimeMs: 1, mode: 493, truncated: false, children: [] },
+        ] },
+        revision: 0, truncated: false,
+      }),
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    const dir = hook.result.current.tree.find((n) => n.path === ".config");
+    expect(dir?.kind).toBe("dir");
+    // children must be UNDEFINED (the unexpanded marker), NOT [] — else expand
+    // is dead and the folder renders as a permanently-empty leaf.
+    expect(dir?.children).toBeUndefined();
+    await hook.unmount();
+  });
+
+  test("readFile proxies fs.read for the viewer pane (no repo required)", async () => {
+    const reads: string[] = [];
+    const client = fakeClient({
+      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      fsList: async () => ({
+        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+          { name: "main.ts", path: "main.ts", type: "file", sizeBytes: 12, mtimeMs: null, mode: null, truncated: false },
+        ] },
+        revision: 0, truncated: false,
+      }),
+      fsRead: async (_ws, _s, req) => {
+        reads.push(req.path);
+        return { path: req.path, encoding: "utf8" as const, content: "export {}\n", sizeBytes: 10, truncated: false, isBinary: false, revision: 0 };
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    const res = await hook.result.current.readFile("main.ts");
+    expect(res.content).toBe("export {}\n");
+    expect(reads).toEqual(["main.ts"]);
     await hook.unmount();
   });
 });

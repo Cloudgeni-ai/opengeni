@@ -41,14 +41,23 @@ export type UseSandboxFilesResult = {
 
 function fsNodeToTree(node: FsTreeNode): FileTreeNode {
   const kind = node.type === "dir" ? "dir" : "file";
+  // Lazy-tree contract: a depth-bounded `fsList` returns each directory at the
+  // depth boundary with `children: []` (the dir is listed, but its grandchildren
+  // are NOT). An empty array therefore means "not yet expanded", NOT "empty
+  // directory" — so we must map it to `undefined` (the unexpanded marker the
+  // FileBrowser keys lazy-expand on). If we kept `[]`, `toggle()`'s
+  // `node.children === undefined` guard would never fire and clicking a folder
+  // would do nothing (the reported bug). A directory we actually expand has its
+  // children spliced in by `replaceChildren` (bypassing this mapper), so a
+  // genuinely-empty dir correctly ends up as `[]` AFTER expansion.
+  const mappedChildren =
+    node.children && node.children.length > 0 ? node.children.map(fsNodeToTree) : undefined;
   return {
     path: node.path,
     name: node.name,
     kind,
     size: node.sizeBytes,
-    ...(kind === "dir"
-      ? { children: node.children ? node.children.map(fsNodeToTree) : undefined }
-      : {}),
+    ...(kind === "dir" ? { children: mappedChildren } : {}),
   };
 }
 

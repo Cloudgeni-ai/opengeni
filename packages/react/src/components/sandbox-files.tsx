@@ -1,4 +1,4 @@
-import type { GitFileDiff } from "@opengeni/sdk";
+import type { FsReadResponse, GitFileDiff } from "@opengeni/sdk";
 import { FileIcon } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
@@ -7,6 +7,7 @@ import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
 import { FileBrowser } from "./file-browser";
 import { DiffView } from "./diff-view";
 import { PierreDiff } from "./pierre-diff";
+import { PierreFile } from "./pierre-file";
 
 export type SandboxFilesProps = {
   /** From `useSandboxFiles(...)`. */
@@ -92,10 +93,20 @@ export function SandboxFiles({
   const changed = activeGit.diff;
   const changedPaths = useMemo(() => new Set(changed.map((f) => f.path)), [changed]);
 
-  // Default the selection to the first changed file once a diff lands.
-  const effectiveSelected =
-    selected && changedPaths.has(selected) ? selected : changed[0]?.path ?? null;
-  const selectedFile = changed.find((f) => f.path === effectiveSelected) ?? null;
+  // The selection is EITHER a changed file (-> diff pane) or any tree file
+  // (-> read-only viewer pane). An explicit pick wins; otherwise default to the
+  // first changed file so a review-first dock opens on a diff. Crucially this is
+  // NOT gated on a repo: with no changes (or no repo) the pane simply waits for a
+  // tree click, and a clicked tree file always resolves to the viewer.
+  const effectiveSelected = selected ?? changed[0]?.path ?? null;
+  const selectedDiff = changed.find((f) => f.path === effectiveSelected) ?? null;
+  // A selected path that is not a changed file is viewed (fs.read), not diffed.
+  const viewPath = effectiveSelected && !selectedDiff ? effectiveSelected : null;
+
+  // Read the selected file's contents for the viewer pane (text/base64). The
+  // hook caps size + flags binary; we surface a notice for binary rather than
+  // dumping base64 into the highlighter.
+  const fileView = useFileView(viewPath, files.readFile);
 
   if (!fileSystemAvailable) {
     return (
@@ -185,10 +196,12 @@ export function SandboxFiles({
         >
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1">
             <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[11px] text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]">
-              {selectedFile ? selectedFile.path : "No file selected"}
+              {effectiveSelected ?? "No file selected"}
             </span>
             <div className="flex shrink-0 items-center gap-1">
-              {stagedGit && (
+              {/* The Working/Staged + Unified/Split toggles only apply to a diff.
+                  Hide them in the read-only viewer (a non-changed tree file). */}
+              {selectedDiff && stagedGit && (
                 <Segmented
                   options={[
                     { value: "working", label: "Working tree" },
@@ -198,38 +211,71 @@ export function SandboxFiles({
                   onChange={(v) => setStaged(v === "staged")}
                 />
               )}
-              <Segmented
-                options={[
-                  { value: "unified", label: "Unified" },
-                  { value: "split", label: "Split" },
-                ]}
-                value={layout}
-                onChange={(v) => setLayout(v as "unified" | "split")}
-              />
+              {selectedDiff && (
+                <Segmented
+                  options={[
+                    { value: "unified", label: "Unified" },
+                    { value: "split", label: "Split" },
+                  ]}
+                  value={layout}
+                  onChange={(v) => setLayout(v as "unified" | "split")}
+                />
+              )}
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
-            {selectedFile ? (
+            {selectedDiff ? (
+              // A changed file -> diff pane (HEAD vs working/staged).
               usePierre ? (
                 <PierreDiff
-                  diff={[selectedFile]}
+                  diff={[selectedDiff]}
                   layout={layout}
                   themeType={resolvedTheme}
                   fallback={
-                    <DiffView diff={[selectedFile]} layout={layout} isRepo={git.isRepo} className="p-1" />
+                    <DiffView diff={[selectedDiff]} layout={layout} isRepo={git.isRepo} className="p-1" />
                   }
                   className="p-1"
                 />
               ) : (
-                <DiffView diff={[selectedFile]} layout={layout} isRepo={git.isRepo} className="p-1" />
+                <DiffView diff={[selectedDiff]} layout={layout} isRepo={git.isRepo} className="p-1" />
+              )
+            ) : viewPath ? (
+              // Any other tree file -> read-only single-file viewer (fs.read).
+              // This works with NO repo — viewing files never requires git.
+              fileView.error ? (
+                <Notice>Could not open {viewPath}: {fileView.error.message}</Notice>
+              ) : fileView.loading ? (
+                <Notice>Loading {viewPath}…</Notice>
+              ) : fileView.isBinary ? (
+                <Notice>{viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).</Notice>
+              ) : fileView.content !== null ? (
+                usePierre ? (
+                  <PierreFile
+                    path={viewPath}
+                    contents={fileView.content}
+                    themeType={resolvedTheme}
+                    fallback={
+                      <pre className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px]">
+                        {fileView.content}
+                      </pre>
+                    }
+                    className="p-1"
+                  />
+                ) : (
+                  <pre className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px]">
+                    {fileView.content}
+                  </pre>
+                )
+              ) : (
+                <Notice>Loading {viewPath}…</Notice>
               )
             ) : (
+              // Nothing selected — never claim a repo is required; the tree shows
+              // the whole workspace regardless of git.
               <Notice>
-                {git.isRepo
-                  ? changed.length === 0
-                    ? "No changes — the working tree is clean."
-                    : "Select a changed file to review its diff."
-                  : "No repository mounted."}
+                {changed.length > 0
+                  ? "Select a changed file to review its diff, or a file in the tree to view it."
+                  : "Select a file in the tree to view it."}
               </Notice>
             )}
           </div>
@@ -324,6 +370,86 @@ function useThemeType(forced: "dark" | "light" | undefined): "dark" | "light" {
     return () => observer.disconnect();
   }, [forced]);
   return forced ?? detected;
+}
+
+type FileViewState = {
+  content: string | null;
+  isBinary: boolean;
+  sizeBytes: number | null;
+  loading: boolean;
+  error: Error | null;
+};
+
+/**
+ * Read a file's contents for the viewer pane. Calls `fs.read` (text by default;
+ * the backend flags binary), decodes a base64 payload if one comes back, and
+ * exposes loading/error/binary state. Re-fetches when the path changes; ignores
+ * a stale resolve after the selection moves on.
+ */
+function useFileView(
+  path: string | null,
+  readFile: (path: string) => Promise<FsReadResponse>,
+): FileViewState {
+  const [state, setState] = useState<FileViewState>({
+    content: null,
+    isBinary: false,
+    sizeBytes: null,
+    loading: false,
+    error: null,
+  });
+  useEffect(() => {
+    if (!path) {
+      setState({ content: null, isBinary: false, sizeBytes: null, loading: false, error: null });
+      return;
+    }
+    let cancelled = false;
+    setState({ content: null, isBinary: false, sizeBytes: null, loading: true, error: null });
+    void readFile(path)
+      .then((res) => {
+        if (cancelled) return;
+        const content = res.isBinary
+          ? null
+          : res.encoding === "base64"
+            ? decodeBase64Utf8(res.content)
+            : res.content;
+        setState({
+          content,
+          isBinary: res.isBinary,
+          sizeBytes: res.sizeBytes,
+          loading: false,
+          error: null,
+        });
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setState({
+          content: null,
+          isBinary: false,
+          sizeBytes: null,
+          loading: false,
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, readFile]);
+  return state;
+}
+
+/** Decode a base64 payload to a UTF-8 string (browser `atob` + TextDecoder). */
+function decodeBase64Utf8(b64: string): string {
+  try {
+    if (typeof atob === "function") {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+  } catch {
+    /* fall through to returning the raw payload */
+  }
+  return b64;
 }
 
 function Notice({ children, className }: { children: ReactNode; className?: string | undefined }) {

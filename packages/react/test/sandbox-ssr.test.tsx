@@ -22,7 +22,7 @@ import { SandboxTerminal } from "../src/components/sandbox-terminal";
 describe("SSR safety (no DOM / no window)", () => {
   test("SandboxTerminal renders to a string on the server (placeholder, no xterm import)", () => {
     const html = renderToString(
-      <SandboxTerminal result={{ chunks: [], running: false, write: null, activePtyId: null }} placeholder="loading" />,
+      <SandboxTerminal result={{ chunks: [], running: false, write: null, activePtyId: null, close: () => {}, error: null }} placeholder="loading" />,
     );
     // The placeholder is present; xterm is NOT imported during the server render
     // (the import lives inside useEffect, which does not run during SSR).

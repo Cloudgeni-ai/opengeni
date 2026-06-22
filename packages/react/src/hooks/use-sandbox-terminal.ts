@@ -4,7 +4,7 @@ import type {
   TerminalPtyExitedPayload,
   TerminalPtyOutputDeltaPayload,
 } from "@opengeni/sdk";
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
 export type TerminalChunk = {
@@ -27,6 +27,15 @@ export type UseSandboxTerminalOptions = ClientOverride & {
   /** Include the agent's command-output firehose (sandbox.command.output.delta).
    *  Default true — the read-only "terminal-as-events" the data path settled on. */
   includeAgentFirehose?: boolean | undefined;
+  /**
+   * OPEN an interactive PTY against the box so the user can type, not just watch.
+   * When true (and the session is live) the hook calls `terminalPtyOpen` once,
+   * tracks the returned ptyId, exposes `write` immediately (bound to that ptyId),
+   * and closes the PTY on unmount. The PTY's banner + every output delta ride the
+   * SSE spine (`terminal.pty.*`) back into `events`, so xterm fills in. Default
+   * false — a caller that only wants the read-only firehose stays projection-only.
+   */
+  interactive?: boolean | undefined;
 };
 
 export type UseSandboxTerminalResult = {
@@ -42,6 +51,10 @@ export type UseSandboxTerminalResult = {
   write: ((data: string) => void) | null;
   /** The active PTY id, if one is open. */
   activePtyId: string | null;
+  /** Close the active PTY (no-op when none is open). */
+  close: () => void;
+  /** A PTY-open failure (interactive mode), if any. */
+  error: Error | null;
 };
 
 /**
@@ -58,7 +71,48 @@ export function useSandboxTerminal(
 ): UseSandboxTerminalResult {
   const { client, workspaceId } = useOpenGeni(options);
   const includeAgentFirehose = options.includeAgentFirehose ?? true;
+  const interactive = options.interactive ?? false;
+  // When the caller controls a fixed ptyId we project that one; otherwise (the
+  // interactive default) the hook opens its OWN PTY and tracks it here so `write`
+  // is live before the `terminal.pty.started` event round-trips through SSE.
   const ptyFilter = options.ptyId;
+  const [openedPtyId, setOpenedPtyId] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<Error | null>(null);
+
+  // Open ONE interactive PTY against the box (once per session), close it on
+  // unmount/identity change. The open's banner + subsequent output deltas ride
+  // A1, so xterm fills from `events` — we don't thread the open's body output
+  // here (the SSE projection is the single source of truth for what's written).
+  const openInFlight = useRef(false);
+  useEffect(() => {
+    if (!interactive || !sessionId || ptyFilter) return;
+    let cancelled = false;
+    openInFlight.current = true;
+    let openedId: string | null = null;
+    void client
+      .terminalPtyOpen(workspaceId, sessionId, {})
+      .then((res) => {
+        if (cancelled) {
+          // Raced past unmount — close the orphan we just opened.
+          void client.terminalPtyClose(workspaceId, sessionId, { ptyId: res.ptyId }).catch(() => {});
+          return;
+        }
+        openedId = res.ptyId;
+        setOpenedPtyId(res.ptyId);
+      })
+      .catch((cause) => {
+        if (!cancelled) setOpenError(cause instanceof Error ? cause : new Error(String(cause)));
+      })
+      .finally(() => {
+        openInFlight.current = false;
+      });
+    return () => {
+      cancelled = true;
+      setOpenedPtyId(null);
+      const id = openedId;
+      if (id) void client.terminalPtyClose(workspaceId, sessionId, { ptyId: id }).catch(() => {});
+    };
+  }, [interactive, client, workspaceId, sessionId, ptyFilter]);
 
   const { chunks, openPty, supportsInput } = useMemo(() => {
     const out: TerminalChunk[] = [];
@@ -114,17 +168,33 @@ export function useSandboxTerminal(
     return { chunks: out, openPty: activePty, supportsInput: lastSupportsInput };
   }, [options.events, ptyFilter, includeAgentFirehose]);
 
+  // The PTY this hook actively drives: the one it opened (interactive) wins so
+  // `write` is live the instant the open resolves — even before the
+  // `terminal.pty.started` event arrives through SSE. Fall back to whatever the
+  // event projection found (a PTY opened elsewhere, or a caller-pinned ptyId).
+  const activePtyId = openedPtyId ?? openPty;
+  // An interactively-opened PTY accepts stdin by construction (we only open it on
+  // a pty-capable backend); a projected PTY uses its advertised supportsInput.
+  const canWrite = openedPtyId !== null || supportsInput;
+
   const write = useMemo(() => {
-    if (!openPty || !supportsInput || !sessionId) return null;
+    if (!activePtyId || !canWrite || !sessionId) return null;
     return (data: string) => {
-      void client.terminalPtyWrite(workspaceId, sessionId, { ptyId: openPty, data }).catch(() => {});
+      void client.terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data }).catch(() => {});
     };
-  }, [client, workspaceId, sessionId, openPty, supportsInput]);
+  }, [client, workspaceId, sessionId, activePtyId, canWrite]);
+
+  const close = useCallback(() => {
+    if (!activePtyId || !sessionId) return;
+    void client.terminalPtyClose(workspaceId, sessionId, { ptyId: activePtyId }).catch(() => {});
+  }, [client, workspaceId, sessionId, activePtyId]);
 
   return {
     chunks,
-    running: openPty !== null,
+    running: activePtyId !== null,
     write,
-    activePtyId: openPty,
+    activePtyId,
+    close,
+    error: openError,
   };
 }

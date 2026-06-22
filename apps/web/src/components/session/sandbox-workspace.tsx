@@ -47,11 +47,15 @@ export function useSandboxWorkspaceTabs({
   const [watchDesktop, setWatchDesktop] = useState(false);
 
   const caps = useSessionCapabilities(sessionId, { events, attachDesktop: watchDesktop });
-  const terminal = useSandboxTerminal(sessionId, { events });
   const capabilities = caps.capabilities;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = (capabilities?.Terminal.transport ?? null) !== null;
+  // Open a real interactive PTY against the box once the backend advertises one
+  // (pty-capable). This is what makes the terminal typeable rather than a
+  // read-only firehose: the open spins/resumes the box and its output rides SSE.
+  const ptyCapable = capabilities?.Terminal.ptyCapable ?? false;
+  const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable });
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
