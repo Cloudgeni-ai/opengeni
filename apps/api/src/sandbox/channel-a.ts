@@ -35,6 +35,7 @@ import { HTTPException } from "hono/http-exception";
 
 import {
   establishSandboxSessionFromEnvelope,
+  serializeEstablishedSandboxEnvelope,
   SandboxChannelAService,
   ChannelAConflictError,
   ChannelANotFoundError,
@@ -138,6 +139,11 @@ export async function withChannelA<T>(
         await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
         throw new HTTPException(409, { message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})` });
       }
+      // Persist the LIVE box as the lease's resume_state so the NEXT op resumes
+      // this box by id rather than cold-creating a rival (the box-churn the
+      // prove-it surfaced). Fall back to the session envelope when serialize is
+      // unavailable.
+      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId,
         workspaceId,
@@ -146,7 +152,7 @@ export async function withChannelA<T>(
         instanceId: established.instanceId,
         dataPlaneUrl: acquired.lease.dataPlaneUrl,
         resumeBackendId: established.backendId,
-        resumeState: envelope ?? null,
+        resumeState: resumeEnvelope,
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -203,14 +209,17 @@ export function mapChannelAError(error: unknown): unknown {
   return error;
 }
 
+// Drop a transiently-established, NON-OWNED handle WITHOUT terminating the box.
+// The box is owned by the LEASE (resumed by id); this handle is incidental.
+//
+// CRITICAL (deployed-integration bug, prove-it D2): a provider session's
+// `close()` is NOT a neutral local-resource free — Modal's session.close() calls
+// sandbox.terminate(), KILLING THE BOX. Calling it after each Channel-A op
+// destroyed the box mid-flight, so a subsequent fs.read/git/exec hit a different
+// (cold-restored) box and 404'd. We DO NOT close the session; only the reaper
+// (provider stop at refcount 0) terminates a box.
 async function dropEstablishedHandle(established: EstablishedSandboxSession | undefined): Promise<void> {
-  if (!established) return;
-  const session = established.session as { close?: () => Promise<void> } | undefined;
-  if (session && typeof session.close === "function") {
-    try {
-      await session.close();
-    } catch {
-      // non-owned handle; the lease owns lifecycle.
-    }
-  }
+  // No-op beyond dropping the reference: the lease owns lifecycle, the reaper
+  // owns teardown. Never session.close()/terminate() a non-owned handle here.
+  void established;
 }

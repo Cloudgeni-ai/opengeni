@@ -44,6 +44,7 @@ import {
   establishSandboxSessionFromEnvelope,
   exposeStreamPort,
   desktopCapableBackend,
+  serializeEstablishedSandboxEnvelope,
   DisplayStackUnsupportedError,
   StreamPortUnavailableError,
   type EstablishedSandboxSession,
@@ -137,6 +138,12 @@ export async function attachViewer(
         sessionId: session.id,
         backendOverride: session.sandboxBackend,
       });
+      // Fold the LIVE box into a re-resumable envelope and persist it as the
+      // lease's resume_state, so EVERY later op (another viewer, a Channel-A
+      // call, the reaper) resumes THIS box by id instead of cold-creating a
+      // rival. Fall back to the session envelope only when serialize is
+      // unavailable. (Without this the box churned: each op spawned its own box.)
+      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId,
         workspaceId,
@@ -146,7 +153,7 @@ export async function attachViewer(
         // The desktop tunnel-URL mint is P4; record null for now.
         dataPlaneUrl: null,
         resumeBackendId: established.backendId,
-        resumeState: envelope ?? null,
+        resumeState: resumeEnvelope,
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -249,22 +256,24 @@ function viewerHeartbeatIntervalMs(settings: Settings): number {
   return Math.max(5_000, Math.floor(settings.sandboxViewerHolderTtlMs / 2));
 }
 
-// Best-effort drop of a transiently-established handle (the cold-spawn path).
-// The box is NON-OWNED by id, so closing the local handle never terminates it;
-// we just free the in-process resources. Swallow errors — a failed close must
-// not fail the attach (the lease holder already keeps the box warm).
+// Drop a transiently-established, NON-OWNED handle. The box is owned by the LEASE
+// (resumed by id), not by this in-process handle, so we MUST NOT terminate it on
+// drop — we only release the local reference and let GC reclaim the client's
+// transport. This mirrors the worker's resume-by-id path (sandbox-resume.ts),
+// which injects the session NON-OWNED and never closes it.
+//
+// CRITICAL (deployed-integration bug, prove-it D1/D2/D5): a provider session's
+// `close()` is NOT a neutral "free local resources" call. For Modal,
+// `ModalSandboxSession.close()` calls `sandbox.terminate()` — it KILLS THE BOX.
+// Calling it here terminated the very box the lease had just committed warm, so
+// every viewer attach / Channel-A op spawned a box and immediately destroyed it
+// (the lease showed warm while Modal showed the box gone; reads 404'd against a
+// fresh box). We therefore DO NOT call session.close()/shutdown()/delete() — the
+// reaper (provider stop at refcount 0) is the ONLY sanctioned box terminator.
 async function dropEstablishedHandle(established: EstablishedSandboxSession | undefined): Promise<void> {
-  if (!established) {
-    return;
-  }
-  const session = established.session as { close?: () => Promise<void> } | undefined;
-  if (session && typeof session.close === "function") {
-    try {
-      await session.close();
-    } catch {
-      // non-owned handle; the lease owns lifecycle.
-    }
-  }
+  // Intentionally a no-op beyond dropping the reference: terminating the box here
+  // is wrong (see above). The lease owns lifecycle; the reaper owns teardown.
+  void established;
 }
 
 // ============================================================================
