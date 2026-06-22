@@ -23,6 +23,7 @@ import { SandboxAgent } from "@openai/agents/sandbox";
 import { ScriptedModel, functionCall, assistantMessage } from "@opengeni/testing";
 import { testSettings } from "@opengeni/testing";
 import {
+  buildManifest,
   buildOpenGeniAgent,
   runAgentStream,
   createSandboxClientForBackend,
@@ -161,6 +162,54 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     });
     expect(established.backendId).toBe("unix_local");
     await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
+  });
+
+  test("the box is created with the SAME manifest environment the agent declares (no provided-session env delta)", async () => {
+    // BUG-1 regression (the turn-killer). The box is injected NON-OWNED and the
+    // SDK then applies the AGENT's declared manifest to it as a provided-session
+    // delta; applyManifestToProvidedSession throws on ANY environment delta. So
+    // the box's manifest environment MUST equal the agent's declared environment.
+    // The agent declares buildManifest(...).environment === sandboxEnvironment;
+    // here we prove establishSandboxSessionFromEnvelope, given that same env via
+    // opts.environment, creates a box whose manifest carries exactly that env.
+    const settings = localSettings();
+    // The minimal real-world delta the live failure surfaced even with NO
+    // workspace env: stable git identity + HOME (plus an arbitrary extra var).
+    const sandboxEnvironment: Record<string, string> = {
+      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_EMAIL: "bot@opengeni.dev",
+      HOME: "/workspace",
+      MY_VAR: "value-123",
+    };
+
+    // The agent's declared manifest (what the SDK compares the box against).
+    const agentManifest = buildManifest(settings, [], sandboxEnvironment);
+    const agentEnv = Object.fromEntries(
+      Object.entries(agentManifest.environment).map(([k, v]) => [k, (v as { value?: string }).value]),
+    );
+
+    const established = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: "sess-env",
+      backendOverride: "local",
+      environment: sandboxEnvironment,
+    });
+    try {
+      const boxManifest = (established.session as { state: { manifest: { environment: Record<string, { value?: string }> } } }).state.manifest;
+      const boxEnv = Object.fromEntries(
+        Object.entries(boxManifest.environment).map(([k, v]) => [k, v.value]),
+      );
+      // Every variable the agent declares is present on the box manifest with the
+      // identical value -> serializeManifestEnvironment(box) has no delta vs the
+      // agent's, so validateNoEnvironmentDelta passes.
+      for (const [key, value] of Object.entries(agentEnv)) {
+        expect(boxEnv[key]).toBe(value);
+      }
+      // And the box declares the same manifest root the agent does (the root-delta
+      // guard also fires on a mismatch).
+      expect((boxManifest as unknown as { root: string }).root).toBe((agentManifest as unknown as { root: string }).root);
+    } finally {
+      await (established.session as { close: () => Promise<void> }).close().catch(() => undefined);
+    }
   });
 });
 

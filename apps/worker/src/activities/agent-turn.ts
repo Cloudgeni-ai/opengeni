@@ -347,12 +347,78 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // activity retry reuses the same activityId, so its re-emitted calls keep
       // deduping (no double charge).
       const dispatchId = activityContext?.info.activityId ?? null;
+      publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
+        const inputs = events.map((event) => ({
+          ...event,
+          payload: redact(event.payload),
+          turnId: turnId!,
+          producerId,
+          producerSeq: ++producerSeq,
+        }));
+        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs);
+        activityContext?.heartbeat({ phase: "events_published", sessionId: input.sessionId, turnId, producerSeq });
+        if (immediate) {
+          await Bun.sleep(0);
+        }
+      };
+      activityContext?.heartbeat({ phase: "turn_started", sessionId: input.sessionId, turnId });
+
+      // A shutdown that landed during claim/billing setup preempts before the
+      // turn visibly starts: nothing ran yet, so the requeued turn replays the
+      // original trigger cleanly on a healthy worker.
+      throwIfWorkerShuttingDown();
+      await setSessionStatus(db, input.workspaceId, input.sessionId, "running", turnId);
+      await publish([
+        { type: "session.status.changed", payload: { status: "running" } },
+        { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
+      ], true);
+      turnStartedPublished = true;
+
+      // Pack-scoped runtime: enabled packs may declare the sandbox image this
+      // workspace's sessions run in and skills for the sandbox skill index.
+      // Resolved after turn.started so a composition conflict (two enabled
+      // packs declaring images) fails the turn with its plain error instead
+      // of failing the activity opaquely.
+      const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+      // Workspace tier of the agent-persona resolution (session > workspace >
+      // deployment default). null means the workspace has no override, so the
+      // runtime falls back to runSettings.agentInstructionsTemplate (the
+      // deployment default, byte-identical to the historical preamble).
+      const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
+      const runSettings = {
+        ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
+        openaiModel: turn.model,
+        openaiReasoningEffort: turn.reasoningEffort,
+        sandboxBackend: turn.sandboxBackend,
+      };
+      const turnResources = mergeResourceRefs(session.resources, turn.resources);
+      const turnTools = mergeToolRefs(session.tools, turn.tools);
+      const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
+      environmentId = workspaceEnvironment?.id ?? "";
+      redact = createSecretRedactor(
+        Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
+      );
+      // Computed exactly ONCE per turn and reused for BOTH the box manifest
+      // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
+      // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
+      // run-scoped GitHub installation token on every call, so a second call would
+      // yield a DIFFERENT token value and re-introduce the manifest-env delta the
+      // SDK's provided-session guard throws on — the box and the agent MUST share
+      // this same object.
+      const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources, workspaceEnvironment?.values ?? {});
+
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
       // takes the legacy per-run build-and-discard path — byte-for-byte today.
       // With it on, acquire the group lease ('turn' holder = the activityId),
       // resume the one box by id, and inject it NON-OWNED into the run. The box
       // backend is "none" -> never resolve (no box to touch).
+      //
+      // Established AFTER sandboxEnvironment is computed (not before) so the box's
+      // manifest is created with the SAME environment the agent declares — the SDK
+      // applies the agent's manifest to this provided session and throws on ANY
+      // environment delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
+      // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
         sandboxHolderId = dispatchId ?? `turn:${turnId}`;
         sandboxGroupId = session.sandboxGroupId;
@@ -365,6 +431,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionId: input.sessionId,
             backend: turn.sandboxBackend,
             os: session.sandboxOs,
+            environment: sandboxEnvironment,
           },
           "turn",
           sandboxHolderId,
@@ -406,32 +473,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           leaseHeartbeatTimer.unref();
         }
       }
-      publish = async (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate = false) => {
-        const inputs = events.map((event) => ({
-          ...event,
-          payload: redact(event.payload),
-          turnId: turnId!,
-          producerId,
-          producerSeq: ++producerSeq,
-        }));
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs);
-        activityContext?.heartbeat({ phase: "events_published", sessionId: input.sessionId, turnId, producerSeq });
-        if (immediate) {
-          await Bun.sleep(0);
-        }
-      };
-      activityContext?.heartbeat({ phase: "turn_started", sessionId: input.sessionId, turnId });
-
-      // A shutdown that landed during claim/billing setup preempts before the
-      // turn visibly starts: nothing ran yet, so the requeued turn replays the
-      // original trigger cleanly on a healthy worker.
-      throwIfWorkerShuttingDown();
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "running", turnId);
-      await publish([
-        { type: "session.status.changed", payload: { status: "running" } },
-        { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
-      ], true);
-      turnStartedPublished = true;
 
       // P4.3 on-turn recording. The box's :0 display stack was brought up by
       // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
@@ -467,31 +508,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      // Pack-scoped runtime: enabled packs may declare the sandbox image this
-      // workspace's sessions run in and skills for the sandbox skill index.
-      // Resolved after turn.started so a composition conflict (two enabled
-      // packs declaring images) fails the turn with its plain error instead
-      // of failing the activity opaquely.
-      const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
-      // Workspace tier of the agent-persona resolution (session > workspace >
-      // deployment default). null means the workspace has no override, so the
-      // runtime falls back to runSettings.agentInstructionsTemplate (the
-      // deployment default, byte-identical to the historical preamble).
-      const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
-      const runSettings = {
-        ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
-        openaiModel: turn.model,
-        openaiReasoningEffort: turn.reasoningEffort,
-        sandboxBackend: turn.sandboxBackend,
-      };
-      const turnResources = mergeResourceRefs(session.resources, turn.resources);
-      const turnTools = mergeToolRefs(session.tools, turn.tools);
-      const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
-      environmentId = workspaceEnvironment?.id ?? "";
-      redact = createSecretRedactor(
-        Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
-      );
-      const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources, workspaceEnvironment?.values ?? {});
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
       throwIfWorkerShuttingDown();
       preparedTools = await runtime.prepareTools(runSettings, turnTools, {

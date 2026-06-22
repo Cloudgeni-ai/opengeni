@@ -155,14 +155,23 @@ afterAll(async () => {
 });
 
 describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real lease + RLS)", () => {
-  test("(1) FLAG-ON slice: spawner wins cold->warming, establishes, commits warm, returns a LIVE session; release -> draining", async () => {
+  test("(1) FLAG-ON slice: spawner wins cold->warming, establishes (box manifest carries the threaded env), commits warm, returns a LIVE session; release -> draining", async () => {
     if (!available) return;
     const settings = settingsFor(true);
     const { accountId, workspaceId, groupId } = await freshWorkspace();
 
+    // The SAME env object the agent will declare for this run. Threaded into
+    // resumeBoxForTurn so the box manifest matches the agent manifest (no
+    // provided-session env delta — the BUG-1 turn-killer fix).
+    const sandboxEnvironment = {
+      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      HOME: "/workspace",
+      MY_VAR: "value-xyz",
+    };
+
     const resumed = await resumeBoxForTurn(
       { db, settings },
-      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: sandboxEnvironment },
       "turn",
       "activity-1",
     );
@@ -171,6 +180,15 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       expect(resumed.established.backendId).toBe("unix_local");
       expect(resumed.established.session).toBeDefined();
       expect(resumed.leaseEpoch).toBeGreaterThanOrEqual(1);
+
+      // The box was created with the threaded environment on its manifest, so the
+      // SDK's provided-session manifest apply finds an empty environment delta.
+      const boxManifestEnv = (resumed.established.session as {
+        state: { manifest: { environment: Record<string, { value?: string }> } };
+      }).state.manifest.environment;
+      for (const [key, value] of Object.entries(sandboxEnvironment)) {
+        expect(boxManifestEnv[key]?.value).toBe(value);
+      }
 
       const warm = await readRow(workspaceId, groupId);
       expect(warm?.liveness).toBe("warm");

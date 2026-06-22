@@ -66,6 +66,17 @@ export type ResumeBoxIds = {
   backend: string;
   /** The OS axis (sessions.sandbox_os); default 'linux'. */
   os?: string;
+  /**
+   * The FULL environment the agent will declare for this run (the SAME object
+   * passed to runtime.buildAgent's `sandboxEnvironment`). The box's manifest is
+   * created with this environment so that when the SDK applies the agent's
+   * manifest to this NON-OWNED provided session, the environments match exactly
+   * and `validateNoEnvironmentDelta` finds an empty delta (otherwise it throws
+   * "Live sandbox sessions cannot change manifest environment variables" and the
+   * turn dies). Omitted → the leaf falls back to collectSandboxEnvironment(settings)
+   * (the legacy default; only the resume/spawn-without-an-agent callers rely on it).
+   */
+  environment?: Record<string, string>;
 };
 
 /** What resumeBoxForTurn returns: the live NON-OWNED session to inject, the
@@ -155,6 +166,7 @@ export async function resumeBoxForTurn(
       const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
         sessionId: ids.sessionId,
         backendOverride: ids.backend as never,
+        ...(ids.environment ? { environment: ids.environment } : {}),
       });
       await ensureDisplayStack(settings, established);
       const endpoint = await exposeStreamPort(settings, established);
@@ -209,6 +221,7 @@ export async function resumeBoxForTurn(
     const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
       sessionId: ids.sessionId,
       backendOverride: ids.backend as never,
+      ...(ids.environment ? { environment: ids.environment } : {}),
     });
     return { established, leaseEpoch, release };
   } catch (error) {

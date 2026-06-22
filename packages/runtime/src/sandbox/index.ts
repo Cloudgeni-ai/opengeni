@@ -435,6 +435,19 @@ export async function establishSandboxSessionFromEnvelope(
     throw new SandboxConfigError(backend, `Sandbox backend "${backend}" does not support create()`);
   }
 
+  // The manifest the box is CREATED with. Its `environment` must equal the
+  // environment the agent declares for this run (buildManifest's `environment`),
+  // because the SDK injects this box NON-OWNED and then applies the agent's
+  // manifest as a provided-session delta — `applyManifestToProvidedSession`
+  // throws on ANY environment delta (validateNoEnvironmentDelta). The client's
+  // constructor `env` materializes the RUNTIME env but does NOT populate
+  // `manifest.environment` (a bare create() yields `new Manifest()` with an empty
+  // environment), so the manifest env must be set here explicitly. `root` is left
+  // to default to "/workspace" to match buildManifest's declared root (the
+  // root-delta guard). The caller threads `opts.environment` = the SAME object
+  // passed to runtime.buildAgent, so current==target and the delta is empty.
+  const createManifest = { environment };
+
   // The serialized provider state the box was last persisted as. The envelope
   // shape is the per-turn `_sandbox` entry; its `sessionState` is the provider
   // payload deserializeSandboxSessionStateEnvelope re-hydrates.
@@ -466,8 +479,8 @@ export async function establishSandboxSessionFromEnvelope(
         // fall back to a fresh box from the manifest the client was built with.
         const snapshot = (resumedState as { snapshot?: unknown } | undefined)?.snapshot;
         const restored = snapshot !== undefined
-          ? await client.create({ snapshot })
-          : await client.create();
+          ? await client.create({ snapshot, manifest: createManifest })
+          : await client.create({ manifest: createManifest });
         const restoredState = (restored as { state?: unknown }).state;
         return { client, session: restored, sessionState: restoredState ?? resumedState, instanceId: readInstanceId(restored), backendId: client.backendId };
       }
@@ -475,7 +488,68 @@ export async function establishSandboxSessionFromEnvelope(
   }
 
   // (b) COLD SESSION (no envelope / no resumable state) — create a fresh box.
-  const created = await client.create();
+  const created = await client.create({ manifest: createManifest });
   const createdState = (created as { state?: unknown }).state;
   return { client, session: created, sessionState: createdState, instanceId: readInstanceId(created), backendId: client.backendId };
+}
+
+// A client that can SERIALIZE a live session state back to the persistable
+// envelope form (the inverse of deserializeSessionState). Narrowed so the leaf
+// stays agent-loop-free.
+type SerializeCapableClient = {
+  backendId: string;
+  serializeSessionState?: (state: unknown, options?: unknown) => Promise<Record<string, unknown>>;
+};
+
+/**
+ * Fold a freshly-established (or resumed) sandbox session into the persistable
+ * `resume_state` envelope the lease stores — the SAME `{ backendId, sessionState }`
+ * shape `establishSandboxSessionFromEnvelope` consumes to RESUME BY ID. The
+ * API-direct control plane (viewer attach / Channel-A) MUST persist this onto the
+ * lease at warm-commit time, or a later op (which reads the lease's resume_state)
+ * has nothing to resume from and COLD-CREATES A RIVAL BOX — the box-churn the
+ * prove-it surfaced (fs.write then fs.read 404'd on a different box; N Channel-A
+ * ops leaked N boxes). Returns null when the client cannot serialize (the caller
+ * stores null and the box rides the provider idle-timeout — no rival spawn, just
+ * no warm-reattach).
+ */
+export async function serializeEstablishedSandboxEnvelope(
+  established: EstablishedSandboxSession,
+): Promise<Record<string, unknown> | null> {
+  const client = established.client as SerializeCapableClient | undefined;
+  if (!client || typeof client.serializeSessionState !== "function") {
+    return null;
+  }
+  if (established.sessionState === undefined || established.sessionState === null) {
+    return null;
+  }
+  try {
+    // serializeSessionState returns the PERSISTABLE FLAT provider state — for
+    // Modal `{ sandboxId, appName, imageTag, manifest(serialized),
+    // configuredExposedPorts, ... }` (sandboxId preserved via `...state`).
+    const serialized = await client.serializeSessionState(established.sessionState);
+
+    // deserializeSandboxSessionStateEnvelope expects the lease-envelope shape
+    // `{ providerState, manifest, snapshot?, exposedPorts?, workspaceReady }` and
+    // rehydrates `{ ...providerState, manifest, snapshot?, exposedPorts?,
+    // workspaceReady }`. So the FLAT serialized state must be nested under
+    // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
+    // round-trip and resume() throws "requires a persisted sandboxId". We pull
+    // manifest/exposedPorts up but leave them in providerState too (harmless; the
+    // deserialize spreads providerState first, then overlays manifest/ports).
+    const flat = serialized as Record<string, unknown>;
+    const manifest = flat.manifest;
+    const exposedPorts = flat.configuredExposedPorts ?? flat.exposedPorts;
+    const sessionState: Record<string, unknown> = {
+      providerState: flat,
+      ...(manifest !== undefined ? { manifest } : {}),
+      ...(exposedPorts !== undefined ? { exposedPorts } : {}),
+      workspaceReady: true,
+    };
+    return { backendId: established.backendId, sessionState };
+  } catch {
+    // A serialize failure must NOT fail the attach/op; we just lose warm-reattach
+    // for this box (it stays resumable-by-instance only via the next cold path).
+    return null;
+  }
 }
