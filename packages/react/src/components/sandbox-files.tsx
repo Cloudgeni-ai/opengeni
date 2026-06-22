@@ -1,6 +1,6 @@
 import type { GitFileDiff } from "@opengeni/sdk";
 import { FileIcon } from "lucide-react";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import type { UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
@@ -67,6 +67,27 @@ export function SandboxFiles({
   const [staged, setStaged] = useState(false);
   const [layout, setLayout] = useState<"unified" | "split">("unified");
 
+  // Side-by-side (tree left, diff right) once the surface is wide enough;
+  // stacked (tree over diff) on a narrow dock. Tracked off the container so it
+  // reacts to the dock resize, not just the viewport.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      setWide(w >= 720);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Resolve the effective diff theme from the host palette (the `data-og-theme`
+  // attribute the demo/app sets), defaulting to dark, unless the caller forced
+  // one. Keeps the Pierre diff dark-on-dark instead of a white slab.
+  const resolvedTheme = useThemeType(themeType);
+
   const activeGit = staged && stagedGit ? stagedGit : git;
   const changed = activeGit.diff;
   const changedPaths = useMemo(() => new Set(changed.map((f) => f.path)), [changed]);
@@ -83,13 +104,21 @@ export function SandboxFiles({
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}>
+    <div ref={rootRef} className={cn("flex h-full min-h-0 min-w-0 flex-col", className)}>
       {/* Branch + dirty header */}
       <GitHeader git={git} dirtyCount={changedPaths.size} />
 
-      <div className="flex min-h-0 flex-1 flex-col">
-        {/* Top pane: Changes group + full tree */}
-        <div className="min-h-0 flex-1 overflow-auto">
+      <div className={cn("flex min-h-0 flex-1", wide ? "flex-row" : "flex-col")}>
+        {/* Tree pane: Changes group + full tree. A fixed left column when wide,
+            a top band when narrow. */}
+        <div
+          className={cn(
+            "min-h-0 overflow-auto",
+            wide
+              ? "w-[280px] shrink-0 border-r border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]"
+              : "flex-1",
+          )}
+        >
           {changed.length > 0 && (
             <div className="border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]">
               <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
@@ -144,8 +173,16 @@ export function SandboxFiles({
           />
         </div>
 
-        {/* Bottom pane: the selected file's diff */}
-        <div className="flex min-h-0 flex-[1.4] flex-col border-t border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]">
+        {/* Diff pane: the selected file's diff. Fills the remaining width when
+            side-by-side, sits below the tree when stacked. */}
+        <div
+          className={cn(
+            "flex min-h-0 min-w-0 flex-col",
+            wide
+              ? "flex-1"
+              : "flex-[1.4] border-t border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]",
+          )}
+        >
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1">
             <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[11px] text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]">
               {selectedFile ? selectedFile.path : "No file selected"}
@@ -177,7 +214,7 @@ export function SandboxFiles({
                 <PierreDiff
                   diff={[selectedFile]}
                   layout={layout}
-                  {...(themeType ? { themeType } : {})}
+                  themeType={resolvedTheme}
                   fallback={
                     <DiffView diff={[selectedFile]} layout={layout} isRepo={git.isRepo} className="p-1" />
                   }
@@ -261,6 +298,32 @@ function Segmented({
       ))}
     </div>
   );
+}
+
+/**
+ * Resolve the diff theme. An explicit prop wins; otherwise read the host's
+ * `data-og-theme` (set on `<html>` or an ancestor) and default to dark. Tracks
+ * live theme flips via a MutationObserver.
+ */
+function useThemeType(forced: "dark" | "light" | undefined): "dark" | "light" {
+  const [detected, setDetected] = useState<"dark" | "light">("dark");
+  useEffect(() => {
+    if (forced || typeof document === "undefined") return;
+    const read = () => {
+      const el = document.querySelector("[data-og-theme]");
+      const value = el?.getAttribute("data-og-theme");
+      setDetected(value === "light" ? "light" : "dark");
+    };
+    read();
+    const observer = new MutationObserver(read);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-og-theme"],
+      subtree: true,
+    });
+    return () => observer.disconnect();
+  }, [forced]);
+  return forced ?? detected;
 }
 
 function Notice({ children, className }: { children: ReactNode; className?: string | undefined }) {

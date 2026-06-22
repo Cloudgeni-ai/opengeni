@@ -84,12 +84,15 @@ export function PierreDiff({
     return <div className={className}>{fallback}</div>;
   }
 
+  // Default to the dark theme: the host UI is dark-first, and Pierre's own
+  // auto-detection otherwise lands on the light Shiki theme (a white diff pane
+  // inside a dark dock). Callers pass `themeType="light"` to opt into light.
   const options = {
     diffStyle: layout,
     overflow: "scroll" as const,
     stickyHeader: true,
     ...(theme ? { theme } : { theme: { dark: "github-dark", light: "github-light" } }),
-    ...(themeType ? { themeType } : {}),
+    themeType: themeType ?? "dark",
   };
 
   return (

@@ -725,6 +725,15 @@ async function streamText(bus: SessionBus, turnId: string, text: string, delayMs
 /** The hero narrative: a manager session orchestrating a worker. */
 async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   bus.setStatus("idle");
+  // Seed the Terminal surface up-front (an interactive PTY + a populated
+  // transcript) so the tab is live the moment the dock opens, instead of an
+  // empty read-only void until the narrative reaches the worker.
+  bus.append("terminal.pty.started", { ptyId: "00000000-0000-4000-8000-0000000000bb" });
+  bus.append("terminal.pty.output.delta", {
+    ptyId: "00000000-0000-4000-8000-0000000000bb",
+    stream: "stdout",
+    chunk: TERMINAL_TRANSCRIPT,
+  });
   bus.append("user.message", { text: "Set up a staging environment for the api service, then run a drift check on prod." });
   await sleep(500);
   bus.setStatus("running");
@@ -766,9 +775,6 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   await sleep(900);
   bus.append("sandbox.operation.completed", { name: "prepare" }, turn);
 
-  // Seed the Terminal surface: an interactive PTY + a little command firehose so
-  // the xterm-backed terminal tab renders real output in the headless harness.
-  bus.append("terminal.pty.started", { ptyId: "00000000-0000-4000-8000-0000000000bb" }, turn);
   bus.append(
     "sandbox.command.output.delta",
     { stream: "stdout", chunk: "$ kubectl get pods -n api-staging\r\nNAME                   READY   STATUS    RESTARTS   AGE\r\napi-7c9d4f8b6-2xk4q    1/1     Running   0          42s\r\napi-7c9d4f8b6-9mlz7    1/1     Running   0          42s\r\n$ [32mDeploy reachable at https://api-staging.acme.dev[0m\r\n" },
@@ -793,6 +799,35 @@ async function runOpsChannelScript(bus: SessionBus): Promise<void> {
   bus.append("turn.completed", {}, turn);
   bus.setStatus("idle");
 }
+
+/**
+ * A realistic interactive-PTY transcript for the Terminal tab: a couple of
+ * prompts, colorized output, and a trailing prompt with a block cursor so the
+ * surface reads as a live shell (not a dead black void) the instant it mounts.
+ * `[…m` are ANSI SGR codes; xterm renders them.
+ */
+const GREEN = "[32m";
+const CYAN = "[36m";
+const BOLD = "[1m";
+const DIM = "[2m";
+const RESET = "[0m";
+const TERMINAL_TRANSCRIPT = [
+  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ kubectl get pods -n api-staging`,
+  "NAME                   READY   STATUS    RESTARTS   AGE",
+  `api-7c9d4f8b6-2xk4q    1/1     ${GREEN}Running${RESET}   0          42s`,
+  `api-7c9d4f8b6-9mlz7    1/1     ${GREEN}Running${RESET}   0          42s`,
+  "",
+  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ curl -s https://api-staging.acme.dev/healthz`,
+  `${GREEN}{"status":"ok","db":"reachable","version":"a049964"}${RESET}`,
+  "",
+  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ ${BOLD}git status -sb${RESET}`,
+  `${CYAN}## feat/sandbox-dock...origin/feat/sandbox-dock [ahead 2, behind 1]${RESET}`,
+  ` ${GREEN}M${RESET} src/server.ts`,
+  ` ${GREEN}M${RESET} infra/main.tf`,
+  `${GREEN}A${RESET}  src/config.ts`,
+  "",
+  `${DIM}operator@api-staging${RESET}:${CYAN}~/api${RESET}$ `,
+].join("\r\n");
 
 /** A formatted "staging is live" report covering every common markdown element. */
 const MARKDOWN_REPORT = `## Staging is live

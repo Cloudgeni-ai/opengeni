@@ -124,7 +124,7 @@ export function WorkspaceDock({
         {...(defaultLayout ? { defaultLayout } : {})}
         onLayoutChanged={onLayoutChanged}
       >
-        <Panel id="primary" minSize={30} className="min-h-0 min-w-0">
+        <Panel id="primary" minSize="30%" className="min-h-0 min-w-0">
           {primary}
         </Panel>
 
@@ -138,12 +138,13 @@ export function WorkspaceDock({
           id="dock"
           panelRef={dockPanelRef}
           collapsible
-          collapsedSize={0}
-          defaultSize={defaultSize}
-          minSize={minSize}
-          maxSize={maxSize}
+          collapsedSize="0%"
+          defaultSize={`${defaultSize}%`}
+          minSize={`${minSize}%`}
+          maxSize={`${maxSize}%`}
           onResize={(size) => {
-            const isCollapsed = size.asPercentage <= 0.5;
+            // `asPercentage` is 0..100; treat a near-zero panel as collapsed.
+            const isCollapsed = size.asPercentage <= 1;
             setCollapsed((prev) => (prev !== isCollapsed ? isCollapsed : prev));
           }}
           className="min-h-0 min-w-0"

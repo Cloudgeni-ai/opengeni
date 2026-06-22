@@ -1,4 +1,5 @@
 import type { CapabilityUnavailableReason, DesktopRfbFactory, DesktopStreamCapability } from "@opengeni/sdk";
+import { MonitorIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
@@ -156,6 +157,19 @@ export function DesktopViewer({
         data-opengeni-desktop-canvas
         data-state={stream.state}
       />
+
+      {/* Idle scrim: a quiet "connecting to the desktop" state behind the canvas
+          so the surface never reads as a dead black rectangle before the first
+          framebuffer paints. Suppressed once connected or when an explicit
+          overlay (unavailable / consent / warming / error) is showing. */}
+      {!connected && !overlay && (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+          <MonitorIcon className="size-8 opacity-40" strokeWidth={1.5} />
+          <span className="text-xs">
+            {stream.state === "connecting" ? "Connecting to the desktop…" : "Watching the agent’s desktop"}
+          </span>
+        </div>
+      )}
 
       {/* Watch ⇄ Take control bar (top-right). Server-gated; framed when driving. */}
       {showToggle && (
