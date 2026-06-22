@@ -45,6 +45,8 @@ import {
   exposeStreamPort,
   desktopCapableBackend,
   serializeEstablishedSandboxEnvelope,
+  mintStreamToken,
+  STREAM_TOKEN_DEFAULT_TTL_SECONDS,
   DisplayStackUnsupportedError,
   StreamPortUnavailableError,
   type EstablishedSandboxSession,
@@ -363,6 +365,33 @@ export async function mintDesktopStream(
   // returns lease_cold; the viewer-attach path warms it first, then mints).
   if (lease.liveness !== "warm" && lease.liveness !== "draining") {
     return null;
+  }
+
+  // FAST PATH (P4.2 perf): when the lease already holds the data-plane URL for
+  // this epoch, the box is warm, exposed, and the display stack is already up.
+  // Re-resuming the box by id (Modal resume-by-id is ~40s) + re-running
+  // ensureDisplayStack + exposeStreamPort on EVERY stream-capabilities poll made
+  // the desktop look like it was "starting" forever. The tunnel URL is stable for
+  // the life of the (epoch-fenced) box, so mint ONLY a fresh scoped token (HMAC,
+  // sub-millisecond) against the cached URL and return — no box touch at all. A
+  // rollover advances the epoch and re-records dataPlaneUrl via the slow path, so
+  // a cached URL here is always the current epoch's live tunnel.
+  if (lease.dataPlaneUrl) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const token = await mintStreamToken(secret, {
+      workspaceId,
+      sessionId: session.id,
+      viewerId,
+      leaseEpoch: lease.leaseEpoch,
+      nowSeconds,
+    });
+    return {
+      url: lease.dataPlaneUrl,
+      token,
+      expiresAt: new Date((nowSeconds + STREAM_TOKEN_DEFAULT_TTL_SECONDS) * 1000).toISOString(),
+      resolution: defaultResolution(settings),
+      leaseEpoch: lease.leaseEpoch,
+    };
   }
 
   // Resume the LIVE box by id. The lease's resume_state is authoritative (it is
