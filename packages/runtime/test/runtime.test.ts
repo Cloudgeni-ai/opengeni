@@ -1247,10 +1247,40 @@ describe("provider item id stripping", () => {
     expect(message.id).toBe("msg_1");
   });
 
-  test("callModelInputFilterForSettings follows the configured policy", () => {
-    expect(callModelInputFilterForSettings(testSettings())).toBe(stripProviderItemIdsFilter);
-    expect(callModelInputFilterForSettings(testSettings({ openaiProviderItemIds: "strip" }))).toBe(stripProviderItemIdsFilter);
-    expect(callModelInputFilterForSettings(testSettings({ openaiProviderItemIds: "preserve" }))).toBeUndefined();
+  test("callModelInputFilterForSettings always normalizes computer_calls and strips ids per policy", async () => {
+    // The computer_call action/actions normalizer is ALWAYS on (Azure 400s
+    // without it); the provider-item-id strip is layered on under the "strip"
+    // policy. The filter is therefore always defined now.
+    const conflictedComputerCall = {
+      id: "cu_abc",
+      type: "computer_call",
+      callId: "cu_abc",
+      status: "completed",
+      action: { type: "screenshot" },
+      actions: [{ type: "screenshot" }],
+    };
+    const runFilter = async (settings: ReturnType<typeof testSettings>) => {
+      const filter = callModelInputFilterForSettings(settings);
+      expect(filter).toBeDefined();
+      const out = await filter!({
+        modelData: { input: [{ ...conflictedComputerCall }] as any },
+        agent: {} as any,
+        context: undefined,
+      });
+      return out.input[0] as Record<string, unknown>;
+    };
+
+    // Default ("strip"): computer_call normalized to exactly `action`, id stripped.
+    const stripped = await runFilter(testSettings());
+    expect("action" in stripped).toBe(true);
+    expect("actions" in stripped).toBe(false);
+    expect("id" in stripped).toBe(false);
+
+    // "preserve": computer_call still normalized, but provider id preserved.
+    const preserved = await runFilter(testSettings({ openaiProviderItemIds: "preserve" }));
+    expect("action" in preserved).toBe(true);
+    expect("actions" in preserved).toBe(false);
+    expect(preserved.id).toBe("cu_abc");
   });
 
   test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {

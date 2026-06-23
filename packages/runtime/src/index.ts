@@ -73,7 +73,7 @@ import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 import {
   createSandboxClient,
@@ -1219,9 +1219,51 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
   }),
 });
 
-/** The model-input filter the configured provider item id policy selects. */
+/**
+ * callModelInputFilter that normalizes every `computer_call` carrying BOTH
+ * `action` and `actions` down to EXACTLY ONE (keeps `action`, drops `actions`).
+ * The Azure computer-use endpoint rejects a request whose computer_call has
+ * both with `400 Computer call input must include exactly one of `action` or
+ * `actions``; the SDK 0.11.6 schema allows both, so a freshly-emitted
+ * screenshot call carries the redundant pair. This filter runs before EVERY
+ * model call — the turn-start history replay AND every mid-turn follow-up — so
+ * it covers the just-emitted (non-replayed) computer_call on the same turn,
+ * which the turn-start `prepareRunInput` sanitizer never sees. Items are cloned,
+ * never mutated.
+ */
+export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }) => ({
+  ...modelData,
+  input: normalizeComputerCallActions(
+    modelData.input as unknown as Array<Record<string, unknown>>,
+  ) as unknown as AgentInputItem[],
+});
+
+/**
+ * Compose a list of callModelInputFilters into one, applied left-to-right so
+ * each sees the prior filter's output.
+ */
+function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallModelInputFilter {
+  return async (args) => {
+    let modelData = args.modelData;
+    for (const filter of filters) {
+      modelData = await filter({ ...args, modelData });
+    }
+    return modelData;
+  };
+}
+
+/**
+ * The model-input filter applied before every model call. The computer_call
+ * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
+ * the provider-item-id strip is layered on top when the configured policy
+ * selects it.
+ */
 export function callModelInputFilterForSettings(settings: Settings): CallModelInputFilter | undefined {
-  return settings.openaiProviderItemIds === "strip" ? stripProviderItemIdsFilter : undefined;
+  const filters: CallModelInputFilter[] = [normalizeComputerCallsFilter];
+  if (settings.openaiProviderItemIds === "strip") {
+    filters.push(stripProviderItemIdsFilter);
+  }
+  return composeCallModelInputFilters(filters);
 }
 
 export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgentInput | string | RunState<any, any>, settings: Settings, overrides: RunAgentStreamOptions = {}) {

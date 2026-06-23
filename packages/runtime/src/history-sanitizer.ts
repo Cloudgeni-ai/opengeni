@@ -201,3 +201,47 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
   }
   return items.filter((_item, index) => !dropped.has(index));
 }
+
+/**
+ * Normalize `computer_call` items so each carries EXACTLY ONE of the two
+ * mutually-exclusive action fields the provider accepts.
+ *
+ * The OpenAI Agents SDK 0.11.6 `computer_call` schema (protocol.mjs) carries
+ * BOTH the legacy singular `action` and the GA batched `actions`, each
+ * `.optional()`, and only requires "at least one" (its superRefine errors only
+ * when both are absent). The Azure computer-use endpoint is stricter: it
+ * requires EXACTLY one and rejects the whole request with
+ *
+ *   `400 Computer call input must include exactly one of `action` or `actions`.`
+ *
+ * when an emitted `computer_call` carries both (observed live: a screenshot
+ * call carrying `action:{type:"screenshot"}` AND `actions:[{type:"screenshot"}]`).
+ *
+ * This transform returns a list where any `computer_call` holding both fields
+ * is shallow-cloned with the redundant field removed. We KEEP `action` (the
+ * singular the model emitted) and DROP `actions`. Calls that already carry
+ * exactly one field — or the GA-only `actions` form — pass through untouched.
+ *
+ * Pure and non-mutating: only the conflicting item(s) are cloned; every other
+ * item passes through by reference (byte-identical). Unlike
+ * {@link sanitizeHistoryItemsForModel} (which only *filters* items), this is a
+ * read-path *transform* of a single item's shape.
+ */
+export function normalizeComputerCallActions<T extends HistoryItem>(items: readonly T[]): T[] {
+  let changed = false;
+  const out = items.map((item) => {
+    if (itemType(item) !== "computer_call") {
+      return item;
+    }
+    const record = item as Record<string, unknown>;
+    const hasAction = record.action !== undefined && record.action !== null;
+    const hasActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0;
+    if (hasAction && hasActions) {
+      changed = true;
+      const { actions: _droppedActions, ...rest } = record;
+      return rest as unknown as T;
+    }
+    return item;
+  });
+  return changed ? out : items.slice();
+}
