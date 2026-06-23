@@ -72,13 +72,38 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
   const reconnect = () => setNonce((n) => n + 1);
 
   const url = capability?.url ?? null;
+  // The credential is keyed into the connect effect so a token rotation (new
+  // password) reconnects, but NOT folded into the whole-`capability` identity —
+  // a benign re-negotiation that re-mints the same cell must not churn the socket.
+  const token = capability?.token ?? null;
   const transport = capability?.transport ?? null;
   const mode = capability?.mode ?? "read-only";
+
+  // The live RFB handle. Holding it in a ref lets us flip view-only (take
+  // control / return control) and re-scale on the OPEN connection instead of
+  // tearing the socket down — the old behaviour reconnected on every
+  // `interactive` change, which read as a constant "refresh" and (combined with
+  // the canvas churn) bounced control back to watch.
+  const rfbRef = useRef<DesktopRfbLike | null>(null);
+  // Latest input/scale/factory the connect effect reads via refs so they are NOT
+  // connect-effect dependencies: changing them must update the live RFB in place,
+  // never reconnect it.
+  const interactiveRef = useRef(interactive);
+  const scaleViewportRef = useRef(scaleViewport);
+  const modeRef = useRef(mode);
+  const rfbFactoryRef = useRef(rfbFactory);
+  interactiveRef.current = interactive;
+  scaleViewportRef.current = scaleViewport;
+  modeRef.current = mode;
+  rfbFactoryRef.current = rfbFactory;
+
+  // read-only is forced when the server says so OR the caller didn't opt in.
+  const viewOnlyFor = (m: string, want: boolean | undefined) => m === "read-only" || !want;
 
   useEffect(() => {
     // SSR / no DOM / no usable transport: stay idle and show the placeholder.
     if (typeof window === "undefined") return;
-    if (!capability || transport !== "vnc-ws" || !url) {
+    if (transport !== "vnc-ws" || !url) {
       setBoth("idle");
       return;
     }
@@ -112,19 +137,19 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
 
     void (async () => {
       try {
-        const factory = rfbFactory ?? (await defaultRfbFactory());
+        const factory = rfbFactoryRef.current ?? (await defaultRfbFactory());
         if (disposed) return;
         const socketUrl = desktopSocketUrl({ url });
         setBoth(nextDesktopState(stateRef.current, { type: "negotiated" }));
         rfb = factory(container, socketUrl, {
-          credentials: capability.token ? { password: capability.token } : undefined,
+          credentials: token ? { password: token } : undefined,
         });
-        // read-only is forced when the server says so OR the caller didn't opt in.
-        rfb.viewOnly = mode === "read-only" || !interactive;
-        rfb.scaleViewport = scaleViewport ?? true;
+        rfb.viewOnly = viewOnlyFor(modeRef.current, interactiveRef.current);
+        rfb.scaleViewport = scaleViewportRef.current ?? true;
         rfb.addEventListener("connect", onConnect);
         rfb.addEventListener("disconnect", onDisconnect);
         rfb.addEventListener("securityfailure", onSecurityFailure);
+        rfbRef.current = rfb;
       } catch (cause) {
         if (!disposed) {
           setError(cause instanceof Error ? cause : new Error(String(cause)));
@@ -135,6 +160,7 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
 
     return () => {
       disposed = true;
+      if (rfbRef.current === rfb) rfbRef.current = null;
       if (rfb) {
         rfb.removeEventListener?.("connect", onConnect);
         rfb.removeEventListener?.("disconnect", onDisconnect);
@@ -146,9 +172,29 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
         }
       }
     };
-    // A url change (rotation) re-runs this effect → disconnect old, connect new.
+    // ONLY a real transport change reconnects: a fresh url (rotation), a new
+    // credential, the transport flipping, or an explicit manual reconnect
+    // (`nonce`). `interactive`/`scaleViewport`/`mode`/`rfbFactory` are read via
+    // refs and applied live below — they must never re-open the socket.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [capability, url, transport, mode, interactive, scaleViewport, rfbFactory, nonce]);
+  }, [url, token, transport, nonce]);
+
+  // Apply take-control / return-control to the OPEN connection in place. noVNC
+  // honours `viewOnly` live, so flipping it neither blinks the surface nor drops
+  // the framebuffer — the cure for the take-control "refresh + auto-release" loop.
+  useEffect(() => {
+    const rfb = rfbRef.current;
+    if (rfb) rfb.viewOnly = viewOnlyFor(mode, interactive);
+    // viewOnlyFor is pure; re-run only when the inputs change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactive, mode, state]);
+
+  // Re-scale the live RFB in place (no reconnect) when the scale preference flips.
+  useEffect(() => {
+    const rfb = rfbRef.current;
+    if (rfb) rfb.scaleViewport = scaleViewport ?? true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scaleViewport, state]);
 
   return { state, error, reconnect };
 }

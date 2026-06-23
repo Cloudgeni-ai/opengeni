@@ -163,4 +163,67 @@ describe("DesktopViewer", () => {
     expect(calls[0]?.url).toContain("/websockify");
     await r.unmount();
   });
+
+  // A fake RFB that keeps every constructed instance live so the test can read
+  // their `viewOnly` AFTER an in-place update (the live take-control path).
+  function trackingRfb(): { factory: DesktopRfbFactory; instances: DesktopRfbLike[] } {
+    const instances: DesktopRfbLike[] = [];
+    const factory: DesktopRfbFactory = () => {
+      const rfb: DesktopRfbLike = {
+        viewOnly: false,
+        scaleViewport: false,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        disconnect: () => {},
+      };
+      instances.push(rfb);
+      return rfb;
+    };
+    return { factory, instances };
+  }
+
+  test("taking control flips viewOnly in place — it does NOT reconnect the socket", async () => {
+    const { factory, instances } = trackingRfb();
+    // An interactive-mode warm cell so take-control is permitted.
+    const cap = { ...fakeCapabilities().DesktopStream, mode: "interactive" as const };
+
+    // Watching (read-only): connects once, viewOnly true.
+    const r = await renderComponent(
+      <DesktopViewer capability={cap} interactive={false} rfbFactory={factory} />,
+    );
+    await flush(5);
+    expect(instances.length).toBe(1);
+    expect(instances[0]?.viewOnly).toBe(true);
+
+    // TAKE CONTROL: the same cell, only `interactive` flips true. This must NOT
+    // tear down + rebuild the RFB (the old reconnect-loop / refresh bug) — the
+    // existing socket's viewOnly is flipped live to false.
+    await r.rerender(<DesktopViewer capability={cap} interactive={true} rfbFactory={factory} />);
+    await flush(5);
+    expect(instances.length).toBe(1); // still exactly one socket — no reconnect.
+    expect(instances[0]?.viewOnly).toBe(false); // input enabled in place.
+
+    // RETURN CONTROL: flips back, still no reconnect.
+    await r.rerender(<DesktopViewer capability={cap} interactive={false} rfbFactory={factory} />);
+    await flush(5);
+    expect(instances.length).toBe(1);
+    expect(instances[0]?.viewOnly).toBe(true);
+    await r.unmount();
+  });
+
+  test("a benign capability refresh (same url/token) does not reconnect the socket", async () => {
+    const { factory, instances } = trackingRfb();
+    const base = fakeCapabilities().DesktopStream;
+    const r = await renderComponent(<DesktopViewer capability={base} rfbFactory={factory} />);
+    await flush(5);
+    expect(instances.length).toBe(1);
+
+    // A re-negotiation re-mints the cell object (new identity) but the SAME live
+    // url + token. The connect effect keys on url/token, so it must not churn.
+    const refreshed = { ...base, expiresAt: new Date(Date.now() + 900_000).toISOString() };
+    await r.rerender(<DesktopViewer capability={refreshed} rfbFactory={factory} />);
+    await flush(5);
+    expect(instances.length).toBe(1); // survived the renegotiation — no reconnect.
+    await r.unmount();
+  });
 });

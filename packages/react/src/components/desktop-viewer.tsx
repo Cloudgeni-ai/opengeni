@@ -170,13 +170,16 @@ export function DesktopViewer({
 
   // Release control WITHOUT ever swallowing a key the desktop needs. Esc, and
   // every other key, pass straight through to noVNC/:0 — vital for vim, menus,
-  // and dialogs inside the box. Two non-trapping exits remain:
-  //   1. A single non-conflicting chord — Ctrl+Alt+Shift pressed on its own
-  //      (no other key) — which no app binds, so it never eats a real keystroke.
-  //   2. The pointer LEAVING the surface: a deliberate "I'm done driving" gesture
-  //      that, unlike a window blur, isn't fired by a plain alt-tab, so control
-  //      is never dropped mid-use while the user tabs to another app/window.
+  // and dialogs inside the box. Exactly ONE non-trapping keyboard exit:
+  //   • A single non-conflicting chord — Ctrl+Alt+Shift pressed on its own (no
+  //     other key) — which no app binds, so it never eats a real keystroke.
   //  (Plus the always-visible "Return control" button in the in-control bar.)
+  //
+  // We deliberately DO NOT release on pointer-leave (or window blur): those fire
+  // as a SIDE EFFECT of connecting — the noVNC canvas re-laying-out, the surface
+  // grabbing focus, the connecting scrim swapping in — which bounced control
+  // straight back to "watch" the instant the user took it. Control is given up
+  // only on an explicit, intentional gesture (the button or the chord).
   useEffect(() => {
     if (!inControl || externallyControlled) return;
     const onKey = (event: KeyboardEvent) => {
@@ -192,13 +195,9 @@ export function DesktopViewer({
         setTakeControl(false);
       }
     };
-    const container = containerRef.current;
-    const onPointerLeave = () => setTakeControl(false);
     window.addEventListener("keydown", onKey);
-    container?.addEventListener("pointerleave", onPointerLeave);
     return () => {
       window.removeEventListener("keydown", onKey);
-      container?.removeEventListener("pointerleave", onPointerLeave);
     };
   }, [inControl, externallyControlled]);
 
@@ -218,6 +217,11 @@ export function DesktopViewer({
 
   const connected = stream.state === "connected";
   const hasLiveUrl = Boolean(connectCapability?.url);
+  // The latest stream state, read without making it an effect dependency — so the
+  // re-attach below can consult it on a visibility change WITHOUT re-subscribing
+  // (and re-firing) every time the state walks idle→negotiating→connected.
+  const streamStateRef = useRef(stream.state);
+  streamStateRef.current = stream.state;
 
   // ── AUTO-WARM ───────────────────────────────────────────────────────────────
   // When the user is watching and the desktop is cold-but-warmable, ask the host
@@ -258,17 +262,25 @@ export function DesktopViewer({
     if (!hasLiveUrl || typeof document === "undefined") return;
     const maybeReattach = () => {
       if (document.visibilityState !== "visible") return;
-      // Only kick when there is nothing in flight — idle/error means the socket
-      // is not (re)trying on its own.
-      if (stream.state === "idle" || stream.state === "error") stream.reconnect();
+      // Only kick a socket that never OPENED (idle — e.g. the tab was hidden when
+      // the url arrived, so the connect effect bailed on a missing container).
+      // Deliberately NOT on "error": that surfaces an overlay with an explicit
+      // Reconnect, and auto-retrying here would hammer (reconnect → error →
+      // reconnect…). We read the live state via a ref so this effect does NOT
+      // depend on `stream.state` — depending on it re-ran the effect on every
+      // transition and re-fired the kick, which is the reconnect loop.
+      if (streamStateRef.current === "idle") stream.reconnect();
     };
-    // Kick once on (re)mount / fresh url.
-    maybeReattach();
+    // The connect effect already opens the socket on mount / a fresh url. The
+    // ONLY gap it can't self-heal is a tab that was hidden when the url arrived
+    // (container not in the DOM → connect effect bailed to idle): the socket then
+    // never (re)fires on its own. So we revive it on the tab becoming visible —
+    // NOT on mount (that double-opens the socket the connect effect just opened).
     document.addEventListener("visibilitychange", maybeReattach);
     return () => document.removeEventListener("visibilitychange", maybeReattach);
-    // stream.reconnect is stable enough; re-run on url / state transitions.
+    // Re-run ONLY on a fresh live url, never on a state transition.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasLiveUrl, connectCapability?.url, stream.state]);
+  }, [hasLiveUrl, connectCapability?.url]);
 
   // ── CONNECT WATCHDOG ─────────────────────────────────────────────────────────
   // If a live url is present but the RFB hasn't reached "connected" within the
