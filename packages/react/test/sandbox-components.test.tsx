@@ -23,6 +23,7 @@ function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandbox
       { path: "README.md", name: "README.md", kind: "file" },
     ],
     expand: async () => {},
+    expandingPaths: new Set<string>(),
     readFile: async () => ({ path: "", encoding: "utf8", content: "", sizeBytes: 0, truncated: false, isBinary: false, revision: 0 }),
     refresh: async () => {},
     loading: false,

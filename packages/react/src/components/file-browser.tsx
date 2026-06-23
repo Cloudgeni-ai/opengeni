@@ -1,4 +1,4 @@
-import { ChevronRightIcon, FileIcon, FolderIcon } from "lucide-react";
+import { ChevronRightIcon, FileIcon, FolderIcon, Loader2Icon } from "lucide-react";
 import { type ReactNode, useCallback, useState } from "react";
 import { cn } from "../lib/cn";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
@@ -98,9 +98,15 @@ export function FileBrowser({
     }
     const isDir = node.kind === "dir";
     const isSelected = node.path === selectedPath;
-    const isLoading = loadingPaths.has(node.path);
+    // In-flight when either the local toggle is awaiting OR the hook reports the
+    // path's lazy fs/list is still running (the authoritative signal).
+    const isLoading = loadingPaths.has(node.path) || result.expandingPaths.has(node.path);
+    // A clear loading state: the chevron is replaced by a spinner while children
+    // load, and a skeleton row sits under the node so the 2-3s Channel-A list
+    // never looks frozen.
+    const showSkeleton = isDir && isOpen && isLoading && (node.children === undefined || node.children.length === 0);
     return (
-      <div key={node.path} role="treeitem" aria-expanded={isDir ? isOpen : undefined}>
+      <div key={node.path} role="treeitem" aria-expanded={isDir ? isOpen : undefined} aria-busy={isLoading || undefined}>
         <button
           type="button"
           onClick={() => (isDir ? void toggle(node) : onSelectFile?.(node.path))}
@@ -112,16 +118,30 @@ export function FileBrowser({
           style={{ paddingLeft: `${depth * 12 + 4}px` }}
         >
           {isDir ? (
-            <ChevronRightIcon
-              className={cn("size-3 shrink-0 transition-transform", isOpen && "rotate-90")}
-            />
+            isLoading ? (
+              <Loader2Icon className="size-3 shrink-0 animate-spin text-[color:var(--color-fg-subtle,#888)]" aria-label="Loading" />
+            ) : (
+              <ChevronRightIcon
+                className={cn("size-3 shrink-0 transition-transform", isOpen && "rotate-90")}
+              />
+            )
           ) : (
             <span className="inline-block w-3 shrink-0" />
           )}
           {isDir ? <FolderIcon className="size-3.5 shrink-0" /> : <FileIcon className="size-3.5 shrink-0" />}
           <span className="truncate">{node.name}</span>
-          {isLoading && <span className="ml-1 text-[10px] opacity-60">…</span>}
         </button>
+        {showSkeleton && (
+          <div role="group" aria-hidden style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }} className="space-y-1 py-1">
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="h-2.5 animate-pulse rounded bg-[color:var(--color-bg-subtle,#1c1c1c)]"
+                style={{ width: `${70 - i * 12}%` }}
+              />
+            ))}
+          </div>
+        )}
         {isDir && isOpen && node.children && node.children.length > 0 && (
           <div role="group">{node.children.map((child) => renderRow(child, depth + 1))}</div>
         )}

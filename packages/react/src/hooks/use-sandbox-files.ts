@@ -37,6 +37,9 @@ export type UseSandboxFilesResult = {
   tree: FileTreeNode[];
   /** Lazy-expand a directory node in place (lists its immediate children). */
   expand: (path: string) => Promise<void>;
+  /** Paths whose lazy `fs.list` is currently in flight — the FileBrowser shows a
+   *  spinner on these nodes so a 2-3s Channel-A list never looks frozen. */
+  expandingPaths: Set<string>;
   /** Read a file for the preview pane (text or base64-for-binary, size-capped). */
   readFile: (path: string) => Promise<FsReadResponse>;
   /** Re-list the whole tree from the root. */
@@ -107,6 +110,7 @@ export function useSandboxFiles(
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
+  const [expandingPaths, setExpandingPaths] = useState<Set<string>>(new Set());
   const [error, setError] = useState<Error | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
 
@@ -156,12 +160,27 @@ export function useSandboxFiles(
   const expand = useCallback(
     async (path: string) => {
       if (!sessionId) return;
+      // Mark this node as expanding so the FileBrowser can render a spinner while
+      // the (often 2-3s) Channel-A fs/list is in flight — the tree never looks
+      // frozen on a click.
+      setExpandingPaths((prev) => {
+        const next = new Set(prev);
+        next.add(path);
+        return next;
+      });
       try {
         const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
         const children = (listed.root.children ?? []).map(fsNodeToTree);
         setTree((prev) => applyStatus(replaceChildren(prev, path, children)));
       } catch (cause) {
         setError(cause instanceof Error ? cause : new Error(String(cause)));
+      } finally {
+        setExpandingPaths((prev) => {
+          if (!prev.has(path)) return prev;
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
       }
     },
     [client, workspaceId, sessionId, applyStatus],
@@ -218,5 +237,5 @@ export function useSandboxFiles(
     }
   }, [enabled, liveness, refresh]);
 
-  return { tree, expand, readFile, refresh, loading, error };
+  return { tree, expand, expandingPaths, readFile, refresh, loading, error };
 }

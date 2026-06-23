@@ -55,7 +55,7 @@ export function useSandboxWorkspaceTabs({
   // (pty-capable). This is what makes the terminal typeable rather than a
   // read-only firehose: the open spins/resumes the box and its output rides SSE.
   const ptyCapable = capabilities?.Terminal.ptyCapable ?? false;
-  const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable });
+  const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable, liveness: capabilities?.liveness });
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";

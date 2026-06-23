@@ -54,6 +54,21 @@ export type UseSessionCapabilitiesResult = {
   renegotiate: () => void;
 };
 
+/**
+ * Whether a desktop attach (POST /viewers) is worth attempting for this cell.
+ * The desktop is FEASIBLE — and thus worth warming — when it already has a live
+ * transport, OR when the only thing missing is a warm box (a cold/un-provisioned
+ * lease). The handshake never warms a box, so a feasible-but-cold cell reports
+ * transport:null with a transient reason; the viewer attach is exactly what warms
+ * it. A genuinely-unsupported desktop (backend/os/policy/headless) is never
+ * attachable — attaching would 409/403/no-op without ever producing a stream.
+ */
+function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean {
+  if (cell.transport !== null) return true;
+  // transport === null: attach only when the reason is a transient cold state.
+  return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
+}
+
 /** Read `stream.url.rotated` payloads off the live event log, newest last. */
 function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
   const out: StreamUrlRotatedPayload[] = [];
@@ -194,7 +209,17 @@ export function useSessionCapabilities(
         // Optional desktop attach: acquire a viewer holder (warms a cold box).
         // The consent gate (409) and the viewer cap (429) surface as typed
         // signals rather than throwing — the desktop tab degrades gracefully.
-        if (attachDesktop && caps.DesktopStream.transport !== null) {
+        //
+        // KEY: the handshake (getStreamCapabilities) NEVER spins up a cold box, so
+        // on a cold/warming lease the desktop cell comes back transport:null with a
+        // transient reason (`lease_cold`/`not_provisioned`). Gating the attach on
+        // `transport !== null` therefore dead-ends the desktop ("Starting the
+        // desktop…" forever): it never warms because it never attaches, and never
+        // attaches because it isn't warm. We must attach whenever the desktop is
+        // FEASIBLE — transport already live OR cold-but-feasible — and let POST
+        // /viewers warm the box and mint the URL. Only a genuinely-no-desktop
+        // reason (backend/os/policy/headless) suppresses the attach.
+        if (attachDesktop && desktopAttachable(caps.DesktopStream)) {
           try {
             const holder = await client.attachViewer(workspaceId, sessionId, {});
             if (cancelled) return;

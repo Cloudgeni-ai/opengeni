@@ -4,6 +4,7 @@ import type {
   TerminalPtyExitedPayload,
   TerminalPtyOutputDeltaPayload,
 } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
@@ -80,16 +81,25 @@ export function useSandboxTerminal(
   // interactive default) the hook opens its OWN PTY and tracks it here so `write`
   // is live before the `terminal.pty.started` event round-trips through SSE.
   const ptyFilter = options.ptyId;
+  const liveness = options.liveness;
   const [openedPtyId, setOpenedPtyId] = useState<string | null>(null);
   const [openError, setOpenError] = useState<Error | null>(null);
+  // Bumped to force a fresh PTY open after a write reveals the old PTY was lost
+  // (a 409 "pty session lost" — the box rolled over since the open). This makes
+  // the interactive terminal self-heal instead of dead-ending on a stale session.
+  const [reopenNonce, setReopenNonce] = useState(0);
 
-  // Open ONE interactive PTY against the box (once per session), close it on
-  // unmount/identity change. The open's banner + subsequent output deltas ride
-  // A1, so xterm fills from `events` — we don't thread the open's body output
-  // here (the SSE projection is the single source of truth for what's written).
+  // Open ONE interactive PTY against the box, close it on unmount/identity
+  // change. The open's banner + subsequent output deltas ride A1, so xterm fills
+  // from `events` — we don't thread the open's body output here (the SSE
+  // projection is the single source of truth for what's written). The open is
+  // gated on a WARM box: opening on a cold/warming lease races the box (the PTY
+  // exec-session is created on a box that the next op may not resume), which is
+  // exactly the "session not found" terminal failure; we wait for warm/draining.
   const openInFlight = useRef(false);
+  const boxWarm = liveness === undefined || liveness === "warm" || liveness === "draining";
   useEffect(() => {
-    if (!interactive || !sessionId || ptyFilter) return;
+    if (!interactive || !sessionId || ptyFilter || !boxWarm) return;
     let cancelled = false;
     openInFlight.current = true;
     let openedId: string | null = null;
@@ -116,7 +126,7 @@ export function useSandboxTerminal(
       const id = openedId;
       if (id) void client.terminalPtyClose(workspaceId, sessionId, { ptyId: id }).catch(() => {});
     };
-  }, [interactive, client, workspaceId, sessionId, ptyFilter]);
+  }, [interactive, client, workspaceId, sessionId, ptyFilter, boxWarm, reopenNonce]);
 
   const { chunks, openPty, supportsInput } = useMemo(() => {
     const out: TerminalChunk[] = [];
@@ -184,9 +194,21 @@ export function useSandboxTerminal(
   const write = useMemo(() => {
     if (!activePtyId || !canWrite || !sessionId) return null;
     return (data: string) => {
-      void client.terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data }).catch(() => {});
+      void client.terminalPtyWrite(workspaceId, sessionId, { ptyId: activePtyId, data }).catch((cause) => {
+        // The PTY exec-session was lost on the live box (409/404 — the box rolled
+        // over since the open). Self-heal: drop the stale id and re-open a fresh
+        // PTY against the current box rather than silently swallowing keystrokes.
+        if (
+          cause instanceof OpenGeniApiError &&
+          (cause.status === 409 || cause.status === 404) &&
+          activePtyId === openedPtyId
+        ) {
+          setOpenedPtyId(null);
+          setReopenNonce((n) => n + 1);
+        }
+      });
     };
-  }, [client, workspaceId, sessionId, activePtyId, canWrite]);
+  }, [client, workspaceId, sessionId, activePtyId, canWrite, openedPtyId]);
 
   const close = useCallback(() => {
     if (!activePtyId || !sessionId) return;
