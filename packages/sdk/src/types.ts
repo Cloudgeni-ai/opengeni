@@ -458,6 +458,10 @@ export type FsWriteRequest = { path: string; encoding?: FsEncoding; content: str
 export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
+export type FsMoveRequest = { path: string; newPath: string; overwrite?: boolean; createParents?: boolean };
+export type FsMoveResponse = { path: string; newPath: string; revision: number };
+export type FsMkdirRequest = { path: string; recursive?: boolean };
+export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
 export type GitFileStatusCode = "added" | "modified" | "deleted" | "renamed" | "copied" | "untracked" | "ignored" | "conflicted" | "typechange";

@@ -217,10 +217,18 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
  * when an emitted `computer_call` carries both (observed live: a screenshot
  * call carrying `action:{type:"screenshot"}` AND `actions:[{type:"screenshot"}]`).
  *
- * This transform returns a list where any `computer_call` holding both fields
- * is shallow-cloned with the redundant field removed. We KEEP `action` (the
- * singular the model emitted) and DROP `actions`. Calls that already carry
- * exactly one field — or the GA-only `actions` form — pass through untouched.
+ * Which singular do we keep? LIVE-PROVEN against the deployed Azure deployment
+ * (gpt-5.5-2026-04-24): for gpt-5.5 the SDK serializes the GA computer tool as
+ * `{type:"computer"}` (not the legacy `computer_use_preview`), and that GA tool
+ * accepts ONLY the batched plural `actions`. Probing all three shapes:
+ *   - `action`-only  -> 400 "exactly one of action or actions" (STILL rejected)
+ *   - `actions`-only -> passes the action/actions structural validation
+ *   - both           -> 400 "exactly one …"
+ * The "exactly one" wording is misleading: only the `actions`-only form is
+ * accepted by the GA tool. So when both are present we KEEP `actions` (the GA
+ * batched plural) and DROP `action`. Calls that already carry exactly one field
+ * — or the legacy `action`-only form — pass through untouched (this transform's
+ * sole job is to resolve the both-present conflict, not to rewrite singulars).
  *
  * Pure and non-mutating: only the conflicting item(s) are cloned; every other
  * item passes through by reference (byte-identical). Unlike
@@ -238,7 +246,7 @@ export function normalizeComputerCallActions<T extends HistoryItem>(items: reado
     const hasActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0;
     if (hasAction && hasActions) {
       changed = true;
-      const { actions: _droppedActions, ...rest } = record;
+      const { action: _droppedAction, ...rest } = record;
       return rest as unknown as T;
     }
     return item;

@@ -158,6 +158,8 @@ export { PierreDiff } from "./components/pierre-diff";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";
+export { CodeEditor, languageForPath } from "./components/code-editor";
+export type { CodeEditorProps } from "./components/code-editor";
 export { SandboxFiles } from "./components/sandbox-files";
 export type { SandboxFilesProps } from "./components/sandbox-files";
 export { DesktopViewer } from "./components/desktop-viewer";

@@ -1,4 +1,4 @@
-import type { FsReadResponse, FsTreeNode, GitFileStatusCode, SessionEvent } from "@opengeni/sdk";
+import type { FsReadResponse, FsTreeNode, FsWriteResponse, GitFileStatusCode, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
@@ -42,11 +42,28 @@ export type UseSandboxFilesResult = {
   expandingPaths: Set<string>;
   /** Read a file for the preview pane (text or base64-for-binary, size-capped). */
   readFile: (path: string) => Promise<FsReadResponse>;
+  /** Write a file (overwrite, last-writer-wins) — the editor save path. Re-lists
+   *  the parent on return so a brand-new file appears even before fs.changed. */
+  writeFile: (path: string, content: string) => Promise<FsWriteResponse>;
+  /** Create a new empty file (refuses to clobber an existing path: overwrite=false). */
+  createFile: (path: string) => Promise<void>;
+  /** Create a directory (recursive by default). */
+  createDir: (path: string) => Promise<void>;
+  /** Delete a path (pass recursive=true for a non-empty directory). */
+  deleteEntry: (path: string, recursive?: boolean) => Promise<void>;
+  /** Move / rename a path (rename == move). Refuses to clobber unless overwrite=true. */
+  moveEntry: (path: string, newPath: string, opts?: { overwrite?: boolean }) => Promise<void>;
   /** Re-list the whole tree from the root. */
   refresh: () => Promise<void>;
   loading: boolean;
   error: Error | null;
 };
+
+/** The workspace-relative parent directory of a POSIX path ("" for a root entry). */
+function parentOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i <= 0 ? "" : path.slice(0, i);
+}
 
 function fsNodeToTree(node: FsTreeNode): FileTreeNode {
   const kind = node.type === "dir" ? "dir" : "file";
@@ -194,6 +211,115 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId],
   );
 
+  // Targeted re-list of a single directory after a mutation. The root ("") goes
+  // through a full refresh (which also refreshes the git overlay); a nested dir
+  // re-lists in place via the same depth-1 splice `expand` uses. This makes a
+  // mutation reflect immediately even on no-event environments where the
+  // fs.changed auto-refresh never fires (and is harmless where it does).
+  const relistPath = useCallback(
+    async (path: string) => {
+      if (!sessionId) return;
+      if (path === "" || path === rootPath) {
+        await refresh();
+        return;
+      }
+      try {
+        const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
+        const children = (listed.root.children ?? []).map(fsNodeToTree);
+        setTree((prev) => applyStatus(replaceChildren(prev, path, children)));
+      } catch {
+        // The parent may not be mounted in the tree yet (collapsed) — fall back to
+        // a root refresh rather than surfacing an error on an otherwise-OK mutation.
+        await refresh();
+      }
+    },
+    [client, workspaceId, sessionId, rootPath, applyStatus, refresh],
+  );
+
+  const writeFile = useCallback(
+    async (path: string, content: string): Promise<FsWriteResponse> => {
+      if (!sessionId) throw new Error("no session");
+      try {
+        const res = await client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true });
+        await relistPath(parentOf(path));
+        return res;
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        setError(err);
+        throw err;
+      }
+    },
+    [client, workspaceId, sessionId, relistPath],
+  );
+
+  const createFile = useCallback(
+    async (path: string): Promise<void> => {
+      if (!sessionId) throw new Error("no session");
+      try {
+        await client.fsWrite(workspaceId, sessionId, { path, content: "", overwrite: false });
+        await relistPath(parentOf(path));
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        setError(err);
+        throw err;
+      }
+    },
+    [client, workspaceId, sessionId, relistPath],
+  );
+
+  const createDir = useCallback(
+    async (path: string): Promise<void> => {
+      if (!sessionId) throw new Error("no session");
+      try {
+        await client.fsMkdir(workspaceId, sessionId, { path, recursive: true });
+        await relistPath(parentOf(path));
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        setError(err);
+        throw err;
+      }
+    },
+    [client, workspaceId, sessionId, relistPath],
+  );
+
+  const deleteEntry = useCallback(
+    async (path: string, recursive = false): Promise<void> => {
+      if (!sessionId) throw new Error("no session");
+      try {
+        await client.fsDelete(workspaceId, sessionId, { path, recursive });
+        await relistPath(parentOf(path));
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        setError(err);
+        throw err;
+      }
+    },
+    [client, workspaceId, sessionId, relistPath],
+  );
+
+  const moveEntry = useCallback(
+    async (path: string, newPath: string, opts?: { overwrite?: boolean }): Promise<void> => {
+      if (!sessionId) throw new Error("no session");
+      try {
+        await client.fsMove(workspaceId, sessionId, {
+          path,
+          newPath,
+          overwrite: opts?.overwrite ?? false,
+        });
+        // A move touches two parents (source + destination); re-list both.
+        const from = parentOf(path);
+        const to = parentOf(newPath);
+        await relistPath(from);
+        if (to !== from) await relistPath(to);
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        setError(err);
+        throw err;
+      }
+    },
+    [client, workspaceId, sessionId, relistPath],
+  );
+
   // Initial load + reset on identity change.
   useEffect(() => {
     if (!enabled) {
@@ -237,5 +363,18 @@ export function useSandboxFiles(
     }
   }, [enabled, liveness, refresh]);
 
-  return { tree, expand, expandingPaths, readFile, refresh, loading, error };
+  return {
+    tree,
+    expand,
+    expandingPaths,
+    readFile,
+    writeFile,
+    createFile,
+    createDir,
+    deleteEntry,
+    moveEntry,
+    refresh,
+    loading,
+    error,
+  };
 }

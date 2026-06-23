@@ -6,6 +6,8 @@ import {
   CompactSessionContextRequest,
   FsDeleteRequest,
   FsListRequest,
+  FsMkdirRequest,
+  FsMoveRequest,
   FsReadRequest,
   FsWriteRequest,
   GitDiffRequest,
@@ -802,6 +804,20 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const ctx = await channelAPreamble(c, "files:write");
     const req = await parseChannelABody(c, FsDeleteRequest);
     const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsDelete(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", async (c) => {
+    const ctx = await channelAPreamble(c, "files:write");
+    const req = await parseChannelABody(c, FsMoveRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsMove(req));
+    return c.json(out);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", async (c) => {
+    const ctx = await channelAPreamble(c, "files:write");
+    const req = await parseChannelABody(c, FsMkdirRequest);
+    const out = await withChannelA({ db, settings, bus }, ctx, ({ service }) => service.fsMkdir(req));
     return c.json(out);
   });
 

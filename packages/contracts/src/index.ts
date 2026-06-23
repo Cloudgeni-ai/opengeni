@@ -2074,6 +2074,31 @@ export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
 export const FsDeleteResponse = z.object({ revision: z.number().int().nonnegative() });
 export type FsDeleteResponse = z.infer<typeof FsDeleteResponse>;
 
+export const FsMoveRequest = z.object({
+  path: z.string(),
+  newPath: z.string(),
+  overwrite: z.boolean().default(false), // false + existing destination => 409
+  createParents: z.boolean().default(true),
+});
+export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
+export const FsMoveResponse = z.object({
+  path: z.string(),
+  newPath: z.string(),
+  revision: z.number().int().nonnegative(), // == the fs.changed revision
+});
+export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
+
+export const FsMkdirRequest = z.object({
+  path: z.string(),
+  recursive: z.boolean().default(true), // false + existing path => 400
+});
+export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
+export const FsMkdirResponse = z.object({
+  path: z.string(),
+  revision: z.number().int().nonnegative(), // == the fs.changed revision
+});
+export type FsMkdirResponse = z.infer<typeof FsMkdirResponse>;
+
 // --- A2 Git request/response (read-only; feeds Pierre diff/tree) -------------
 export const GitFileStatusCode = z.enum([
   "added", "modified", "deleted", "renamed", "copied", "untracked", "ignored", "conflicted", "typechange",

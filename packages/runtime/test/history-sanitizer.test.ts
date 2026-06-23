@@ -132,10 +132,11 @@ describe("sanitizeHistoryItemsForModel", () => {
 });
 
 describe("normalizeComputerCallActions", () => {
-  test("normalizes a computer_call carrying BOTH action and actions to exactly one (keeps action)", () => {
+  test("normalizes a computer_call carrying BOTH action and actions to exactly one (keeps actions)", () => {
     // The live Azure 400: a freshly-emitted screenshot computer_call carries
-    // both the legacy singular `action` and the GA batched `actions`. The
-    // endpoint requires exactly one.
+    // both the legacy singular `action` and the GA batched `actions`. The GA
+    // computer tool (how gpt-5.5 serializes it) accepts ONLY the plural
+    // `actions`; the `action`-only form is rejected too. So we keep `actions`.
     const conflicted = {
       type: "computer_call",
       callId: "cu_1",
@@ -146,9 +147,9 @@ describe("normalizeComputerCallActions", () => {
     const items = [userMessage("take a screenshot"), conflicted];
     const result = normalizeComputerCallActions(items);
     const normalized = result[1] as Record<string, unknown>;
-    expect("action" in normalized).toBe(true);
-    expect("actions" in normalized).toBe(false);
-    expect(normalized.action).toEqual({ type: "screenshot" });
+    expect("actions" in normalized).toBe(true);
+    expect("action" in normalized).toBe(false);
+    expect(normalized.actions).toEqual([{ type: "screenshot" }]);
     // Other identifying fields survive untouched.
     expect(normalized.callId).toBe("cu_1");
     expect(normalized.status).toBe("completed");

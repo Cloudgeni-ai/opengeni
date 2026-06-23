@@ -1270,16 +1270,17 @@ describe("provider item id stripping", () => {
       return out.input[0] as Record<string, unknown>;
     };
 
-    // Default ("strip"): computer_call normalized to exactly `action`, id stripped.
+    // Default ("strip"): computer_call normalized to exactly `actions` (the GA
+    // batched plural the Azure GA computer tool accepts), `action` dropped, id stripped.
     const stripped = await runFilter(testSettings());
-    expect("action" in stripped).toBe(true);
-    expect("actions" in stripped).toBe(false);
+    expect("actions" in stripped).toBe(true);
+    expect("action" in stripped).toBe(false);
     expect("id" in stripped).toBe(false);
 
     // "preserve": computer_call still normalized, but provider id preserved.
     const preserved = await runFilter(testSettings({ openaiProviderItemIds: "preserve" }));
-    expect("action" in preserved).toBe(true);
-    expect("actions" in preserved).toBe(false);
+    expect("actions" in preserved).toBe(true);
+    expect("action" in preserved).toBe(false);
     expect(preserved.id).toBe("cu_abc");
   });
 

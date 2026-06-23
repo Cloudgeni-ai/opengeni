@@ -27,6 +27,10 @@ import type {
   FsDeleteResponse,
   FsListRequest,
   FsListResponse,
+  FsMkdirRequest,
+  FsMkdirResponse,
+  FsMoveRequest,
+  FsMoveResponse,
   FsReadRequest,
   FsReadResponse,
   FsTreeNode,
@@ -389,6 +393,57 @@ export class SandboxChannelAService {
     this.revision++;
     await this.emitFsChanged([{ path, kind: "deleted", isDir: false, sizeBytes: null }], "write");
     return { revision: this.revision };
+  }
+
+  async fsMove(req: FsMoveRequest): Promise<FsMoveResponse> {
+    const path = assertSafeRelPath(req.path);
+    const newPath = assertSafeRelPath(req.newPath);
+    const abs = this.joinRoot(path);
+    const newAbs = this.joinRoot(newPath);
+
+    if (!req.overwrite) {
+      const { exitCode } = await this.run({ cmd: `test -e ${shellQuote(newAbs)}` });
+      if (exitCode === 0) {
+        throw new ChannelAConflictError(`destination exists and overwrite is false: ${newPath}`);
+      }
+    }
+    if (req.createParents) {
+      const dir = dirnameAbs(newAbs);
+      if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
+    }
+    // -f only when overwrite — otherwise a clobber would silently succeed past
+    // the guard above on a race. A missing source surfaces a non-zero exit -> 400.
+    const flag = req.overwrite ? "-f " : "";
+    const { exitCode, stderr } = await this.run({
+      cmd: `mv ${flag}${shellQuote(abs)} ${shellQuote(newAbs)}`,
+    });
+    if (exitCode !== null && exitCode !== 0) {
+      throw new ChannelAValidationError(`failed to move ${path} -> ${newPath}: ${stderr || `exit ${exitCode}`}`);
+    }
+    this.revision++;
+    await this.emitFsChanged(
+      [
+        { path, kind: "deleted", isDir: false, sizeBytes: null },
+        { path: newPath, kind: "created", isDir: false, sizeBytes: null },
+      ],
+      "write",
+    );
+    return { path, newPath, revision: this.revision };
+  }
+
+  async fsMkdir(req: FsMkdirRequest): Promise<FsMkdirResponse> {
+    const path = assertSafeRelPath(req.path);
+    const abs = this.joinRoot(path);
+    // A plain mkdir on an existing path returns non-zero -> 400, matching the
+    // write-on-existing semantics; -p makes the create idempotent + builds parents.
+    const flag = req.recursive ? "-p " : "";
+    const { exitCode, stderr } = await this.run({ cmd: `mkdir ${flag}${shellQuote(abs)}` });
+    if (exitCode !== null && exitCode !== 0) {
+      throw new ChannelAValidationError(`failed to mkdir ${path}: ${stderr || `exit ${exitCode}`}`);
+    }
+    this.revision++;
+    await this.emitFsChanged([{ path, kind: "created", isDir: true, sizeBytes: null }], "write");
+    return { path, revision: this.revision };
   }
 
   // ════════════════════════════ Git (A2, read-only) ═════════════════════════

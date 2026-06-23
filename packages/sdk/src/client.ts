@@ -69,6 +69,10 @@ import type {
   FsWriteResponse,
   FsDeleteRequest,
   FsDeleteResponse,
+  FsMoveRequest,
+  FsMoveResponse,
+  FsMkdirRequest,
+  FsMkdirResponse,
   GitStatusRequest,
   GitStatusResponse,
   GitDiffRequest,
@@ -458,6 +462,16 @@ export class OpenGeniClient {
   /** FileSystem: delete a path (emits fs.changed). */
   async fsDelete(workspaceId: string, sessionId: string, request: FsDeleteRequest): Promise<FsDeleteResponse> {
     return await this.requestJson<FsDeleteResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/delete`, request);
+  }
+
+  /** FileSystem: move/rename a path (emits fs.changed; 409 if destination exists and overwrite is false). */
+  async fsMove(workspaceId: string, sessionId: string, request: FsMoveRequest): Promise<FsMoveResponse> {
+    return await this.requestJson<FsMoveResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/move`, request);
+  }
+
+  /** FileSystem: create a directory (emits fs.changed; recursive defaults to true). */
+  async fsMkdir(workspaceId: string, sessionId: string, request: FsMkdirRequest): Promise<FsMkdirResponse> {
+    return await this.requestJson<FsMkdirResponse>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/mkdir`, request);
   }
 
   /** Git: working-tree/index status (the Pierre file-status feed). */

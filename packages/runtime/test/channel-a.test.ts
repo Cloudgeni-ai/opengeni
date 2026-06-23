@@ -156,6 +156,82 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(payload.revision).toBe(1);
     expect(payload.leaseEpoch).toBe(7);
   });
+
+  test("fsMove renames a file and read-back follows the new path", async () => {
+    const { session } = await makeBox();
+    const emitted: { type: string; payload: unknown }[] = [];
+    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
+    await svc.fsWrite({ path: "old.txt", encoding: "utf8", content: "move me\n", overwrite: true, createParents: true });
+
+    const moved = await svc.fsMove({ path: "old.txt", newPath: "new.txt", overwrite: false, createParents: true });
+    expect(moved.path).toBe("old.txt");
+    expect(moved.newPath).toBe("new.txt");
+    expect(moved.revision).toBe(2);
+
+    const read = await svc.fsRead({ path: "new.txt", encoding: "utf8", maxBytes: 64 });
+    expect(read.content).toBe("move me\n");
+    await expect(svc.fsRead({ path: "old.txt", encoding: "utf8", maxBytes: 64 })).rejects.toThrow();
+
+    // emits a deleted(old) + created(new) pair on the move.
+    const moveEvent = emitted.find((e) => (e.payload as { changes: { path: string }[] }).changes.some((c) => c.path === "new.txt"));
+    const changes = (moveEvent!.payload as { changes: { path: string; kind: string }[] }).changes;
+    expect(changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "old.txt", kind: "deleted" }),
+      expect.objectContaining({ path: "new.txt", kind: "created" }),
+    ]));
+  });
+
+  test("fsMove with overwrite:false onto an existing destination throws conflict", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsWrite({ path: "a.txt", encoding: "utf8", content: "a", overwrite: true, createParents: true });
+    await svc.fsWrite({ path: "b.txt", encoding: "utf8", content: "b", overwrite: true, createParents: true });
+    await expect(svc.fsMove({ path: "a.txt", newPath: "b.txt", overwrite: false, createParents: true }))
+      .rejects.toThrow(/exists/);
+  });
+
+  test("fsMove with createParents builds missing destination dirs", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsWrite({ path: "src.txt", encoding: "utf8", content: "x", overwrite: true, createParents: true });
+    await svc.fsMove({ path: "src.txt", newPath: "deep/nested/dst.txt", overwrite: false, createParents: true });
+    const read = await svc.fsRead({ path: "deep/nested/dst.txt", encoding: "utf8", maxBytes: 16 });
+    expect(read.content).toBe("x");
+  });
+
+  test("fsMove rejects path traversal on either side", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await expect(svc.fsMove({ path: "../escape", newPath: "x.txt", overwrite: false, createParents: true })).rejects.toThrow(/traversal/);
+    await expect(svc.fsMove({ path: "x.txt", newPath: "/abs", overwrite: false, createParents: true })).rejects.toThrow(/absolute/);
+  });
+
+  test("fsMkdir -p creates a nested directory and emits a created(dir) change", async () => {
+    const { session } = await makeBox();
+    const emitted: { type: string; payload: unknown }[] = [];
+    const svc = new SandboxChannelAService({ session, emit: async (e) => { emitted.push(...e); } });
+
+    const made = await svc.fsMkdir({ path: "fresh/dir", recursive: true });
+    expect(made.path).toBe("fresh/dir");
+    expect(made.revision).toBe(1);
+
+    const list = await svc.fsList({ path: "", depth: 3, maxEntries: 1000, includeHidden: true });
+    const paths: string[] = [];
+    const walk = (n: typeof list.root): void => { paths.push(n.path); n.children?.forEach(walk); };
+    walk(list.root);
+    expect(paths).toContain("fresh/dir");
+
+    const evt = emitted.find((e) => e.type === "fs.changed")!;
+    const change = (evt.payload as { changes: { path: string; kind: string; isDir: boolean }[] }).changes[0]!;
+    expect(change).toMatchObject({ path: "fresh/dir", kind: "created", isDir: true });
+  });
+
+  test("fsMkdir recursive:false on an existing path throws validation", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session });
+    await svc.fsMkdir({ path: "once", recursive: false });
+    await expect(svc.fsMkdir({ path: "once", recursive: false })).rejects.toThrow();
+  });
 });
 
 describe("P4.4 SandboxChannelAService — Git (real local box)", () => {

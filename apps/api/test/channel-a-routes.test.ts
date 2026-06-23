@@ -26,6 +26,8 @@ const CHANNEL_A_ROUTES: RouteSpec[] = [
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/write", permission: "files:write" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/delete", permission: "files:write" },
+  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/move", permission: "files:write" },
+  { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/mkdir", permission: "files:write" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/status", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff", permission: "files:read" },
   { path: "/v1/workspaces/:workspaceId/sessions/:sessionId/git/log", permission: "files:read" },

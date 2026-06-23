@@ -61,6 +61,10 @@ export type SessionClientLike = Pick<
   // Channel-A structured services (terminal-as-events feed via fs/git/terminal)
   | "fsList"
   | "fsRead"
+  | "fsWrite"
+  | "fsDelete"
+  | "fsMove"
+  | "fsMkdir"
   | "gitStatus"
   | "gitDiff"
   | "terminalExec"

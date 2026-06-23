@@ -1,9 +1,10 @@
 import type { FsReadResponse, GitFileDiff } from "@opengeni/sdk";
 import { FileIcon } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import type { UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
+import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { DiffView } from "./diff-view";
 import { PierreDiff } from "./pierre-diff";
@@ -20,6 +21,9 @@ export type SandboxFilesProps = {
   fileSystemAvailable?: boolean | undefined;
   /** Use Pierre's Shiki-highlighted diff (default true; falls back to built-in). */
   usePierre?: boolean | undefined;
+  /** Allow in-place editing of tree files (CodeMirror). Default true. When false
+   *  the surface is review-only: every text file opens in the read-only viewer. */
+  editable?: boolean | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -61,12 +65,17 @@ export function SandboxFiles({
   stagedGit,
   fileSystemAvailable = true,
   usePierre = true,
+  editable = true,
   themeType,
   className,
 }: SandboxFilesProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const [staged, setStaged] = useState(false);
   const [layout, setLayout] = useState<"unified" | "split">("unified");
+  // View vs Edit for the read-only-viewer branch (a tree file that is NOT a
+  // diff). Resets to View on every new selection so opening a file never lands
+  // you in a stale dirty editor for a different path.
+  const [editMode, setEditMode] = useState(false);
 
   // Side-by-side (tree left, diff right) once the surface is wide enough;
   // stacked (tree over diff) on a narrow dock. Tracked off the container so it
@@ -108,6 +117,28 @@ export function SandboxFiles({
   // dumping base64 into the highlighter.
   const fileView = useFileView(viewPath, files.readFile);
 
+  // Selecting a (different) file always returns to View — never drop the user
+  // into an editor whose buffer belongs to the previously-selected path.
+  const selectFile = useCallback((path: string) => {
+    setSelected(path);
+    setEditMode(false);
+  }, []);
+
+  // A tree file is editable only when it is a real, fully-loaded text file: not
+  // binary (would corrupt on save) and not truncated (we only hold a PREFIX, so
+  // a save would write the prefix back and lose the tail). The editor is then
+  // additionally gated on the `editable` prop. Anything failing this opens
+  // read-only in the viewer.
+  const canEdit =
+    editable &&
+    viewPath !== null &&
+    !fileView.loading &&
+    fileView.error === null &&
+    !fileView.isBinary &&
+    !fileView.truncated &&
+    fileView.content !== null;
+  const showEditor = canEdit && editMode;
+
   if (!fileSystemAvailable) {
     return (
       <Notice className={className}>This sandbox does not expose a file system.</Notice>
@@ -140,7 +171,7 @@ export function SandboxFiles({
                   <li key={file.path}>
                     <button
                       type="button"
-                      onClick={() => setSelected(file.path)}
+                      onClick={() => selectFile(file.path)}
                       className={cn(
                         "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-xs hover:bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
                         file.path === effectiveSelected &&
@@ -178,7 +209,7 @@ export function SandboxFiles({
           <FileBrowser
             result={files}
             selectedPath={effectiveSelected ?? undefined}
-            onSelectFile={(path) => setSelected(path)}
+            onSelectFile={selectFile}
             emptyState="No files."
             className="min-w-0"
           />
@@ -221,6 +252,19 @@ export function SandboxFiles({
                   onChange={(v) => setLayout(v as "unified" | "split")}
                 />
               )}
+              {/* View/Edit toggle — only for a real, fully-loaded text file the
+                  editor can safely round-trip. Binary/truncated files never get
+                  an Edit affordance (they'd corrupt on save). */}
+              {!selectedDiff && canEdit && (
+                <Segmented
+                  options={[
+                    { value: "view", label: "View" },
+                    { value: "edit", label: "Edit" },
+                  ]}
+                  value={editMode ? "edit" : "view"}
+                  onChange={(v) => setEditMode(v === "edit")}
+                />
+              )}
             </div>
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
@@ -240,16 +284,32 @@ export function SandboxFiles({
                 <DiffView diff={[selectedDiff]} layout={layout} isRepo={git.isRepo} className="p-1" />
               )
             ) : viewPath ? (
-              // Any other tree file -> read-only single-file viewer (fs.read).
-              // This works with NO repo — viewing files never requires git.
-              fileView.error ? (
+              // Any other tree file -> editable editor (Edit mode) or read-only
+              // single-file viewer (fs.read). This works with NO repo — viewing
+              // and editing files never requires git.
+              showEditor && fileView.content !== null ? (
+                <CodeEditor
+                  key={viewPath}
+                  path={viewPath}
+                  initialContents={fileView.content}
+                  themeType={resolvedTheme}
+                  onSave={(contents) => files.writeFile(viewPath, contents)}
+                  className="h-full"
+                />
+              ) : fileView.error ? (
                 <Notice>Could not open {viewPath}: {fileView.error.message}</Notice>
               ) : fileView.loading ? (
                 <Notice>Loading {viewPath}…</Notice>
               ) : fileView.isBinary ? (
                 <Notice>{viewPath} is a binary file ({fileView.sizeBytes ?? 0} bytes).</Notice>
               ) : fileView.content !== null ? (
-                usePierre ? (
+                <>
+                {fileView.truncated && (
+                  <div className="border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1 text-[10px] text-[color:var(--og-color-status-running,var(--color-warning,#d29922))]">
+                    Large file — showing a truncated preview ({fileView.sizeBytes ?? 0} bytes loaded). Editing is disabled to avoid corrupting the file.
+                  </div>
+                )}
+                {usePierre ? (
                   <PierreFile
                     path={viewPath}
                     contents={fileView.content}
@@ -265,7 +325,8 @@ export function SandboxFiles({
                   <pre className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px]">
                     {fileView.content}
                   </pre>
-                )
+                )}
+                </>
               ) : (
                 <Notice>Loading {viewPath}…</Notice>
               )
@@ -375,6 +436,10 @@ function useThemeType(forced: "dark" | "light" | undefined): "dark" | "light" {
 type FileViewState = {
   content: string | null;
   isBinary: boolean;
+  /** The backend truncated the read (size cap hit) — content is a PREFIX only.
+   *  Editing+saving such a file would write the prefix back and corrupt it, so
+   *  the editor must stay read-only for a truncated read. */
+  truncated: boolean;
   sizeBytes: number | null;
   loading: boolean;
   error: Error | null;
@@ -393,17 +458,18 @@ function useFileView(
   const [state, setState] = useState<FileViewState>({
     content: null,
     isBinary: false,
+    truncated: false,
     sizeBytes: null,
     loading: false,
     error: null,
   });
   useEffect(() => {
     if (!path) {
-      setState({ content: null, isBinary: false, sizeBytes: null, loading: false, error: null });
+      setState({ content: null, isBinary: false, truncated: false, sizeBytes: null, loading: false, error: null });
       return;
     }
     let cancelled = false;
-    setState({ content: null, isBinary: false, sizeBytes: null, loading: true, error: null });
+    setState({ content: null, isBinary: false, truncated: false, sizeBytes: null, loading: true, error: null });
     void readFile(path)
       .then((res) => {
         if (cancelled) return;
@@ -415,6 +481,7 @@ function useFileView(
         setState({
           content,
           isBinary: res.isBinary,
+          truncated: res.truncated,
           sizeBytes: res.sizeBytes,
           loading: false,
           error: null,
@@ -425,6 +492,7 @@ function useFileView(
         setState({
           content: null,
           isBinary: false,
+          truncated: false,
           sizeBytes: null,
           loading: false,
           error: cause instanceof Error ? cause : new Error(String(cause)),

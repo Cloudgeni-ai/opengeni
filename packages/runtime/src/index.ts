@@ -1221,10 +1221,12 @@ export const stripProviderItemIdsFilter: CallModelInputFilter = ({ modelData }) 
 
 /**
  * callModelInputFilter that normalizes every `computer_call` carrying BOTH
- * `action` and `actions` down to EXACTLY ONE (keeps `action`, drops `actions`).
+ * `action` and `actions` down to EXACTLY ONE (keeps `actions`, drops `action`).
  * The Azure computer-use endpoint rejects a request whose computer_call has
  * both with `400 Computer call input must include exactly one of `action` or
- * `actions``; the SDK 0.11.6 schema allows both, so a freshly-emitted
+ * `actions``; and (live-proven against gpt-5.5's GA computer tool) it also
+ * rejects the `action`-only form, accepting ONLY the batched plural `actions`.
+ * The SDK 0.11.6 schema allows both, so a freshly-emitted
  * screenshot call carries the redundant pair. This filter runs before EVERY
  * model call — the turn-start history replay AND every mid-turn follow-up — so
  * it covers the just-emitted (non-replayed) computer_call on the same turn,

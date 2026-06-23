@@ -21,6 +21,10 @@ import type {
   FileDownloadUrlResponse,
   FsListResponse,
   FsReadResponse,
+  FsWriteResponse,
+  FsDeleteResponse,
+  FsMoveResponse,
+  FsMkdirResponse,
   FsTreeNode,
   GitDiffResponse,
   GitStatusResponse,
@@ -560,6 +564,22 @@ export class MockOpenGeniClient implements SessionClientLike {
   async fsRead(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsReadResponse> {
     const content = `// ${request.path}\nexport const ok = true;\n`;
     return { path: request.path, encoding: "utf8", content, sizeBytes: content.length, truncated: false, isBinary: false, revision: 1 };
+  }
+
+  async fsWrite(_workspaceId: string, _sessionId: string, request: { path: string; content: string }): Promise<FsWriteResponse> {
+    return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+  }
+
+  async fsDelete(_workspaceId: string, _sessionId: string, _request: { path: string }): Promise<FsDeleteResponse> {
+    return { revision: 1 };
+  }
+
+  async fsMove(_workspaceId: string, _sessionId: string, request: { path: string; newPath: string }): Promise<FsMoveResponse> {
+    return { path: request.path, newPath: request.newPath, revision: 1 };
+  }
+
+  async fsMkdir(_workspaceId: string, _sessionId: string, request: { path: string }): Promise<FsMkdirResponse> {
+    return { path: request.path, revision: 1 };
   }
 
   async gitStatus(): Promise<GitStatusResponse> {
