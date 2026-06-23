@@ -35,6 +35,7 @@ import {
   establishSandboxSessionFromEnvelope,
   ensureDisplayStack as ensureDisplayStackOnBox,
   desktopCapableBackend,
+  serializeEstablishedSandboxEnvelope,
   DisplayStackUnsupportedError,
   buildStreamUrl,
   StreamPortUnavailableError,
@@ -170,6 +171,14 @@ export async function resumeBoxForTurn(
       });
       await ensureDisplayStack(settings, established);
       const endpoint = await exposeStreamPort(settings, established);
+      // Fold the LIVE box into a re-resumable envelope and persist it as the
+      // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
+      // viewer.ts). Without this the turn committed the ORIGINAL session manifest
+      // as resume_state, so every LATER op off this lease (Channel-A fs/git/
+      // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
+      // and never saw the turn's live box. Fall back to the session envelope only
+      // when the client cannot serialize live state.
+      const resumeEnvelope = (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
       const committed = await commitWarmingToWarm(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -178,7 +187,7 @@ export async function resumeBoxForTurn(
         instanceId: established.instanceId,
         dataPlaneUrl: endpoint?.url ?? null,
         resumeBackendId: established.backendId,
-        resumeState: envelope ?? null,
+        resumeState: resumeEnvelope,
         leaseTtlMs,
       });
       if (!committed.committed || !committed.lease) {
@@ -217,7 +226,13 @@ export async function resumeBoxForTurn(
   }
 
   try {
-    const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+    // Prefer the lease's resume_state (the LIVE box the spawner committed) so we
+    // re-attach to the SAME box by id, not cold-restore the original session
+    // manifest into a rival. Fall back to the session envelope only when the
+    // lease carries no resume_state (matches channel-a.ts's attached branch).
+    const live = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+    const envelope =
+      live?.resumeState ?? (await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId));
     const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
       sessionId: ids.sessionId,
       backendOverride: ids.backend as never,
