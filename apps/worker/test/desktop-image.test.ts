@@ -143,18 +143,44 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
     //    google-chrome ships a launcher wrapper PLUS a real ELF `chrome` binary;
     //    the proof of "real browser" is (i) a genuine ELF binary present in the
     //    install dir, and (ii) `--version` actually launches and prints a version.
+    //
+    //    NOTE: /usr/local/bin/opengeni-browser is now a CONTAINER-SAFE WRAPPER SCRIPT
+    //    (it adds --no-sandbox etc. so Chrome launches as root from the human exo/menu
+    //    path), so we resolve the REAL engine via OPENGENI_BROWSER_BIN (the binary the
+    //    wrapper execs), not via readlink of the wrapper itself.
     const browser = await sh(
-      "BIN=$(readlink -f /usr/local/bin/opengeni-browser); DIR=$(dirname \"$BIN\"); " +
+      "BIN=\"${OPENGENI_BROWSER_BIN:-/usr/bin/google-chrome-stable}\"; " +
+        "BIN=$(readlink -f \"$BIN\"); DIR=$(dirname \"$BIN\"); " +
         "echo \"resolved=$BIN\"; " +
         // find a real ELF binary in the install tree (chrome's actual engine).
-        "ELF=$(for f in \"$DIR/chrome\" \"$DIR\"/*; do " +
+        "ELF=$(for f in \"$DIR/chrome\" \"$BIN\" \"$DIR\"/*; do " +
         "  [ -f \"$f\" ] && [ \"$(head -c4 \"$f\" | xxd -p)\" = \"7f454c46\" ] && { echo \"$f\"; break; }; done); " +
         "echo \"elf=$ELF\"",
     );
     // a genuine ELF engine binary is present (NOT a lone shell stub like the snap).
     expect(browser.out).toMatch(/elf=\/.+/);
     expect(browser.out).not.toMatch(/elf=\s*$/m);
-    // and it actually LAUNCHES enough to report a version (the snap-stub cannot).
+
+    // (c.2) the wrapper IS a container-safe script that passes --no-sandbox to the
+    //       real engine — the fix for the root-without-sandbox launch failure.
+    const wrapper = await sh("cat /usr/local/bin/opengeni-browser");
+    expect(wrapper.out).toContain("--no-sandbox");
+    expect(wrapper.out).toContain("--disable-dev-shm-usage");
+    // it must be bash -n clean and executable.
+    const wrapSyntax = await sh("bash -n /usr/local/bin/opengeni-browser && echo SYNTAX_OK");
+    expect(wrapSyntax.out).toContain("SYNTAX_OK");
+
+    // (c.3) the wrapper is wired as the XFCE default WebBrowser AND the x-www-browser
+    //       alternative, so the human menu/exo path resolves to it (not the stock
+    //       chrome-no-flags helper that died with "Input/output error").
+    const defaults = await sh(
+      "grep -h WebBrowser /etc/xdg/xfce4/helpers.rc; " +
+        "readlink -f /etc/alternatives/x-www-browser",
+    );
+    expect(defaults.out).toContain("WebBrowser=opengeni-browser");
+    expect(defaults.out).toContain("/usr/local/bin/opengeni-browser");
+
+    // and the wrapper actually LAUNCHES enough to report a version (the snap-stub cannot).
     const ver = await sh("/usr/local/bin/opengeni-browser --version 2>&1 | head -1", 30_000);
     expect(ver.code).toBe(0);
     expect(ver.out.toLowerCase()).toMatch(/chrome|firefox/);

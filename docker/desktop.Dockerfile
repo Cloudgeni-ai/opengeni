@@ -55,7 +55,9 @@ RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     desktop_packages=" \
         xvfb x11-utils x11-xserver-utils x11-apps xauth \
+        xkb-data x11-xkb-utils \
         xfce4 xfce4-terminal dbus-x11 \
+        at-spi2-core \
         x11vnc \
         xdotool scrot ffmpeg \
         libgl1-mesa-dri \
@@ -79,12 +81,27 @@ RUN set -eux; \
 RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
     ln -sf /var/lib/dbus/machine-id /etc/machine-id
 
-# ---- Layer 5: a REAL in-box browser (google-chrome-stable) ----
+# ---- Layer 5: a REAL in-box browser (google-chrome-stable) + container-safe wiring ----
 # The spike PROVED `chromium-browser` on Jammy is a SNAP-TRANSITION STUB (a shell
 # script that demands the chromium snap; with no snapd in the container it does NOT
 # install a runnable browser). The canonical image ships the real Google Chrome deb
-# (the "apt-key dance" is unavoidable and correct). Launch flags (--no-sandbox etc.)
-# are applied at launch (computer-use / hook), never baked here.
+# (the "apt-key dance" is unavoidable and correct).
+#
+# CONTAINER-SAFE LAUNCH (the bug this layer fixes): the box runs as ROOT, and Chrome
+# refuses to start as root without --no-sandbox — so the stock XFCE/exo "Web Browser"
+# (debian-sensible-browser -> x-www-browser -> google-chrome-stable, NO flags) hard-
+# fails with exit 1, which exo surfaces as "Failed to execute default Web Browser.
+# Input/output error." We fix BOTH the human menu path and the agent path with ONE
+# wrapper that supplies the container-safe flags, and we wire it as the system default
+# browser so every exo/x-www-browser/mimeapps resolution lands on it.
+ARG OPENGENI_BROWSER_BIN_AMD64=/usr/bin/google-chrome-stable
+ARG OPENGENI_BROWSER_BIN_ARM64=/usr/bin/firefox-esr
+
+# (i) the wrapper + the default-browser config files (one COPY, used right below).
+COPY docker/desktop/opengeni-browser.sh            /usr/local/bin/opengeni-browser
+COPY docker/desktop/opengeni-browser.helper.desktop /usr/share/xfce4/helpers/opengeni-browser.desktop
+COPY docker/desktop/opengeni-browser.app.desktop    /usr/share/applications/opengeni-browser.desktop
+
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
@@ -100,17 +117,49 @@ RUN set -eux; \
             apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
-        ln -sf /usr/bin/google-chrome-stable /usr/local/bin/opengeni-browser; \
+        BROWSER_BIN="${OPENGENI_BROWSER_BIN_AMD64}"; \
     else \
         for attempt in 1 2 3; do \
             rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
             apt-get update && apt-get install -y --no-install-recommends firefox-esr && break; \
             if [ "$attempt" = "3" ]; then exit 1; fi; sleep $((attempt * 5)); \
         done; \
-        ln -sf /usr/bin/firefox-esr /usr/local/bin/opengeni-browser; \
+        BROWSER_BIN="${OPENGENI_BROWSER_BIN_ARM64}"; \
     fi; \
     rm -rf /var/lib/apt/lists/*; \
-    /usr/local/bin/opengeni-browser --version
+    # the wrapper reads OPENGENI_BROWSER_BIN; bake the per-arch real binary into the
+    # process env (ENV below) AND record it so the wrapper resolves it deterministically.
+    echo "OPENGENI_BROWSER_BIN baked as ${BROWSER_BIN}"; \
+    chmod 0755 /usr/local/bin/opengeni-browser; \
+    bash -n /usr/local/bin/opengeni-browser; \
+    # (ii) make the wrapper the XFCE default WebBrowser so exo-open --launch WebBrowser
+    #      (the panel/menu "Web Browser") resolves to it instead of debian-sensible-browser.
+    #      Write helpers.rc both system-wide (/etc/xdg) and into the /workspace skel so a
+    #      HOME=/workspace session picks it up. The up-script also re-asserts the HOME copy.
+    install -d -m 0755 /etc/xdg/xfce4; \
+    printf '[Default]\nWebBrowser=opengeni-browser\n' > /etc/xdg/xfce4/helpers.rc; \
+    install -d -m 0755 /workspace/.config/xfce4; \
+    printf '[Default]\nWebBrowser=opengeni-browser\n' > /workspace/.config/xfce4/helpers.rc; \
+    # (iii) repoint the debian x-www-browser / sensible-browser alternatives at the
+    #       wrapper too, so even the fallback chain is container-safe.
+    update-alternatives --install /usr/bin/x-www-browser  x-www-browser  /usr/local/bin/opengeni-browser 250; \
+    update-alternatives --install /usr/bin/gnome-www-browser gnome-www-browser /usr/local/bin/opengeni-browser 250 || true; \
+    update-alternatives --set x-www-browser /usr/local/bin/opengeni-browser; \
+    # (iv) register the freedesktop default handler for http(s)/html so any "open URL"
+    #      (mimeapps) path also lands on the wrapper.
+    install -d -m 0755 /etc/xdg; \
+    printf '[Default Applications]\nx-scheme-handler/http=opengeni-browser.desktop\nx-scheme-handler/https=opengeni-browser.desktop\ntext/html=opengeni-browser.desktop\nx-scheme-handler/about=opengeni-browser.desktop\nx-scheme-handler/unknown=opengeni-browser.desktop\n' \
+        > /etc/xdg/mimeapps.list; \
+    update-desktop-database /usr/share/applications 2>/dev/null || true; \
+    # (v) prove the wrapper actually launches the real engine (--version, NO_AT_BRIDGE
+    #     keeps it quiet). Uses the baked env via the ENV directive below at runtime;
+    #     here we pass it inline so the build-time check exercises the same path.
+    OPENGENI_BROWSER_BIN="${BROWSER_BIN}" /usr/local/bin/opengeni-browser --version
+
+# the per-arch real engine the wrapper execs (amd64 chrome by default; the ARM build
+# arg path overrides at build time). Lives in process env so the wrapper picks it up
+# from BOTH the human exo launch and the agent computer-use launch.
+ENV OPENGENI_BROWSER_BIN=/usr/bin/google-chrome-stable
 
 # ---- Layer 6: terraform / checkov / az / gh (parity with docker/sandbox.Dockerfile) ----
 RUN set -eux; \

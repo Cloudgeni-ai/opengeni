@@ -168,18 +168,37 @@ export function DesktopViewer({
     onAcknowledge?.();
   };
 
-  // Esc / blur returns control to watch so the pointer is never trapped.
+  // Release control WITHOUT ever swallowing a key the desktop needs. Esc, and
+  // every other key, pass straight through to noVNC/:0 — vital for vim, menus,
+  // and dialogs inside the box. Two non-trapping exits remain:
+  //   1. A single non-conflicting chord — Ctrl+Alt+Shift pressed on its own
+  //      (no other key) — which no app binds, so it never eats a real keystroke.
+  //   2. The pointer LEAVING the surface: a deliberate "I'm done driving" gesture
+  //      that, unlike a window blur, isn't fired by a plain alt-tab, so control
+  //      is never dropped mid-use while the user tabs to another app/window.
+  //  (Plus the always-visible "Return control" button in the in-control bar.)
   useEffect(() => {
     if (!inControl || externallyControlled) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setTakeControl(false);
+      // Only the bare modifier chord releases; if any non-modifier key is also
+      // down (event.key is a real key like "a"/"Escape"), let it pass through.
+      if (
+        event.ctrlKey &&
+        event.altKey &&
+        event.shiftKey &&
+        (event.key === "Control" || event.key === "Alt" || event.key === "Shift")
+      ) {
+        event.preventDefault();
+        setTakeControl(false);
+      }
     };
-    const onBlur = () => setTakeControl(false);
+    const container = containerRef.current;
+    const onPointerLeave = () => setTakeControl(false);
     window.addEventListener("keydown", onKey);
-    window.addEventListener("blur", onBlur);
+    container?.addEventListener("pointerleave", onPointerLeave);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("blur", onBlur);
+      container?.removeEventListener("pointerleave", onPointerLeave);
     };
   }, [inControl, externallyControlled]);
 
@@ -370,10 +389,12 @@ export function DesktopViewer({
       {/* Take-control affordance. Two distinct states:
             - WATCHING  → a prominent, centered call-to-action button overlaid on
               the desktop (the primary CTA; tasteful so the screen stays visible).
-            - IN CONTROL → a small, unobtrusive top bar ("You're in control · Esc
-              to release"); the desktop stays fully usable (accent ring already on
-              the viewport). Server-gated: when the deployment is read-only the CTA
-              renders disabled with a reason so it degrades gracefully. */}
+            - IN CONTROL → a small top bar ("You're in control · click Return
+              control (or Ctrl+Alt+Shift)") with a clearly-visible Return-control
+              button; the desktop stays fully usable and EVERY key — Esc included —
+              passes through to the box. Server-gated: when the deployment is
+              read-only the CTA renders disabled with a reason so it degrades
+              gracefully. */}
       {showToggle && !externallyControlled && inControl && (
         <InControlBar
           shared={capability?.shared ?? false}
@@ -470,10 +491,12 @@ function TakeControlCallToAction({
 }
 
 /**
- * The IN-CONTROL state: a small, unobtrusive top bar so the desktop stays fully
- * usable while driving (the accent ring around the viewport carries the primary
- * "you're driving" signal). Shows a one-click release affordance + the Esc hint,
- * and the shared-box disclosure when relevant.
+ * The IN-CONTROL state: a small top bar so the desktop stays fully usable while
+ * driving (the accent ring around the viewport carries the primary "you're
+ * driving" signal). Every keystroke — including Esc — passes through to the box,
+ * so release lives only on explicit, non-trapping affordances: a clearly-visible
+ * "Return control" button and the Ctrl+Alt+Shift chord. The button is solid
+ * (not a faint ghost) so it's always discoverable as the way out.
  */
 function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () => void }) {
   return (
@@ -481,7 +504,7 @@ function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () =>
       <span className="pointer-events-auto inline-flex items-center gap-2 rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] px-2.5 py-1 text-[11px] font-medium text-[color:var(--og-color-accent-fg,#fff)] shadow-[var(--og-shadow-md)]">
         <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
         You&apos;re in control
-        <span className="opacity-75">· press Esc to release</span>
+        <span className="opacity-75">· click Return control (or Ctrl+Alt+Shift)</span>
       </span>
       <div className="pointer-events-auto flex items-center gap-1.5">
         {shared && (
@@ -492,14 +515,15 @@ function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () =>
         <button
           type="button"
           onClick={onRelease}
-          title="Return control (Esc)"
+          title="Return control (or press Ctrl+Alt+Shift)"
           className={cn(
-            "rounded-[var(--og-radius-sm,4px)] border px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors",
-            "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,#0d0d0d)]/70 text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]",
-            "outline-none hover:text-[color:var(--og-color-fg,#e6e6e6)] focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+            "inline-flex items-center gap-1.5 rounded-[var(--og-radius-sm,4px)] border px-2.5 py-1 text-[11px] font-semibold shadow-[var(--og-shadow-md)] transition-colors",
+            "border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] bg-[color:var(--og-color-bg,#0d0d0d)]/90 text-[color:var(--og-color-fg,#e6e6e6)] backdrop-blur-sm",
+            "outline-none hover:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] hover:text-[color:var(--og-color-accent-fg,#fff)] focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
           )}
         >
-          Release
+          <MonitorIcon className="size-3.5" strokeWidth={2} aria-hidden />
+          Return control
         </button>
       </div>
     </div>
