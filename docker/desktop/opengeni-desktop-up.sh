@@ -39,9 +39,13 @@ if ! alive xfce; then
 fi
 
 # 3. x11vnc  (shares the EXISTING :0; -shared = native N-viewer fan-out; -forever = survive 0 viewers)
-#    -viewonly => v1 read-only desktop (F13): NO write path to :0 from viewers; the agent
-#    drives input via session.exec'd xdotool (XTEST), not the VNC channel.
-start x11vnc x11vnc -display :0 -forever -shared -viewonly -wait 50 -rfbport 5900 -nopw \
+#    Human take-control: NO -viewonly, so VNC viewers can drive mouse+keyboard into
+#    :0 (the human intervenes when they want). This is the intended SHARED-desktop
+#    behavior: viewer input and the agent's xdotool/scrot (XTEST) input both reach
+#    the SAME :0 independently. Control is gated client-side (the "Take control"
+#    affordance) and by the stream posture (unguessable short-TTL tunnel URL +
+#    server-recorded scoped token); there is no in-box token validation by design.
+start x11vnc x11vnc -display :0 -forever -shared -wait 50 -rfbport 5900 -nopw \
   -noxdamage -noxfixes -repeat -ping 1 -speeds lan -o "$RUN/x11vnc.full.log"
 for i in $(seq 1 50); do nc -z localhost 5900 && break; sleep 0.1; \
   [ "$i" = "50" ] && { echo "x11vnc failed on :5900" >&2; exit 12; }; done

@@ -55,6 +55,12 @@ const ACTION_YIELD_MS = 15_000;
 // uses a similar divisor. Clamp keeps a runaway delta from spamming the wheel.
 const SCROLL_NOTCH_PIXELS = 100;
 const SCROLL_MAX_CLICKS = 15;
+// screenshot() never hands the model an empty image_url (the SDK turns "" into
+// `image_url: ''`, which the model API 400s). A cold/not-yet-painting :0 can yield
+// a zero-byte frame on the first scrot; bounded retries with a short pause let a
+// momentarily-unpainted-but-live display self-heal before we FAIL LOUD.
+const SCREENSHOT_MAX_ATTEMPTS = 3;
+const SCREENSHOT_RETRY_DELAY_MS = 400;
 
 export type SandboxComputerOptions = {
   display?: string; // ":0"
@@ -181,25 +187,52 @@ export class SandboxComputer implements Computer {
     // F2: scrot to a file, then read the RAW PNG bytes via readFile and base64 in
     // JS. NEVER `base64 -w0 | execCommand` — the execCommand metadata preamble
     // would prefix the image payload and corrupt the computer_call_result.
+    //
+    // CRITICAL CONTRACT: this NEVER returns an empty string. The Agents SDK builds
+    // the model-facing image as `data:image/png;base64,${output}` — so an empty
+    // `output` becomes `image_url: ''`, which the model API rejects with
+    // "400 Invalid input[N].output.image_url, expected a valid URL" and kills the
+    // turn. An empty/failed frame is therefore a THROW (a clear action failure the
+    // SDK surfaces), never a silent "". We also self-heal a transient cold-display
+    // frame: bounded retries with a short wait between attempts, so a :0 that is up
+    // but momentarily not painting (XFCE/dbus still warming) recovers without
+    // failing the turn.
     if (typeof this.session.readFile !== "function") {
       throw new ComputerUnavailableError("session cannot read files (no readFile) — screenshots unavailable");
     }
-    const f = `${this.tmp}/og-shot-${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
-    try {
-      await this.x(`scrot --pointer --overwrite ${f}`);
-      const data = await this.session.readFile!({
-        path: f,
-        ...(this.runAs ? { runAs: this.runAs } : {}),
-      });
-      const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
-      if (bytes.length === 0) {
-        throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
+    let lastError: unknown;
+    for (let attempt = 0; attempt < SCREENSHOT_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, SCREENSHOT_RETRY_DELAY_MS));
       }
-      return Buffer.from(bytes).toString("base64");
-    } finally {
-      // Best-effort cleanup; never mask the screenshot result.
-      await this.x(`rm -f ${f}`).catch(() => undefined);
+      const f = `${this.tmp}/og-shot-${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
+      try {
+        await this.x(`scrot --pointer --overwrite ${f}`);
+        const data = await this.session.readFile!({
+          path: f,
+          ...(this.runAs ? { runAs: this.runAs } : {}),
+        });
+        const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+        if (bytes.length === 0) {
+          // A cold/not-yet-painting :0 yields a zero-byte frame. Retry rather than
+          // hand the model an empty image_url; throw on the final attempt.
+          throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
+        }
+        return Buffer.from(bytes).toString("base64");
+      } catch (error) {
+        lastError = error;
+      } finally {
+        // Best-effort cleanup on every attempt (success OR failure); never mask the
+        // screenshot result.
+        await this.x(`rm -f ${f}`).catch(() => undefined);
+      }
     }
+    // Exhausted retries: FAIL LOUD. A clear throw is the only acceptable outcome —
+    // returning "" here would surface to the model as an invalid empty image_url.
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+    throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
   }
 
   async click(xp: number, yp: number, button: ComputerButton) {

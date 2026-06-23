@@ -1,5 +1,5 @@
 import type { CapabilityUnavailableReason, DesktopRfbFactory, DesktopStreamCapability } from "@opengeni/sdk";
-import { MonitorIcon } from "lucide-react";
+import { MonitorIcon, MousePointerClickIcon } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
@@ -42,10 +42,13 @@ export type DesktopViewerProps = {
 
 /**
  * The desktop surface: a noVNC client connecting to the Channel-B scoped tunnel
- * URL from the capability doc — read-only in v1. Owns the mount `<div ref>`,
- * drives `useDesktopStream` (SSR-safe lazy RFB), and renders the
+ * URL from the capability doc. Owns the mount `<div ref>`, drives
+ * `useDesktopStream` (SSR-safe lazy RFB), and renders the
  * unavailable / warming / consent / viewer-cap / live states. The read-only vs
- * interactive decision is enforced server-first (`capability.mode`).
+ * interactive decision is enforced server-first (`capability.mode`): when the
+ * deployment advertises mode "interactive" the viewer can TAKE CONTROL and drive
+ * the mouse & keyboard into the box's :0; a "read-only" deployment disables the
+ * take-control affordance (graceful, with a reason).
  *
  * Connection is gated: the RFB only attaches once a usable `url` is present
  * (post-acknowledgment, post-warm). Before that, the consent / warming notices
@@ -175,38 +178,32 @@ export function DesktopViewer({
         </div>
       )}
 
-      {/* Watch ⇄ Take control bar (top-right). Server-gated; framed when driving. */}
-      {showToggle && (
-        <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 p-2">
-          {inControl ? (
-            <span className="pointer-events-auto rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] px-2 py-0.5 text-[11px] font-medium text-[color:var(--og-color-accent-fg,#fff)] shadow-[var(--og-shadow-md)]">
-              You&apos;re in control
-            </span>
-          ) : (
-            <span />
-          )}
-          <div className="pointer-events-auto flex items-center gap-1.5">
-            {capability?.shared && inControl && (
-              <span className="rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-danger,var(--color-danger,#f85149))]/85 px-2 py-0.5 text-[10px] text-white">
-                Shared box — others are watching
-              </span>
-            )}
-            {!externallyControlled && (
-              <ControlToggle
-                inControl={inControl}
-                disabled={!serverAllowsControl || !connected}
-                disabledReason={
-                  !serverAllowsControl
-                    ? "This deployment streams the desktop read-only"
-                    : !connected
-                      ? "Waiting for the desktop to connect"
-                      : undefined
-                }
-                onChange={(next) => setTakeControl(next)}
-              />
-            )}
-          </div>
-        </div>
+      {/* Take-control affordance. Two distinct states:
+            - WATCHING  → a prominent, centered call-to-action button overlaid on
+              the desktop (the primary CTA; tasteful so the screen stays visible).
+            - IN CONTROL → a small, unobtrusive top bar ("You're in control · Esc
+              to release"); the desktop stays fully usable (accent ring already on
+              the viewport). Server-gated: when the deployment is read-only the CTA
+              renders disabled with a reason so it degrades gracefully. */}
+      {showToggle && !externallyControlled && inControl && (
+        <InControlBar
+          shared={capability?.shared ?? false}
+          onRelease={() => setTakeControl(false)}
+        />
+      )}
+      {/* The big CTA only appears once the framebuffer is live + the viewer is
+          watching: before connect the idle scrim already communicates state, so we
+          don't double up. A read-only deployment (serverAllowsControl=false) still
+          surfaces the CTA disabled-with-reason once connected, so it degrades
+          gracefully and stays discoverable. */}
+      {showToggle && !externallyControlled && !inControl && connected && (
+        <TakeControlCallToAction
+          disabled={!serverAllowsControl}
+          disabledReason={
+            !serverAllowsControl ? "This deployment streams the desktop read-only" : undefined
+          }
+          onTakeControl={() => setTakeControl(true)}
+        />
       )}
 
       {overlay && (
@@ -216,33 +213,107 @@ export function DesktopViewer({
   );
 }
 
-function ControlToggle({
-  inControl,
+/**
+ * The primary WATCHING-state call-to-action: a large, centered pill button
+ * overlaid on the desktop inviting the viewer to drive the mouse & keyboard.
+ * Tasteful by default — it sits in the LOWER-center with a soft scrim only behind
+ * the button (not the whole screen) and lifts on hover, so a watcher can still see
+ * the agent work. Server-gated: when the deployment is read-only (or the desktop
+ * hasn't connected yet) it renders disabled with a reason. Accessible: a real
+ * <button> with a title, focus ring, and Enter/Space activation.
+ */
+function TakeControlCallToAction({
   disabled,
   disabledReason,
-  onChange,
+  onTakeControl,
 }: {
-  inControl: boolean;
   disabled: boolean;
   disabledReason?: string | undefined;
-  onChange: (next: boolean) => void;
+  onTakeControl: () => void;
 }) {
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      title={disabled ? disabledReason : inControl ? "Return control (Esc)" : "Take control of the desktop"}
-      onClick={() => onChange(!inControl)}
-      className={cn(
-        "rounded-[var(--og-radius-sm,4px)] border px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors",
-        disabled && "cursor-not-allowed opacity-50",
-        inControl
-          ? "border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]/15 text-[color:var(--og-color-fg,#e6e6e6)]"
-          : "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,#0d0d0d)]/70 text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))] hover:text-[color:var(--og-color-fg,#e6e6e6)]",
-      )}
-    >
-      {inControl ? "Return control" : "Take control"}
-    </button>
+    // The wrapper spans the surface but is click-through (pointer-events-none); only
+    // the button itself is interactive, so watchers can still see the desktop.
+    <div className="pointer-events-none absolute inset-0 flex items-end justify-center pb-[8%]">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-label="Take control of the desktop"
+        title={disabled ? disabledReason : "Take control of the desktop"}
+        onClick={onTakeControl}
+        className={cn(
+          "group pointer-events-auto flex items-center gap-3 rounded-[var(--og-radius-lg,12px)] border px-5 py-3",
+          "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]",
+          "bg-[color:var(--og-color-bg,#0d0d0d)]/85 backdrop-blur-md",
+          "shadow-[var(--og-shadow-lg,0_10px_30px_-10px_rgba(0,0,0,0.6))]",
+          "outline-none transition-all duration-150 ease-out",
+          "focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] focus-visible:ring-offset-2 focus-visible:ring-offset-black",
+          disabled
+            ? "cursor-not-allowed opacity-60"
+            : cn(
+                "cursor-pointer opacity-90 hover:-translate-y-0.5 hover:opacity-100",
+                "hover:border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+                "hover:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]/10",
+              ),
+        )}
+      >
+        <span
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
+            "bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+            "text-[color:var(--og-color-accent-fg,#fff)]",
+            disabled ? "" : "group-hover:scale-105",
+          )}
+        >
+          <MousePointerClickIcon className="size-5" strokeWidth={2} />
+        </span>
+        <span className="flex flex-col items-start leading-tight">
+          <span className="text-sm font-semibold text-[color:var(--og-color-fg,#e6e6e6)]">
+            Take control
+          </span>
+          <span className="text-[11px] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+            {disabled && disabledReason ? disabledReason : "Drive the mouse & keyboard"}
+          </span>
+        </span>
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The IN-CONTROL state: a small, unobtrusive top bar so the desktop stays fully
+ * usable while driving (the accent ring around the viewport carries the primary
+ * "you're driving" signal). Shows a one-click release affordance + the Esc hint,
+ * and the shared-box disclosure when relevant.
+ */
+function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () => void }) {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2">
+      <span className="pointer-events-auto inline-flex items-center gap-2 rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] px-2.5 py-1 text-[11px] font-medium text-[color:var(--og-color-accent-fg,#fff)] shadow-[var(--og-shadow-md)]">
+        <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
+        You&apos;re in control
+        <span className="opacity-75">· press Esc to release</span>
+      </span>
+      <div className="pointer-events-auto flex items-center gap-1.5">
+        {shared && (
+          <span className="rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-danger,var(--color-danger,#f85149))]/85 px-2 py-0.5 text-[10px] text-white">
+            Shared box — others are watching
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onRelease}
+          title="Return control (Esc)"
+          className={cn(
+            "rounded-[var(--og-radius-sm,4px)] border px-2 py-0.5 text-[11px] font-medium backdrop-blur-sm transition-colors",
+            "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,#0d0d0d)]/70 text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]",
+            "outline-none hover:text-[color:var(--og-color-fg,#e6e6e6)] focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+          )}
+        >
+          Release
+        </button>
+      </div>
+    </div>
   );
 }
 

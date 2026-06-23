@@ -52,6 +52,7 @@ import type {
   WorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -1935,6 +1936,61 @@ export async function getWorkspaceEnvironmentValuesForRun(db: Database, workspac
       values: Object.fromEntries(rows.map((row) => [row.name, row.valueEncrypted])),
     };
   });
+}
+
+export type WorkspaceEnvironmentForRun = {
+  id: string;
+  name: string;
+  description: string | null;
+  values: Record<string, string>;
+};
+
+/**
+ * Load and decrypt the workspace environment attached to a run's session. SHARED
+ * by the worker TURN path (apps/worker agent-turn) AND the API-direct ATTACH paths
+ * (viewer / Channel-A / desktop / terminal) so a box first warmed by an attach is
+ * created with the SAME decrypted workspace-environment values the turn declares —
+ * the box-manifest env must match the agent-manifest env or the SDK's
+ * `validateNoEnvironmentDelta` throws when the agent injects its manifest into the
+ * resumed non-owned box.
+ *
+ * `environmentId === null` is the unattached path: zero DB work and behavior
+ * byte-identical to deployments without this feature. Attached runs fail closed: a
+ * missing key or a deleted environment throws (names/ids only in messages) instead
+ * of silently running without the secrets the run expects.
+ */
+export async function loadWorkspaceEnvironmentForRun(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  environmentId: string | null,
+): Promise<WorkspaceEnvironmentForRun | null> {
+  if (!environmentId) {
+    return null;
+  }
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (!key) {
+    throw new Error("workspace environment attached but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+  }
+  const stored = await getWorkspaceEnvironmentValuesForRun(db, workspaceId, environmentId);
+  if (!stored) {
+    throw new Error(`workspace environment not found: ${environmentId}`);
+  }
+  const values: Record<string, string> = {};
+  for (const [name, encrypted] of Object.entries(stored.values)) {
+    try {
+      values[name] = decryptEnvironmentValue(key, encrypted);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`failed to decrypt workspace environment variable ${name}: ${reason}`);
+    }
+  }
+  return {
+    id: stored.environment.id,
+    name: stored.environment.name,
+    description: stored.environment.description,
+    values,
+  };
 }
 
 export async function recordAuditEvent(db: Database, input: {

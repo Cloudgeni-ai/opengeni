@@ -19,7 +19,7 @@
 // lease's recorded data_plane_url (null until P4 mints it).
 
 import { createHash } from "node:crypto";
-import { resolveStreamTokenSecret } from "@opengeni/config";
+import { resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
@@ -28,6 +28,7 @@ import {
   failWarmingToCold,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
+  loadWorkspaceEnvironmentForRun,
   readLease,
   recordLeaseDataPlaneUrl,
   recordLeaseTerminalDataPlaneUrl,
@@ -82,6 +83,38 @@ export type ViewerAttachResult = {
   // (the mint is P4); surfaced here so the shape is stable.
   dataPlaneUrl: string | null;
 };
+
+/**
+ * The STABLE run-scoped sandbox environment a COLD box must be created with so
+ * that — whether the box is first warmed by an API-direct ATTACH (here) or by the
+ * worker TURN — its manifest environment matches the environment the agent later
+ * declares for a turn. Without this, an attach-warmed box was created with the
+ * BASE allowlist env only (establishSandboxSessionFromEnvelope's
+ * collectSandboxEnvironment default), so the next turn's fuller env (git identity
+ * + workspace environment + HOME) introduced a delta and the SDK's
+ * `validateNoEnvironmentDelta` threw "Live sandbox sessions cannot change manifest
+ * environment variables" — the BLOCKING error this fixes.
+ *
+ * Mirrors the worker turn's STABLE subset (config.stableSandboxEnvironmentForRun +
+ * the session's attached, decrypted workspace environment). It deliberately omits
+ * the per-run, rotating GitHub App installation token the turn layers on for a
+ * repo-attached run (sandboxEnvironmentForRun): that secret is minted fresh per
+ * call and is not attach-reproducible, and the attach surfaces have no repo
+ * resources in scope anyway.
+ */
+async function sessionAttachEnvironment(
+  services: ViewerServices,
+  workspaceId: string,
+  session: Session,
+): Promise<Record<string, string>> {
+  const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
+    services.db,
+    services.settings,
+    workspaceId,
+    session.environmentId,
+  );
+  return stableSandboxEnvironmentForRun(services.settings, workspaceEnvironment?.values ?? {});
+}
 
 /**
  * Acquire a `viewer` holder on the group lease, spinning up the box IN-PROCESS
@@ -141,9 +174,16 @@ export async function attachViewer(
     let established: EstablishedSandboxSession | undefined;
     try {
       const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
+      // Create a cold box with the SAME stable run-environment the worker turn
+      // will declare (config base + git identity + decrypted workspace env + HOME)
+      // so the next turn's agent-manifest apply finds an EMPTY environment delta in
+      // the SDK's validateNoEnvironmentDelta (otherwise: "Live sandbox sessions
+      // cannot change manifest environment variables").
+      const environment = await sessionAttachEnvironment(services, workspaceId, session);
       established = await establishSandboxSessionFromEnvelope(settings, envelope, {
         sessionId: session.id,
         backendOverride: session.sandboxBackend,
+        environment,
       });
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state, so EVERY later op (another viewer, a Channel-A
@@ -410,11 +450,15 @@ export async function mintDesktopStream(
   const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
+    // On a cold-restore (the lease's box is gone) this create() must carry the
+    // SAME stable run-env the turn declares, so a later turn finds no env delta.
+    const environment = await sessionAttachEnvironment(services, workspaceId, session);
     established = input.establish
       ? await input.establish(envelope)
       : await establishSandboxSessionFromEnvelope(settings, envelope, {
           sessionId: session.id,
           backendOverride: session.sandboxBackend,
+          environment,
         });
 
     // Idempotent display stack (flock-guarded; a no-op when already up). A box
@@ -607,11 +651,15 @@ export async function mintTerminalStream(
   const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
   let established: EstablishedSandboxSession | undefined;
   try {
+    // On a cold-restore this create() must carry the SAME stable run-env the turn
+    // declares, so a later turn finds no manifest-env delta.
+    const environment = await sessionAttachEnvironment(services, workspaceId, session);
     established = input.establish
       ? await input.establish(envelope)
       : await establishSandboxSessionFromEnvelope(settings, envelope, {
           sessionId: session.id,
           backendOverride: session.sandboxBackend,
+          environment,
         });
 
     // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that

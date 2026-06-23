@@ -91,8 +91,8 @@ export function MessageTimeline({
   };
 
   return (
-    <div className={cn("og-root relative min-h-0", className)}>
-      <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto overscroll-contain px-4 py-6 sm:px-6">
+    <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+      <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {groups.length === 0 && !working
             ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)

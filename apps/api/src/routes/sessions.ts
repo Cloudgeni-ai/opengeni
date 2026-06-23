@@ -487,6 +487,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       liveness: lease?.liveness ?? "cold",
       leaseEpoch: lease?.leaseEpoch ?? 0,
       desktopEnabled: settings.sandboxDesktopEnabled,
+      // Human take-control: when the desktop is available + this policy is on
+      // (default), the cell is mode "interactive" — the noVNC viewer drives :0
+      // (x11vnc runs without -viewonly). Off → mode "read-only" (client disables
+      // take-control). Independent of the agent's computerUseReadOnly.
+      desktopInteractive: settings.sandboxDesktopInteractive,
       // P4.3 computer-use: the agent drives :0 (xdotool/scrot); availability
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,

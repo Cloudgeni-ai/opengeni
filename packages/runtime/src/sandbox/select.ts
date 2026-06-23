@@ -26,6 +26,18 @@ export interface NegotiationContext {
   leaseEpoch: number;
   /** The deployment desktop toggle (settings.sandboxDesktopEnabled). */
   desktopEnabled: boolean;
+  /**
+   * The HUMAN take-control toggle (settings.sandboxDesktopInteractive). When true
+   * (default) and the desktop cell is available, the negotiated DesktopStream.mode
+   * is "interactive" — the noVNC viewer can drive mouse+keyboard into :0 (the box's
+   * x11vnc runs without -viewonly). When false the cell reports mode "read-only"
+   * and the client disables the "Take control" affordance (a genuinely read-only
+   * deployment). Independent of `computerUseReadOnly`, which gates the AGENT
+   * driver, not the human viewer plane. Defaults to true so a caller that never
+   * threads it (e.g. headless tests) still gets the interactive plane when the
+   * desktop is available.
+   */
+  desktopInteractive?: boolean;
   /** The deployment computer-use toggle (settings.computerUseEnabled). The agent
    *  drives :0 via xdotool/scrot; availability tracks desktop. Defaults to true. */
   computerUseEnabled?: boolean;
@@ -251,10 +263,19 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     // caller mints it via POST /viewers.
     const acknowledged = available ? Boolean(ctx.desktopAcknowledged) : false;
     const minted = available && acknowledged ? ctx.desktopStream : undefined;
+    // Human take-control: the cell is "interactive" when the desktop is actually
+    // available AND the deployment's take-control policy is on (default true). The
+    // box's x11vnc runs without -viewonly, so a viewer driving input reaches :0;
+    // this mode bit is the CLIENT gate (the "Take control" affordance). A
+    // deployment that wants a genuinely read-only desktop sets
+    // sandboxDesktopInteractive=false → mode "read-only" and the client disables
+    // take-control. An unavailable cell is always "read-only" (nothing to drive).
+    const interactive = available && ctx.desktopInteractive !== false;
+    const mode = interactive ? ("interactive" as const) : ("read-only" as const);
     return {
       transport: available ? cap.transport : null,
       client: available ? ("novnc" as const) : null,
-      mode: "read-only" as const,
+      mode,
       url: minted?.url ?? null,
       token: minted?.token ?? null,
       expiresAt: minted?.expiresAt ?? null,

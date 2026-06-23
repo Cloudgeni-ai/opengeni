@@ -17,13 +17,14 @@
 // IMPORT DISCIPLINE: sandbox symbols come ONLY from @opengeni/runtime/sandbox
 // (the agent-loop-free leaf) — enforced by sandbox-access-import-guard.test.ts.
 
-import type { Settings } from "@opengeni/config";
+import { stableSandboxEnvironmentForRun, type Settings } from "@opengeni/config";
 import type { Session } from "@opengeni/contracts";
 import {
   acquireLease,
   commitWarmingToWarm,
   failWarmingToCold,
   getSandboxSessionEnvelope,
+  loadWorkspaceEnvironmentForRun,
   readLease,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
@@ -125,6 +126,12 @@ export async function withChannelA<T>(
 
   try {
     const envelope = await getSandboxSessionEnvelope(db, workspaceId, session.id);
+    // The STABLE run-environment a COLD box must be created with so a later worker
+    // turn's agent-manifest apply finds an EMPTY env delta (config base + git
+    // identity + decrypted workspace env + HOME). Mirrors the worker turn's stable
+    // subset; omits the per-run rotating GitHub token (no repo resources here).
+    const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, workspaceId, session.environmentId);
+    const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment?.values ?? {});
 
     if (acquired.role === "spawner") {
       // We won the cold->warming CAS: establish the box from the envelope, then
@@ -134,6 +141,7 @@ export async function withChannelA<T>(
         established = await establishSandboxSessionFromEnvelope(settings, envelope, {
           sessionId: session.id,
           backendOverride: session.sandboxBackend,
+          environment,
         });
       } catch (error) {
         await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
@@ -168,6 +176,7 @@ export async function withChannelA<T>(
       established = await establishSandboxSessionFromEnvelope(settings, resumeEnvelope, {
         sessionId: session.id,
         backendOverride: session.sandboxBackend,
+        environment,
       });
     }
 

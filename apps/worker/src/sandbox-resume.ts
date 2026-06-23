@@ -8,9 +8,11 @@
 //      the SOLE double-spawn guard (P1.1).
 //   2. establishSandboxSessionFromEnvelope — resume the one box BY ID (warm
 //      reattach, R4-safe) or cold-restore from snapshot on a provider NotFound.
-//   3. (spawner only) ensureDisplayStack + exposeStreamPort, then
-//      commitWarmingToWarm (the lease_epoch++ fence + folds the resume envelope
-//      onto the lease).
+//   3. (spawner) ensureDisplayStack + exposeStreamPort, then commitWarmingToWarm
+//      (the lease_epoch++ fence + folds the resume envelope onto the lease). The
+//      ATTACHED/REARMED path RE-ensures the display stack too (idempotent) so a
+//      computer-use turn always finds a live :0 even on a box first warmed by a
+//      non-desktop op or after a snapshot rollover dropped the X stack.
 //   4. the caller injects {client, session, sessionState} NON-OWNED into the run
 //      (the SDK never reaps it — the keystone), runs, then in `finally` calls the
 //      returned `release()` and drops the in-memory handle. NEVER provider-delete
@@ -238,6 +240,16 @@ export async function resumeBoxForTurn(
       backendOverride: ids.backend as never,
       ...(ids.environment ? { environment: ids.environment } : {}),
     });
+    // Re-ensure the desktop display stack on the ATTACHED/REARMED path too — NOT
+    // just the spawner path. A turn attaching to a warm box whose :0 was never
+    // brought up (the box was first warmed by a Channel-A op, or a snapshot
+    // rollover dropped the X stack) would otherwise drive computer-use against a
+    // dead display: scrot yields an empty PNG, the SDK builds `image_url: ''`,
+    // and the model rejects the turn with "400 Invalid input[N].output.image_url".
+    // ensureDisplayStack is idempotent + flock-guarded (cheap no-op when up) and
+    // NO-OPs when the desktop tier is off or the backend is headless-only, so the
+    // headless turn path stays byte-for-byte unchanged.
+    await ensureDisplayStack(settings, established);
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();

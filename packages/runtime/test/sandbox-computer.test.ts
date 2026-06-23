@@ -18,6 +18,9 @@ function makeMockSession(opts: {
   pngBytes?: Uint8Array; // bytes readFile returns for the screenshot
   failExit?: number; // non-zero exit for the next exec (F2 error detection)
   stillRunning?: boolean; // simulate a yield-without-finish (F3)
+  // readFile bytes PER scrot attempt — models a cold :0 that paints on a later
+  // retry (e.g. [empty, empty, valid] self-heals on attempt 3). Overrides pngBytes.
+  pngBytesPerAttempt?: Uint8Array[];
 } = {}) {
   const execCalls: string[] = [];
   const readFileCalls: { path: string; maxBytes?: number }[] = [];
@@ -32,10 +35,16 @@ function makeMockSession(opts: {
     return formatted("", opts.failExit ?? 0);
   };
 
+  let readFileN = 0;
   const session: Record<string, unknown> = {
     execCommand: async (args: { cmd: string }) => run(args.cmd),
     readFile: async (args: { path: string; maxBytes?: number }) => {
       readFileCalls.push({ path: args.path, ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}) });
+      if (opts.pngBytesPerAttempt) {
+        const i = Math.min(readFileN, opts.pngBytesPerAttempt.length - 1);
+        readFileN++;
+        return opts.pngBytesPerAttempt[i]!;
+      }
       return opts.pngBytes ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // PNG magic
     },
   };
@@ -74,6 +83,37 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     expect(execCalls.some((c) => /base64/.test(c))).toBe(false);
     // The temp file is cleaned up.
     expect(execCalls.some((c) => c.includes("rm -f /tmp/og-shot-"))).toBe(true);
+  });
+
+  // ── Regression: the "400 Invalid input[N].output.image_url" turn-killer ──────
+  // The Agents SDK builds the model-facing image as `data:image/png;base64,${out}`
+  // (runner/toolExecution.mjs). An EMPTY screenshot output => `image_url: ''` =>
+  // the model API 400s and the computer-use turn dies. screenshot() must NEVER
+  // return "" — it throws (a clear action failure) or self-heals via retry.
+  test("REGRESSION: a zero-byte (cold/dead :0) frame THROWS — never returns an empty string", async () => {
+    const { session } = makeMockSession({ pngBytes: new Uint8Array() }); // empty PNG, every attempt
+    const c = new SandboxComputer(session as never);
+    // Failure-sensitive: it must reject (NOT resolve to ""), so an empty image_url
+    // can never reach the model.
+    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error(`screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`);
+    expect(result.e).toBeInstanceOf(ComputerUnavailableError);
+  });
+
+  test("REGRESSION: a transient cold frame self-heals — empty on attempt 1, valid on a retry", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
+    // attempt 1 reads 0 bytes (display still warming), attempt 2 paints.
+    const { session, execCalls } = makeMockSession({ pngBytesPerAttempt: [new Uint8Array(), png] });
+    const c = new SandboxComputer(session as never);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    // Two scrot attempts were made (the retry), and every attempt cleaned up its
+    // temp file (no leak across retries).
+    const scrots = execCalls.filter((cmd) => cmd.includes("scrot --pointer --overwrite"));
+    const cleanups = execCalls.filter((cmd) => cmd.includes("rm -f /tmp/og-shot-"));
+    expect(scrots.length).toBe(2);
+    expect(cleanups.length).toBe(2);
   });
 
   test("F2: nonzero exit is DETECTED via the preamble parser (not a silent success)", async () => {

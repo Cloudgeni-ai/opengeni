@@ -15,6 +15,8 @@
 // OPENGENI_P41_LIVE_MODAL-gated integration test below this one.
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { testSettings } from "@opengeni/testing";
 import type { EstablishedSandboxSession } from "@opengeni/runtime";
 import { ensureDisplayStack } from "../src/sandbox-resume";
@@ -80,5 +82,35 @@ describe("P4.1 worker ensureDisplayStack gating (I5 headless-rollover branch)", 
     // Channel-A-only fallback: swallowed, not thrown.
     await ensureDisplayStack(settings, established);
     expect(true).toBe(true);
+  });
+});
+
+// ── Regression: the computer-use "400 Invalid input[N].output.image_url" fix ───
+// The trigger was that resumeBoxForTurn brought up the desktop :0 ONLY on the
+// SPAWNER branch; a turn ATTACHING to a warm box whose display was never up (box
+// first warmed by a Channel-A op, or a snapshot rollover dropped the X stack)
+// drove computer-use against a dead :0 — scrot returned an empty PNG, the Agents
+// SDK built `image_url: ''`, and the model 400'd the turn. FIX A re-ensures the
+// display stack on the ATTACHED/REARMED branch too. We pin the structural
+// invariant (source-level, no live modal box needed): BOTH resume branches call
+// ensureDisplayStack(settings, established). This fails loud if the attached-path
+// ensure is ever removed.
+describe("REGRESSION: resumeBoxForTurn ensures the display stack on BOTH the spawner AND the attached branch", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "src", "sandbox-resume.ts"), "utf8");
+
+  test("ensureDisplayStack is called at least twice in the source (spawner + attached)", () => {
+    const calls = source.match(/await ensureDisplayStack\(settings, established\)/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("the attached/rearmed branch (resume-by-id) ensures the stack before returning the established session", () => {
+    // The attached branch establishes from the lease's resume_state then returns
+    // { established, leaseEpoch, release }. Assert ensureDisplayStack runs between
+    // that establish and that return — i.e. an attaching turn always finds a live :0.
+    const attachedBranch = source.slice(source.indexOf("Prefer the lease's resume_state"));
+    const ensureIdx = attachedBranch.indexOf("await ensureDisplayStack(settings, established)");
+    const returnIdx = attachedBranch.indexOf("return { established, leaseEpoch, release }");
+    expect(ensureIdx).toBeGreaterThan(0);
+    expect(returnIdx).toBeGreaterThan(ensureIdx);
   });
 });

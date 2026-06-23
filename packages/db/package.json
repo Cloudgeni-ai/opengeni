@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"

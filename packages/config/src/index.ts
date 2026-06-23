@@ -1,5 +1,6 @@
 import {
   BillingMode,
+  CAPABILITY_DESCRIPTORS,
   Entitlements,
   EntitlementsMode,
   ProductAccessMode,
@@ -265,6 +266,13 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
+  // Human take-control toggle: when ON (default) the negotiated DesktopStream
+  // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
+  // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
+  // deployment: the cell reports mode "read-only" and the client disables the
+  // "Take control" affordance. Independent of computerUseReadOnly (the AGENT
+  // driver); this gates the HUMAN viewer plane.
+  sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
   // terminal is a baseline structured-service surface (unlike the heavier desktop
@@ -737,6 +745,7 @@ export function getSettings(): Settings {
     modalIdleTimeoutSeconds: optional("OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS"),
     modalWorkspacePersistence: optional("OPENGENI_MODAL_WORKSPACE_PERSISTENCE"),
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
+    sandboxDesktopInteractive: optional("OPENGENI_SANDBOX_DESKTOP_INTERACTIVE"),
     sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
     streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
     streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
@@ -1135,6 +1144,50 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
     GIT_COMMITTER_NAME: settings.gitCommitterName ?? settings.gitAuthorName,
     GIT_COMMITTER_EMAIL: settings.gitCommitterEmail ?? settings.gitAuthorEmail,
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0));
+}
+
+/**
+ * The STABLE run-scoped sandbox environment: the subset of a run's box-manifest
+ * environment that is IDENTICAL whether the box is first warmed by the worker
+ * TURN or by an API-direct ATTACH (viewer / Channel-A / desktop / terminal). It
+ * is the layered base every cold box must be created with so a later turn's
+ * agent-manifest apply finds an EMPTY environment delta in the SDK's
+ * `validateNoEnvironmentDelta` (which throws "Live sandbox sessions cannot change
+ * manifest environment variables" on ANY key the agent declares that the box's
+ * manifest lacks or carries a different value for).
+ *
+ * Precedence (lowest → highest): deployment allowlist (`collectSandboxEnvironment`)
+ * < git identity (`collectGitIdentityEnvironment`) < the session's attached
+ * workspace environment < the backend-aware HOME default. Reserved-name validation
+ * at write time keeps workspace values from colliding with platform entries.
+ *
+ * DELIBERATELY EXCLUDES the per-run, ROTATING GitHub App installation token
+ * (GH_TOKEN/GITHUB_TOKEN/GIT_ASKPASS/GIT_CONFIG_*) that `sandboxEnvironmentForRun`
+ * layers on top when a repository resource is attached: that token is minted FRESH
+ * per call, so it is not a stable, attach-reproducible value and must not be part
+ * of the shared base. The attach surfaces have only the `Session` (no repo
+ * resources) and so cannot reproduce it anyway; the BLOCKING attach-vs-turn error
+ * this helper fixes is for the common (no-repo) and workspace-environment-attached
+ * cases. (A repo-attached turn re-attaching to an attach-warmed box is a separate,
+ * pre-existing rotating-secret concern — see sandboxEnvironmentForRun.)
+ */
+export function stableSandboxEnvironmentForRun(
+  settings: Settings,
+  workspaceEnvironment: Record<string, string> = {},
+): Record<string, string> {
+  const environment: Record<string, string> = {
+    ...collectSandboxEnvironment(settings),
+    ...collectGitIdentityEnvironment(settings),
+    ...workspaceEnvironment,
+  };
+  // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
+  // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
+  // unix user (keep its real $HOME); `none` has no box.
+  const descriptor = CAPABILITY_DESCRIPTORS[settings.sandboxBackend];
+  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+    environment.HOME ??= descriptor.workspaceRoot;
+  }
+  return environment;
 }
 
 export type StartupRetryOptions = {
