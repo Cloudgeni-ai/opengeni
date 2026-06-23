@@ -131,6 +131,8 @@ export {
   ChannelAUnsupportedError,
   stripExecBanner,
   parseExecBannerSessionId,
+  isWorkspaceEscapeError,
+  isExecSessionLostBanner,
   assertSafeRelPath,
   parsePorcelainV2,
   parseNumstatZ,

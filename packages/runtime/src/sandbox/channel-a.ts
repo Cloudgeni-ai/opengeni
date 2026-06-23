@@ -270,22 +270,44 @@ export class SandboxChannelAService {
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     const path = assertSafeRelPath(req.path);
     if (!this.session.readFile) {
-      // Fallback: base64 the file through exec (binary-safe).
-      const abs = this.joinRoot(path);
-      const { stdout, exitCode } = await this.run({ cmd: `base64 ${shellQuote(abs)} 2>/dev/null | head -c ${Math.ceil(req.maxBytes * 1.4)}` });
-      if (exitCode !== null && exitCode !== 0 && stdout === "") {
-        throw new ChannelANotFoundError(`file not found: ${path}`);
-      }
-      const bytes = Buffer.from(stdout.replace(/\n/g, ""), "base64");
-      return this.shapeRead(path, bytes, req);
+      // No native readFile: base64 the file through exec (binary-safe).
+      return await this.fsReadViaExec(path, req);
     }
     let raw: string | Uint8Array;
     try {
       raw = await this.session.readFile({ path: this.joinRoot(path), maxBytes: req.maxBytes, ...(this.runAs ? { runAs: this.runAs } : {}) });
     } catch (error) {
+      // The provider's native readFile applies a REMOTE workspace-escape guard:
+      // a SYMLINK whose target resolves outside /workspace (e.g.
+      // `.config/pulse/<id>-runtime -> /tmp/pulse-…`) is rejected with
+      // "Sandbox path failed remote validation: workspace escape: /tmp/…". That
+      // raw 404 surfaced to the user. The path is still legitimately INSIDE the
+      // workspace (the symlink node lives there); only its target escapes. Read it
+      // via exec instead — `base64 <path>` follows the link and is NOT subject to
+      // the provider's path validation — so a symlink-to-/tmp renders cleanly
+      // instead of erroring. A genuine not-found falls through to a clean 404.
+      if (isWorkspaceEscapeError(error)) {
+        return await this.fsReadViaExec(path, req);
+      }
       throw new ChannelANotFoundError(`file not found: ${path} (${error instanceof Error ? error.message : String(error)})`);
     }
     const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
+    return this.shapeRead(path, bytes, req);
+  }
+
+  /** Read a file by base64-ing it through exec. Binary-safe and — crucially —
+   *  NOT subject to the provider's native-readFile workspace-escape validation,
+   *  so it can render a symlink whose target lives outside /workspace (the link
+   *  node itself is in-workspace). `base64 <path>` follows the symlink. */
+  private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
+    const abs = this.joinRoot(path);
+    const { stdout, exitCode } = await this.run({ cmd: `base64 ${shellQuote(abs)} 2>/dev/null | head -c ${Math.ceil(req.maxBytes * 1.4)}` });
+    if (exitCode !== null && exitCode !== 0 && stdout === "") {
+      // The target may be a dangling symlink or a link to a directory; surface a
+      // clean, typed not-found rather than a raw provider validation error.
+      throw new ChannelANotFoundError(`file not found: ${path}`);
+    }
+    const bytes = Buffer.from(stdout.replace(/\n/g, ""), "base64");
     return this.shapeRead(path, bytes, req);
   }
 
@@ -566,6 +588,17 @@ export class SandboxChannelAService {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
     const out = await this.session.writeStdin({ sessionId: execSessionId, chars: data, yieldTimeMs: 250 });
+    // The Modal exec surface reports a vanished exec-session as a NON-throwing
+    // string ("write_stdin failed: session not found: N") that we used to stream
+    // verbatim into the terminal. That happens when the persisted exec-session no
+    // longer exists on the live box — historically the box-mismatch (resume_state
+    // pointing at a rival box; fixed at the lease layer), or a genuine box
+    // rollover after the PTY opened. Surface it as a typed CONFLICT so the route
+    // returns 409 and the client cleanly RE-OPENS the PTY against the live box,
+    // instead of writing a raw "session not found: 1" into the user's xterm.
+    if (isExecSessionLostBanner(out, execSessionId)) {
+      throw new ChannelAConflictError("pty session lost on the live box; reopen the terminal");
+    }
     return stripExecBanner(out);
   }
 
@@ -646,6 +679,34 @@ export function stripExecBanner(raw: string): string {
   if (marker >= 0) return raw.slice(marker + "\nOutput:\n".length);
   if (raw.startsWith("Output:\n")) return raw.slice("Output:\n".length);
   return raw;
+}
+
+// Detect the provider's native-readFile workspace-escape rejection — a symlink
+// whose target resolves outside the sandbox root. Modal phrases it "Sandbox path
+// failed remote validation: workspace escape: <target>"; we match loosely so a
+// wording tweak still classifies it. Used to fall the read back onto the exec
+// path (which follows the link and isn't path-validated) instead of 404-ing.
+export function isWorkspaceEscapeError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? "");
+  const lower = msg.toLowerCase();
+  return lower.includes("workspace escape") || (lower.includes("remote validation") && lower.includes("escape"));
+}
+
+// Detect the Modal "the exec-session you're writing to no longer exists" banner.
+// writeStdin reports a vanished session as a non-throwing string of the shape
+// `write_stdin failed: session not found: <N>` (it does NOT raise). We treat that
+// as a lost PTY (the box rolled over / was re-created since the open) so the
+// caller surfaces a clean reconnect instead of writing the raw failure into
+// xterm. Matched loosely (`session not found`) with the id when present so a
+// future wording tweak still classifies it; the command's own output cannot spoof
+// it because the SDK emits this as the whole writeStdin return, not user output.
+export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
+  if (!out) return false;
+  const lower = out.toLowerCase();
+  if (!lower.includes("session not found")) return false;
+  // When the id is present require it to match ours; when absent, the generic
+  // "session not found" still classifies (it is never legitimate stdout here).
+  return lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower);
 }
 
 // Recover the numeric exec-session id the SDK embeds in a formatExecResponse

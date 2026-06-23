@@ -16,6 +16,8 @@ import {
   parseUnifiedPatch,
   stripExecBanner,
   parseExecBannerSessionId,
+  isWorkspaceEscapeError,
+  isExecSessionLostBanner,
   type ChannelASession,
 } from "../src/sandbox";
 import { createSandboxClientForBackend } from "../src/index";
@@ -362,6 +364,27 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     expect(parseExecBannerSessionId("no banner")).toBeNull();
   });
 
+  test("isWorkspaceEscapeError classifies the provider's symlink-escape rejection", () => {
+    // The Modal native-readFile guard on a symlink targeting outside /workspace.
+    expect(isWorkspaceEscapeError(new Error("Sandbox path failed remote validation: workspace escape: /tmp/pulse-abc"))).toBe(true);
+    expect(isWorkspaceEscapeError("Remote validation failed: escape detected")).toBe(true);
+    // A genuine not-found is NOT an escape (must fall through to a clean 404).
+    expect(isWorkspaceEscapeError(new Error("ENOENT: no such file or directory"))).toBe(false);
+    expect(isWorkspaceEscapeError(undefined)).toBe(false);
+  });
+
+  test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {
+    // The Modal writeStdin non-throwing banner when the exec-session is gone.
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1", 1)).toBe(true);
+    // A generic 'session not found' (no id) still classifies — never legit output.
+    expect(isExecSessionLostBanner("session not found", 1)).toBe(true);
+    // A different id present means it's not OUR session's loss banner.
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 9", 1)).toBe(false);
+    // Real PTY output is never misclassified.
+    expect(isExecSessionLostBanner("root@box:~# echo hi\nhi\n", 1)).toBe(false);
+    expect(isExecSessionLostBanner("", 1)).toBe(false);
+  });
+
   test("ptyOpen surfaces an execSessionId on an execCommand-only backend (Modal shape)", async () => {
     // Reproduce the Modal session surface: NO structural `exec()`, only
     // `execCommand()` returning a banner string, plus supportsPty()+writeStdin.
@@ -390,5 +413,22 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     expect(opened.execSessionId).toBe(1); // recovered from the banner (was null before the fix)
     const out = await svc.ptyWrite({ ptyId: "pty-1", data: "echo hi\n" }, opened.execSessionId!, "echo hi\n");
     expect(out).toContain("echo hi");
+  });
+
+  test("ptyWrite raises a CONFLICT (not raw output) when the exec-session was lost on the live box", async () => {
+    // The Modal writeStdin reports a vanished exec-session as a NON-throwing
+    // banner string. Pre-fix that string ("write_stdin failed: session not
+    // found: 1") was streamed verbatim into the user's xterm; now ptyWrite
+    // classifies it and throws a ChannelAConflictError so the route returns 409
+    // and the client cleanly re-opens the PTY against the live box.
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      execCommand: async () =>
+        "Chunk ID: zzz\nWall time: 0.4 seconds\nProcess running with session ID 1\nOutput:\nroot@box:~# ",
+      writeStdin: async () => "write_stdin failed: session not found: 1",
+    };
+    const svc = new SandboxChannelAService({ session });
+    const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "" }, "pty-x");
+    await expect(svc.ptyWrite({ ptyId: "pty-x", data: "x\n" }, opened.execSessionId!, "x\n")).rejects.toThrow(/pty session lost/i);
   });
 });
