@@ -104,6 +104,14 @@ export function useSandboxWorkspaceTabs({
     }
   }
 
+  // Re-warm WITHOUT re-acknowledging: the consent was already recorded, only the
+  // box drained back to cold. Engage the viewer attach + re-negotiate so the
+  // sandbox warms again. Idempotent — the viewer auto-warm de-dupes per episode.
+  function rewarmDesktop() {
+    if (!watchDesktop) setWatchDesktop(true);
+    caps.renegotiate();
+  }
+
   const dirtyCount = git.diff.length;
 
   return useMemo(() => {
@@ -163,8 +171,9 @@ export function useSandboxWorkspaceTabs({
           <DesktopViewer
             capability={capabilities?.DesktopStream ?? null}
             viewerCapReached={caps.viewerCapReached}
+            watching={watchDesktop}
             onAcknowledge={() => void acknowledgeAndWatch()}
-            renderWarming={() => <Notice>Starting the desktop…</Notice>}
+            onWarm={rewarmDesktop}
             className="h-full"
           />
         ),
@@ -189,12 +198,4 @@ export function useSandboxWorkspaceTabs({
     capabilities,
     caps.viewerCapReached,
   ]);
-}
-
-function Notice({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex h-full items-center justify-center p-4 text-center text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
-      {children}
-    </div>
-  );
 }

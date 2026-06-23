@@ -15,9 +15,13 @@
 //   F1  exec is OPTIONAL on every provider (Modal has only execCommand) — the
 //       primitive dual-paths `session.exec ?? session.execCommand`.
 //   F2  execCommand returns a FORMATTED STRING with a metadata preamble, not raw
-//       stdout — screenshots read the PNG via `session.readFile` (raw bytes) and
-//       base64-encode in JS, never parsing the preamble; exit codes come from the
-//       established `sandboxCommandExitCode` parser, not a `.exitCode` field.
+//       stdout — screenshots read the PNG by running `base64 <path>` over the SAME
+//       command primitive and stripping the banner (NOT `session.readFile`: Modal's
+//       readFile path-validates against the /workspace root and THROWS
+//       "Sandbox path /tmp/…png escapes the workspace root", so the /tmp scrot can
+//       never be read → empty frame → `image_url: ''` → model 400). This mirrors
+//       recording.ts/channel-a fsReadViaExec. Exit codes come from the established
+//       `sandboxCommandExitCode` parser, not a `.exitCode` field.
 //   F3  exec/execCommand YIELDS (does not wait) — `sandboxCommandStillRunning` is
 //       treated as a retriable failure, and the input commands complete well under
 //       the yield window.
@@ -31,6 +35,11 @@ import { computerTool, type Computer, type Tool } from "@openai/agents";
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
 
 import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
+// `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
+// command body from Modal's execCommand banner ("…Output:\n<body>"). Imported from
+// the agent-loop-free leaf (importing a pure parser FROM the leaf is allowed — the
+// leaf boundary only forbids the leaf importing the agent loop, not the reverse).
+import { stripExecBanner } from "./sandbox";
 
 // `requireBoundSession` lives in @openai/agents-core/sandbox/capabilities/base
 // but is NOT re-exported from the public @openai/agents/sandbox barrel, so we
@@ -88,14 +97,15 @@ function toKeysym(k: string): string {
 }
 const BUTTON_NUM: Record<ComputerButton, number> = { left: 1, wheel: 2, right: 3, back: 8, forward: 9 };
 
-// The structural slice of a provider session computer-use drives. Every field is
-// optional because the SDK's SandboxSessionLike leaves exec/execCommand/readFile
-// optional (Modal implements execCommand + readFile, not exec — F1).
+// The structural slice of a provider session computer-use drives. exec and
+// execCommand are optional because the SDK's SandboxSessionLike leaves them
+// optional (Modal implements execCommand, not exec — F1). readFile is intentionally
+// NOT in this type: screenshots read the /tmp PNG via `base64 <path>` over
+// exec/execCommand (readFile path-validates against /workspace and rejects /tmp).
 type ExecResultLike = { output?: string; stdout?: string; stderr?: string; exitCode?: number | null; sessionId?: number };
 type ComputerSession = {
   exec?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike>;
   execCommand?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
-  readFile?: (args: { path: string; runAs?: string; maxBytes?: number }) => Promise<string | Uint8Array>;
 };
 
 /** No exec/execCommand on the session, or the display is not up. */
@@ -118,8 +128,11 @@ export class ComputerActionError extends Error {
 /**
  * The Computer the agent drives. Every action issues ONE shell line through the
  * externally-owned session (exec ?? execCommand, F1), prefixed with the display.
- * screenshot() does NOT exec scrot-to-base64 (F2 — the execCommand preamble would
- * corrupt the PNG); it scrots to a file and reads the RAW bytes via readFile.
+ * screenshot() scrots to a /tmp file and reads the RAW bytes by running
+ * `base64 <path>` over the SAME command primitive and stripping the banner — NOT
+ * `session.readFile` (Modal's readFile path-validates against /workspace and rejects
+ * /tmp with "escapes the workspace root", which would yield an empty frame and 400
+ * the model). The base64-over-exec path is /tmp-readable and binary-safe.
  */
 export class SandboxComputer implements Computer {
   readonly environment = "ubuntu" as const;
@@ -184,9 +197,16 @@ export class SandboxComputer implements Computer {
   }
 
   async screenshot(): Promise<string> {
-    // F2: scrot to a file, then read the RAW PNG bytes via readFile and base64 in
-    // JS. NEVER `base64 -w0 | execCommand` — the execCommand metadata preamble
-    // would prefix the image payload and corrupt the computer_call_result.
+    // F2: scrot to a /tmp file, then read the RAW PNG bytes by running `base64
+    // <path>` over the SAME command primitive (exec ?? execCommand) and stripping
+    // the banner — NOT `session.readFile`. On Modal, readFile path-validates the
+    // path against the /workspace root and THROWS for /tmp ("Sandbox path
+    // /tmp/og-shot-*.png escapes the workspace root"), so the scrot could never be
+    // read → empty frame → `image_url: ''` → the model 400s. The base64-over-exec
+    // mechanism (mirroring recording.ts readRecordingBytes + channel-a
+    // fsReadViaExec) is /tmp-readable and binary-safe. We do NOT use execCommand's
+    // body via the `this.x()` parser — that drops the execCommand string body; the
+    // banner is stripped explicitly here so the base64 payload survives intact.
     //
     // CRITICAL CONTRACT: this NEVER returns an empty string. The Agents SDK builds
     // the model-facing image as `data:image/png;base64,${output}` — so an empty
@@ -197,9 +217,6 @@ export class SandboxComputer implements Computer {
     // frame: bounded retries with a short wait between attempts, so a :0 that is up
     // but momentarily not painting (XFCE/dbus still warming) recovers without
     // failing the turn.
-    if (typeof this.session.readFile !== "function") {
-      throw new ComputerUnavailableError("session cannot read files (no readFile) — screenshots unavailable");
-    }
     let lastError: unknown;
     for (let attempt = 0; attempt < SCREENSHOT_MAX_ATTEMPTS; attempt++) {
       if (attempt > 0) {
@@ -208,11 +225,7 @@ export class SandboxComputer implements Computer {
       const f = `${this.tmp}/og-shot-${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
       try {
         await this.x(`scrot --pointer --overwrite ${f}`);
-        const data = await this.session.readFile!({
-          path: f,
-          ...(this.runAs ? { runAs: this.runAs } : {}),
-        });
-        const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+        const bytes = await this.readScreenshotBytes(f);
         if (bytes.length === 0) {
           // A cold/not-yet-painting :0 yields a zero-byte frame. Retry rather than
           // hand the model an empty image_url; throw on the final attempt.
@@ -233,6 +246,39 @@ export class SandboxComputer implements Computer {
       throw lastError;
     }
     throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
+  }
+
+  // Read the screenshot PNG bytes by base64-ing the absolute /tmp path through the
+  // SAME command primitive (exec ?? execCommand) — NOT `session.readFile` (Modal
+  // path-validates against /workspace and rejects /tmp) and NOT `this.x()` (its
+  // `sandboxCommandOutput` parser drops the execCommand STRING body, returning ""
+  // — only the exec-object path has a structured body). We capture the RAW result,
+  // strip the execCommand banner ("…Output:\n<base64>"), strip whitespace, and
+  // decode. Binary-safe: base64 of the scrot is plain ASCII over stdout, no
+  // truncation (maxOutputTokens:null), mirroring recording.ts readRecordingBytes.
+  private async readScreenshotBytes(path: string): Promise<Uint8Array> {
+    const args = {
+      cmd: `DISPLAY=${this.display} base64 ${path}`,
+      ...(this.runAs ? { runAs: this.runAs } : {}),
+      yieldTimeMs: ACTION_YIELD_MS,
+      // null disables the provider's output truncation so a full-screen PNG's
+      // base64 is never clipped (the SDK's truncateOutput passes through on null).
+      maxOutputTokens: null as unknown as number,
+    };
+    let raw: string;
+    if (typeof this.session.exec === "function") {
+      // The exec-object path exposes a structured stdout/output body.
+      raw = sandboxCommandOutput(await this.session.exec(args));
+    } else if (typeof this.session.execCommand === "function") {
+      // execCommand returns the formatted STRING — strip the banner to recover the
+      // base64 body (sandboxCommandOutput would drop it for the string form).
+      raw = stripExecBanner(await this.session.execCommand(args));
+    } else {
+      throw new ComputerUnavailableError("session cannot run commands (no exec/execCommand) — screenshots unavailable");
+    }
+    const b64 = raw.replace(/\s+/g, "");
+    if (b64.length === 0) return new Uint8Array();
+    return Uint8Array.from(Buffer.from(b64, "base64"));
   }
 
   async click(xp: number, yp: number, button: ComputerButton) {

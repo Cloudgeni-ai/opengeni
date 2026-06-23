@@ -85,6 +85,77 @@ describe("P4.1 worker ensureDisplayStack gating (I5 headless-rollover branch)", 
   });
 });
 
+// ── REGRESSION: the flock-contention turn-failure (display-stack best-effort) ──
+// The env-manifest/computer-use work added ensureDisplayStack to the agent TURN
+// path. When a VIEWER attach already brought the stack up and holds/contends the
+// up-script's outer flock (or the up-script is mid-run), the turn's ensure waited
+// on the lock, timed out at ~45s, got empty output -> inferExitFromOutput=-1 ->
+// DisplayStackError -> the WHOLE TURN failed ("desktop display stack failed at
+// stage unknown (exit -1) ... Wall time ~45.91s"). That blocked EVERY desktop
+// turn after an attach. FIX 2: the turn's ensureDisplayStack is BEST-EFFORT — a
+// DisplayStackError (timeout-derived exit -1 OR a real stage failure) is caught,
+// logged, and swallowed so the desktop surface degrades to Channel-A WITHOUT
+// failing the turn. (FIX 1 — the lock-free pre-check — makes the already-up case
+// resolve fast so this catch is rarely reached; we still pin tolerance here.)
+describe("REGRESSION: the turn's ensureDisplayStack is BEST-EFFORT (a contended-flock timeout never fails the turn)", () => {
+  function fakeBoxExit(exitCode: number, output: string) {
+    const calls: string[] = [];
+    const session = {
+      exec: async ({ cmd }: { cmd: string }) => {
+        calls.push(cmd);
+        return { output, stdout: output, stderr: output, exitCode, wallTimeSeconds: 45.91 };
+      },
+    };
+    const established: EstablishedSandboxSession = {
+      client: {},
+      session,
+      sessionState: {},
+      instanceId: "box-contended",
+      backendId: "modal",
+    };
+    return { established, calls };
+  }
+
+  test("a contended-flock TIMEOUT (empty output -> exit -1 -> DisplayStackError) is swallowed — the turn continues", async () => {
+    const settings = testSettings({ sandboxDesktopEnabled: true });
+    // The exact live signature: flock -w timed out, the exec yielded empty output,
+    // inferExitFromOutput returned -1, the leaf threw DisplayStackError(exit -1).
+    const { established, calls } = fakeBoxExit(-1, "");
+    // MUST NOT THROW (pre-fix this propagated and failed the turn).
+    await ensureDisplayStack(settings, established);
+    expect(calls).toHaveLength(1); // it did attempt the ensure...
+  });
+
+  test("a real STAGE failure (exit 13, websockify) is also swallowed — the desktop degrades, the turn survives", async () => {
+    const settings = testSettings({ sandboxDesktopEnabled: true });
+    const { established } = fakeBoxExit(13, "websockify failed on 6080");
+    // A genuine stage failure is still a desktop-surface degradation, not a turn
+    // killer (the agent's work doesn't depend on the optional pixel stack).
+    await ensureDisplayStack(settings, established);
+    expect(true).toBe(true);
+  });
+
+  test("an UNEXPECTED non-display error (the session itself blew up) still propagates", async () => {
+    const settings = testSettings({ sandboxDesktopEnabled: true });
+    const session = {
+      exec: async () => {
+        throw new Error("provider session connection reset");
+      },
+    };
+    const established: EstablishedSandboxSession = {
+      client: {},
+      session,
+      sessionState: {},
+      instanceId: "box-broken",
+      backendId: "modal",
+    };
+    // Not a DisplayStack* error -> NOT a desktop degradation -> it propagates.
+    await expect(ensureDisplayStack(settings, established)).rejects.toThrow(
+      "provider session connection reset",
+    );
+  });
+});
+
 // ── Regression: the computer-use "400 Invalid input[N].output.image_url" fix ───
 // The trigger was that resumeBoxForTurn brought up the desktop :0 ONLY on the
 // SPAWNER branch; a turn ATTACHING to a warm box whose display was never up (box

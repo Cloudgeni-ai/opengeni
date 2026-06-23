@@ -11,51 +11,65 @@ import {
 } from "../src/sandbox-computer";
 
 // A mock provider session that records every command. By default it mimics
-// MODAL: it implements execCommand (the formatted-string contract) + readFile,
-// and does NOT implement exec — the F1 trap the impl must survive.
+// MODAL: it implements execCommand (the formatted-string contract) and does NOT
+// implement exec — the F1 trap the impl must survive. The screenshot read is now a
+// `base64 <path>` over execCommand (NOT readFile — Modal's readFile rejects the
+// /tmp scrot as "escapes the workspace root"), so the mock returns the PNG bytes
+// base64'd INSIDE the execCommand banner for `base64 …` commands.
 function makeMockSession(opts: {
   withExec?: boolean; // if true, also implement the structured exec object path
-  pngBytes?: Uint8Array; // bytes readFile returns for the screenshot
+  pngBytes?: Uint8Array; // bytes the screenshot read returns (base64'd over exec)
   failExit?: number; // non-zero exit for the next exec (F2 error detection)
   stillRunning?: boolean; // simulate a yield-without-finish (F3)
-  // readFile bytes PER scrot attempt — models a cold :0 that paints on a later
+  // PNG bytes PER scrot attempt — models a cold :0 that paints on a later
   // retry (e.g. [empty, empty, valid] self-heals on attempt 3). Overrides pngBytes.
   pngBytesPerAttempt?: Uint8Array[];
 } = {}) {
   const execCalls: string[] = [];
-  const readFileCalls: { path: string; maxBytes?: number }[] = [];
   // The execCommand contract: a FORMATTED STRING with a metadata preamble (F2).
   const formatted = (body: string, exit = 0): string =>
     `Chunk ID: abc123\nWall time: 0.01 seconds\nProcess exited with code ${exit}\nOutput:\n${body}`;
   const stillRunningStr = `Chunk ID: abc\nProcess running with session ID 7`;
 
+  // The bytes the NEXT `base64 <path>` screenshot read should yield, per attempt.
+  let readN = 0;
+  const screenshotBytes = (): Uint8Array => {
+    if (opts.pngBytesPerAttempt) {
+      const i = Math.min(readN, opts.pngBytesPerAttempt.length - 1);
+      readN++;
+      return opts.pngBytesPerAttempt[i]!;
+    }
+    return opts.pngBytes ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // PNG magic
+  };
+  // `true` once a command is the screenshot byte-read (`base64 <abs-path>`, no pipe)
+  // rather than an xdotool/scrot/rm action.
+  const isScreenshotRead = (cmd: string): boolean => /\bbase64 \/tmp\/og-shot-/.test(cmd);
+
   const run = (cmd: string): string => {
     execCalls.push(cmd);
+    if (isScreenshotRead(cmd)) {
+      // The screenshot read returns the PNG bytes base64'd in the banner BODY.
+      return formatted(Buffer.from(screenshotBytes()).toString("base64"));
+    }
     if (opts.stillRunning) return stillRunningStr;
     return formatted("", opts.failExit ?? 0);
   };
 
-  let readFileN = 0;
   const session: Record<string, unknown> = {
     execCommand: async (args: { cmd: string }) => run(args.cmd),
-    readFile: async (args: { path: string; maxBytes?: number }) => {
-      readFileCalls.push({ path: args.path, ...(args.maxBytes !== undefined ? { maxBytes: args.maxBytes } : {}) });
-      if (opts.pngBytesPerAttempt) {
-        const i = Math.min(readFileN, opts.pngBytesPerAttempt.length - 1);
-        readFileN++;
-        return opts.pngBytesPerAttempt[i]!;
-      }
-      return opts.pngBytes ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // PNG magic
-    },
   };
   if (opts.withExec) {
     session.exec = async (args: { cmd: string }) => {
       execCalls.push(args.cmd);
+      if (isScreenshotRead(args.cmd)) {
+        // The exec-object path exposes a structured stdout body (no banner).
+        return { output: Buffer.from(screenshotBytes()).toString("base64"), stdout: "", stderr: "", exitCode: 0 };
+      }
       if (opts.stillRunning) return { output: "", stdout: "", stderr: "", sessionId: 7 };
       return { output: "", stdout: "", stderr: "", exitCode: opts.failExit ?? 0, wallTimeSeconds: 0.01 };
     };
   }
-  return { session, execCalls, readFileCalls };
+  return { session, execCalls };
 }
 
 describe("SandboxComputer (P4.3 computer-use)", () => {
@@ -69,20 +83,42 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     expect(execCalls[0]).toContain("DISPLAY=:0");
   });
 
-  test("F2: screenshot reads the PNG via readFile (NOT base64-via-execCommand), returns clean base64", async () => {
+  // ── The image_url-400 fix: read the /tmp PNG via `base64 <path>` over exec, NOT
+  // session.readFile. On Modal, readFile path-validates the path against the
+  // /workspace root and THROWS for /tmp ("Sandbox path /tmp/og-shot-*.png escapes
+  // the workspace root") — so readFile could never read the scrot, the frame came
+  // back empty, and the SDK built `image_url: ''` which 400s the model. The
+  // base64-over-exec mechanism (mirroring recording.ts / channel-a fsReadViaExec)
+  // is /tmp-readable and binary-safe. ──────────────────────────────────────────
+  test("F2/400-FIX: screenshot reads the /tmp PNG via `base64 <path>` over exec (NOT readFile), returns clean base64", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
-    const { session, execCalls, readFileCalls } = makeMockSession({ pngBytes: png });
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    // The session has NO readFile at all — proving the read does not depend on it.
+    expect((session as Record<string, unknown>).readFile).toBeUndefined();
     const c = new SandboxComputer(session as never);
     const shot = await c.screenshot();
-    // The screenshot bytes came from readFile, base64'd in JS — NO preamble.
+    // The screenshot bytes round-trip through base64-over-exec, decoded then
+    // re-encoded in JS — clean, no banner.
     expect(shot).toBe(Buffer.from(png).toString("base64"));
-    expect(readFileCalls.length).toBe(1);
-    expect(readFileCalls[0]!.path).toMatch(/\/tmp\/og-shot-.*\.png$/);
-    // scrot wrote the file; the screenshot was NOT a `base64 -w0` exec (F2).
-    expect(execCalls.some((c) => c.includes("scrot --pointer --overwrite"))).toBe(true);
-    expect(execCalls.some((c) => /base64/.test(c))).toBe(false);
+    // scrot wrote the /tmp file, then the read was a `base64 <abs /tmp path>` over
+    // the command primitive — the path that ISN'T workspace-root-validated.
+    expect(execCalls.some((cmd) => cmd.includes("scrot --pointer --overwrite"))).toBe(true);
+    const reads = execCalls.filter((cmd) => /\bbase64 \/tmp\/og-shot-.*\.png\b/.test(cmd));
+    expect(reads.length).toBe(1);
+    // Defensive: the read is base64-direct, NOT a `base64 -w0 | …` piped form (a
+    // pipe would risk a banner-corrupted body) and NOT readFile.
+    expect(reads[0]).not.toContain("|");
     // The temp file is cleaned up.
-    expect(execCalls.some((c) => c.includes("rm -f /tmp/og-shot-"))).toBe(true);
+    expect(execCalls.some((cmd) => cmd.includes("rm -f /tmp/og-shot-"))).toBe(true);
+  });
+
+  test("400-FIX: the exec-object provider path also reads the PNG via base64 (structured stdout body)", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const { session, execCalls } = makeMockSession({ withExec: true, pngBytes: png });
+    const c = new SandboxComputer(session as never);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    expect(execCalls.some((cmd) => /\bbase64 \/tmp\/og-shot-.*\.png\b/.test(cmd))).toBe(true);
   });
 
   // ── Regression: the "400 Invalid input[N].output.image_url" turn-killer ──────

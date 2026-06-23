@@ -38,6 +38,7 @@ import {
   ensureDisplayStack as ensureDisplayStackOnBox,
   desktopCapableBackend,
   serializeEstablishedSandboxEnvelope,
+  DisplayStackError,
   DisplayStackUnsupportedError,
   buildStreamUrl,
   StreamPortUnavailableError,
@@ -326,12 +327,24 @@ async function waitForWarmOrReacquire(
 // ============================================================================
 
 /**
- * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc -viewonly ->
- * websockify:6080 -> noVNC) is up on the live box. Idempotent: the in-box flock +
- * the up-script's per-stage PID guards make a second call a no-op. NO-OP when the
- * desktop tier is disabled or the backend cannot serve a desktop (degradation is
- * a value: a headless-only session simply skips the stack). Delegates to the
- * agent-loop-free leaf (@opengeni/runtime/sandbox display-stack).
+ * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc ->
+ * websockify:6080 -> noVNC) is up on the live box. Idempotent: the lock-free
+ * pre-check + the in-box flock + the up-script's per-stage PID guards make a
+ * second call a cheap no-op. NO-OP when the desktop tier is disabled or the
+ * backend cannot serve a desktop (degradation is a value: a headless-only session
+ * simply skips the stack). Delegates to the agent-loop-free leaf
+ * (@opengeni/runtime/sandbox display-stack).
+ *
+ * BEST-EFFORT — NEVER fails the turn. The display stack powers the OPTIONAL
+ * Channel-B desktop / computer-use surface; it is NOT load-bearing for the
+ * agent's work. A `DisplayStackError` (a real stage failure, OR — the regression
+ * this guards — a timeout-derived exit -1 when a viewer attach already holds /
+ * contends the up-script's flock and the turn's ensure waits ~45s and times out)
+ * is CAUGHT + logged and swallowed, so a slow/contended/failed stack degrades to
+ * Channel-A-only rather than killing the turn. The fast lock-free pre-check
+ * upstream means the already-up case resolves in milliseconds and never reaches
+ * this catch in the first place. `DisplayStackUnsupportedError` (a box that can't
+ * run commands at all) is likewise swallowed.
  */
 export async function ensureDisplayStack(
   settings: Settings,
@@ -339,6 +352,8 @@ export async function ensureDisplayStack(
 ): Promise<void> {
   // Headless rollover branch (I5): the tier is off OR the backend is
   // headless-only -> no display stack. Behavior-preserving for the headless path.
+  // This is ALSO the "is the desktop relevant to this turn?" gate: we only touch
+  // the box when the desktop tier is enabled for a desktop-capable backend.
   if (!settings.sandboxDesktopEnabled) {
     return;
   }
@@ -348,12 +363,24 @@ export async function ensureDisplayStack(
   try {
     await ensureDisplayStackOnBox(established.session);
   } catch (error) {
-    // A box that genuinely can't run commands degrades to Channel-A-only rather
-    // than failing the whole turn (the desktop is a value-add, not load-bearing
-    // for the agent's work). A real stage failure (DisplayStackError) propagates.
-    if (error instanceof DisplayStackUnsupportedError) {
+    // The desktop is a value-add, not load-bearing for the agent's work, so NO
+    // display-stack failure may fail the turn:
+    //  - DisplayStackUnsupportedError: the box genuinely can't run commands ->
+    //    Channel-A-only.
+    //  - DisplayStackError: a stage failure OR a contended-lock timeout (exit -1)
+    //    after a viewer attach already brought the stack up / is mid-launch. The
+    //    pre-check makes the already-up case fast; if we still time out or a stage
+    //    really failed, degrade — don't die.
+    if (error instanceof DisplayStackUnsupportedError || error instanceof DisplayStackError) {
+      console.warn(
+        `[sandbox-resume] ensureDisplayStack degraded to Channel-A-only (turn continues): ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
       return;
     }
+    // An unexpected non-display error (e.g. the session blew up entirely) still
+    // propagates — that is not a desktop-surface degradation.
     throw error;
   }
 }

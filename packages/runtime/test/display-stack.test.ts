@@ -97,6 +97,53 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(cmd).toContain("DESKTOP_W=1920 DESKTOP_H=1080 DESKTOP_DPI=120 STREAM_PORT=7090");
   });
 
+  test("(2b) FAST PRE-CHECK: buildDisplayStackScript probes the exposed + VNC ports BEFORE the flock", () => {
+    const cmd = buildDisplayStackScript({ port: 6080 });
+    // The lock-free port probe (nc -z to the exposed port AND x11vnc:5900) must
+    // appear, and it must appear BEFORE the flock so an already-up no-op caller
+    // never serializes behind a lock holder (the regression: a turn re-ensuring
+    // after a viewer attach timing out on flock -w 45).
+    const precheckIdx = cmd.indexOf("nc -z 127.0.0.1 6080");
+    const vncProbeIdx = cmd.indexOf("nc -z 127.0.0.1 5900");
+    const flockIdx = cmd.indexOf("flock");
+    expect(precheckIdx).toBeGreaterThanOrEqual(0);
+    expect(vncProbeIdx).toBeGreaterThanOrEqual(0);
+    expect(flockIdx).toBeGreaterThan(precheckIdx);
+    // On a pre-check hit the script echoes the marker and skips the up-script.
+    expect(cmd).toContain("OPENGENI_DESKTOP_UP");
+  });
+
+  test("(2c) FAST PRE-CHECK: an already-up stack returns the marker FAST — no flock wait, no relaunch", async () => {
+    // Model the real box's lock-free pre-check: ports already listening -> the
+    // command returns the `(precheck)` marker IMMEDIATELY without ever taking the
+    // outer flock (so no `flock -w 45` timeout, no up-script relaunch). This is
+    // the contended-but-already-up case the regression timed out on.
+    const calls: string[] = [];
+    const session = {
+      exec: async ({ cmd, yieldTimeMs }: { cmd: string; yieldTimeMs?: number }) => {
+        calls.push(cmd);
+        // The pre-check resolves in milliseconds — assert we did NOT block for the
+        // ~45-60s timeout the caller would allow on the flock path.
+        expect(yieldTimeMs ?? 0).toBeGreaterThanOrEqual(0);
+        return {
+          output: "OPENGENI_DESKTOP_UP port=6080 geometry=1280x800 dpi=96 (precheck)",
+          stdout: "OPENGENI_DESKTOP_UP port=6080 geometry=1280x800 dpi=96 (precheck)",
+          stderr: "",
+          exitCode: 0,
+          wallTimeSeconds: 0.001,
+        };
+      },
+    };
+    const started = Date.now();
+    const result = await ensureDisplayStack(session);
+    const elapsed = Date.now() - started;
+
+    expect(result.marker).toContain("OPENGENI_DESKTOP_UP");
+    expect(result.marker).toContain("(precheck)");
+    expect(calls).toHaveLength(1); // single probe; nothing relaunched
+    expect(elapsed).toBeLessThan(1_000); // fast — nowhere near the 45s flock timeout
+  });
+
   test("(3) FLOCK-IDEMPOTENCY: a second call against an already-up box launches NOTHING new (no-op)", async () => {
     const box = makeFakeBox();
     const first = await ensureDisplayStack(box.session);

@@ -11,6 +11,17 @@ PORT="${STREAM_PORT:-${OPENGENI_DESKTOP_STREAM_PORT:-6080}}"
 export DISPLAY=:0
 RUN=/tmp/opengeni-desktop; mkdir -p "$RUN"
 
+# FAST PRE-CHECK (lock-free): if the stack is ALREADY up — websockify (the one
+# exposed port) AND x11vnc are both listening — re-print the marker and exit 0
+# IMMEDIATELY, *before* taking the inner lock. This is the contention escape
+# hatch: a no-op caller (the agent turn re-ensuring after a viewer attach already
+# brought the stack up) must never serialize behind the lock holder. `nc -z` to
+# the two loopback ports is the cheap, sub-millisecond "already up?" signal.
+if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then
+  echo "OPENGENI_DESKTOP_UP port=$PORT geometry=${W}x${H} dpi=${DPI} (precheck)"
+  exit 0
+fi
+
 # FLOCK-IDEMPOTENCY: a single whole-script lock so two concurrent
 # `opengeni-desktop-up` invocations (the API on a viewer op + the agent turn,
 # both racing after a rollover) serialize — the first brings the stack up, the
@@ -18,6 +29,14 @@ RUN=/tmp/opengeni-desktop; mkdir -p "$RUN"
 # this shell exits (the FD closes).
 exec 9>"$RUN/up.lock"
 flock 9
+
+# Re-check under the lock (the stack may have come up while we waited on flock):
+# the same cheap port probe, now race-free. A caller that blocked on a mid-run
+# launch returns the moment the holder finished, without re-running the stages.
+if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then
+  echo "OPENGENI_DESKTOP_UP port=$PORT geometry=${W}x${H} dpi=${DPI} (precheck)"
+  exit 0
+fi
 
 alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
 start() { # name, cmd...

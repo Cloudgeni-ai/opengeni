@@ -2,7 +2,7 @@
 //
 // The agent-loop-free home for `ensureDisplayStack`: the exec-launched,
 // flock-idempotent procedure that brings up the Channel-B pixel stack
-// (Xvfb :0 -> XFCE -> x11vnc -viewonly -> websockify:6080 -> noVNC) on a live,
+// (Xvfb :0 -> XFCE -> x11vnc -> websockify:6080 -> noVNC) on a live,
 // externally-owned box. It is driven over the box's `exec`/`execCommand` channel
 // (NOT a container CMD) so it re-establishes after a snapshot rollover / box
 // re-election, and it is safe to call from the API on a viewer op OR from the
@@ -114,13 +114,25 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
   const env =
     `DESKTOP_W=${geometry.width} DESKTOP_H=${geometry.height} ` +
     `DESKTOP_DPI=${geometry.dpi} STREAM_PORT=${port}`;
+  // FAST PRE-CHECK (lock-free) before the outer flock: if the exposed port and
+  // x11vnc are ALREADY listening, the stack is up — print the marker and short-
+  // circuit, so a no-op caller (the agent turn re-ensuring after a viewer attach
+  // already brought the stack up) never serializes behind a lock holder and never
+  // burns the 45s flock -w timeout. `nc -z` to the two loopback ports is the cheap
+  // (sub-millisecond) "already up?" signal; on a miss we fall through to the
+  // flock-wrapped up-script (which ALSO pre-checks under its own lock).
+  //
   // flock -w bounds the wait so a wedged holder can't deadlock the caller; the
   // up-script itself ALSO takes the same lock (belt + braces) so this works even
   // against an older image that predates the wrapper.
   return (
+    `if nc -z 127.0.0.1 ${port} >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then ` +
+    `echo "OPENGENI_DESKTOP_UP port=${port} geometry=${geometry.width}x${geometry.height} dpi=${geometry.dpi} (precheck)"; ` +
+    `else ` +
     `mkdir -p /tmp/opengeni-desktop && ` +
     `flock -w 45 /tmp/opengeni-desktop/up.outer.lock ` +
-    `env ${env} opengeni-desktop-up`
+    `env ${env} opengeni-desktop-up; ` +
+    `fi`
   );
 }
 

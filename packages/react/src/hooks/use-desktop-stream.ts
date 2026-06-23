@@ -83,7 +83,15 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
       return;
     }
     const container = containerRef.current;
-    if (!container) return;
+    if (!container) {
+      // The mount target isn't in the DOM yet (e.g. the tab is still hidden).
+      // Stay idle (not a stale negotiating/connecting) so a re-attach nudge —
+      // fired by the viewer on becoming visible / on mount — can re-run this
+      // effect once the container exists. Without this the surface can stick
+      // forever on the idle scrim and never open a socket.
+      setBoth("idle");
+      return;
+    }
 
     let rfb: DesktopRfbLike | null = null;
     let disposed = false;
