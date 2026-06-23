@@ -464,7 +464,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return;
     }
     const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false, sandboxOwnershipEnabled: true });
-    const { createSandboxClientForBackend, establishSandboxSessionFromEnvelope } = await import("@opengeni/runtime");
+    const { createSandboxClientForBackend, establishSandboxSessionFromEnvelope, serializeEstablishedSandboxEnvelope } = await import("@opengeni/runtime");
     const client = createSandboxClientForBackend("modal", settings) as {
       backendId: string;
       delete?: (state: unknown) => Promise<unknown>;
@@ -476,9 +476,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     let established: Awaited<ReturnType<typeof establishSandboxSessionFromEnvelope>> | undefined;
     try {
       established = await establishSandboxSessionFromEnvelope(settings, null, { sessionId: ws.groupId, backendOverride: "modal" });
-      const envelope = client.serializeSessionState
-        ? { backendId: "modal", sessionState: await client.serializeSessionState(established.sessionState) }
-        : null;
+      // Fold the box onto the lease via the SAME serializer production uses
+      // (serializeEstablishedSandboxEnvelope), so the envelope nests the flat
+      // provider state (with sandboxId) under sessionState.providerState — the
+      // exact shape the reaper's terminate path must unwrap.
+      const envelope = await serializeEstablishedSandboxEnvelope(established);
       await insertLease(ws, {
         liveness: "draining", refcount: 0, leaseEpoch: 1, expiresInMs: -1_000,
         instanceId: established.instanceId, backend: "modal", resumeBackendId: "modal",

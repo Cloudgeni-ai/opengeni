@@ -360,7 +360,7 @@ async function terminateDrainableBox(
  * row that committed no box, or a 'none'-backed group) there is no live box — a
  * no-op.
  */
-async function terminateProviderBox(
+export async function terminateProviderBox(
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
   observability: ActivityServices["observability"],
@@ -393,7 +393,20 @@ async function terminateProviderBox(
       // provider idle-timeout is the backstop. No-op.
       return;
     }
-    const resumedState = await deserializeSandboxSessionStateEnvelope(client as never, lease.resumeState);
+    // resume_state is the lease ENVELOPE: `{ backendId, sessionState: {
+    // providerState: { sandboxId, ... }, manifest, ... } }` (the shape
+    // serializeEstablishedSandboxEnvelope folds onto the lease). The provider
+    // payload deserializeSandboxSessionStateEnvelope re-hydrates is the INNER
+    // `sessionState` — pass the WHOLE envelope and it reads `state.providerState`
+    // at the top level, finds nothing (providerState is nested under
+    // `sessionState`), drops `sandboxId`, and `client.resume(state)` throws
+    // "requires a persisted sandboxId". This is exactly what the working
+    // resume-by-id paths (establishSandboxSessionFromEnvelope) avoid: they unwrap
+    // `envelope.sessionState` first. Mirror that. (`?? lease.resumeState` keeps a
+    // legacy flat envelope — providerState at the top — resumable too.)
+    const envelopeSessionState =
+      (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
+    const resumedState = await deserializeSandboxSessionStateEnvelope(client as never, envelopeSessionState);
     if (resumedState === undefined) {
       return;
     }
