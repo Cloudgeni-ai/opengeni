@@ -73,7 +73,7 @@ import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 import {
   createSandboxClient,
@@ -273,6 +273,12 @@ export function buildOpenAIClientFromSettings(settings: Settings): OpenAI {
       defaultHeaders: settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey
         ? { Authorization: `Bearer ${settings.azureOpenaiAdToken}` }
         : undefined,
+      // Rewrite every outbound /responses computer_call to the ACTIONS-ONLY shape
+      // the GA Azure computer tool (gpt-5.5) accepts. This is the lowest reachable
+      // seam — below the SDK responses converter, which always re-synthesizes BOTH
+      // `action` and `actions` (rejected 400 "exactly one of action or actions").
+      // See computerCallNormalizingFetch / rewriteComputerCallsToActionsOnly.
+      fetch: computerCallNormalizingFetch(globalThis.fetch),
     });
   }
   return new OpenAI({

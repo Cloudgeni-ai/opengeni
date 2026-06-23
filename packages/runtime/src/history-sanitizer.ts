@@ -253,3 +253,115 @@ export function normalizeComputerCallActions<T extends HistoryItem>(items: reado
   });
   return changed ? out : items.slice();
 }
+
+/**
+ * Rewrite EVERY `computer_call` item in a serialized Responses request body to
+ * the ACTIONS-ONLY shape the GA Azure computer tool accepts, mutating the parsed
+ * JSON object in place and returning whether anything changed.
+ *
+ * WHY THIS LIVES AT THE WIRE LEVEL (not the input-item filter). The input-item
+ * normalizer above ({@link normalizeComputerCallActions}, wired as a
+ * callModelInputFilter) runs BEFORE the SDK's responses converter
+ * (`convertAgentItemToResponsesInput`). That converter then re-derives the wire
+ * payload from the item: when `actions` is present it emits BOTH
+ * `{action: ..., actions: [...]}`, and when only `action` is present it emits
+ * `action`-only. It can NEVER emit actions-only. Probed live against the
+ * deployed Azure gpt-5.5-2026-04-24 GA computer tool (`{type:"computer"}`):
+ *   - `action`-only  -> 400 "Computer call input must include exactly one of
+ *                       `action` or `actions`." (rejected)
+ *   - both           -> 400 same message (rejected)
+ *   - `actions`-only -> passes the action/actions structural validation
+ * So neither the input-filter nor the converter can produce an accepted body.
+ * The ONLY seam that sees — and can rewrite — the final serialized JSON is a
+ * custom `fetch` on the OpenAI client (it runs after the converter and after
+ * `responses.create` serialization). This function is that rewriter's core.
+ *
+ * It collapses each computer_call to actions-only: it prefers an existing
+ * non-empty `actions` array, else wraps the singular `action` into
+ * `actions:[action]`, then deletes `action`. A computer_call with neither field
+ * is left untouched (nothing to derive; let the provider report it).
+ *
+ * Mutates `body` in place (the caller has already JSON.parsed a private copy of
+ * the request body). Returns `true` iff at least one computer_call was changed.
+ */
+export function rewriteComputerCallsToActionsOnly(body: unknown): boolean {
+  if (!body || typeof body !== "object") {
+    return false;
+  }
+  const input = (body as Record<string, unknown>).input;
+  if (!Array.isArray(input)) {
+    return false;
+  }
+  let changed = false;
+  for (const item of input) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (record.type !== "computer_call") {
+      continue;
+    }
+    const existingActions = Array.isArray(record.actions) && (record.actions as unknown[]).length > 0
+      ? (record.actions as unknown[])
+      : undefined;
+    const actions = existingActions ?? (
+      record.action !== undefined && record.action !== null ? [record.action] : undefined
+    );
+    if (actions === undefined) {
+      // Neither action nor actions present: nothing to normalize.
+      continue;
+    }
+    const hadAction = "action" in record;
+    const actionsAlreadyExact = existingActions !== undefined && !hadAction;
+    if (actionsAlreadyExact) {
+      // Already actions-only with a non-empty array — leave byte-identical.
+      continue;
+    }
+    delete record.action;
+    record.actions = actions;
+    changed = true;
+  }
+  return changed;
+}
+
+/**
+ * Wrap a `fetch` so every outbound OpenAI Responses request body that contains a
+ * `computer_call` is rewritten to the ACTIONS-ONLY shape (see
+ * {@link rewriteComputerCallsToActionsOnly}) before it reaches the network.
+ *
+ * Installed as the `fetch:` option on the Azure OpenAI client, this is the
+ * lowest reachable seam — below the agents-core input filter and below the SDK's
+ * responses converter — so it neutralizes the converter's both-fields synthesis
+ * regardless of what the input item carried.
+ *
+ * Surgical and cheap: it only parses the body when it is a string that contains
+ * the literal `"computer_call"` (every other request — non-computer-use turns,
+ * streaming SSE responses, non-string bodies — forwards untouched, the SAME
+ * `init` reference, so streaming and other providers are unaffected). A JSON
+ * parse failure or a no-op rewrite also forwards the original `init` unchanged.
+ *
+ * Typed structurally (the `(input, init) => Promise<Response>` call signature)
+ * rather than as the DOM `typeof fetch` so it omits the `preconnect` static the
+ * global type carries; this matches the OpenAI SDK's `Fetch` option, which only
+ * needs the call signature. The wiring site passes it as the client `fetch:`.
+ */
+type FetchLike = (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => Promise<Response>;
+
+export function computerCallNormalizingFetch(base: FetchLike): FetchLike {
+  return (input, init) => {
+    if (init && typeof init.body === "string" && init.body.includes("\"computer_call\"")) {
+      try {
+        const parsed = JSON.parse(init.body) as unknown;
+        if (rewriteComputerCallsToActionsOnly(parsed)) {
+          return base(input, { ...init, body: JSON.stringify(parsed) });
+        }
+      } catch {
+        // Non-JSON or parse failure: forward the request unchanged.
+      }
+    }
+    return base(input, init);
+  };
+}
