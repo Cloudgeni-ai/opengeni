@@ -20,6 +20,18 @@ export type {
   DesktopConnectionState,
   DesktopStreamEvent,
 } from "./desktop";
+// Interactive terminal (ttyd PTY-over-websocket) transport contract — pure,
+// zero-dep (the WebSocket + xterm attach live in @opengeni/react). URL assembler
+// + the ttyd wire-protocol frame codec, symmetric with the desktop above.
+export {
+  terminalSocketUrl,
+  ttydAuthFrame,
+  ttydInputFrame,
+  ttydResizeFrame,
+  TTYD_SUBPROTOCOL,
+  TtydClientCommand,
+  TtydServerCommand,
+} from "./terminal";
 export { streamSessionEvents } from "./stream";
 export type {
   SessionEventStreamTransport,

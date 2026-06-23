@@ -108,6 +108,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     modalIdleTimeoutSeconds: undefined,
     modalWorkspacePersistence: undefined,
     sandboxDesktopEnabled: false,
+    sandboxTerminalEnabled: true,
     streamResolutionWidth: 1280,
     streamResolutionHeight: 800,
     computerUseEnabled: true,

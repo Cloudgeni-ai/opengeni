@@ -58,7 +58,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
-import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, readGroupLease, type DesktopStreamMint } from "../sandbox/viewer";
+import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   normalizeResources,
@@ -460,6 +460,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
 
+    // P5.t — the REAL PTY terminal cell, served API-DIRECT. Independent of the
+    // desktop: it gates ONLY on sandboxTerminalEnabled + a real-PTY backend + a
+    // WARM box (NO un-redacted ack — the terminal cell has no acknowledgment
+    // gate). A degraded mint (terminal off / no secret / ttyd or tunnel failure)
+    // returns null → the Terminal cell falls back to the sse-events firehose.
+    let terminalStream: TerminalStreamMint | null = null;
+    const terminalUnlocked =
+      settings.sandboxTerminalEnabled
+      && !streamTokenDegraded(settings)
+      && (lease?.liveness === "warm" || lease?.liveness === "draining");
+    if (terminalUnlocked && lease) {
+      terminalStream = await mintTerminalStream({ db, settings }, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        viewerId: grant.subjectId,
+        lease,
+      });
+    }
+
     const capabilities = negotiateCapabilities({
       sessionId,
       backend: session.sandboxBackend as SandboxBackend,
@@ -487,6 +507,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
               token: desktopStream.token,
               expiresAt: desktopStream.expiresAt,
               resolution: desktopStream.resolution,
+            },
+          }
+        : {}),
+      // P5.t — the terminal policy toggle + the minted pty-ws address. The
+      // resolver advertises sse-events (firehose) on a cold/disabled terminal and
+      // folds the live pty-ws url/token in only when the gates passed + minted.
+      terminalEnabled: settings.sandboxTerminalEnabled,
+      ...(terminalStream
+        ? {
+            terminalStream: {
+              url: terminalStream.url,
+              token: terminalStream.token,
+              expiresAt: terminalStream.expiresAt,
             },
           }
         : {}),
@@ -570,16 +603,34 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // box is warm here (attachViewer spun it up or attached), so the handshake's
     // never-spin-up rule does not apply.
     let stream: DesktopStreamMint | null = null;
-    if (settings.sandboxDesktopEnabled && !streamTokenDegraded(settings)) {
+    let terminal: TerminalStreamMint | null = null;
+    if (
+      (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
+      && !streamTokenDegraded(settings)
+    ) {
       const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
       if (lease) {
-        stream = await mintDesktopStream({ db, settings, bus }, {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          viewerId: result.viewerId,
-          lease,
-        });
+        if (settings.sandboxDesktopEnabled) {
+          stream = await mintDesktopStream({ db, settings, bus }, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId: result.viewerId,
+            lease,
+          });
+        }
+        // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
+        // address (independent of the desktop toggle). A degraded mint leaves the
+        // terminal fields null → the client falls back to the sse-events firehose.
+        if (settings.sandboxTerminalEnabled) {
+          terminal = await mintTerminalStream({ db, settings }, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId: result.viewerId,
+            lease,
+          });
+        }
       }
     }
     return c.json(
@@ -591,6 +642,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         resolution: stream?.resolution ?? null,
         transport: stream ? ("vnc-ws" as const) : null,
         client: stream ? ("novnc" as const) : null,
+        // The REAL PTY terminal address (pty-ws), null when degraded.
+        terminalUrl: terminal?.url ?? null,
+        terminalToken: terminal?.token ?? null,
+        terminalExpiresAt: terminal?.expiresAt ?? null,
+        terminalTransport: terminal ? ("pty-ws" as const) : null,
       },
       201,
     );

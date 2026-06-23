@@ -265,6 +265,13 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
+  // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
+  // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
+  // terminal is a baseline structured-service surface (unlike the heavier desktop
+  // pixel plane); a deployment can turn it off to fall back to the read-only
+  // sse-events command firehose. The 7681 port-merge tracks sandboxDesktopEnabled
+  // (a desktop-capable image is the one that bakes ttyd).
+  sandboxTerminalEnabled: EnvBoolean.default(true),
   // The desktop framebuffer geometry the pixel plane advertises + launches the
   // display stack with (P4.2). v1 has no live RANDR resize; a change is a full
   // down→up restart. Defaults match the proven spike geometry (1280x800).
@@ -730,6 +737,7 @@ export function getSettings(): Settings {
     modalIdleTimeoutSeconds: optional("OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS"),
     modalWorkspacePersistence: optional("OPENGENI_MODAL_WORKSPACE_PERSISTENCE"),
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
+    sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
     streamResolutionWidth: optional("OPENGENI_STREAM_RESOLUTION_WIDTH"),
     streamResolutionHeight: optional("OPENGENI_STREAM_RESOLUTION_HEIGHT"),
     computerUseEnabled: optional("OPENGENI_COMPUTER_USE_ENABLED"),

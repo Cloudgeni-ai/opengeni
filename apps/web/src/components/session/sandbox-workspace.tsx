@@ -45,16 +45,30 @@ export function useSandboxWorkspaceTabs({
   // attach + the un-redacted acknowledgment). Off by default — the structured
   // surfaces (files/terminal) need no consent and no warm box.
   const [watchDesktop, setWatchDesktop] = useState(false);
+  // Whether the user has engaged the terminal (focus/click). Off by default so a
+  // cold box stays on the read-only firehose; flips true ON INTERACT to warm the
+  // box for the REAL pty-ws terminal — never on mere mount. Shares the SAME viewer
+  // attach as the desktop (one warm box serves both planes).
+  const [warmTerminal, setWarmTerminal] = useState(false);
 
-  const caps = useSessionCapabilities(sessionId, { events, attachDesktop: watchDesktop });
+  const caps = useSessionCapabilities(sessionId, {
+    events,
+    attachDesktop: watchDesktop,
+    attachTerminal: warmTerminal,
+  });
   const capabilities = caps.capabilities;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
   const gitOn = capabilities?.Git.available ?? false;
   const terminalOn = (capabilities?.Terminal.transport ?? null) !== null;
-  // Open a real interactive PTY against the box once the backend advertises one
-  // (pty-capable). This is what makes the terminal typeable rather than a
-  // read-only firehose: the open spins/resumes the box and its output rides SSE.
-  const ptyCapable = capabilities?.Terminal.ptyCapable ?? false;
+  // The REAL interactive terminal is the ttyd pty-ws stream (driven inside
+  // SandboxTerminal from the Terminal cell). When that's live, the broken legacy
+  // ptyOpen/ptyWrite-over-HTTP path must NOT run — the ttyd socket owns stdin. So
+  // `useSandboxTerminal` opens its HTTP PTY ONLY as the firehose-mode fallback
+  // (transport still sse-events, e.g. a backend without ttyd). Once `pty-ws` is
+  // advertised we keep the projection read-only (it just feeds the cold firehose
+  // until the socket takes over).
+  const ptyWsLive = capabilities?.Terminal.transport === "pty-ws" && Boolean(capabilities?.Terminal.url);
+  const ptyCapable = (capabilities?.Terminal.ptyCapable ?? false) && !ptyWsLive;
   const terminal = useSandboxTerminal(sessionId, { events, interactive: ptyCapable, liveness: capabilities?.liveness });
   const desktopAdvertised =
     (capabilities?.DesktopStream.transport ?? null) !== null ||
@@ -125,6 +139,8 @@ export function useSandboxWorkspaceTabs({
           <div className="h-full bg-[color:var(--og-color-bg,var(--color-bg))] p-1">
             <SandboxTerminal
               result={terminal}
+              terminalCapability={capabilities?.Terminal ?? null}
+              onActivate={() => setWarmTerminal(true)}
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
               {...(xtermTheme ? { theme: xtermTheme } : {})}
@@ -164,6 +180,7 @@ export function useSandboxWorkspaceTabs({
     desktopAdvertised,
     dirtyCount,
     watchDesktop,
+    warmTerminal,
     files,
     git,
     stagedGit,

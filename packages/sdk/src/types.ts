@@ -171,6 +171,15 @@ export type AttachViewerResponse = ViewerHolder & {
   resolution: [number, number] | null;
   transport: "vnc-ws" | null;
   client: "novnc" | null;
+  // The scoped ttyd PTY-over-websocket address minted for THIS holder — the REAL
+  // interactive terminal, symmetric with the desktop pixel plane (same Modal
+  // tunnel, same scoped stream token). Populated on a warm box; null when the
+  // terminal mint degraded (headless / no secret / tunnel failure), in which case
+  // the client falls back to the Channel-A read-only command-output firehose.
+  // `terminalTransport` is "pty-ws" iff a live `terminalUrl` was minted.
+  terminalUrl: string | null;
+  terminalToken: string | null;
+  terminalTransport: "pty-ws" | null;
 };
 
 // Mirror of `@opengeni/contracts` AcknowledgeStreamRequest/Response — the

@@ -1,5 +1,7 @@
+import type { TerminalCapability } from "@opengeni/sdk";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
+import { useTerminalStream } from "../hooks/use-terminal-stream";
 import type { UseSandboxTerminalResult } from "../hooks/use-sandbox-terminal";
 
 /** A subset of xterm.js's ITheme — the tokens worth themeing from a host app. */
@@ -14,13 +16,23 @@ export type XtermTheme = {
 export type SandboxTerminalProps = {
   /** From `useSandboxTerminal(...)`. */
   result: UseSandboxTerminalResult;
+  /**
+   * The negotiated Terminal capability cell. When it advertises `transport:
+   * "pty-ws"` + a live `url` (a warm box with a viewer attached), the terminal is
+   * driven by a REAL bidirectional PTY over the Modal tunnel (ttyd-over-websocket)
+   * INSTEAD of the broken ptyWrite-over-HTTP path: xterm input → the socket, the
+   * socket's output → xterm, xterm resize → the socket. On a cold box / no url
+   * (`transport: "sse-events"`) it stays on the read-only Channel-A firehose
+   * (`result.chunks`). Omit to force the legacy firehose-only behavior.
+   */
+  terminalCapability?: TerminalCapability | null | undefined;
   theme?: XtermTheme | undefined;
   fontFamily?: string | undefined;
   fontSize?: number | undefined;
   /**
    * Force read-only even when the PTY accepts stdin. Default: interactive
-   * whenever `result.write !== null` (the box advertises an interactive PTY);
-   * otherwise the read-only agent firehose.
+   * whenever a live pty-ws stream is connected OR `result.write !== null` (the box
+   * advertises an interactive PTY); otherwise the read-only agent firehose.
    */
   readOnly?: boolean | undefined;
   /** Shown on the server / before xterm hydrates (SSR-safe placeholder). */
@@ -29,6 +41,14 @@ export type SandboxTerminalProps = {
   showHeader?: boolean | undefined;
   /** Shell label for the header (e.g. `/bin/bash`). */
   shell?: string | undefined;
+  /**
+   * Fired the first time the user engages the terminal surface (focus or click).
+   * The host wires this to warm the box for the REAL pty-ws terminal (the viewer
+   * attach), so a cold box upgrades from the read-only firehose to a live PTY ON
+   * INTERACT — never on mere mount (which would force a box spin-up and regress
+   * the firehose-only default).
+   */
+  onActivate?: (() => void) | undefined;
   className?: string | undefined;
 };
 
@@ -39,8 +59,11 @@ type XtermLike = {
   write: (data: string) => void;
   clear: () => void;
   onData: (cb: (data: string) => void) => { dispose: () => void };
+  onResize: (cb: (size: { cols: number; rows: number }) => void) => { dispose: () => void };
   loadAddon: (addon: unknown) => void;
   dispose: () => void;
+  cols: number;
+  rows: number;
   options: { theme?: XtermTheme; disableStdin?: boolean };
 };
 type FitAddonLike = { fit: () => void };
@@ -59,6 +82,7 @@ type FitAddonLike = { fit: () => void };
  */
 export function SandboxTerminal({
   result,
+  terminalCapability,
   theme,
   fontFamily,
   fontSize,
@@ -66,6 +90,7 @@ export function SandboxTerminal({
   placeholder,
   showHeader,
   shell,
+  onActivate,
   className,
 }: SandboxTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -74,7 +99,39 @@ export function SandboxTerminal({
   const writtenRef = useRef<Set<string>>(new Set());
   const [ready, setReady] = useState(false);
 
-  const interactive = !readOnly && result.write !== null;
+  // ── Interactive transport switch ─────────────────────────────────────────────
+  // The interactive terminal is a REAL bidirectional PTY (ttyd over the Modal
+  // tunnel) WHENEVER the Terminal cell advertises `transport: "pty-ws"` + a live
+  // `url`; the ttyd socket then OWNS the screen (input + output both ride it). On
+  // a cold box / sse-events cell, `useTerminalStream` stays idle and we fall back
+  // to the read-only Channel-A command-output firehose (`result.chunks`) — with
+  // the legacy `result.write` (ptyWrite-over-HTTP) as the only stdin path there.
+  const ptyWs = terminalCapability?.transport === "pty-ws" && Boolean(terminalCapability?.url);
+  // Output frames buffer here until xterm has mounted; the write effect drains it.
+  const ptyOutputQueueRef = useRef<string[]>([]);
+  const ptyStream = useTerminalStream({
+    capability: ptyWs
+      ? {
+          transport: terminalCapability!.transport,
+          url: terminalCapability!.url,
+          token: terminalCapability!.token,
+        }
+      : null,
+    onOutput: (data) => {
+      const term = termRef.current;
+      if (term) term.write(data);
+      else ptyOutputQueueRef.current.push(data);
+    },
+  });
+
+  // PTY mode = a live ttyd socket drives the screen. In PTY mode the screen is
+  // owned by the websocket (we must NOT replay the SSE firehose into it — that
+  // double-writes the agent's command output on top of the live PTY). Firehose
+  // mode = the read-only projection (or the legacy HTTP-write fallback).
+  const ptyMode = ptyWs && ptyStream.status !== "closed";
+  // Interactive (stdin enabled) when a live PTY socket is connected, OR (legacy
+  // fallback) the projection exposed an HTTP write fn. `readOnly` forces off.
+  const interactive = !readOnly && (ptyMode || result.write !== null);
 
   // Mount xterm once (client-only). Re-mounts only when the interactive flag
   // flips (stdin enable/disable is a construction param on xterm).
@@ -157,6 +214,11 @@ export function SandboxTerminal({
       requestAnimationFrame(() => {
         if (disposed) return;
         settle();
+        // Drain any ttyd OUTPUT that arrived before xterm finished mounting.
+        if (ptyOutputQueueRef.current.length > 0) {
+          for (const data of ptyOutputQueueRef.current) term.write(data);
+          ptyOutputQueueRef.current = [];
+        }
         setReady(true);
       });
     })();
@@ -179,27 +241,58 @@ export function SandboxTerminal({
     term.options.theme = theme;
   }, [ready, theme]);
 
-  // Write new chunks incrementally.
+  // On the firehose → PTY transition (the box warmed and the ttyd socket came
+  // up), clear the stale read-only transcript so the live shell starts on a clean
+  // screen instead of below the agent's projected command output.
+  const enteredPtyRef = useRef(false);
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term) return;
+    if (ptyMode && !enteredPtyRef.current) {
+      enteredPtyRef.current = true;
+      term.clear();
+    } else if (!ptyMode) {
+      enteredPtyRef.current = false;
+    }
+  }, [ready, ptyMode]);
+
+  // Write new firehose chunks incrementally — but ONLY in firehose mode. In PTY
+  // mode the ttyd socket owns the screen; replaying the SSE command-output
+  // projection on top of it would double-render the agent's output.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!ready || !term || ptyMode) return;
     for (const chunk of result.chunks) {
       if (writtenRef.current.has(chunk.id)) continue;
       writtenRef.current.add(chunk.id);
       term.write(chunk.text);
     }
-  }, [ready, result.chunks]);
+  }, [ready, result.chunks, ptyMode]);
 
-  // Wire interactive input when allowed.
+  // Wire interactive input when allowed. PTY mode pipes keystrokes to the ttyd
+  // socket (the real PTY); firehose mode uses the legacy ptyWrite-over-HTTP fn.
   useEffect(() => {
     const term = termRef.current;
-    const write = result.write;
-    if (!ready || !term || !write || !interactive) return;
-    const sub = term.onData((data) => write(data));
+    if (!ready || !term || !interactive) return;
+    const sink = ptyMode ? ptyStream.write : result.write;
+    if (!sink) return;
+    const sub = term.onData((data) => sink(data));
     return () => sub.dispose();
-  }, [ready, result.write, interactive]);
+  }, [ready, interactive, ptyMode, ptyStream.write, result.write]);
 
-  // Refit on container resize (dock drag) AND window resize.
+  // In PTY mode, tell ttyd the window size on the xterm resize event (the fit
+  // addon reflows the grid; ttyd resizes the remote PTY to match), and push the
+  // initial geometry once the socket is open.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!ready || !term || !ptyMode) return;
+    ptyStream.resize(term.cols, term.rows);
+    const sub = term.onResize(({ cols, rows }) => ptyStream.resize(cols, rows));
+    return () => sub.dispose();
+  }, [ready, ptyMode, ptyStream.connected, ptyStream.resize]);
+
+  // Refit on container resize (dock drag) AND window resize. The fit addon
+  // mutates xterm's cols/rows → the onResize handler above forwards to ttyd.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const refit = () => {
@@ -258,7 +351,14 @@ export function SandboxTerminal({
           </span>
         </div>
       )}
-      <div className="relative min-h-0 flex-1 bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))] px-2 py-1.5">
+      {/* `onPointerDownCapture`/`onFocusCapture` fire on the FIRST user engagement
+          with the terminal surface (capture so they win even though xterm's own
+          listeners stop propagation). The host warms the box for pty-ws here. */}
+      <div
+        className="relative min-h-0 flex-1 bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))] px-2 py-1.5"
+        onPointerDownCapture={onActivate}
+        onFocusCapture={onActivate}
+      >
         {!ready && (placeholder ?? <TerminalPlaceholder />)}
         <div ref={containerRef} className="h-full w-full" data-opengeni-terminal />
       </div>

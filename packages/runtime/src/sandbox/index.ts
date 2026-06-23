@@ -20,7 +20,7 @@
 
 import type { Settings } from "@opengeni/config";
 import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
-import { DESKTOP_STREAM_PORT, type SandboxBackend } from "@opengeni/contracts";
+import { DESKTOP_STREAM_PORT, TERMINAL_STREAM_PORT, type SandboxBackend } from "@opengeni/contracts";
 import type {
   SandboxClient,
   SandboxSessionLike,
@@ -87,6 +87,21 @@ export {
   type EnsureDisplayStackOptions,
   type EnsureDisplayStackResult,
 } from "./display-stack";
+
+// The Channel-B REAL PTY terminal-server launcher (P5.t). Exec-launched,
+// flock-idempotent twin of ensureDisplayStack; brings up ttyd PTY-over-websocket
+// (bash -l per ws client) on 7681 over the SAME tunnel the desktop noVNC uses.
+export {
+  TERMINAL_STREAM_PORT,
+  TERMINAL_SERVER_TIMEOUT_MS,
+  TerminalServerError,
+  TerminalServerUnsupportedError,
+  buildTerminalServerScript,
+  ensureTerminalServer,
+  tearDownTerminalServer,
+  type EnsureTerminalServerOptions,
+  type EnsureTerminalServerResult,
+} from "./terminal-server";
 
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
@@ -197,6 +212,18 @@ export function createSandboxClientForBackend(
     && !exposedPorts.includes(DESKTOP_STREAM_PORT)
   ) {
     exposedPorts.push(DESKTOP_STREAM_PORT);
+  }
+  // 7681 port-merge: the REAL PTY terminal (ttyd) rides the SAME tunnel as the
+  // desktop, so a desktop-capable pre-declared-port backend must ALSO carry 7681
+  // at construction for resolveExposedPort(7681) to succeed later on a fresh box.
+  // Same condition as the 6080 merge (a desktop-capable image bakes ttyd too).
+  if (
+    desktop.available
+    && settings.sandboxDesktopEnabled
+    && !registration.descriptor.portExposure.supportsOnDemandPorts
+    && !exposedPorts.includes(TERMINAL_STREAM_PORT)
+  ) {
+    exposedPorts.push(TERMINAL_STREAM_PORT);
   }
 
   const raw = registration.build({ settings, environment, exposedPorts });

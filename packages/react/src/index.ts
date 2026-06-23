@@ -55,6 +55,12 @@ export type {
 } from "./hooks/use-session-capabilities";
 export { useDesktopStream } from "./hooks/use-desktop-stream";
 export type { UseDesktopStreamOptions, UseDesktopStreamResult } from "./hooks/use-desktop-stream";
+export { useTerminalStream } from "./hooks/use-terminal-stream";
+export type {
+  TerminalStreamStatus,
+  UseTerminalStreamOptions,
+  UseTerminalStreamResult,
+} from "./hooks/use-terminal-stream";
 export { useSandboxTerminal } from "./hooks/use-sandbox-terminal";
 export type {
   TerminalChunk,

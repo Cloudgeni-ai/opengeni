@@ -3051,6 +3051,7 @@ type LeaseRow = {
   backend: string;
   os: string;
   data_plane_url: string | null;
+  terminal_data_plane_url: string | null;
   lease_epoch: number | string;
   resume_backend_id: string | null;
   resume_state: Record<string, unknown> | null;
@@ -3070,6 +3071,9 @@ export interface LeaseSnapshot {
   backend: string;
   os: string;
   dataPlaneUrl: string | null;
+  // The cached ttyd pty-ws tunnel URL (7681), separate from dataPlaneUrl (the
+  // 6080 desktop tunnel). Null until mintTerminalStream resolves + records it.
+  terminalDataPlaneUrl: string | null;
   leaseEpoch: number;
   resumeBackendId: string | null;
   resumeState: Record<string, unknown> | null;
@@ -3127,6 +3131,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     backend: row.backend,
     os: row.os,
     dataPlaneUrl: row.data_plane_url,
+    terminalDataPlaneUrl: row.terminal_data_plane_url ?? null,
     // Defensive coercion: integer returns a number, but coerce regardless so the
     // fence comparison stays exact even if the column type ever drifts to int8.
     leaseEpoch: Number(row.lease_epoch),
@@ -3279,6 +3284,10 @@ export async function commitWarmingToWarm(db: Database, input: {
           liveness          = 'warm',
           instance_id       = ${input.instanceId},
           data_plane_url    = ${input.dataPlaneUrl ?? null},
+          -- A box re-key (epoch++) invalidates the prior epoch's ttyd tunnel; the
+          -- terminal URL is re-resolved + re-recorded lazily by mintTerminalStream
+          -- on the next attach. Clear it here so a stale URL never survives a roll.
+          terminal_data_plane_url = null,
           resume_backend_id = ${input.resumeBackendId ?? null},
           resume_state      = ${resumeStateJson}::jsonb,
           lease_epoch       = lease_epoch + 1,
@@ -3309,7 +3318,7 @@ export async function failWarmingToCold(db: Database, input: {
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
-          data_plane_url = null, updated_at = now()
+          data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
       `);
@@ -3461,7 +3470,7 @@ export async function reapStaleLeaseHolders(db: Database, input: {
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
-          data_plane_url = null, updated_at = now()
+          data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now()
         returning id
@@ -3573,7 +3582,7 @@ export async function confirmDrainCold(db: Database, input: {
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
-          data_plane_url = null, updated_at = now()
+          data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
         returning id
@@ -3615,6 +3624,36 @@ export async function recordLeaseDataPlaneUrl(db: Database, input: {
         update sandbox_leases set
           data_plane_url = ${input.dataPlaneUrl ?? null},
           updated_at     = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and lease_epoch = ${input.expectedEpoch}
+          and liveness in ('warm', 'draining')
+        returning *
+      `);
+      return rows[0] ? mapLeaseRow(rows[0]) : null;
+    });
+}
+
+// P5.t — record the (re-)resolved ttyd terminal data-plane URL (7681) on an
+// ALREADY-WARM lease, EPOCH-FENCED. The exact terminal twin of
+// recordLeaseDataPlaneUrl: the REAL PTY rides a SEPARATE provider tunnel from the
+// desktop noVNC, so its URL is cached in its own column. mintTerminalStream calls
+// this after resolving the 7681 tunnel; the fast-path then re-mints only a fresh
+// token against the cached URL. The fence is the split-brain guard (a stale-epoch
+// writer updates ZERO rows). Returns the updated snapshot, or null on a fence
+// miss (epoch advanced / lease vanished).
+export async function recordLeaseTerminalDataPlaneUrl(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  terminalDataPlaneUrl: string | null;
+}): Promise<LeaseSnapshot | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          terminal_data_plane_url = ${input.terminalDataPlaneUrl ?? null},
+          updated_at              = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and lease_epoch = ${input.expectedEpoch}
           and liveness in ('warm', 'draining')

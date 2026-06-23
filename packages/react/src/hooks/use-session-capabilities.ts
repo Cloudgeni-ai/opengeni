@@ -24,6 +24,16 @@ export type UseSessionCapabilitiesOptions = ClientOverride & {
    * negotiation (no holder, no warm) — terminal/files/git work without it.
    */
   attachDesktop?: boolean | undefined;
+  /**
+   * Whether to acquire a viewer holder to warm the box for the REAL interactive
+   * terminal (the ttyd pty-ws plane). Symmetric with `attachDesktop` and shares
+   * the SAME viewer attach (one warm box serves both planes), but needs NO
+   * un-redacted acknowledgment — a shell is interactive by nature, and the gate
+   * is the scoped tunnel URL + stream token. Default false: the terminal stays on
+   * the read-only Channel-A firehose until the user opens/focuses it. The attach
+   * folds the minted `pty-ws` url+token into the `Terminal` cell.
+   */
+  attachTerminal?: boolean | undefined;
   /** Hold off negotiating (e.g. the workbench panel is collapsed). Default true. */
   enabled?: boolean | undefined;
   /** Poll cadence (ms) while the lease is cold/warming. Default 1500. */
@@ -69,6 +79,24 @@ function desktopAttachable(cell: SessionCapabilities["DesktopStream"]): boolean 
   return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
 }
 
+/**
+ * Whether warming the box for the interactive terminal (pty-ws) is worth it.
+ * The Terminal cell is ALWAYS feasible when the backend advertises a transport at
+ * all (`sse-events` on a cold box, `pty-ws` once warm) — only a genuinely
+ * terminal-less backend reports transport:null with a hard reason. The attach is
+ * what flips `sse-events` → `pty-ws` by warming the box and minting the ttyd
+ * tunnel URL, so we attach whenever the terminal is not hard-unavailable.
+ */
+function terminalAttachable(cell: SessionCapabilities["Terminal"]): boolean {
+  if (cell.transport === null) {
+    // No terminal at all unless the only blocker is a transient cold state.
+    return cell.reason === "lease_cold" || cell.reason === "not_provisioned" || cell.reason === null;
+  }
+  // Already pty-ws (warm) is fine to (re)attach; sse-events is the cold state the
+  // attach upgrades. Either way it's attachable.
+  return true;
+}
+
 /** Read `stream.url.rotated` payloads off the live event log, newest last. */
 function rotationsFrom(events: SessionEvent[]): StreamUrlRotatedPayload[] {
   const out: StreamUrlRotatedPayload[] = [];
@@ -98,6 +126,7 @@ export function useSessionCapabilities(
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const attachDesktop = options.attachDesktop ?? false;
+  const attachTerminal = options.attachTerminal ?? false;
   const warmingPollMs = options.warmingPollMs ?? 1500;
   const warmingDeadlineMs = options.warmingDeadlineMs ?? 30_000;
 
@@ -206,20 +235,25 @@ export function useSessionCapabilities(
         if (cancelled) return;
         settle(caps);
 
-        // Optional desktop attach: acquire a viewer holder (warms a cold box).
-        // The consent gate (409) and the viewer cap (429) surface as typed
-        // signals rather than throwing — the desktop tab degrades gracefully.
+        // Optional viewer attach: acquire a viewer holder (warms a cold box). ONE
+        // attach serves BOTH live planes — the desktop pixel stream AND the
+        // interactive terminal (ttyd pty-ws) ride the same warm box and the same
+        // holder; the response folds the minted address for each requested plane.
+        // The consent gate (409) and the viewer cap (429) surface as typed signals
+        // rather than throwing — the tabs degrade gracefully.
         //
         // KEY: the handshake (getStreamCapabilities) NEVER spins up a cold box, so
-        // on a cold/warming lease the desktop cell comes back transport:null with a
+        // on a cold/warming lease the desktop cell comes back transport:null and
+        // the terminal cell comes back `sse-events` (read-only firehose) with a
         // transient reason (`lease_cold`/`not_provisioned`). Gating the attach on
-        // `transport !== null` therefore dead-ends the desktop ("Starting the
-        // desktop…" forever): it never warms because it never attaches, and never
-        // attaches because it isn't warm. We must attach whenever the desktop is
-        // FEASIBLE — transport already live OR cold-but-feasible — and let POST
-        // /viewers warm the box and mint the URL. Only a genuinely-no-desktop
-        // reason (backend/os/policy/headless) suppresses the attach.
-        if (attachDesktop && desktopAttachable(caps.DesktopStream)) {
+        // `transport` therefore dead-ends both surfaces (forever "Starting…"): they
+        // never warm because they never attach, and never attach because they
+        // aren't warm. We attach whenever a REQUESTED plane is FEASIBLE — transport
+        // already live OR cold-but-feasible — and let POST /viewers warm the box and
+        // mint the URLs. Only a genuinely-unsupported reason suppresses the attach.
+        const wantDesktopAttach = attachDesktop && desktopAttachable(caps.DesktopStream);
+        const wantTerminalAttach = attachTerminal && terminalAttachable(caps.Terminal);
+        if (wantDesktopAttach || wantTerminalAttach) {
           try {
             const holder = await client.attachViewer(workspaceId, sessionId, {});
             if (cancelled) return;
@@ -227,7 +261,9 @@ export function useSessionCapabilities(
             viewerIdRef.current = holder.viewerId;
             setViewerId(holder.viewerId);
             epochRef.current = holder.leaseEpoch;
-            // Fold the freshly-minted live address into the doc the components read.
+            // Fold the freshly-minted live address(es) into the doc the components
+            // read. Desktop fields fold only when a desktop attach was wanted;
+            // terminal fields fold the minted ttyd pty-ws url+token when present.
             setCapabilities((prev) =>
               prev
                 ? {
@@ -235,15 +271,29 @@ export function useSessionCapabilities(
                     liveness: holder.liveness,
                     leaseEpoch: holder.leaseEpoch,
                     viewerHeartbeatIntervalMs: holder.viewerHeartbeatIntervalMs,
-                    DesktopStream: {
-                      ...prev.DesktopStream,
-                      transport: holder.transport ?? prev.DesktopStream.transport,
-                      client: holder.client ?? prev.DesktopStream.client,
-                      url: holder.dataPlaneUrl ?? prev.DesktopStream.url,
-                      token: holder.streamToken ?? prev.DesktopStream.token,
-                      expiresAt: holder.streamExpiresAt ?? prev.DesktopStream.expiresAt,
-                      resolution: holder.resolution ?? prev.DesktopStream.resolution,
-                    },
+                    DesktopStream: wantDesktopAttach
+                      ? {
+                          ...prev.DesktopStream,
+                          transport: holder.transport ?? prev.DesktopStream.transport,
+                          client: holder.client ?? prev.DesktopStream.client,
+                          url: holder.dataPlaneUrl ?? prev.DesktopStream.url,
+                          token: holder.streamToken ?? prev.DesktopStream.token,
+                          expiresAt: holder.streamExpiresAt ?? prev.DesktopStream.expiresAt,
+                          resolution: holder.resolution ?? prev.DesktopStream.resolution,
+                        }
+                      : prev.DesktopStream,
+                    Terminal:
+                      holder.terminalUrl && holder.terminalTransport
+                        ? {
+                            ...prev.Terminal,
+                            transport: holder.terminalTransport,
+                            url: holder.terminalUrl,
+                            token: holder.terminalToken ?? prev.Terminal.token,
+                            // A live pty-ws means the box is pty-capable for real.
+                            ptyCapable: true,
+                            reason: null,
+                          }
+                        : prev.Terminal,
                   }
                 : prev,
             );
@@ -251,9 +301,16 @@ export function useSessionCapabilities(
             if (cancelled) return;
             if (cause instanceof OpenGeniApiError) {
               if (cause.status === 409) {
-                setAcknowledgmentRequired(
-                  cause.message.includes("shared_acknowledgment") ? "shared" : "unredacted",
-                );
+                // The un-redacted/shared consent gate is a DESKTOP requirement. A
+                // terminal-only warm attach needs no consent, so a 409 there is not
+                // a consent prompt — the terminal just stays on the read-only
+                // firehose. Only raise the consent requirement when the desktop was
+                // the (or a) reason we attached.
+                if (wantDesktopAttach) {
+                  setAcknowledgmentRequired(
+                    cause.message.includes("shared_acknowledgment") ? "shared" : "unredacted",
+                  );
+                }
               } else if (cause.status === 429) {
                 setViewerCapReached(true);
               } else if (cause.status === 403) {
@@ -299,7 +356,7 @@ export function useSessionCapabilities(
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, workspaceId, sessionId, enabled, attachDesktop, warmingPollMs, warmingDeadlineMs, nonce]);
+  }, [client, workspaceId, sessionId, enabled, attachDesktop, attachTerminal, warmingPollMs, warmingDeadlineMs, nonce]);
 
   // ── Fold stream.url.rotated from the live event log (no round trip) ──────────
   const events = options.events;

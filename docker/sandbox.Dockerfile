@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
+ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 
 RUN set -eux; \
@@ -66,9 +67,29 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
+# ttyd static binary (REAL PTY-over-websocket; Channel-B terminal on headless boxes).
+# Pinned static build from the upstream release; the PTY port (7681) is exposed over
+# the SAME Modal raw-TLS tunnel mechanism the desktop image uses. Mirrors the
+# desktop.Dockerfile ttyd layer.
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in amd64) tarch="x86_64" ;; arm64|aarch64) tarch="aarch64" ;; *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; esac; \
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${tarch}" -o /usr/local/bin/ttyd; \
+    chmod 0755 /usr/local/bin/ttyd; \
+    ttyd --version
+
 ENV HOME=/workspace
+ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
-RUN chmod 0755 /usr/local/bin/opengeni-git-askpass
+COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
+COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
+RUN set -eux; \
+    chmod 0755 /usr/local/bin/opengeni-git-askpass \
+               /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down; \
+    bash -n /usr/local/bin/opengeni-terminal-up; \
+    bash -n /usr/local/bin/opengeni-terminal-down
+
+EXPOSE 7681
 
 WORKDIR /workspace

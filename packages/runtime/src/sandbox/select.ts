@@ -68,6 +68,26 @@ export interface NegotiationContext {
     expiresAt: string;
     resolution: [number, number];
   };
+  /** The deployment terminal toggle (settings.sandboxTerminalEnabled). The REAL
+   *  PTY (ttyd pty-ws) is gated on this + a real-PTY backend; when off the
+   *  Terminal cell still advertises the read-only sse-events firehose. Defaults to
+   *  true so a caller that never threads it is unaffected. */
+  terminalEnabled?: boolean;
+  /**
+   * The minted terminal-plane endpoint (P5.t): the direct-to-provider ttyd
+   * PTY-over-websocket URL + the scoped stream token + its expiry. Threaded by the
+   * API-direct handshake AFTER it has resumed the box, ensured the terminal
+   * server, and resolved the provider tunnel (mintTerminalStream) — SYMMETRIC with
+   * `desktopStream`. When ABSENT (the negotiation-only read, a cold lease, or a
+   * degraded terminal) the Terminal cell reports url/token/expiresAt as null and
+   * falls back to transport "sse-events" (the read-only firehose) — the caller
+   * POSTs to /viewers to mint the live pty-ws address.
+   */
+  terminalStream?: {
+    url: string;
+    token: string;
+    expiresAt: string;
+  };
   /** Override the negotiation clock (tests). */
   now?: Date;
 }
@@ -149,19 +169,42 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
   const terminal = (() => {
     const cap = descriptor.capabilities.Terminal;
     if (osReason) {
-      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: osReason };
+      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, expiresAt: null, reason: osReason };
     }
     if (!cap.available) {
-      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, reason: "backend_unsupported" as const };
+      return { transport: null, ptyCapable: false, shell: "/bin/bash", url: null, token: null, expiresAt: null, reason: "backend_unsupported" as const };
     }
-    // pty-ws when the backend has a real PTY, else the SSE-events firehose.
+    // The REAL PTY (ttyd pty-ws) rides the SAME tunnel as the desktop, so it is
+    // gated identically: a real-PTY backend (cap.pty), the terminal policy toggle
+    // ON, and a WARM box. Until those hold the cell advertises the read-only
+    // sse-events firehose (Channel-A command.output still works) with a typed
+    // reason — degradation is a value, never an absent capability.
+    //   - cold lease           -> sse-events + lease_cold (the pty-ws address is
+    //                             minted by mintTerminalStream at viewer attach).
+    //   - terminal off         -> sse-events + disabled_by_policy.
+    //   - not a real-PTY backend-> sse-events (no reason; the firehose IS the cap).
+    const ptyCapable = cap.pty;
+    let transport: "pty-ws" | "sse-events" = ptyCapable ? "pty-ws" : "sse-events";
+    let reason: CapabilityUnavailableReason | null = null;
+    if (ptyCapable && ctx.terminalEnabled === false) {
+      transport = "sse-events";
+      reason = "disabled_by_policy";
+    } else if (ptyCapable && ctx.liveness === "cold") {
+      transport = "sse-events";
+      reason = "lease_cold";
+    }
+    // The minted pty-ws endpoint is folded in ONLY when the terminal is actually
+    // serving pty-ws (the gates passed). When absent the cell advertises the
+    // capability with a null live address — the caller mints it via POST /viewers.
+    const minted = transport === "pty-ws" ? ctx.terminalStream : undefined;
     return {
-      transport: cap.pty ? ("pty-ws" as const) : ("sse-events" as const),
-      ptyCapable: cap.pty,
+      transport,
+      ptyCapable,
       shell: "/bin/bash",
-      url: null,
-      token: null,
-      reason: null,
+      url: minted?.url ?? null,
+      token: minted?.token ?? null,
+      expiresAt: minted?.expiresAt ?? null,
+      reason,
     };
   })();
 

@@ -18,6 +18,7 @@
 // scoped token are P3/P4. Here we surface only the holder lifecycle + the
 // lease's recorded data_plane_url (null until P4 mints it).
 
+import { createHash } from "node:crypto";
 import { resolveStreamTokenSecret } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
@@ -29,6 +30,7 @@ import {
   heartbeatLeaseHolder,
   readLease,
   recordLeaseDataPlaneUrl,
+  recordLeaseTerminalDataPlaneUrl,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   type Database,
@@ -41,13 +43,16 @@ import { HTTPException } from "hono/http-exception";
 // (enforced by sandbox-access-import-guard.test.ts).
 import {
   ensureDisplayStack,
+  ensureTerminalServer,
   establishSandboxSessionFromEnvelope,
   exposeStreamPort,
   desktopCapableBackend,
   serializeEstablishedSandboxEnvelope,
   mintStreamToken,
   STREAM_TOKEN_DEFAULT_TTL_SECONDS,
+  TERMINAL_STREAM_PORT,
   DisplayStackUnsupportedError,
+  TerminalServerUnsupportedError,
   StreamPortUnavailableError,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
@@ -346,7 +351,12 @@ export async function mintDesktopStream(
   input: MintDesktopStreamInput,
 ): Promise<DesktopStreamMint | null> {
   const { db, settings, bus } = services;
-  const { accountId, workspaceId, session, viewerId, lease } = input;
+  const { accountId, workspaceId, session, lease } = input;
+  // The scoped token's viewerId must be a UUID (StreamTokenPayload). The GET caps
+  // handshake passes grant.subjectId, which is a non-UUID for an API-key principal
+  // ("configured:key") — coerce it to a deterministic UUID so the mint never 500s
+  // (caps-500 fix). A managed-session subject (already a UUID) is unchanged.
+  const viewerId = viewerIdAsUuid(input.viewerId);
 
   // GATE 1: a desktop tier that is off, headless, or lacks a stream-token secret
   // cannot mint a live URL. (The handshake's negotiateCapabilities already
@@ -492,8 +502,207 @@ export async function mintDesktopStream(
   }
 }
 
+// ============================================================================
+// P5.t — the REAL PTY terminal DATA PLANE, served API-DIRECT.
+//
+// mintTerminalStream is the EXACT terminal twin of mintDesktopStream: it resumes
+// the WARM box BY ID in-process, idempotently ensures the ttyd PTY-over-websocket
+// server (ensureTerminalServer), resolves the provider's scoped tunnel for port
+// 7681 (a SEPARATE tunnel from the 6080 desktop noVNC → a different URL), mints
+// the scoped per-viewer stream token, and records the resolved URL on the lease's
+// terminal_data_plane_url column under the epoch fence. The fast-path re-mints
+// ONLY a fresh token against the cached terminal URL (no box touch).
+//
+// It does NOT require the desktop to be on — it gates on the separate
+// sandboxTerminalEnabled toggle. Degradation (no secret, headless backend, ttyd
+// failure, provider tunnel failure) returns null → the Terminal cell falls back
+// to the read-only sse-events firehose (a value, never a throw).
+// ============================================================================
+
+/** The minted terminal cell the handshake/attach folds into the Terminal
+ *  capability (pty-ws). Null when degraded — the caller surfaces transport
+ *  "sse-events" (the read-only firehose), never an exception. */
+export type TerminalStreamMint = {
+  url: string;
+  token: string;
+  expiresAt: string;
+  leaseEpoch: number;
+};
+
+export type MintTerminalStreamInput = {
+  accountId: string;
+  workspaceId: string;
+  session: Session;
+  /** The viewer holder / principal id the scoped token is minted for. */
+  viewerId: string;
+  /** The live lease (must be warm/draining — the box is up). */
+  lease: LeaseSnapshot;
+  /** Test seam: override how the box is re-established by id (see
+   *  MintDesktopStreamInput.establish). Production NEVER passes this. */
+  establish?: (
+    envelope: Record<string, unknown> | null,
+  ) => Promise<EstablishedSandboxSession>;
+};
+
+/**
+ * Mint (or re-mint) the REAL PTY (ttyd pty-ws) terminal cell for a viewer against
+ * a WARM box, IN-PROCESS. Returns the minted cell, or null when the terminal tier
+ * degrades (terminal off, no resolvable stream-token secret, a headless backend,
+ * a ttyd-launch failure, or a provider-tunnel failure) — the caller surfaces the
+ * sse-events firehose, never an exception to the user. Mirrors mintDesktopStream.
+ */
+export async function mintTerminalStream(
+  services: ViewerServices,
+  input: MintTerminalStreamInput,
+): Promise<TerminalStreamMint | null> {
+  const { db, settings } = services;
+  const { accountId, workspaceId, session, lease } = input;
+  // Same caps-500 fix as the desktop mint: coerce a non-UUID principal id
+  // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
+  // so StreamTokenPayload.parse never throws an uncaught 500.
+  const viewerId = viewerIdAsUuid(input.viewerId);
+
+  // GATE 1: the terminal pty-ws plane requires the toggle ON, a real-PTY backend
+  // (desktop-capable images bake ttyd), and a resolvable stream-token secret.
+  if (!settings.sandboxTerminalEnabled) {
+    return null;
+  }
+  if (!desktopCapableBackend(session.sandboxBackend)) {
+    return null;
+  }
+  const secret = resolveStreamTokenSecret(settings);
+  if (!secret) {
+    return null;
+  }
+  // GATE 2: the box must be live (the handshake never spins one up).
+  if (lease.liveness !== "warm" && lease.liveness !== "draining") {
+    return null;
+  }
+
+  // FAST PATH: the terminal tunnel URL is stable for the life of the (epoch-fenced)
+  // box, so when the lease already caches it, mint ONLY a fresh scoped token (HMAC,
+  // sub-millisecond) against the cached URL — no box resume/exec at all. A rollover
+  // advances the epoch and clears terminalDataPlaneUrl (commitWarmingToWarm), so a
+  // cached URL here is always the current epoch's live ttyd tunnel.
+  if (lease.terminalDataPlaneUrl) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const token = await mintStreamToken(secret, {
+      workspaceId,
+      sessionId: session.id,
+      viewerId,
+      leaseEpoch: lease.leaseEpoch,
+      port: TERMINAL_STREAM_PORT,
+      nowSeconds,
+    });
+    return {
+      url: lease.terminalDataPlaneUrl,
+      token,
+      expiresAt: new Date((nowSeconds + STREAM_TOKEN_DEFAULT_TTL_SECONDS) * 1000).toISOString(),
+      leaseEpoch: lease.leaseEpoch,
+    };
+  }
+
+  // Resume the LIVE box by id (lease.resume_state authoritative), ensure ttyd, and
+  // resolve the 7681 tunnel + mint the scoped token, IN-PROCESS.
+  const envelope = lease.resumeState ?? (await getSandboxSessionEnvelope(db, workspaceId, session.id));
+  let established: EstablishedSandboxSession | undefined;
+  try {
+    established = input.establish
+      ? await input.establish(envelope)
+      : await establishSandboxSessionFromEnvelope(settings, envelope, {
+          sessionId: session.id,
+          backendOverride: session.sandboxBackend,
+        });
+
+    // Idempotent ttyd launch (flock-guarded; a no-op when already up). A box that
+    // genuinely can't run it degrades to the sse-events firehose, not a throw.
+    try {
+      await ensureTerminalServer(established.session, { port: TERMINAL_STREAM_PORT });
+    } catch (error) {
+      if (error instanceof TerminalServerUnsupportedError) {
+        return null;
+      }
+      throw error;
+    }
+
+    // Resolve the provider tunnel for 7681 + mint the scoped token, IN-PROCESS.
+    // exposeStreamPort is port-agnostic; it returns transport "vnc-ws"/client
+    // "novnc" tags we ignore for the terminal (the contract carries pty-ws) — we
+    // use only its url/token/expiresAt.
+    let exposed: Awaited<ReturnType<typeof exposeStreamPort>>;
+    try {
+      exposed = await exposeStreamPort(established.session, {
+        workspaceId,
+        sessionId: session.id,
+        viewerId,
+        leaseEpoch: lease.leaseEpoch,
+        streamTokenSecret: secret,
+        port: TERMINAL_STREAM_PORT,
+      });
+    } catch (error) {
+      if (error instanceof StreamPortUnavailableError) {
+        return null;
+      }
+      throw error;
+    }
+
+    // Record the resolved terminal URL on the lease under the epoch fence. A fence
+    // miss (box re-established under a newer epoch mid-call) is a no-op; we still
+    // return the cell we minted for our epoch.
+    await recordLeaseTerminalDataPlaneUrl(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: lease.leaseEpoch,
+      terminalDataPlaneUrl: exposed.url,
+    });
+
+    return {
+      url: exposed.url,
+      token: exposed.token,
+      expiresAt: exposed.expiresAt,
+      leaseEpoch: lease.leaseEpoch,
+    };
+  } catch {
+    // Any other failure degrades the terminal pty-ws cell to the sse-events
+    // firehose rather than failing the whole handshake.
+    return null;
+  } finally {
+    await dropEstablishedHandle(established);
+  }
+}
+
 // The framebuffer geometry from settings (streamResolutionWidth/Height; default
 // 1280x800, the spike's proven geometry).
 function defaultResolution(settings: Settings): [number, number] {
   return [settings.streamResolutionWidth, settings.streamResolutionHeight];
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Coerce a viewer/principal id into a valid UUID for the scoped stream-token
+ * payload (StreamTokenPayload.viewerId is z.string().uuid()).
+ *
+ * The GET stream-capabilities handshake mints a token scoped to the CALLING
+ * PRINCIPAL — grant.subjectId — which for an API-key principal is a NON-UUID like
+ * "configured:key". Passing that straight to mintStreamToken threw a ZodError in
+ * StreamTokenPayload.parse, which escaped as an uncaught 500 (caps-500 bug). The
+ * browser's managed-session subject IS a UUID and is returned unchanged, so it is
+ * unaffected. A non-UUID principal is mapped to a DETERMINISTIC v5-shaped UUID
+ * (SHA-256 of the raw id, RFC-4122 version/variant bits set) so the same
+ * principal always mints the same viewerId (stable scoping; idempotent re-mint).
+ */
+function viewerIdAsUuid(rawViewerId: string): string {
+  if (UUID_RE.test(rawViewerId)) {
+    return rawViewerId;
+  }
+  const hex = createHash("sha256").update(`opengeni:stream-viewer:${rawViewerId}`).digest("hex");
+  // Shape the first 16 bytes as a version-5 UUID (deterministic, name-based).
+  const b = hex.slice(0, 32).split("");
+  b[12] = "5"; // version 5
+  const variantNibble = (parseInt(b[16]!, 16) & 0x3) | 0x8; // RFC-4122 variant (8-b)
+  b[16] = variantNibble.toString(16);
+  const s = b.join("");
+  return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
 }

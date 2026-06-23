@@ -85,6 +85,12 @@ export type CapabilityDescriptor = {
 // every desktop-capable (backend, os). Asserted present by boot-validation.
 export const DESKTOP_STREAM_PORT = 6080;
 
+// The ttyd PTY-over-websocket port that is exposed over the SAME Modal raw-TLS
+// tunnel as the desktop, for the REAL interactive terminal (Channel-B-symmetric).
+// ttyd's default; the box bakes ttyd and launches it on this port. The pty-ws
+// Terminal cell's `url` is the tunnel address resolved against this port.
+export const TERMINAL_STREAM_PORT = 7681;
+
 // The Part-D matrix (master-spine PART D + module 03-providers). One row per
 // backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
 // placeholders (no enum members shipped). Reading rule: a capability cell is
@@ -2416,8 +2422,15 @@ export const SessionCapabilities = z.object({
     transport: z.enum(["sse-events", "pty-ws"]).nullable(),
     ptyCapable: z.boolean(),
     shell: z.string(),
+    // The direct-to-provider ttyd PTY-over-websocket URL (pty-ws) resolved on the
+    // SAME tunnel as the desktop; null on a cold lease / read-only sse-events
+    // firehose / degraded terminal. The scoped stream token is recorded against
+    // the holder (NEVER a URL query param), symmetric with DesktopStream.
     url: z.string().url().nullable(),
     token: z.string().nullable(),
+    // ISO absolute expiry of the minted stream token (symmetric with
+    // DesktopStream.expiresAt). Null when no live URL/token is minted.
+    expiresAt: z.string().nullable(),
     reason: CapabilityUnavailableReason.nullable(),
   }),
   Git: z.object({

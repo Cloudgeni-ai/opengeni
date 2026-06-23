@@ -104,7 +104,11 @@ export function DesktopViewer({
   }, [inControl, externallyControlled]);
 
   // The hook is always called (rules of hooks); it stays idle until `url` is set.
-  const connectCapability = !transportNull && !needsAck ? capability : null;
+  // Do NOT open a socket while the viewer-cap (429) notice is showing — the slot
+  // is already exhausted, so connecting would only burn a doomed attempt (and in
+  // tests leak an unhandled ws error from the never-resolving tunnel URL).
+  const connectCapability =
+    !transportNull && !needsAck && !viewerCapReached ? capability : null;
   const stream = useDesktopStream({
     capability: connectCapability,
     containerRef,

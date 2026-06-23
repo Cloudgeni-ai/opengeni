@@ -497,6 +497,9 @@ export class MockOpenGeniClient implements SessionClientLike {
       resolution: null,
       transport: null,
       client: null,
+      terminalUrl: null,
+      terminalToken: null,
+      terminalTransport: null,
     };
   }
 

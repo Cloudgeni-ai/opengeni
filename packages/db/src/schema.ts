@@ -415,6 +415,12 @@ export const sandboxLeases = pgTable("sandbox_leases", {
   backend: text("backend").notNull(),
   os: text("os").notNull().default("linux"),
   dataPlaneUrl: text("data_plane_url"),
+  // The REAL PTY terminal (ttyd pty-ws) rides a SEPARATE provider tunnel (7681)
+  // from the desktop noVNC (6080), so its resolved URL is cached independently.
+  // Recorded under the epoch fence by recordLeaseTerminalDataPlaneUrl; reset to
+  // null on every box re-key (warm-commit / fail / drain), symmetric with
+  // data_plane_url.
+  terminalDataPlaneUrl: text("terminal_data_plane_url"),
 
   // integer (NOT bigint): the lease-epoch spike proved a raw int8 read returns a
   // JS STRING from postgres-js, breaking the strict epoch-fence comparison (it

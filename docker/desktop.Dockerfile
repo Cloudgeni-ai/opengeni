@@ -23,6 +23,7 @@ ARG TERRAFORM_VERSION=1.13.3
 ARG CHECKOV_VERSION=3.2.526
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
+ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
@@ -135,22 +136,39 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
 
+# ---- Layer 6b: ttyd static binary (REAL PTY-over-websocket; Channel-B terminal) ----
+# Pinned static build from the upstream release (no apt package on Jammy). The PTY
+# port (7681) is exposed over the SAME Modal raw-TLS tunnel as the desktop noVNC.
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in amd64) tarch="x86_64" ;; arm64|aarch64) tarch="aarch64" ;; *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; esac; \
+    curl -fsSL "https://github.com/tsl0922/ttyd/releases/download/${TTYD_VERSION}/ttyd.${tarch}" -o /usr/local/bin/ttyd; \
+    chmod 0755 /usr/local/bin/ttyd; \
+    ttyd --version
+
 # ---- Layer 7: the launch scripts (idempotent; invoked by ensureDisplayStack via exec) ----
-COPY docker/desktop/opengeni-desktop-up.sh   /usr/local/bin/opengeni-desktop-up
-COPY docker/desktop/opengeni-desktop-down.sh /usr/local/bin/opengeni-desktop-down
-COPY docker/desktop/opengeni-record.sh       /usr/local/bin/opengeni-record
-COPY docker/opengeni-git-askpass             /usr/local/bin/opengeni-git-askpass
+COPY docker/desktop/opengeni-desktop-up.sh    /usr/local/bin/opengeni-desktop-up
+COPY docker/desktop/opengeni-desktop-down.sh  /usr/local/bin/opengeni-desktop-down
+COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
+COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
+COPY docker/desktop/opengeni-record.sh        /usr/local/bin/opengeni-record
+COPY docker/opengeni-git-askpass              /usr/local/bin/opengeni-git-askpass
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
+               /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \
+    bash -n /usr/local/bin/opengeni-terminal-up; \
+    bash -n /usr/local/bin/opengeni-terminal-down; \
     bash -n /usr/local/bin/opengeni-record
 
 ENV HOME=/workspace
 ENV DISPLAY=:0
 ENV OPENGENI_DESKTOP_STREAM_PORT=6080
+ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 EXPOSE 6080
+EXPOSE 7681
 WORKDIR /workspace
 
 # No CMD/ENTRYPOINT override of substance: the provider runs its own keep-alive

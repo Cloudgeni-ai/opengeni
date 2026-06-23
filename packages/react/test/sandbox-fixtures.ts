@@ -100,6 +100,9 @@ export function fakeAttachResponse(overrides: Partial<AttachViewerResponse> = {}
     resolution: [1024, 768],
     transport: "vnc-ws",
     client: "novnc",
+    terminalUrl: null,
+    terminalToken: null,
+    terminalTransport: null,
     ...overrides,
   };
 }
