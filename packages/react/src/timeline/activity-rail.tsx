@@ -133,22 +133,52 @@ function SandboxRow({ item }: { item: SandboxItem }) {
 /** Spawned/messaged worker sessions get a first-class card, not a tool row. */
 function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: ((sessionId: string) => void) | undefined }) {
   const running = item.status === "running";
-  const title = item.action === "spawn" ? (running ? "Spawning worker" : "Worker spawned") : running ? "Messaging worker" : "Worker messaged";
+  const failed = item.status === "failed";
+  const title =
+    item.action === "spawn"
+      ? running
+        ? "Spawning worker"
+        : failed
+          ? "Worker spawn failed"
+          : "Worker spawned"
+      : running
+        ? "Messaging worker"
+        : failed
+          ? "Worker message failed"
+          : "Worker messaged";
   return (
-    <div className="my-0.5 flex items-start gap-3 rounded-og-md border border-og-border bg-og-surface-1 p-3">
-      <span className="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center text-og-accent">
+    <div
+      className={cn(
+        "my-0.5 flex items-start gap-3 rounded-og-md border bg-og-surface-1 p-3",
+        failed ? "border-og-status-failed/40" : "border-og-border",
+      )}
+    >
+      <span
+        className={cn(
+          "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center",
+          failed ? "text-og-status-failed" : "text-og-accent",
+        )}
+      >
         <BotIcon className="size-4" />
       </span>
       <div className="min-w-0 flex-1">
         {/* In-flight state is carried ONLY by the shimmering title (no detached
             pulse badge), matching every other running row in the rail. */}
-        <span className={cn("text-og-base font-medium", running ? "og-shimmer-text" : "text-og-fg")}>{title}</span>
+        <span className={cn("text-og-base font-medium", running ? "og-shimmer-text" : failed ? "text-og-status-failed" : "text-og-fg")}>
+          {title}
+        </span>
         {item.prompt ? <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">{truncate(item.prompt, 140)}</p> : null}
         {item.workerSessionId ? (
           <p className="mt-1 font-og-mono text-og-xs text-og-fg-subtle">{item.workerSessionId.slice(0, 8)}</p>
         ) : null}
       </div>
-      {item.workerSessionId && onOpenSession ? (
+      {/* Failed chip — same "bad" tone as ActivityDisclosure, right-aligned. */}
+      {failed ? (
+        <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
+          <span className="size-1.5 rounded-full bg-og-status-failed" />
+          failed
+        </span>
+      ) : item.workerSessionId && onOpenSession ? (
         <button
           type="button"
           onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}

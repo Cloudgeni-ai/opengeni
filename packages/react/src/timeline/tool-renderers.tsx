@@ -530,13 +530,16 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
     );
   }
 
+  const isFailed = item.status === "failed";
+
   if (isImage && typeof out === "string") {
     const caption = `computer_call · ${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
     return (
       <ActivityDisclosure
         icon={isShot ? <CameraIcon className={ICON_SIZE} /> : <MousePointer2Icon className={ICON_SIZE} />}
-        iconTone="accent"
+        iconTone={isFailed ? "failed" : "accent"}
         title={`${verb}${countSuffix}`}
+        failed={isFailed}
         media={<Thumbnail src={out} caption={caption} />}
       >
         <ScreenshotFigure src={out} caption={caption} />
@@ -549,11 +552,12 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
     return (
       <ActivityDisclosure
         icon={<CameraOffIcon className={ICON_SIZE} />}
-        iconTone="muted"
+        iconTone={isFailed ? "failed" : "muted"}
         title={verb}
+        failed={isFailed}
         media={<MediaEmpty />}
       >
-        <BodyNote>(no image) — the session returned an empty screenshot.</BodyNote>
+        <BodyNote>{isFailed ? "computer_call failed — no image returned." : "(no image) — the session returned an empty screenshot."}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -562,8 +566,9 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   return (
     <ActivityDisclosure
       icon={<MousePointer2Icon className={ICON_SIZE} />}
-      iconTone="accent"
+      iconTone={isFailed ? "failed" : "accent"}
       title={verb}
+      failed={isFailed}
       preview={batched ?? undefined}
       expandable={batched != null}
     >
@@ -659,6 +664,8 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
     );
   }
 
+  const viewFailed = item.status === "failed";
+
   const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
   if (errMatch) {
     const tooBig = text.includes("exceeded the allowed size");
@@ -678,8 +685,9 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
     return (
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
-        iconTone="muted"
+        iconTone={viewFailed ? "failed" : "muted"}
         title={`Viewed ${basename(path)}`}
+        failed={viewFailed}
         preview={path}
       >
         <BodyNote>{text}</BodyNote>
@@ -690,11 +698,12 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
     return (
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
-        iconTone="muted"
+        iconTone={viewFailed ? "failed" : "muted"}
         title={`Viewed ${basename(path)}`}
+        failed={viewFailed}
         preview="(no image)"
       >
-        <BodyNote>(no image) — the sandbox session returned no image data.</BodyNote>
+        <BodyNote>{viewFailed ? "view_image failed — no image data returned." : "(no image) — the sandbox session returned no image data."}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -702,8 +711,9 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
     return (
       <ActivityDisclosure
         icon={<ImageIcon className={ICON_SIZE} />}
-        iconTone="accent"
+        iconTone={viewFailed ? "failed" : "accent"}
         title={`Viewed ${basename(path)}`}
+        failed={viewFailed}
         media={<Thumbnail src={text} caption={path} alt={path} />}
       >
         <ScreenshotFigure src={text} caption={path} alt={path} />
