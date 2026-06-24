@@ -88,6 +88,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
   // No output event ever arrived (item.output stays undefined from creation):
   // the turn failed before the output insert — most likely a NUL byte in the
   // command output prevented storage. Surface the specific explanation.
+  // (Cancelled items bypass this: a cancellation is not a NUL-storage failure.)
   if (item.status === "failed" && out === undefined) {
     return (
       <ActivityDisclosure
@@ -108,6 +109,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
 
   // An output event arrived but the tool still failed (error:true / MCP isError)
   // and the output is empty — show a generic failure rather than claiming NUL.
+  // (Cancelled items bypass this: a cancellation is not a tool-call failure.)
   if (item.status === "failed" && (out == null || out === "")) {
     return (
       <ActivityDisclosure
@@ -172,6 +174,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
       titleMono
       {...(chip ? { chip } : {})}
       failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
       preview={truncated ? `⋯ truncated · ${preview}` : preview}
     >
       <TermBlock command={null} workdir={workdir} output={body} />
@@ -226,6 +229,7 @@ function WriteStdinRenderer({ item }: ToolRendererProps) {
       titleMono
       {...(chip ? { chip } : {})}
       failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
       preview={lost ? `session ${sessionId} PTY vanished` : tailPeek(stripped) || "sent"}
     >
       {lost ? (
@@ -283,6 +287,7 @@ function PathPreview({ path, add, del }: { path: string; add?: number | undefine
 function ApplyPatchRenderer({ item }: ToolRendererProps) {
   const ops = applyPatchOps(item.raw);
   const failed = item.status === "failed";
+  const cancelled = item.status === "cancelled";
   const running = item.status === "running";
   const firstOp = ops[0];
 
@@ -344,6 +349,7 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
         icon={<FileDiffIcon className={ICON_SIZE} />}
         iconTone="accent"
         title={`Edited ${ops.length} files`}
+        cancelled={cancelled}
         preview={
           <span className="inline-flex items-center gap-2 font-og-mono">
             <span className="text-og-fg-muted">{ops.length} files</span>
@@ -378,6 +384,7 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
         icon={<FileDiffIcon className={ICON_SIZE} />}
         iconTone="failed"
         title={`Deleted ${basename(firstOp.path)}`}
+        cancelled={cancelled}
         preview={<PathPreview path={firstOp.path} />}
       >
         <BodyNote>File deleted — no diff to show.</BodyNote>
@@ -392,6 +399,7 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
         icon={<FileDiffIcon className={ICON_SIZE} />}
         iconTone="accent"
         title={`${verbForOp(firstOp)} ${basename(firstOp.path)}`}
+        cancelled={cancelled}
         preview={
           <span className="inline-flex items-center gap-2 font-og-mono">
             <span className="text-og-fg-muted">{basename(firstOp.path)}</span>
@@ -412,6 +420,7 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
       icon={<FileDiffIcon className={ICON_SIZE} />}
       iconTone="accent"
       title={`${verbForOp(firstOp)} ${basename(file.path)}`}
+      cancelled={cancelled}
       preview={<PathPreview path={file.path} add={file.additions} del={file.deletions} />}
     >
       <ToolDiff files={[file]} />
@@ -531,6 +540,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   }
 
   const isFailed = item.status === "failed";
+  const isCancelled = item.status === "cancelled";
 
   if (isImage && typeof out === "string") {
     const caption = `computer_call · ${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
@@ -540,6 +550,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
         iconTone={isFailed ? "failed" : "accent"}
         title={`${verb}${countSuffix}`}
         failed={isFailed}
+        cancelled={isCancelled}
         media={<Thumbnail src={out} caption={caption} />}
       >
         <ScreenshotFigure src={out} caption={caption} />
@@ -555,9 +566,10 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
         iconTone={isFailed ? "failed" : "muted"}
         title={verb}
         failed={isFailed}
+        cancelled={isCancelled}
         media={<MediaEmpty />}
       >
-        <BodyNote>{isFailed ? "computer_call failed — no image returned." : "(no image) — the session returned an empty screenshot."}</BodyNote>
+        <BodyNote>{isFailed ? "computer_call failed — no image returned." : isCancelled ? "computer_call interrupted — no image returned." : "(no image) — the session returned an empty screenshot."}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -569,6 +581,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
       iconTone={isFailed ? "failed" : "accent"}
       title={verb}
       failed={isFailed}
+      cancelled={isCancelled}
       preview={batched ?? undefined}
       expandable={batched != null}
     >
@@ -617,6 +630,7 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
       title="Searched the web"
       preview={`${query}${variants}`}
       failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
     >
       {results && results.length ? (
         <ul className="flex flex-col gap-2">
@@ -665,6 +679,7 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
   }
 
   const viewFailed = item.status === "failed";
+  const viewCancelled = item.status === "cancelled";
 
   const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
   if (errMatch) {
@@ -688,6 +703,7 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
         iconTone={viewFailed ? "failed" : "muted"}
         title={`Viewed ${basename(path)}`}
         failed={viewFailed}
+        cancelled={viewCancelled}
         preview={path}
       >
         <BodyNote>{text}</BodyNote>
@@ -701,9 +717,10 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
         iconTone={viewFailed ? "failed" : "muted"}
         title={`Viewed ${basename(path)}`}
         failed={viewFailed}
+        cancelled={viewCancelled}
         preview="(no image)"
       >
-        <BodyNote>{viewFailed ? "view_image failed — no image data returned." : "(no image) — the sandbox session returned no image data."}</BodyNote>
+        <BodyNote>{viewFailed ? "view_image failed — no image data returned." : viewCancelled ? "view_image interrupted." : "(no image) — the sandbox session returned no image data."}</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -714,6 +731,7 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
         iconTone={viewFailed ? "failed" : "accent"}
         title={`Viewed ${basename(path)}`}
         failed={viewFailed}
+        cancelled={viewCancelled}
         media={<Thumbnail src={text} caption={path} alt={path} />}
       >
         <ScreenshotFigure src={text} caption={path} alt={path} />
@@ -764,6 +782,7 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
       icon={<KeyRoundIcon className={ICON_SIZE} />}
       iconTone="muted"
       title={`Set ${name}`}
+      cancelled={item.status === "cancelled"}
       preview="value write-only · never returned"
     >
       <PayloadBlock label="Arguments" value={redactSecrets(args)} />
@@ -794,7 +813,10 @@ function GenericRenderer({ item }: ToolRendererProps) {
   }
 
   const { text: outText, isError } = unwrapMcpOutput(item.output);
-  if (isError || item.status === "failed") {
+  // Cancelled is NOT an error — a user-cancelled tool should not surface the red
+  // error chip even if the output payload carries an isError flag (the error may be
+  // a consequence of the cancellation, not the tool's own failure).
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
     return (
       <ActivityDisclosure
         icon={<WrenchIcon className={ICON_SIZE} />}
@@ -814,6 +836,7 @@ function GenericRenderer({ item }: ToolRendererProps) {
       icon={<WrenchIcon className={ICON_SIZE} />}
       iconTone="muted"
       title={display}
+      cancelled={item.status === "cancelled"}
       preview={compactArgs(args)}
     >
       <PayloadBlock label="Arguments" value={args} />

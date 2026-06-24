@@ -122,6 +122,7 @@ function SandboxRow({ item }: { item: SandboxItem }) {
       title={toolDisplayName(item.name)}
       running={item.status === "running"}
       failed={item.status === "failed"}
+      cancelled={item.status === "cancelled"}
       preview={item.command ?? undefined}
     >
       {item.command ? <PayloadBlock label="Command" value={item.command} /> : null}
@@ -134,18 +135,23 @@ function SandboxRow({ item }: { item: SandboxItem }) {
 function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: ((sessionId: string) => void) | undefined }) {
   const running = item.status === "running";
   const failed = item.status === "failed";
+  const cancelled = item.status === "cancelled";
   const title =
     item.action === "spawn"
       ? running
         ? "Spawning worker"
         : failed
           ? "Worker spawn failed"
-          : "Worker spawned"
+          : cancelled
+            ? "Worker interrupted"
+            : "Worker spawned"
       : running
         ? "Messaging worker"
         : failed
           ? "Worker message failed"
-          : "Worker messaged";
+          : cancelled
+            ? "Worker interrupted"
+            : "Worker messaged";
   return (
     <div
       className={cn(
@@ -172,11 +178,16 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
           <p className="mt-1 font-og-mono text-og-xs text-og-fg-subtle">{item.workerSessionId.slice(0, 8)}</p>
         ) : null}
       </div>
-      {/* Failed chip — same "bad" tone as ActivityDisclosure, right-aligned. */}
+      {/* Right gutter: failed gets a red chip; cancelled gets a calm "interrupted"
+          chip (no dot, no red); a live complete worker shows an "Open session" button. */}
       {failed ? (
         <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
           <span className="size-1.5 rounded-full bg-og-status-failed" />
           failed
+        </span>
+      ) : cancelled ? (
+        <span className="og-cancelled-chip shrink-0 self-center font-og-mono text-og-xs leading-none text-og-fg-subtle">
+          interrupted
         </span>
       ) : item.workerSessionId && onOpenSession ? (
         <button

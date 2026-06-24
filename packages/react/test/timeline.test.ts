@@ -282,13 +282,13 @@ describe("buildTimeline", () => {
     expect((items[0] as ToolCallItem).status).toBe("failed");
   });
 
-  test("turn.cancelled marks in-flight tool calls as failed (not complete)", () => {
+  test("turn.cancelled marks in-flight tool calls as cancelled (not failed, not complete)", () => {
     reset();
     const items = buildTimeline([
       event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make test" } }),
       event("turn.cancelled", {}),
     ]);
-    expect((items[0] as ToolCallItem).status).toBe("failed");
+    expect((items[0] as ToolCallItem).status).toBe("cancelled");
   });
 
   test("turn.failed marks in-flight sandbox operations as failed", () => {
@@ -298,6 +298,24 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "storage error" }),
     ]);
     expect((items[0] as SandboxItem).status).toBe("failed");
+  });
+
+  test("turn.cancelled marks in-flight sandbox operations as cancelled (not failed)", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "exec", command: "kubectl logs -f" }),
+      event("turn.cancelled", {}),
+    ]);
+    expect((items[0] as SandboxItem).status).toBe("cancelled");
+  });
+
+  test("turn.cancelled marks in-flight worker items as cancelled (not failed)", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "session_create", arguments: JSON.stringify({ initialMessage: "go" }) }),
+      event("turn.cancelled", {}),
+    ]);
+    expect((items[0] as WorkerItem).status).toBe("cancelled");
   });
 
   test("goal events become goal markers with text", () => {

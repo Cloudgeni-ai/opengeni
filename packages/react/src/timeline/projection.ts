@@ -44,7 +44,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   };
 
-  const finalizeOpen = (turnId?: string | null, disposition: "complete" | "failed" = "complete"): void => {
+  const finalizeOpen = (turnId?: string | null, disposition: "complete" | "failed" | "cancelled" = "complete"): void => {
     for (const item of items) {
       if (turnId !== undefined && "turnId" in item && item.turnId && turnId && item.turnId !== turnId) {
         continue;
@@ -299,7 +299,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.cancelled": {
-        finalizeOpen(turnId, "failed");
+        finalizeOpen(turnId, "cancelled");
         items.push({
           kind: "notice",
           id: event.id,

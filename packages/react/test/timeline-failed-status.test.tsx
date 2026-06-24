@@ -432,3 +432,241 @@ describe("ComputerCallRenderer — read-only and rejected paths unaffected by fa
     await r.unmount();
   });
 });
+
+/* ============================================================================
+   CANCELLED STATUS GUARD — distinct from failed, no red affordance
+   ============================================================================ */
+
+/**
+ * Detect the cancelled/interrupted affordance in a rendered container.
+ * Two signals qualify:
+ *   1. Text: "interrupted" or "cancelled" in the text content (covers the chip
+ *      text, WorkerRow title "Worker interrupted", body notes on expand).
+ *   2. `data-status="cancelled"` attribute on a root element (covers the case
+ *      where the chip slot is taken by media — e.g. ComputerCallRenderer with
+ *      empty output — so the chip text is suppressed but the status is marked).
+ */
+function hasCancelledAffordance(container: HTMLElement): boolean {
+  const text = container.textContent ?? "";
+  if (/interrupted|cancelled/i.test(text)) {
+    return true;
+  }
+  return container.querySelector('[data-status="cancelled"]') !== null;
+}
+
+/**
+ * Confirm the red failed affordance is ABSENT: neither the "failed" chip text
+ * nor the `text-og-status-failed` CSS class should appear.
+ */
+function hasNoFailedAffordance(container: HTMLElement): boolean {
+  const text = container.textContent ?? "";
+  // "interrupted" is fine; "fail" is not
+  if (/\bfail/i.test(text)) {
+    return false;
+  }
+  return container.querySelector(".text-og-status-failed") === null;
+}
+
+function cancelledToolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
+  return {
+    kind: "tool-call",
+    id: "tc-c",
+    turnId: "turn-1",
+    callId: "call-c",
+    name: "exec_command",
+    arguments: {},
+    output: undefined,
+    raw: undefined,
+    status: "cancelled",
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+function cancelledWorkerItem(overrides: Partial<WorkerItem> = {}): WorkerItem {
+  return {
+    kind: "worker",
+    id: "w-c",
+    turnId: "turn-1",
+    callId: "call-c",
+    action: "spawn",
+    prompt: "do something",
+    workerSessionId: null,
+    status: "cancelled",
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+function cancelledSandboxItem(overrides: Partial<SandboxItem> = {}): SandboxItem {
+  return {
+    kind: "sandbox",
+    id: "sb-c",
+    turnId: "turn-1",
+    name: "exec",
+    command: "kubectl logs -f",
+    output: "",
+    status: "cancelled",
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+type CancelledCase =
+  | { label: string; kind: "tool"; item: ToolCallItem }
+  | { label: string; kind: "rail-worker"; item: WorkerItem }
+  | { label: string; kind: "rail-sandbox"; item: SandboxItem };
+
+const CANCELLED_CASES: CancelledCase[] = [
+  {
+    label: "ExecRenderer — cancelled (no output)",
+    kind: "tool",
+    item: cancelledToolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "make test" }), output: undefined }),
+  },
+  {
+    label: "ExecRenderer — cancelled (with partial output)",
+    kind: "tool",
+    item: cancelledToolItem({ name: "exec_command", arguments: JSON.stringify({ cmd: "npm run e2e" }), output: "Chunk ID: abc\nWall time: 1.0\nProcess exited with code 0\nOutput:\nRunning tests…" }),
+  },
+  {
+    label: "WriteStdinRenderer — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({ name: "write_stdin", arguments: JSON.stringify({ session_id: "s1", chars: "ls\n" }), output: "" }),
+  },
+  {
+    label: "ApplyPatchRenderer — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "apply_patch_call",
+      raw: { type: "apply_patch_call", operations: [{ type: "update_file", path: "a.ts", diff: "@@ -1 +1 @@\n-old\n+new" }] },
+      output: undefined,
+    }),
+  },
+  {
+    label: "WebSearchRenderer — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "web_search_call",
+      raw: { providerData: { action: { query: "test query" } } },
+      output: null,
+    }),
+  },
+  {
+    label: "ComputerCallRenderer — cancelled + empty output",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "computer_call",
+      raw: { type: "computer_call", action: { type: "screenshot" } },
+      output: "",
+    }),
+  },
+  {
+    label: "ViewImageRenderer — cancelled + no output",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "view_image",
+      arguments: JSON.stringify({ path: "/tmp/img.png" }),
+      output: undefined,
+    }),
+  },
+  {
+    label: "SecretSetRenderer — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({
+      name: "environment_set_variable",
+      arguments: JSON.stringify({ name: "MY_VAR", value: "secret" }),
+      output: undefined,
+    }),
+  },
+  {
+    label: "GenericRenderer (fallback) — cancelled",
+    kind: "tool",
+    item: cancelledToolItem({ name: "some_mcp_tool", arguments: JSON.stringify({ foo: "bar" }), output: undefined }),
+  },
+  {
+    label: "WorkerRow — cancelled spawn",
+    kind: "rail-worker",
+    item: cancelledWorkerItem({ action: "spawn" }),
+  },
+  {
+    label: "WorkerRow — cancelled message",
+    kind: "rail-worker",
+    item: cancelledWorkerItem({ action: "message" }),
+  },
+  {
+    label: "SandboxRow — cancelled",
+    kind: "rail-sandbox",
+    item: cancelledSandboxItem(),
+  },
+];
+
+describe("Structural guard — cancelled status: interrupted affordance present, no red failed affordance", () => {
+  for (const c of CANCELLED_CASES) {
+    test(c.label, async () => {
+      let r: Awaited<ReturnType<typeof renderComponent>>;
+      if (c.kind === "tool") {
+        const Renderer = defaultToolRegistry.resolve(c.item);
+        r = await renderComponent(<Renderer item={c.item} />);
+      } else {
+        r = await renderComponent(<ActivityRail items={[c.item]} />);
+      }
+      await flush();
+
+      // Must show a calm interrupted/cancelled signal.
+      expect(hasCancelledAffordance(r.container)).toBe(true);
+      // Must NOT show the red failed chip or text-og-status-failed class.
+      expect(hasNoFailedAffordance(r.container)).toBe(true);
+
+      await r.unmount();
+    });
+  }
+});
+
+describe("WorkerRow — cancelled status (explicit)", () => {
+  test("cancelled spawn: shows 'Worker interrupted', NOT 'Worker spawn failed'", async () => {
+    const item = cancelledWorkerItem({ action: "spawn" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Worker interrupted");
+    expect(text).not.toContain("Worker spawn failed");
+    expect(text).not.toContain("Worker spawned");
+    await r.unmount();
+  });
+
+  test("cancelled message: shows 'Worker interrupted', NOT 'Worker message failed'", async () => {
+    const item = cancelledWorkerItem({ action: "message" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Worker interrupted");
+    expect(text).not.toContain("Worker message failed");
+    expect(text).not.toContain("Worker messaged");
+    await r.unmount();
+  });
+
+  test("cancelled spawn: shows calm 'interrupted' chip (NOT red 'failed' chip)", async () => {
+    const item = cancelledWorkerItem({ action: "spawn" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("interrupted");
+    expect(text.toLowerCase()).not.toContain("failed");
+    expect(r.container.querySelector(".text-og-status-failed")).toBeNull();
+    await r.unmount();
+  });
+
+  test("failed spawn still shows 'Worker spawn failed' — cancelled fix does not regress failed", async () => {
+    const item = workerItem({ action: "spawn" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("fail");
+    expect(text).not.toContain("Worker interrupted");
+    await r.unmount();
+  });
+});

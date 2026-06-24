@@ -28,9 +28,13 @@ import { useLightboxOptional } from "./screenshot-lightbox";
      muted    quiet metadata         subtle text ("session 3")
    -------------------------------------------------------------------------- */
 
-/** A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set. */
+/**
+ * A subtle settle signal — see the CHIP DOCTRINE above. The closed tone set.
+ * `"interrupted"` is a calm neutral tone for cancelled items — no dot, same
+ * quiet weight as `"muted"`, but semantically distinct from metadata.
+ */
 export type DisclosureChip = {
-  tone: "ok" | "bad" | "muted";
+  tone: "ok" | "bad" | "muted" | "interrupted";
   text: string;
 };
 
@@ -64,6 +68,18 @@ export type ActivityDisclosureProps = {
    * affordance without each renderer having to duplicate the logic.
    */
   failed?: boolean | undefined;
+  /**
+   * When true the row carries a calm "interrupted" affordance: the icon stays
+   * muted (no red) and a quiet "interrupted" chip appears in the right gutter
+   * (unless an explicit `chip` is already supplied — the caller's chip wins).
+   * This is the cancelled-status analogue of `failed`, but deliberately calm
+   * and neutral — it is NOT an error; the user chose to stop.
+   *
+   * Renderers should pass `cancelled={item.status === "cancelled"}` so any
+   * in-flight item that was interrupted on turn.cancelled reads consistently.
+   * `cancelled` is ignored when `failed` is also true (failure takes precedence).
+   */
+  cancelled?: boolean | undefined;
   /** When false the row is a static line (no expand affordance). */
   expandable?: boolean | undefined;
   children?: ReactNode | undefined;
@@ -92,14 +108,24 @@ export function ActivityDisclosure({
   media,
   chip: chipProp,
   failed,
+  cancelled,
   expandable = true,
   children,
 }: ActivityDisclosureProps) {
+  // `failed` takes precedence over `cancelled` when both are set (shouldn't happen, but be safe).
   // When `failed` is set the icon goes red and a "failed" chip appears in the
   // gutter — unless the caller already supplied an explicit chip (their chip wins,
   // e.g. an exit-code chip that is more informative than a bare "failed" label).
+  // When `cancelled` is set (and not failed) the icon stays muted and a calm
+  // "interrupted" chip appears — no red, just a quiet neutral signal.
   const iconTone = failed && iconToneProp === "muted" ? "failed" : iconToneProp;
-  const chip = chipProp ?? (failed ? ({ tone: "bad", text: "failed" } satisfies DisclosureChip) : undefined);
+  const chip =
+    chipProp ??
+    (failed
+      ? ({ tone: "bad", text: "failed" } satisfies DisclosureChip)
+      : cancelled
+        ? ({ tone: "interrupted", text: "interrupted" } satisfies DisclosureChip)
+        : undefined);
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();
@@ -166,8 +192,12 @@ export function ActivityDisclosure({
     </>
   );
 
+  // A `data-status` attribute on the root lets tests (and AT) detect the item's
+  // settled state regardless of whether the chip slot is occupied by media.
+  const dataStatus = cancelled ? "cancelled" : failed ? "failed" : undefined;
+
   if (!hasBody) {
-    return <div className={cn(rowClass, "cursor-default")}>{inner}</div>;
+    return <div className={cn(rowClass, "cursor-default")} data-status={dataStatus}>{inner}</div>;
   }
 
   return (
@@ -185,6 +215,7 @@ export function ActivityDisclosure({
               setOpen((prev) => !prev);
             }
           }}
+          data-status={dataStatus}
           className={cn(
             rowClass,
             "cursor-pointer outline-none hover:bg-og-surface-1 hover:text-og-fg",
@@ -217,6 +248,12 @@ function Chip({ chip }: { chip: DisclosureChip }) {
         {chip.text}
       </span>
     );
+  }
+  // "interrupted" is a calm cancelled signal: same quiet weight as muted, no
+  // dot, no red — just a slightly more prominent subtle text so "interrupted"
+  // reads at a glance without demanding attention the way a failure does.
+  if (chip.tone === "interrupted") {
+    return <span className={cn(base, "text-og-fg-subtle og-cancelled-chip")}>{chip.text}</span>;
   }
   // ok and muted are the same quiet weight — success never earns a hue.
   return <span className={cn(base, "text-og-fg-subtle")}>{chip.text}</span>;

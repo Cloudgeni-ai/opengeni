@@ -55,7 +55,7 @@ export type ToolCallItem = {
    * payload in `arguments`/`output` instead.
    */
   raw: unknown;
-  status: "running" | "complete" | "failed";
+  status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
 
@@ -74,7 +74,7 @@ export type WorkerItem = {
   prompt: string | null;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
-  status: "running" | "complete" | "failed";
+  status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
 
@@ -85,7 +85,7 @@ export type SandboxItem = {
   name: string;
   command: string | null;
   output: string;
-  status: "running" | "complete" | "failed";
+  status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
 
