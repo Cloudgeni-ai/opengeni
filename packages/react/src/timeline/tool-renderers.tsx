@@ -85,9 +85,10 @@ function ExecRenderer({ item }: ToolRendererProps) {
   const out = item.output;
   const title = `$ ${cmd}`;
 
-  // Orphaned output: the turn failed on the output insert (NUL byte) — no output
-  // event ever arrived. Surface the loss instead of a blank row.
-  if (item.status === "failed" && (out == null || out === "")) {
+  // No output event ever arrived (item.output stays undefined from creation):
+  // the turn failed before the output insert — most likely a NUL byte in the
+  // command output prevented storage. Surface the specific explanation.
+  if (item.status === "failed" && out === undefined) {
     return (
       <ActivityDisclosure
         icon={<TerminalIcon className={ICON_SIZE} />}
@@ -101,6 +102,23 @@ function ExecRenderer({ item }: ToolRendererProps) {
           output contained a NUL byte and could not be stored; the turn failed on this tool&apos;s output insert — no output
           event ever arrived.
         </BodyNote>
+      </ActivityDisclosure>
+    );
+  }
+
+  // An output event arrived but the tool still failed (error:true / MCP isError)
+  // and the output is empty — show a generic failure rather than claiming NUL.
+  if (item.status === "failed" && (out == null || out === "")) {
+    return (
+      <ActivityDisclosure
+        icon={<TerminalIcon className={ICON_SIZE} />}
+        iconTone="failed"
+        title={title}
+        titleMono
+        chip={{ tone: "bad", text: "failed" }}
+        preview="tool call failed"
+      >
+        <BodyNote tone="error">the tool call failed with no output.</BodyNote>
       </ActivityDisclosure>
     );
   }
@@ -266,9 +284,14 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
   // multi-file edit — magnitude stays a single muted glyph; the per-file
   // green/red lives only inside the expanded DiffView gutter.
   if (ops.length > 1) {
-    const files = ops.map((op) => safeParseOp(op)).filter((f): f is GitFileDiff => f !== null);
-    const add = files.reduce((n, f) => n + f.additions, 0);
-    const del = files.reduce((n, f) => n + f.deletions, 0);
+    // Parse every op: successfully parsed ones go into ToolDiff; malformed ops
+    // fall back to a RawPatch display (mirroring the single-op fallback path).
+    // The count in the title/preview equals ops.length so it is always truthful
+    // regardless of how many ops parsed successfully.
+    const parsed = ops.map((op) => safeParseOp(op));
+    const goodFiles = parsed.filter((f): f is GitFileDiff => f !== null);
+    const add = goodFiles.reduce((n, f) => n + f.additions, 0);
+    const del = goodFiles.reduce((n, f) => n + f.deletions, 0);
     return (
       <ActivityDisclosure
         icon={<FileDiffIcon className={ICON_SIZE} />}
@@ -283,7 +306,17 @@ function ApplyPatchRenderer({ item }: ToolRendererProps) {
           </span>
         }
       >
-        {files.length ? <ToolDiff files={files} /> : <BodyNote>No structured diff available.</BodyNote>}
+        {ops.map((op, index) => {
+          const file = parsed[index];
+          return file ? (
+            <ToolDiff key={op.path} files={[file]} />
+          ) : (
+            <div key={op.path}>
+              <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
+              <RawPatch diff={op.diff ?? ""} />
+            </div>
+          );
+        })}
       </ActivityDisclosure>
     );
   }
