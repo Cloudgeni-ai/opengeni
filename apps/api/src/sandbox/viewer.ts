@@ -228,7 +228,13 @@ export async function attachViewer(
       // release our own holder so we don't pin a cold lease.
       await failWarmingToCold(db, { accountId, workspaceId, sandboxGroupId, expectedEpoch });
       await release();
-      throw error;
+      // Mirror the Channel-A spawner (channel-a.ts): a provider/config failure to
+      // bring up the cold box is a client-actionable 409 ("sandbox not available;
+      // re-attach to retry"), NOT a raw 500 — the warming row was just rolled back
+      // to cold, so a re-attach re-acquires and re-spawns. Preserve an already-typed
+      // HTTPException unchanged.
+      if (error instanceof HTTPException) throw error;
+      throw new HTTPException(409, { message: `sandbox not available (${error instanceof Error ? error.message : "spawn failed"})` });
     } finally {
       // Drop the in-process handle: the API resumed BY ID for the cold-spawn,
       // it does NOT own the box. The lease's refcount (this viewer holder) keeps

@@ -427,11 +427,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
-    // Per-principal acknowledgment: A acknowledging does not consent for B. A
-    // shared box requires the SHARED acknowledgment, so `acknowledged` for a
-    // shared box is the shared-consent bit, not the bare un-redacted one.
+    // Per-principal acknowledgment: A acknowledging does not consent for B. The
+    // un-redacted desktop stream ALWAYS requires the un-redacted ack; a shared box
+    // ADDITIONALLY requires the shared-exposure ack. Both must match the POST
+    // /viewers gate EXACTLY — otherwise a principal who recorded shared consent
+    // WITHOUT un-redacted consent could be handed a live VNC URL + scoped token
+    // from this read path while being correctly 409'd on attach (a consent-gate
+    // bypass of the un-redacted pixel plane).
     const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
-    const acknowledged = ack ? (shared ? ack.acknowledgedShared : ack.acknowledgedUnredacted) : false;
+    const acknowledged = ack ? (ack.acknowledgedUnredacted && (!shared || ack.acknowledgedShared)) : false;
 
     // P4.2 — the pixel DATA PLANE, served API-direct. When the backend is
     // desktop-capable AND sandboxDesktopEnabled AND the (shared, if shared)
