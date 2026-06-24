@@ -316,7 +316,7 @@ function SessionChatPane(props: {
   }, [props.session.workspaceId]);
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+    <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       {props.goal.goal ? (
         <div className="mx-auto flex w-full max-w-3xl shrink-0 items-center px-4 pt-3 sm:px-6">
           <GoalChip goal={props.goal} />
