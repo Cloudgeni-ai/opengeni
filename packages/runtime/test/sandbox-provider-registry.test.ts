@@ -81,8 +81,25 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.appName).toBe("my-app");
     expect(client.options?.tokenId).toBe("tok-id");
     expect(client.options?.tokenSecret).toBe("tok-secret");
-    // 3600s default → ms.
+    // modalTimeoutSeconds default (3600s) → ms.
     expect(client.options?.timeoutMs).toBe(3_600_000);
+    // sandbox-file-persistence: idleTimeoutMs is ALWAYS pinned; with no explicit
+    // OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS it DEFAULTS to the hard lifetime so
+    // Modal's short server-default idle-reap can never kill an idle box before the
+    // OpenGeni reaper snapshots /workspace.
+    expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+  });
+
+  test("modal idleTimeoutMs honours an explicit override (still pinned, not the SDK default)", () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalTokenId: "tok-id",
+      modalTokenSecret: "tok-secret",
+      modalAppName: "my-app",
+      modalIdleTimeoutSeconds: 1200,
+    });
+    const client = createSandboxClient(settings) as { options?: Record<string, unknown> };
+    expect(client.options?.idleTimeoutMs).toBe(1_200_000);
   });
 
   test("modal both-or-neither token validation fails fast (typed error)", () => {

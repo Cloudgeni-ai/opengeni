@@ -38,7 +38,14 @@ function makeFakeModalClient() {
         throw new Error("Modal sandbox resume requires a persisted sandboxId.");
       }
       resumeCalls.push(state.sandboxId as string);
-      return { kill: async () => {}, closed: false };
+      // The resumed live session exposes persistWorkspace() (the snapshot/tar
+      // capture) — terminateProviderBox MUST call it BEFORE delete().
+      return {
+        kill: async () => {},
+        closed: false,
+        persistWorkspace: async () => new TextEncoder().encode("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-snap-123\"}"),
+        modal: { images: { delete: async () => {} } },
+      };
     },
     async serializeSessionState(state: Record<string, unknown>) {
       // The persistable FLAT provider state (sandboxId at the top), like Modal.
@@ -109,15 +116,87 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
 
     const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
 
+    // Capture the persist-before-terminate seam: the archive must be folded onto
+    // the lease (returned wrote:true) BEFORE delete() fires.
+    const persistedArchives: string[] = [];
+    const persistArchive = async (archiveBase64: string) => {
+      // A persistArchive call must precede the terminate (delete) call.
+      expect(deleteCalls).toHaveLength(0);
+      persistedArchives.push(archiveBase64);
+      return { wrote: true, priorArchive: null };
+    };
+
     // Pre-fix this threw the Modal UserError; post-fix it resolves cleanly.
-    await terminateProviderBox(
+    // Inject the fake Modal client so no live provider box is created.
+    const terminated = await terminateProviderBox(
       settings,
       lease as never,
       observability,
-      ((backend: string) => backend === "modal" ? makeFakeModalClient() : undefined) as never,
+      persistArchive,
+      ((backend: string) => (backend === "modal" ? makeFakeModalClient() : undefined)) as never,
     );
 
+    expect(terminated).toBe(true);
     expect(resumeCalls).toEqual(["sb-live-123"]); // resumed BY ID, not thrown
-    expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID
+    // persistWorkspace was captured and folded onto the lease BEFORE terminate.
+    expect(persistedArchives).toHaveLength(1);
+    expect(Buffer.from(persistedArchives[0]!, "base64").toString("utf8")).toContain("MODAL_SANDBOX_FS_SNAPSHOT_V1");
+    expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID, AFTER persist
+  });
+
+  test("a persistWorkspace failure does NOT terminate the box (re-throws → lease stays draining)", async () => {
+    resumeCalls.length = 0;
+    deleteCalls.length = 0;
+
+    // A client whose resumed session FAILS to snapshot (provider snapshot error).
+    const failClient = {
+      backendId: "modal",
+      async deserializeSessionState(state: Record<string, unknown>) {
+        return { ...state, ownsSandbox: true };
+      },
+      async resume() {
+        resumeCalls.push("sb-nosnap");
+        return {
+          kill: async () => {},
+          closed: false,
+          persistWorkspace: async () => {
+            throw new Error("Modal snapshot_filesystem persistence timed out.");
+          },
+        };
+      },
+      async serializeSessionState(state: Record<string, unknown>) {
+        return { ...state };
+      },
+      async delete(state: { sandboxId?: unknown }) {
+        deleteCalls.push(state?.sandboxId as string | undefined);
+      },
+    };
+
+    const established = {
+      client: failClient,
+      session: {},
+      sessionState: { sandboxId: "sb-nosnap", appName: "app", imageTag: "tag" },
+      instanceId: "sb-nosnap",
+      backendId: "modal",
+    };
+    const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
+    const lease = { sandboxGroupId: "group-nosnap", leaseEpoch: 1, backend: "modal", resumeBackendId: "modal", resumeState };
+    const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
+
+    const persistArchive = async () => ({ wrote: true as const, priorArchive: null });
+
+    // The snapshot failure must propagate (so the caller skips + leaves the lease
+    // draining); the box is NEVER terminated with un-captured files. The failing
+    // client is injected explicitly (no global @opengeni/runtime mock).
+    await expect(
+      terminateProviderBox(
+        settings,
+        lease as never,
+        observability,
+        persistArchive,
+        ((backend: string) => (backend === "modal" ? failClient : undefined)) as never,
+      ),
+    ).rejects.toThrow(/snapshot_filesystem persistence timed out/);
+    expect(deleteCalls).toHaveLength(0); // box deliberately NOT terminated
   });
 });

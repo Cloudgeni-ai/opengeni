@@ -4,8 +4,10 @@ import postgres from "postgres";
 import {
   acquireLease,
   commitWarmingToWarm,
+  confirmDrainCold,
   createDb,
   heartbeatLeaseHolder,
+  persistDrainSnapshot,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
@@ -382,5 +384,78 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const bHolders = await admin<{ id: string }[]>`
       select id from sandbox_lease_holders where workspace_id = ${wsB.workspaceId}`;
     expect(bHolders.length).toBe(1); // B's holder is untouched by A's scoped reap
+  }, 60_000);
+
+  // The file-persistence regression: persistDrainSnapshot folds the /workspace
+  // snapshot onto the DRAINING lease's resume_state, and confirmDrainCold then
+  // commits draining->cold. The bug was confirmDrainCold nulling resume_state
+  // wholesale — destroying the snapshot the next cold-restore must replay, IN THE
+  // SAME reaper sweep (drainable:1, terminated:1, but arch=NULL → file lost). The
+  // fix: confirmDrainCold PRESERVES a minimal archive-only envelope across the cold
+  // transition so the snapshot survives until the re-warm hydrates it.
+  test("(7) the persisted /workspace archive SURVIVES confirmDrainCold (draining->cold) — file-persistence regression", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    // Warm a box with a realistic resume envelope (providerState + sandboxId).
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live", appName: "app" }, workspaceReady: true } },
+      leaseTtlMs: 45_000,
+    });
+    // Drain it (0ms grace) -> draining at refcount 0. commitWarmingToWarm bumped
+    // the epoch (0->1), so the drain seam fences on the LIVE epoch.
+    const rel = await releaseLeaseHolder(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", idleGraceMs: 0 });
+    expect(rel?.liveness).toBe("draining");
+    const epoch = (await readRow(workspaceId, groupId))!.lease_epoch;
+
+    // The reaper persist seam: fold the /workspace snapshot-ref onto the lease.
+    const ARCHIVE_B64 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-snap-xyz\"}").toString("base64");
+    const persisted = await persistDrainSnapshot(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch, workspaceArchive: ARCHIVE_B64 });
+    expect(persisted.wrote).toBe(true);
+
+    // Now the cold commit — the seam that USED to wipe the archive.
+    const cold = await confirmDrainCold(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch });
+    expect(cold.wentCold).toBe(true);
+
+    const [row] = await admin<{ liveness: string; instance_id: string | null; resume_backend_id: string | null; archive: string | null; sandbox_id: string | null; backend_id: string | null }[]>`
+      select liveness, instance_id, resume_backend_id,
+             resume_state #>> '{sessionState,workspaceArchive}' as archive,
+             resume_state #>> '{sessionState,providerState,sandboxId}' as sandbox_id,
+             resume_state ->> 'backendId' as backend_id
+      from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("cold");
+    expect(row?.instance_id).toBeNull();            // live-box id cleared
+    // The archive SURVIVES the cold transition — the whole point of the fix.
+    expect(row?.archive).toBe(ARCHIVE_B64);
+    expect(row?.resume_backend_id).toBe("modal");   // backend kept so cold-restore knows the client
+    expect(row?.backend_id).toBe("modal");          // archive-only envelope carries backendId
+    // The DEAD box's providerState/sandboxId is dropped (resume-by-id would only fail).
+    expect(row?.sandbox_id).toBeNull();
+  }, 60_000);
+
+  // The other side: a drained lease with NO persisted archive still colds cleanly
+  // with resume_state nulled (no regression for the tar/none/never-persisted case).
+  test("(8) confirmDrainCold with NO archive nulls resume_state (clean cold)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, {
+      accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" }, workspaceReady: true } },
+      leaseTtlMs: 45_000,
+    });
+    await releaseLeaseHolder(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", idleGraceMs: 0 });
+    const epoch = (await readRow(workspaceId, groupId))!.lease_epoch;
+    const cold = await confirmDrainCold(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: epoch });
+    expect(cold.wentCold).toBe(true);
+    const [row] = await admin<{ liveness: string; resume_state: unknown; resume_backend_id: string | null }[]>`
+      select liveness, resume_state, resume_backend_id
+      from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("cold");
+    expect(row?.resume_state).toBeNull();
+    expect(row?.resume_backend_id).toBeNull();
   }, 60_000);
 });

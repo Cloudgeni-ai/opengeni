@@ -98,8 +98,15 @@ function reaperServices(settings: Settings): () => Promise<ActivityServices> {
 
 function makeTerminateSpy(): { fn: TerminateBoxFn; calls: { group: string; epoch: number }[] } {
   const calls: { group: string; epoch: number }[] = [];
-  const fn: TerminateBoxFn = async (_settings, lease) => {
+  const fn: TerminateBoxFn = async (_settings, lease, _observability, persistArchive) => {
     calls.push({ group: lease.sandboxGroupId, epoch: lease.leaseEpoch });
+    // Mirror the production seam: persist the /workspace archive onto the lease
+    // (epoch-fenced) BEFORE terminating; a CAS miss (re-armed) returns false and
+    // the box is left running. Return wrote so the caller colds only on success.
+    const { wrote } = await persistArchive(
+      Buffer.from("WARM_METER_SPY_ARCHIVE").toString("base64"),
+    );
+    return wrote;
   };
   return { fn, calls };
 }

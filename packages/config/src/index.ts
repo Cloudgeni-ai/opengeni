@@ -271,8 +271,41 @@ const SettingsSchema = z.object({
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
   // modal gap-fill: idleTimeoutMs + workspacePersistence were unmapped (module 03 §4.1).
+  //
+  // CRITICAL (sandbox-file-persistence): when this is UNSET the Modal SDK sends
+  // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
+  // timeout (~minutes) — and a box between turns sits with NO active connection,
+  // so that idle clock runs and Modal idle-reaps the box LONG before OpenGeni's
+  // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
+  // it. The observed failure: every drain logs "drainable box already gone
+  // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
+  // Modal's idle-reap is a SECOND reaper racing OpenGeni's — and it wins. The fix:
+  // OpenGeni OWNS box lifecycle via its reaper + the hard modalTimeoutSeconds
+  // backstop, so the Modal idle-reap must NOT fire first. We default the effective
+  // idle timeout to the hard lifetime (effectiveModalIdleTimeoutSeconds), making
+  // the box survive its full warm window so the reaper can snapshot it. Set this
+  // explicitly (OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS) only to deliberately idle-reap
+  // SOONER than the hard lifetime; the boot invariant forbids a value that would
+  // reap before reaperPeriod + idleGrace elapses.
   modalIdleTimeoutSeconds: z.coerce.number().int().positive().optional(),
-  modalWorkspacePersistence: z.enum(["tar", "snapshot_filesystem", "snapshot_directory"]).optional(),
+  // /workspace FILE PERSISTENCE across warm/cold cycles. Defaults to
+  // `snapshot_filesystem` so EVERY box is created persistence-capable: the reaper
+  // snapshots the live box before it terminates a drained group, and a later
+  // cold-restore hydrates a fresh box from that snapshot (sandbox-file-persistence).
+  // `snapshot_filesystem` requires the manifest declare NO ephemeralPersistencePaths
+  // (buildManifest never sets entry.ephemeral, so it never downgrades to tar). Set
+  // OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar to opt back out (no native snapshot;
+  // the reaper persists a tar archive — same store+hydrate plumbing, slower).
+  modalWorkspacePersistence: z
+    .enum(["tar", "snapshot_filesystem", "snapshot_directory"])
+    .default("snapshot_filesystem"),
+  // Snapshot GC backstop (sandbox-file-persistence): the reaper keeps ONE latest
+  // filesystem snapshot per lease (delete-prior-on-supersede + delete-on-teardown).
+  // This is the TTL retention floor for the periodic orphan sweep — a snapshot
+  // whose lease is cold and older than this is best-effort deleted so a crashed
+  // persist-then-no-restore never leaks a Modal image. 0 disables the TTL sweep
+  // (delete-on-supersede/teardown still run). Default 7 days.
+  modalSnapshotRetentionSeconds: z.coerce.number().int().nonnegative().default(604_800),
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
@@ -360,9 +393,12 @@ const SettingsSchema = z.object({
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
-  // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < providerIdleTimeout
-  // (modalTimeoutSeconds*1000). No keep-alive knob: between turns the box survives
-  // on the provider's existing idle-timeout; there is no keepalive loop to bound.
+  // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
+  // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
+  // modalTimeoutSeconds). No keep-alive loop: between turns the box survives on its
+  // idle timeout — which we pin high enough (via the idle-timeout default) that
+  // OpenGeni's reaper, not Modal's idle-reap, governs teardown so /workspace is
+  // snapshotted before the box dies (sandbox-file-persistence).
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
   // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
@@ -762,6 +798,7 @@ export function getSettings(): Settings {
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
     modalIdleTimeoutSeconds: optional("OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS"),
     modalWorkspacePersistence: optional("OPENGENI_MODAL_WORKSPACE_PERSISTENCE"),
+    modalSnapshotRetentionSeconds: optional("OPENGENI_MODAL_SNAPSHOT_RETENTION_SECONDS"),
     sandboxDesktopEnabled: optional("OPENGENI_SANDBOX_DESKTOP_ENABLED"),
     sandboxDesktopInteractive: optional("OPENGENI_SANDBOX_DESKTOP_INTERACTIVE"),
     sandboxTerminalEnabled: optional("OPENGENI_SANDBOX_TERMINAL_ENABLED"),
@@ -874,6 +911,21 @@ export function getSettings(): Settings {
   };
   validateSettings(settings);
   return settings;
+}
+
+/**
+ * The Modal sandbox idle timeout (seconds) the provider actually passes as
+ * idleTimeoutMs (sandbox-file-persistence). When the operator did not pin
+ * OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS we DEFAULT it to the hard lifetime
+ * (modalTimeoutSeconds): OpenGeni's reaper owns box lifecycle, so Modal's
+ * built-in idle-reap (which would otherwise fire on its short server default and
+ * kill the box BEFORE the reaper can snapshot /workspace) is pushed out to the
+ * hard backstop. An explicit smaller value is honoured (the boot invariant keeps
+ * it above reaperPeriod + idleGrace so a drained box still survives long enough
+ * to be persisted).
+ */
+export function effectiveModalIdleTimeoutSeconds(settings: Settings): number {
+  return settings.modalIdleTimeoutSeconds ?? settings.modalTimeoutSeconds;
 }
 
 export function collectSandboxEnvironment(settings: Settings, source: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -1668,26 +1720,41 @@ function validateSettings(settings: Settings): void {
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
     const idleGraceMs = settings.sandboxIdleGraceMs;
     const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
+    // The EFFECTIVE box lifetime when it sits idle between turns is the Modal IDLE
+    // timeout, NOT the hard lifetime (sandbox-file-persistence): a box with no
+    // active connection is idle-reaped at idleTimeout. effectiveModalIdleTimeout
+    // defaults to the hard lifetime (so the idle-reap never beats the OpenGeni
+    // reaper), but an operator can pin it shorter — the invariants below bind the
+    // reaper cadence + drain grace to the idle timeout (the REAL ceiling), so a
+    // drained box always survives long enough for the reaper to snapshot it.
+    const idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
     if (!(reaperPeriod < viewerTtl)) {
       throw new Error(
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than `
         + `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often `
         + `than the TTL it polices, or stale viewer holders outlive a full reaper period.`);
     }
-    if (!(viewerTtl < providerLifetimeMs)) {
+    if (!(idleTimeoutMs <= providerLifetimeMs)) {
       throw new Error(
-        `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the provider `
-        + `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): a viewer holder must be `
-        + `reapable before the box idles out from under it (the provider idle-timeout is the backstop).`);
+        `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}) must not exceed the hard provider `
+        + `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the idle timeout is a `
+        + `floor under the hard lifetime, not above it.`);
     }
-    if (!(reaperPeriod + idleGraceMs < providerLifetimeMs)) {
+    if (!(viewerTtl < idleTimeoutMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box `
+        + `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from `
+        + `under it (the provider idle-timeout is the backstop).`);
+    }
+    if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_GRACE_MS `
         + `(${reaperPeriod} + ${idleGraceMs} = ${reaperPeriod + idleGraceMs}) must be strictly less than the `
-        + `provider lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the reaper must be `
-        + `able to terminate a genuinely-idle box on the sweep AFTER the drain grace elapses, before the `
-        + `provider's hard idle-timeout reclaims it (the provider timeout is the backstop). Raise `
-        + `OPENGENI_MODAL_TIMEOUT_SECONDS or lower OPENGENI_SANDBOX_IDLE_GRACE_MS.`);
+        + `effective box idle timeout (${idleTimeoutMs}): a drained box must SURVIVE its full warm window so `
+        + `the reaper can resume + snapshot /workspace + terminate it on the sweep AFTER the drain grace `
+        + `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise `
+        + `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower `
+        + `OPENGENI_SANDBOX_IDLE_GRACE_MS.`);
     }
   }
   // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (I8) ---

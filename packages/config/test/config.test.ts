@@ -3,6 +3,7 @@ import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
+  effectiveModalIdleTimeoutSeconds,
   configuredStaticUsageLimits,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
@@ -695,6 +696,50 @@ describe("backend-gated sandbox required-credential validation", () => {
     for (const backend of Object.keys(SANDBOX_REQUIRED_ENV)) {
       expect(Array.isArray(requiredSandboxEnvForBackend(backend as keyof typeof SANDBOX_REQUIRED_ENV))).toBe(true);
     }
+  });
+});
+
+describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)", () => {
+  test("idle timeout defaults to the hard lifetime and the default cadence passes boot", () => {
+    const settings = withEnv({}, () => getSettings());
+    // Default config: idleGrace 900s + reaper 30s = 930s warm window must fit under
+    // the effective box idle timeout — which defaults to the hard lifetime (3600s).
+    expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(settings.modalTimeoutSeconds);
+    expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(3600);
+    expect(
+      settings.sandboxLeaseReaperPeriodMs + settings.sandboxIdleGraceMs,
+    ).toBeLessThan(effectiveModalIdleTimeoutSeconds(settings) * 1000);
+  });
+
+  test("an explicit idle timeout overrides the default", () => {
+    const settings = withEnv(
+      { OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1200" },
+      () => getSettings(),
+    );
+    expect(effectiveModalIdleTimeoutSeconds(settings)).toBe(1200);
+  });
+
+  test("boot fails when reaperPeriod + idleGrace would outlive the box idle timeout", () => {
+    // Pin the idle timeout BELOW idleGrace so Modal's idle-reap would kill the box
+    // before the reaper waits out the drain grace to snapshot it — the exact
+    // failure mode (file lost across box churn). Boot must reject it.
+    expect(() => withEnv(
+      {
+        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
+        OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+      },
+      () => getSettings(),
+    )).toThrow(/idle timeout/i);
+  });
+
+  test("boot fails when an explicit idle timeout exceeds the hard lifetime", () => {
+    expect(() => withEnv(
+      {
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
+      },
+      () => getSettings(),
+    )).toThrow(/must not exceed the hard provider/i);
   });
 });
 

@@ -180,7 +180,14 @@ export async function attachViewer(
       // the SDK's validateNoEnvironmentDelta (otherwise: "Live sandbox sessions
       // cannot change manifest environment variables").
       const environment = await sessionAttachEnvironment(services, workspaceId, session);
-      established = await establishSandboxSessionFromEnvelope(settings, envelope, {
+      // Prefer the COLD lease's preserved resume_state when it carries a persisted
+      // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
+      // across draining->cold). establishSandboxSessionFromEnvelope cold-creates a
+      // fresh box and replays the archive via hydrateWorkspace, so /workspace
+      // survives the box churn (sandbox-file-persistence). No archive -> the bare
+      // session envelope (a never-warmed cold start).
+      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
+      established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: session.id,
         backendOverride: session.sandboxBackend,
         environment,

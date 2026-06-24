@@ -1,4 +1,5 @@
 import { ModalImageSelector, ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
+import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
@@ -26,9 +27,14 @@ export const modalProvider: ProviderRegistration = {
       env: environment,
     };
     // gap-fill (module 03 §4.1): these SDK options were previously unmapped.
-    if (settings.modalIdleTimeoutSeconds) {
-      options.idleTimeoutMs = settings.modalIdleTimeoutSeconds * 1000;
-    }
+    // ALWAYS pin idleTimeoutMs (sandbox-file-persistence): an UNSET idle timeout
+    // lets the SDK send idleTimeoutSecs=undefined, so Modal applies its short
+    // server-default idle-reap and kills an idle (between-turns) box LONG before
+    // OpenGeni's reaper can resume+snapshot it. effectiveModalIdleTimeoutSeconds
+    // defaults this to the hard lifetime so the box survives its full warm window
+    // and the reaper — not Modal's idle-reap — governs teardown (and snapshots
+    // /workspace first).
+    options.idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
     }

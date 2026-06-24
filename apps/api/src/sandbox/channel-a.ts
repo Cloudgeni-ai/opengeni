@@ -137,8 +137,17 @@ export async function withChannelA<T>(
       // We won the cold->warming CAS: establish the box from the envelope, then
       // commit warm. The established handle IS our live handle for the op.
       const expectedEpoch = acquired.lease.leaseEpoch;
+      // Prefer the COLD lease's preserved resume_state when it carries a persisted
+      // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
+      // across draining->cold for exactly this re-warm). establishSandboxSessionFromEnvelope
+      // cold-creates a fresh box and replays the archive via hydrateWorkspace, so
+      // /workspace survives the box churn (sandbox-file-persistence). No archive ->
+      // the bare session envelope (a never-warmed cold start). The order matters:
+      // resume_state is the lease's authoritative box descriptor; the session
+      // `_sandbox` envelope is only the per-session fallback.
+      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       try {
-        established = await establishSandboxSessionFromEnvelope(settings, envelope, {
+        established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
           sessionId: session.id,
           backendOverride: session.sandboxBackend,
           environment,

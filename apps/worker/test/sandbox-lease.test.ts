@@ -32,7 +32,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
-import { createDb, type Database, type DbClient } from "@opengeni/db";
+import { createDb, persistDrainSnapshot, type Database, type DbClient } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
@@ -124,12 +124,26 @@ function reaperServices(settings: Settings = REAPER_SETTINGS): () => Promise<Act
 }
 
 // A spy provider-terminate: records every (group, epoch) it was asked to stop.
-function makeTerminateSpy(): { fn: TerminateBoxFn; calls: { group: string; epoch: number }[] } {
+function makeTerminateSpy(): {
+  fn: TerminateBoxFn;
+  calls: { group: string; epoch: number }[];
+  persisted: { group: string; wrote: boolean }[];
+} {
   const calls: { group: string; epoch: number }[] = [];
-  const fn: TerminateBoxFn = async (_settings, lease) => {
+  const persisted: { group: string; wrote: boolean }[] = [];
+  const fn: TerminateBoxFn = async (_settings, lease, _observability, persistArchive) => {
     calls.push({ group: lease.sandboxGroupId, epoch: lease.leaseEpoch });
+    // Exercise the real epoch-fenced persist CAS against the live DB (the seam's
+    // production order is resume -> persistWorkspace -> persistArchive -> stop).
+    // A re-armed lease returns wrote:false and the production seam leaves the box
+    // running; mirror that so the spy never colds a re-armed lease either.
+    const { wrote } = await persistArchive(
+      Buffer.from("TERMINATE_SPY_TEST_ARCHIVE").toString("base64"),
+    );
+    persisted.push({ group: lease.sandboxGroupId, wrote });
+    return wrote;
   };
-  return { fn, calls };
+  return { fn, calls, persisted };
 }
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string; groupId: string }> {
@@ -154,6 +168,12 @@ type LeaseFixture = {
 };
 
 // Insert a lease row directly (so we control liveness/expiry/refcount/epoch).
+// NOTE: resume_state binds the JSON string CAST ::text::jsonb so it stores as a
+// real jsonb OBJECT (matching production commitWarmingToWarm). A bare ::jsonb cast
+// makes postgres.js send the param AS jsonb, wrapping the JS string into a jsonb
+// STRING SCALAR — then the drain-persist path's jsonb_set/`-> key` treats it as a
+// scalar (throws "cannot set path in scalar" / drops the envelope). ::text first
+// forces a text param the server casts to a jsonb object.
 async function insertLease(
   ids: { accountId: string; workspaceId: string; groupId: string },
   f: LeaseFixture,
@@ -168,7 +188,7 @@ async function insertLease(
       ${f.refcount ?? 0}, ${f.turnHolders ?? 0}, ${f.viewerHolders ?? 0},
       ${f.instanceId ?? null}, ${f.backend ?? "local"}, ${f.leaseEpoch ?? 1},
       ${f.resumeBackendId ?? null},
-      ${f.resumeState ? JSON.stringify(f.resumeState) : null},
+      ${f.resumeState ? JSON.stringify(f.resumeState) : null}::text::jsonb,
       now() + (${String(f.expiresInMs ?? 60_000)} || ' milliseconds')::interval
     ) returning id`;
   return row!.id;
@@ -288,6 +308,55 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(drainRow?.liveness).toBe("cold");
     expect(drainRow?.instance_id).toBeNull();
     expect(result.terminated).toBeGreaterThanOrEqual(1);
+  }, 60_000);
+
+  test("(1b) persist-before-terminate: persistDrainSnapshot folds the /workspace archive onto the lease under the epoch fence (keep-latest GC returns the prior)", async () => {
+    if (!available) return;
+    // A draining lease carrying the production envelope shape (sessionState with
+    // providerState). This is exactly the row the reaper persists onto BEFORE it
+    // terminates (the seam's resume -> persistWorkspace -> persistArchive order).
+    const ids = await freshWorkspace();
+    // Grace NOT elapsed (positive expiry) so the GLOBAL cross-workspace reaper
+    // sweep in sibling tests does not pick this leftover draining row up — we are
+    // unit-testing persistDrainSnapshot directly, not via a sweep.
+    await insertLease(ids, {
+      liveness: "draining", refcount: 0, leaseEpoch: 7, expiresInMs: 600_000,
+      instanceId: "box-persist", backend: "modal", resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-old" }, workspaceReady: true } },
+    });
+
+    // First persist: folds the archive, no prior snapshot to GC.
+    const archive1 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-1\"}").toString("base64");
+    const r1 = await persistDrainSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 7, workspaceArchive: archive1,
+    });
+    expect(r1.wrote).toBe(true);
+    expect(r1.priorArchive).toBeNull();
+    // The archive is folded at resume_state.sessionState.workspaceArchive AND the
+    // existing providerState sibling is preserved (resume-by-id still works).
+    const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss1 = (row1!.resume_state as any).sessionState;
+    expect(ss1.workspaceArchive).toBe(archive1);
+    expect(ss1.providerState.sandboxId).toBe("sb-old");
+
+    // Second persist (a later drain): supersedes, returns the PRIOR archive so the
+    // reaper can GC the superseded snapshot (keep-latest-per-lease).
+    const archive2 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-2\"}").toString("base64");
+    const r2 = await persistDrainSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 7, workspaceArchive: archive2,
+    });
+    expect(r2.wrote).toBe(true);
+    expect(r2.priorArchive).toBe(archive1);
+
+    // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
+    // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
+    const r3 = await persistDrainSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 999, workspaceArchive: archive2,
+    });
+    expect(r3.wrote).toBe(false);
   }, 60_000);
 
   test("(2) provider stop() fires ONLY at refcount=0 past grace — never under a held turn/viewer or during the grace", async () => {
@@ -447,7 +516,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(elapsedRow?.instance_id).toBeNull();
   }, 60_000);
 
-  test("(4) the boot invariant (reaper<viewerTTL; reaper+idleGrace<providerLifetime) rejects a misconfigured cadence", () => {
+  test("(4) the boot invariant (reaper<viewerTTL; reaper+idleGrace<effective box idle timeout) rejects a misconfigured cadence", () => {
     // Driven through the REAL @opengeni/config getSettings validation (the same
     // boot path the worker uses): getSettings reads process.env, so withEnv swaps
     // it for the duration of each parse.
@@ -466,25 +535,40 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
     }, () => getSettings())).toThrow(/REAPER_PERIOD_MS.*less than.*VIEWER_HOLDER_TTL_MS/s);
 
-    // viewerHolderTTL (4000s) >= providerLifetime (3600s) → throws.
+    // viewerHolderTTL (4000s) >= effective box idle timeout (3600s, == hard
+    // lifetime by default) → throws. (sandbox-file-persistence: the binding box
+    // lifetime is the idle timeout, not the hard lifetime.)
     expect(() => withEnv({
       ...base,
       OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
       OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "4000000",
       OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
-    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than the provider lifetime/s);
+    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than the effective box idle timeout/s);
 
-    // reaperPeriod + idleGrace (30s + 900s = 930s) >= providerLifetime (900s) → throws.
-    // This is the warm-window guard: the reaper must terminate a genuinely-idle box
-    // (on the sweep after the drain grace elapses) BEFORE the provider's hard
-    // lifetime reclaims it out from under us.
+    // reaperPeriod + idleGrace (30s + 900s = 930s) >= effective box idle timeout
+    // (900s, == hard lifetime since no explicit idle timeout) → throws. This is the
+    // warm-window guard AND the file-persistence guard: a drained box must survive
+    // its full warm window so the reaper can snapshot /workspace before Modal's
+    // idle-reap (or the hard backstop) reclaims it.
     expect(() => withEnv({
       ...base,
       OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
       OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
       OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
       OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
-    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS \+ OPENGENI_SANDBOX_IDLE_GRACE_MS.*less than the.*provider lifetime/s);
+    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS \+ OPENGENI_SANDBOX_IDLE_GRACE_MS.*less than the.*effective box idle timeout/s);
+
+    // sandbox-file-persistence: an explicit SHORT idle timeout below the warm
+    // window ALSO throws — even though the hard lifetime is generous — because
+    // Modal idle-reaps the box at the idle timeout, before the reaper snapshots it.
+    expect(() => withEnv({
+      ...base,
+      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+      OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
+      OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
+    }, () => getSettings())).toThrow(/effective box idle timeout/s);
 
     // The shipped defaults validate: reaper 30s < viewer 90s; reaper 30s + idleGrace
     // 900s = 930s < providerLifetime 3600s. (No idle-grace/modal env set → defaults.)

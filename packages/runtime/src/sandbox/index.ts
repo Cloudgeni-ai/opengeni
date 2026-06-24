@@ -313,6 +313,112 @@ export async function restoredSandboxSessionStateFromEntry(entry: Record<string,
   return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
 }
 
+/**
+ * Read the persisted /workspace snapshot archive off a lease envelope's
+ * `sessionState` (sandbox-file-persistence). The reaper (persistDrainSnapshot)
+ * folds the base64 archive — a Modal native snapshot-ref or a tar archive, the
+ * exact bytes `session.persistWorkspace()` returned — at
+ * `sessionState.workspaceArchive`. Cold-restore decodes it and replays it via
+ * `session.hydrateWorkspace(archive)` on the freshly-created box so /workspace is
+ * restored. Returns undefined when the envelope carries no archive (a box that
+ * was never drain-persisted, or a non-persistence config that stored none).
+ *
+ * It is deliberately read SEPARATELY from deserializeSandboxSessionStateEnvelope:
+ * the archive does NOT ride serializeSessionState (it originates at reaper time),
+ * and the SDK's deserializeSessionState must NOT receive it (it is an opaque
+ * runtime-level field, not provider state).
+ */
+export function readWorkspaceArchiveFromEnvelopeSessionState(sessionState: unknown): Uint8Array | undefined {
+  if (!sessionState || typeof sessionState !== "object") {
+    return undefined;
+  }
+  const b64 = (sessionState as { workspaceArchive?: unknown }).workspaceArchive;
+  if (typeof b64 !== "string" || b64.length === 0) {
+    return undefined;
+  }
+  try {
+    return Uint8Array.from(Buffer.from(b64, "base64"));
+  } catch {
+    return undefined;
+  }
+}
+
+// The native snapshot-ref prefixes the @openai/agents-extensions modal client
+// encodes (snapshots.mjs `NATIVE_SNAPSHOT_PREFIXES`). The ref is
+// `<PREFIX>\n{"snapshot_id":"...",...}`. We re-implement the decode here because
+// `@openai/agents-extensions/sandbox/shared` is NOT an exported subpath (the
+// package `exports` map only exposes `./sandbox/<provider>`), so decodeNativeSnapshotRef
+// is unreachable — same reasoning as isProviderSandboxNotFoundError below.
+const MODAL_SNAPSHOT_REF_PREFIXES = [
+  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
+  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
+];
+
+/** Decode the Modal snapshot id out of a persisted base64 archive ref, or
+ *  undefined when the archive is a tar payload (no provider snapshot to GC) or
+ *  is unparseable. Used only for keep-latest-per-lease snapshot GC. */
+export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
+  let text: string;
+  try {
+    text = new TextDecoder().decode(archive);
+  } catch {
+    return undefined;
+  }
+  for (const prefix of MODAL_SNAPSHOT_REF_PREFIXES) {
+    if (!text.startsWith(prefix)) {
+      continue;
+    }
+    try {
+      const payload = JSON.parse(text.slice(prefix.length)) as { snapshot_id?: unknown };
+      return typeof payload.snapshot_id === "string" && payload.snapshot_id.length > 0
+        ? payload.snapshot_id
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort GC of a SUPERSEDED Modal filesystem/directory snapshot
+ * (sandbox-file-persistence). restoreSnapshotFilesystem terminates the previous
+ * SANDBOX but never deletes the prior SNAPSHOT image, so snapshots accumulate
+ * unbounded across warm/cold cycles. The reaper keeps only the latest per lease:
+ * when it writes a NEW archive it passes the PRIOR archive here to delete its
+ * image via the live session's Modal client (`session.modal.images.delete(id)` —
+ * the same API the SDK uses for directory images). Never throws (GC is a
+ * best-effort backstop; a leaked snapshot is a cost issue, not a correctness one).
+ * A tar archive (no snapshot id) is a no-op. Returns the deleted snapshot id (or
+ * undefined when nothing was deleted) for observability.
+ */
+export async function deletePriorPersistedSnapshot(session: unknown, priorArchiveBase64: string | null | undefined): Promise<string | undefined> {
+  if (!priorArchiveBase64) {
+    return undefined;
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(priorArchiveBase64, "base64"));
+  } catch {
+    return undefined;
+  }
+  const snapshotId = decodeModalSnapshotId(bytes);
+  if (!snapshotId) {
+    return undefined;
+  }
+  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } }).modal;
+  const del = modal?.images?.delete;
+  if (typeof del !== "function") {
+    return undefined;
+  }
+  try {
+    await del.call(modal!.images, snapshotId);
+    return snapshotId;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function deserializeSandboxSessionStateEnvelope(client: SandboxClient, envelope: unknown): Promise<SandboxSessionState | undefined> {
   if (!envelope || typeof envelope !== "object") {
     return undefined;
@@ -483,8 +589,56 @@ export async function establishSandboxSessionFromEnvelope(
   // payload deserializeSandboxSessionStateEnvelope re-hydrates.
   const envelopeSessionState = envelope && typeof envelope === "object" ? (envelope as { sessionState?: unknown }).sessionState : undefined;
 
-  // (a) WARM REATTACH BY ID — only when we have an envelope to resume from.
-  if (envelopeSessionState && client.resume && client.deserializeSessionState) {
+  // The persisted /workspace snapshot the reaper folded onto the lease envelope
+  // (sandbox-file-persistence). Present on a re-warm whose box was drain-persisted:
+  //   - WARM reattach NotFound path (box gone, full envelope still has sandboxId);
+  //   - COLD lease re-warm (confirmDrainCold preserved a MINIMAL archive-only
+  //     envelope `{ sessionState: { workspaceArchive } }` — NO sandboxId, so the
+  //     warm-reattach branch must NOT try resume()-by-id; it cold-creates+hydrates).
+  const workspaceArchive = readWorkspaceArchiveFromEnvelopeSessionState(envelopeSessionState);
+
+  // create() a FRESH box, THEN replay the persisted /workspace snapshot via
+  // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
+  // decodes the snapshot-ref and swaps the box for one booted from the snapshot
+  // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
+  // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
+  // cold-restore branch (b) below.
+  const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
+    const restored = await client.create!({ manifest: createManifest });
+    if (workspaceArchive) {
+      const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
+      if (typeof hydrate === "function") {
+        // hydrateWorkspace may internally REPLACE the underlying box
+        // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
+        // the placeholder), so the instanceId must be re-read AFTER.
+        await hydrate.call(restored, workspaceArchive);
+      }
+    }
+    const restoredState = (restored as { state?: unknown }).state;
+    return { client, session: restored, sessionState: restoredState ?? resumeFallbackState, instanceId: readInstanceId(restored), backendId: client.backendId };
+  };
+
+  // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
+  // restorable archive (cold lease)? A Modal envelope with no providerState.sandboxId
+  // (the minimal archive-only envelope confirmDrainCold preserves) is NOT resumable —
+  // client.resume() would throw "requires a persisted sandboxId", which is NOT a
+  // NotFound, so it would propagate instead of cold-restoring. Gate the resume
+  // branch on a present sandbox identity so an archive-only envelope falls straight
+  // through to the cold-restore+hydrate path (b).
+  const envelopeProviderState = envelopeSessionState && typeof envelopeSessionState === "object"
+    ? (envelopeSessionState as { providerState?: Record<string, unknown> }).providerState
+    : undefined;
+  const hasResumableInstance = Boolean(
+    envelopeProviderState
+    && typeof envelopeProviderState === "object"
+    && (envelopeProviderState.sandboxId
+      || envelopeProviderState.instanceId
+      || envelopeProviderState.id
+      || envelopeProviderState.containerId),
+  );
+
+  // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
+  if (hasResumableInstance && envelopeSessionState && client.resume && client.deserializeSessionState) {
     let resumedState: unknown;
     try {
       resumedState = await deserializeSandboxSessionStateEnvelope(client as unknown as SandboxClient, envelopeSessionState);
@@ -502,25 +656,23 @@ export async function establishSandboxSessionFromEnvelope(
         if (!isProviderSandboxNotFoundError(client.backendId, error)) {
           throw error;
         }
-        // COLD-RESTORE: the box is genuinely gone. Recreate it, restoring the
-        // workspace from the snapshot the resumed state carries when present (the
-        // create() arg shape is { snapshot } — NOT a sessionState bag). When the
-        // state has no snapshot (no provider workspace-persistence configured),
-        // fall back to a fresh box from the manifest the client was built with.
-        const snapshot = (resumedState as { snapshot?: unknown } | undefined)?.snapshot;
-        const restored = snapshot !== undefined
-          ? await client.create({ snapshot, manifest: createManifest })
-          : await client.create({ manifest: createManifest });
-        const restoredState = (restored as { state?: unknown }).state;
-        return { client, session: restored, sessionState: restoredState ?? resumedState, instanceId: readInstanceId(restored), backendId: client.backendId };
+        // COLD-RESTORE: the box is genuinely gone. Modal does NOT restore via
+        // create({ snapshot }) — passing `snapshot` to ModalSandboxClient.create()
+        // THROWS (assertCoreSnapshotUnsupported). Modal's real persistence is an
+        // OPAQUE ARCHIVE captured by session.persistWorkspace() at reaper-drain
+        // time and folded onto the lease envelope (sandbox-file-persistence). The
+        // shared coldRestore() seam creates a fresh box and replays that archive.
+        return await coldRestore(resumedState);
       }
     }
   }
 
-  // (b) COLD SESSION (no envelope / no resumable state) — create a fresh box.
-  const created = await client.create({ manifest: createManifest });
-  const createdState = (created as { state?: unknown }).state;
-  return { client, session: created, sessionState: createdState, instanceId: readInstanceId(created), backendId: client.backendId };
+  // (b) COLD SESSION / COLD LEASE — no resumable box id. create() a fresh box, and
+  // if the envelope carries a persisted /workspace snapshot (the archive-only
+  // envelope confirmDrainCold preserves across draining->cold), replay it so
+  // /workspace survives the box churn (sandbox-file-persistence). No archive -> a
+  // clean empty box (a never-warmed session).
+  return await coldRestore();
 }
 
 // A client that can SERIALIZE a live session state back to the persistable
