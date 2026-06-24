@@ -304,6 +304,105 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     await dropSession(resumed.established);
   }, 60_000);
 
+  // FINDING 3: turn spawner must prefer the lease's resume_state archive.
+  // Before the fix the worker TURN spawner always passed the session _sandbox
+  // `envelope` to establishSandboxSessionFromEnvelope, ignoring the LEASE's
+  // resume_state. After a drain->cold, the archive lives on the LEASE
+  // (confirmDrainCold preserves a minimal archive-only envelope). A turn-first
+  // re-warm would therefore spawn an EMPTY box instead of hydrating /workspace.
+  // The fix: use `acquired.lease.resumeState ?? envelope` (mirrors channel-a.ts).
+  //
+  // We test this with the `local` backend + a pre-inserted cold lease whose
+  // resume_state carries a synthetic archive-only envelope. Because the local
+  // backend has no hydrateWorkspace, we verify the CORRECT ENVELOPE is selected
+  // (spawnEnvelope === the lease's archive envelope) rather than the session
+  // envelope — i.e. the resumeBoxForTurn spawner path reads the lease's archive.
+  // We assert by reading back the committed resume_state: a spawner that ignored
+  // the lease archive would commit the session envelope's backendId (or null);
+  // a spawner that preferred the lease archive correctly uses its backendId.
+  test("(F3) turn spawner prefers lease resume_state archive over session envelope on cold re-warm", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+    // Pre-insert a cold lease whose resume_state carries an archive-only envelope
+    // (the shape confirmDrainCold produces). The lease is cold with epoch 5.
+    // The session envelope (getSandboxSessionEnvelope) returns null for a bare
+    // groupId with no sessions row — so the spawner's `envelope` is null, and
+    // the only source of the archive is the lease's resume_state.
+    const ARCHIVE_B64 = Buffer.from("WORKSPACE_ARCHIVE_TURN_RESUME_TEST").toString("base64");
+    const archiveOnlyEnvelope = {
+      backendId: "unix_local",
+      sessionState: { workspaceArchive: ARCHIVE_B64 },
+    };
+    // Use the same text->jsonb cast pattern as insertLease (the postgres.js driver
+    // sends the interpolated value as a text parameter; ::text::jsonb casts it
+    // server-side so postgres parses it as a jsonb object, not a scalar string).
+    const archiveEnvelopeJson = JSON.stringify(archiveOnlyEnvelope);
+    await admin.unsafe(`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 5, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`, [accountId, workspaceId, groupId, archiveEnvelopeJson]);
+
+    // resumeBoxForTurn must win the cold->warming CAS (spawner) and use the
+    // LEASE's resume_state (the archive-only envelope) as the spawnEnvelope
+    // rather than the null session envelope. The local backend DOES have a
+    // hydrateWorkspace that tries to JSON.parse the archive, so a synthetic
+    // archive that isn't valid JSON causes hydrateWorkspace to throw — but
+    // THAT throw proves the fix: the spawner correctly read the lease's
+    // resume_state (otherwise hydrateWorkspace would never be called).
+    //
+    // The test deliberately asserts the error path: the spawn fails because
+    // the synthetic archive isn't valid JSON, which means:
+    //   (a) establishSandboxSessionFromEnvelope called hydrateWorkspace
+    //       (the lease archive WAS selected as spawnEnvelope), and
+    //   (b) Finding 4's fix: the placeholder box is best-effort deleted
+    //       before re-throwing, and
+    //   (c) failWarmingToCold rolls the lease back to cold (Finding 2's fix:
+    //       preserves the archive).
+    //
+    // A spawner that ignored the lease archive (the bug) would call
+    // establishSandboxSessionFromEnvelope with the null session envelope —
+    // no hydrateWorkspace would fire, the spawn would succeed with an EMPTY
+    // box, and the archive would be silently lost.
+    let spawnError: Error | undefined;
+    let resumed: Awaited<ReturnType<typeof resumeBoxForTurn>> | undefined;
+    try {
+      resumed = await resumeBoxForTurn(
+        { db, settings },
+        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        "turn",
+        "activity-f3",
+      );
+    } catch (e) {
+      spawnError = e instanceof Error ? e : new Error(String(e));
+    } finally {
+      await resumed?.release();
+      if (resumed) await dropSession(resumed.established);
+    }
+    // The error must come from hydrateWorkspace (JSON parse of our synthetic
+    // archive), NOT from a missing envelope. This proves the archive was used.
+    expect(spawnError).toBeDefined();
+    expect(spawnError?.message ?? "").toMatch(/JSON\s*[Pp]arse|Unexpected identifier|invalid.*archive|workspaceArchive/i);
+
+    // Finding 2 side-effect: after failWarmingToCold, the lease is cold again
+    // and the archive-only envelope must still be present (not nulled).
+    const row = await readRow(workspaceId, groupId);
+    expect(row?.liveness).toBe("cold");
+    // The archive survives the failed warm (Finding 2 in action).
+    const [archiveRow] = await admin<{ archive: string | null }[]>`
+      select resume_state #>> '{sessionState,workspaceArchive}' as archive
+      from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(archiveRow?.archive).toBe(ARCHIVE_B64);
+  }, 60_000);
+
   test("(4) FLAG-OFF: the gate condition is false -> resumeBoxForTurn is NEVER invoked, so NO lease row is materialized", async () => {
     if (!available) return;
     const offSettings = settingsFor(false);

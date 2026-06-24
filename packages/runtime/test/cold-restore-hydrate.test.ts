@@ -21,6 +21,9 @@ import { afterAll, describe, expect, mock, test } from "bun:test";
 // `new ModalSandboxClient(...)` constructs our fake).
 const hydrateCalls: Uint8Array[] = [];
 const createArgs: Array<{ manifest?: unknown; snapshot?: unknown }> = [];
+// Finding 4: controls for hydrateWorkspace-throw + delete tracking.
+let hydrateWorkspaceShouldThrow = false;
+const deleteCalls: unknown[] = [];
 
 class FakeModalSandboxClient {
   backendId = "modal";
@@ -39,9 +42,15 @@ class FakeModalSandboxClient {
     return {
       state: { sandboxId: "sb-fresh" },
       async hydrateWorkspace(data: Uint8Array) {
+        if (hydrateWorkspaceShouldThrow) {
+          throw new Error("hydrateWorkspace: snapshot GC'd or provider timeout (test-injected failure)");
+        }
         hydrateCalls.push(data);
       },
     };
+  }
+  async delete(state: unknown) {
+    deleteCalls.push(state);
   }
 }
 
@@ -139,5 +148,44 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect("snapshot" in createArgs[0]!).toBe(false);
     expect(hydrateCalls).toHaveLength(0); // nothing to restore → clean empty box
     expect(established.instanceId).toBe("sb-fresh");
+  });
+
+  // FINDING 4: placeholder box must be deleted when hydrateWorkspace throws.
+  // client.create() allocates a live Modal box; if the subsequent hydrateWorkspace()
+  // throws (snapshot GC'd, provider timeout, corrupt archive), the freshly-created
+  // box must be best-effort deleted before re-throwing so it doesn't leak up to the
+  // full idle/hard lifetime. The original error semantics are preserved (re-thrown).
+  test("(F4) hydrateWorkspace failure deletes the placeholder box before re-throwing", async () => {
+    hydrateCalls.length = 0;
+    createArgs.length = 0;
+    deleteCalls.length = 0;
+    hydrateWorkspaceShouldThrow = true;
+
+    try {
+      let threw = false;
+      let caughtMessage = "";
+      try {
+        await establishSandboxSessionFromEnvelope(
+          modalSettings(),
+          envelopeWithArchive(SNAPSHOT_B64),
+          { sessionId: "sess-hydrate-fail", environment: {} },
+        );
+      } catch (e) {
+        threw = true;
+        caughtMessage = e instanceof Error ? e.message : String(e);
+      }
+      // The original hydrateWorkspace error is re-thrown (error semantics preserved).
+      expect(threw).toBe(true);
+      expect(caughtMessage).toContain("hydrateWorkspace");
+      // The placeholder box was best-effort deleted before re-throwing.
+      // FakeModalSandboxClient.delete() records the state passed to it.
+      expect(deleteCalls.length).toBe(1);
+      expect(deleteCalls[0]).toMatchObject({ sandboxId: "sb-fresh" });
+      // create() was called exactly once (no retry — just create then fail).
+      expect(createArgs).toHaveLength(1);
+    } finally {
+      // Reset so other tests are not affected.
+      hydrateWorkspaceShouldThrow = false;
+    }
   });
 });

@@ -167,7 +167,17 @@ export async function resumeBoxForTurn(
     const expectedEpoch = acquired.lease.leaseEpoch;
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
-      const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
+      // Prefer the COLD lease's preserved resume_state when it carries a persisted
+      // /workspace snapshot (confirmDrainCold keeps a minimal archive-only envelope
+      // across draining->cold for exactly this re-warm). establishSandboxSessionFromEnvelope
+      // cold-creates a fresh box and replays the archive via hydrateWorkspace, so
+      // /workspace survives box churn (sandbox-file-persistence). No archive ->
+      // the bare session envelope (a never-warmed cold start). Mirrors channel-a.ts's
+      // spawner branch: the lease's resume_state is authoritative; the session
+      // `_sandbox` envelope is the per-session fallback. Without this a turn-first
+      // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
+      const spawnEnvelope = acquired.lease.resumeState ?? envelope;
+      const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),

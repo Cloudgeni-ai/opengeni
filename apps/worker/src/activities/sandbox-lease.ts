@@ -106,9 +106,14 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  *   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished). The box
  *                     is wanted again; the seam MUST NOT terminate it.
  *   - priorArchive -> the superseded archive (if any) to GC the prior snapshot.
+ *
+ * Pass null for archiveBase64 to CAS-check WITHOUT writing (re-arm guard for
+ * backends with no persistWorkspace — ensures a re-arm during the snapshot window
+ * aborts the terminate before client.delete()). priorArchive is always null in
+ * this case.
  */
 export type PersistArchiveFn = (
-  archiveBase64: string,
+  archiveBase64: string | null,
 ) => Promise<{ wrote: boolean; priorArchive: string | null }>;
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
@@ -355,7 +360,7 @@ async function terminateDrainableBox(
   // Same guard as confirmDrainCold (draining AND refcount=0 AND lease_epoch=
   // expected): a re-arm or newer epoch that snuck in writes ZERO rows → wrote:false
   // → the seam leaves the box RUNNING and we skip the cold-commit below.
-  const persistArchive: PersistArchiveFn = async (archiveBase64: string) =>
+  const persistArchive: PersistArchiveFn = async (archiveBase64: string | null) =>
     await persistDrainSnapshot(db, {
       accountId,
       workspaceId: row.workspaceId,
@@ -517,8 +522,15 @@ export async function terminateProviderBox(
   // Fold the captured archive onto the lease under the epoch fence, then GC the
   // superseded snapshot. A CAS miss (wrote:false) means the lease was re-armed
   // mid-drain: the box is wanted again — DO NOT terminate it (return false; the
-  // caller skips confirmDrainCold). A box with no archive (a backend whose session
-  // has no persistWorkspace) skips the persist+GC but still terminates.
+  // caller skips confirmDrainCold).
+  //
+  // Re-arm guard for no-archive path: even when persistWorkspace returned no bytes
+  // (a backend with no persistWorkspace, or an empty result), we MUST still CAS-
+  // check before delete(). The snapshot window (resume → persistWorkspace) can be
+  // long; a late acquireLease re-arm (draining→warm, same epoch) can land in it,
+  // so without this check we would delete a box the lease now treats as live. The
+  // null-archive path of persistArchive does exactly this: FOR UPDATE + liveness/
+  // refcount/epoch guard, no write. wrote:false → abort the terminate.
   if (archiveBytes && archiveBytes.length > 0) {
     const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
     const { wrote, priorArchive } = await persistArchive(archiveBase64);
@@ -538,6 +550,18 @@ export async function terminateProviderBox(
         backend,
         snapshotId: deleted,
       });
+    }
+  } else {
+    // No archive produced (backend has no persistWorkspace or returned empty).
+    // CAS-check via persistArchive(null): if the lease was re-armed during the
+    // snapshot window, wrote:false → leave the box RUNNING (abort terminate).
+    const { wrote } = await persistArchive(null);
+    if (!wrote) {
+      observability.info("sandbox reaper: lease re-armed during snapshot window (no-archive path) — leaving box RUNNING (no terminate)", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      return false;
     }
   }
 

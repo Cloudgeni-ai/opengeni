@@ -614,6 +614,159 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(created).toBe(1); // still exactly one Schedule.
   });
 
+  // ── FINDING 1: re-arm during no-archive snapshot window must NOT delete a live box.
+  // When a backend produces no archive (persistWorkspace returns nothing), the
+  // terminate seam previously skipped the persist CAS entirely and called delete()
+  // unconditionally. If a re-arm landed in the snapshot window the box was killed
+  // while live. The fix: call persistArchive(null) as a CAS-check-only gate.
+  test("(F1) no-archive path: lease re-armed during snapshot window aborts terminate (no delete)", async () => {
+    if (!available) return;
+
+    // A draining lease, grace elapsed → will be picked up by reapSandboxLeases.
+    const ws = await freshWorkspace();
+    const EPOCH = 3;
+    await insertLease(ws, {
+      liveness: "draining", refcount: 0, leaseEpoch: EPOCH, expiresInMs: -1_000,
+      instanceId: "box-no-archive", backend: "local", resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    // A spy that:
+    //   (a) produces NO archive (simulates a backend with no persistWorkspace), and
+    //   (b) re-arms the lease mid-snapshot (atomically before calling persistArchive)
+    //   — so persistArchive(null) should find refcount>0 or liveness!=draining and
+    //   return wrote:false → the seam returns false → no delete → lease stays re-armed.
+    let deleteCount = 0;
+    const reArmSpy: TerminateBoxFn = async (_settings, lease, _observability, persistArchive) => {
+      // Simulate the re-arm: flip the draining lease back to warm with a viewer holder
+      // BEFORE the CAS-check so that persistArchive(null) misses.
+      await admin`
+        update sandbox_leases set liveness = 'warm', refcount = 1, viewer_holders = 1
+        where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}
+          and liveness = 'draining' and lease_epoch = ${lease.leaseEpoch}`;
+      // persistArchive(null) = CAS-check without writing. Should return wrote:false
+      // because liveness is now 'warm'.
+      const { wrote } = await persistArchive(null);
+      if (!wrote) {
+        // Correctly aborted: box left running.
+        return false;
+      }
+      deleteCount += 1;
+      return true;
+    };
+
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: reArmSpy });
+    const result = await reapSandboxLeases();
+
+    // The terminate was ABORTED (the box was re-armed). No delete fired.
+    expect(deleteCount).toBe(0);
+    expect(result.terminated).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+    // The lease should still be warm (re-armed) — not killed or cold.
+    const row = await readRow(ws.workspaceId, ws.groupId);
+    expect(row?.liveness).toBe("warm");
+    expect(row?.refcount).toBe(1);
+  }, 60_000);
+
+  // ── FINDING 1 (positive case): no-archive path with no re-arm should still terminate.
+  test("(F1b) no-archive path: no re-arm → persistArchive(null) succeeds → box is terminated → lease cold", async () => {
+    if (!available) return;
+
+    const ws = await freshWorkspace();
+    await insertLease(ws, {
+      liveness: "draining", refcount: 0, leaseEpoch: 4, expiresInMs: -1_000,
+      instanceId: "box-no-archive-ok", backend: "local", resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    let deleteCount = 0;
+    const noArchiveSpy: TerminateBoxFn = async (_settings, _lease, _observability, persistArchive) => {
+      // No archive produced. CAS-check via null: lease is still draining → wrote:true.
+      const { wrote } = await persistArchive(null);
+      if (!wrote) return false;
+      deleteCount += 1;
+      return true;
+    };
+
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: noArchiveSpy });
+    await reapSandboxLeases();
+
+    expect(deleteCount).toBe(1);
+    const row = await readRow(ws.workspaceId, ws.groupId);
+    expect(row?.liveness).toBe("cold");
+  }, 60_000);
+
+  // ── FINDING 2: failed cold-warm preserves the workspace archive for retry.
+  // When failWarmingToCold rolls back a failed spawn, it used to null resume_state
+  // unconditionally, destroying the archive a prior drain had folded onto the cold
+  // lease. The next re-warm would start an empty box. The fix: preserve the minimal
+  // archive-only envelope (same shape confirmDrainCold keeps) across the failure.
+  test("(F2) failWarmingToCold preserves the /workspace archive on the lease for retry", async () => {
+    if (!available) return;
+
+    const ws = await freshWorkspace();
+    const ARCHIVE_B64 = Buffer.from("WORKSPACE_ARCHIVE_RETRY_TEST").toString("base64");
+    // Simulate a cold lease that already carries a persisted /workspace archive
+    // (from a prior drain). A re-warm attempt won the warming CAS but then the
+    // spawn failed, so failWarmingToCold must NOT destroy the archive.
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${ws.accountId}, ${ws.workspaceId}, ${ws.groupId}, 'warming', 0, 0, 0, null,
+        'modal', 7, 'modal',
+        ${JSON.stringify({
+          backendId: "modal",
+          sessionState: { workspaceArchive: ARCHIVE_B64 },
+        })}::text::jsonb,
+        now() + interval '60s'
+      )`;
+
+    // Simulate spawn failure: call failWarmingToCold.
+    const { failWarmingToCold: failWarmToCold } = await import("@opengeni/db");
+    await failWarmToCold(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: 7 });
+
+    // The lease must be cold again, but the archive must survive.
+    const [row] = await admin<{ liveness: string; archive: string | null; backend_id: string | null; resume_backend_id: string | null }[]>`
+      select liveness,
+             resume_state #>> '{sessionState,workspaceArchive}' as archive,
+             resume_state ->> 'backendId' as backend_id,
+             resume_backend_id
+      from sandbox_leases where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+
+    expect(row?.liveness).toBe("cold");
+    // Archive preserved — the next re-warm can hydrate from it.
+    expect(row?.archive).toBe(ARCHIVE_B64);
+    expect(row?.backend_id).toBe("modal");
+    expect(row?.resume_backend_id).toBe("modal");
+  }, 60_000);
+
+  // ── FINDING 2 (negative case): failWarmingToCold without an archive still nulls resume_state.
+  test("(F2b) failWarmingToCold without an archive nulls resume_state (clean cold, no regression)", async () => {
+    if (!available) return;
+
+    const ws = await freshWorkspace();
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch, expires_at
+      ) values (
+        ${ws.accountId}, ${ws.workspaceId}, ${ws.groupId}, 'warming', 0, 0, 0,
+        'modal', 3, now() + interval '60s'
+      )`;
+
+    const { failWarmingToCold: failWarmToCold } = await import("@opengeni/db");
+    await failWarmToCold(db, { accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId, expectedEpoch: 3 });
+
+    const [row] = await admin<{ liveness: string; resume_state: unknown }[]>`
+      select liveness, resume_state from sandbox_leases
+      where workspace_id = ${ws.workspaceId} and sandbox_group_id = ${ws.groupId}`;
+    expect(row?.liveness).toBe("cold");
+    expect(row?.resume_state).toBeNull();
+  }, 60_000);
+
   // ── Gated live-Modal terminate (opt-in). RUN_MODAL_LIVE=1 + [opengeni] profile
   //    in ~/.modal.toml. Stands up a real box, folds it onto a draining lease,
   //    runs the REAL reaper terminate path, asserts the box is stopped. Terminate

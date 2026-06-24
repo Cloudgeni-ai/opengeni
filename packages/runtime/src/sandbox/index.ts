@@ -608,10 +608,30 @@ export async function establishSandboxSessionFromEnvelope(
     if (workspaceArchive) {
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
       if (typeof hydrate === "function") {
-        // hydrateWorkspace may internally REPLACE the underlying box
-        // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
-        // the placeholder), so the instanceId must be re-read AFTER.
-        await hydrate.call(restored, workspaceArchive);
+        try {
+          // hydrateWorkspace may internally REPLACE the underlying box
+          // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
+          // the placeholder), so the instanceId must be re-read AFTER.
+          await hydrate.call(restored, workspaceArchive);
+        } catch (hydrateError) {
+          // sandbox-file-persistence: if hydrateWorkspace throws (snapshot GC'd,
+          // provider timeout, corrupt archive), the placeholder box created above is
+          // live but unhydrated — it would leak up to the full idle/hard lifetime
+          // (3600s) if we just re-throw. Best-effort delete/terminate it BEFORE
+          // re-throwing so no box leaks. The original error semantics are preserved
+          // (the re-throw propagates to the caller). This mirrors the reaper's
+          // discipline: NEVER leave an orphaned box running.
+          const restoredState = (restored as { state?: unknown }).state;
+          const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
+          if (typeof clientWithDelete.delete === "function" && restoredState !== undefined) {
+            try { await clientWithDelete.delete(restoredState); } catch { /* best-effort; re-throw the hydrate error below */ }
+          } else {
+            // No delete() — try a session-level close/terminate as a fallback.
+            const sess = restored as { close?: () => Promise<unknown>; terminate?: () => Promise<unknown> };
+            try { await (sess.terminate ?? sess.close)?.(); } catch { /* best-effort */ }
+          }
+          throw hydrateError;
+        }
       }
     }
     const restoredState = (restored as { state?: unknown }).state;
