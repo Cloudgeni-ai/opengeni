@@ -152,3 +152,115 @@ describe("ExecRenderer — failed+empty-output distinction", () => {
     await r.unmount();
   });
 });
+
+/* ---- Finding A: WebSearchRenderer — null entry in results array --------- */
+
+describe("WebSearchRenderer — null/undefined entries in results array", () => {
+  test("renders without throwing when results contains a null entry", async () => {
+    // Simulate a host-enriched output where one entry is null (untrusted data).
+    const item = toolItem({
+      name: "web_search_call",
+      arguments: JSON.stringify({ query: "safe null test" }),
+      raw: { providerData: { action: { query: "safe null test" } } },
+      output: {
+        results: [
+          null,
+          { title: "Good Result", domain: "example.com", snippet: "A real result." },
+          undefined,
+          { title: "Another Good", domain: "other.com", snippet: "Also real." },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    // Must not throw during render.
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    // Expand the disclosure to see the body.
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // The two valid entries should appear; the nulls are silently dropped.
+    expect(text).toContain("Good Result");
+    expect(text).toContain("Another Good");
+
+    await r.unmount();
+  });
+
+  test("all-null results array renders the fallback note, not a crash", async () => {
+    const item = toolItem({
+      name: "web_search_call",
+      arguments: JSON.stringify({ query: "all null" }),
+      raw: { providerData: { action: { query: "all null" } } },
+      output: { results: [null, null] },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    // Expand.
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // No valid results → fallback note.
+    expect(text.toLowerCase()).toContain("no list available");
+
+    await r.unmount();
+  });
+});
+
+/* ---- Finding B: failed tool WITH non-empty output shows failure affordance */
+
+describe("ExecRenderer — failed status with non-empty output", () => {
+  const execArgs = JSON.stringify({ cmd: "make build" });
+
+  test("failed status with non-empty output carries the failure affordance", async () => {
+    // Simulate a tool that returned output but the SDK marked the call failed
+    // (e.g. MCP isError:true with a non-empty error message in output).
+    const item = toolItem({
+      name: "exec_command",
+      arguments: execArgs,
+      output: "make: *** [build] Error 2\nsome build output here",
+      status: "failed",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // The failure affordance must be present — either the "failed" chip text
+    // or the exit-code chip. We look for "fail" to cover both cases.
+    expect(text.toLowerCase()).toContain("fail");
+
+    await r.unmount();
+  });
+
+  test("failed status with non-empty output still shows the output on expand", async () => {
+    const item = toolItem({
+      name: "exec_command",
+      arguments: execArgs,
+      output: "unique-output-marker-xyz",
+      status: "failed",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    // Expand.
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // Output still visible after expand.
+    expect(text).toContain("unique-output-marker-xyz");
+
+    await r.unmount();
+  });
+});

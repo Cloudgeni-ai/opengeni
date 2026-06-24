@@ -53,6 +53,17 @@ export type ActivityDisclosureProps = {
   media?: ReactNode | undefined;
   /** At most one quiet settle chip, right-aligned to the gutter. */
   chip?: DisclosureChip | undefined;
+  /**
+   * When true the row carries the standard failure affordance: the icon is tinted
+   * red and a "failed" bad-chip appears in the right gutter (unless an explicit
+   * `chip` is already supplied — the caller's chip wins). Output is still visible
+   * on expand; this is a quiet status signal, not a blocking banner.
+   *
+   * Renderers should pass `failed={item.status === "failed"}` on their settled
+   * (non-running) paths so any tool with a failed status shows a consistent
+   * affordance without each renderer having to duplicate the logic.
+   */
+  failed?: boolean | undefined;
   /** When false the row is a static line (no expand affordance). */
   expandable?: boolean | undefined;
   children?: ReactNode | undefined;
@@ -73,16 +84,22 @@ const ICON_TONE: Record<NonNullable<ActivityDisclosureProps["iconTone"]>, string
  */
 export function ActivityDisclosure({
   icon,
-  iconTone = "muted",
+  iconTone: iconToneProp = "muted",
   title,
   titleMono,
   running,
   preview,
   media,
-  chip,
+  chip: chipProp,
+  failed,
   expandable = true,
   children,
 }: ActivityDisclosureProps) {
+  // When `failed` is set the icon goes red and a "failed" chip appears in the
+  // gutter — unless the caller already supplied an explicit chip (their chip wins,
+  // e.g. an exit-code chip that is more informative than a bare "failed" label).
+  const iconTone = failed && iconToneProp === "muted" ? "failed" : iconToneProp;
+  const chip = chipProp ?? (failed ? ({ tone: "bad", text: "failed" } satisfies DisclosureChip) : undefined);
   // An ancestor may seed the initial open state (screenshot instrumentation);
   // absent in normal app usage, where the row starts collapsed.
   const forcedDefaultOpen = useForcedDefaultOpen();

@@ -171,6 +171,7 @@ function ExecRenderer({ item }: ToolRendererProps) {
       title={title}
       titleMono
       {...(chip ? { chip } : {})}
+      failed={item.status === "failed"}
       preview={truncated ? `⋯ truncated · ${preview}` : preview}
     >
       <TermBlock command={null} workdir={workdir} output={body} />
@@ -208,6 +209,7 @@ function WriteStdinRenderer({ item }: ToolRendererProps) {
       title={`session ${sessionId} ← ${keys || "∅"}`}
       titleMono
       {...(chip ? { chip } : {})}
+      failed={item.status === "failed"}
       preview={lost ? `session ${sessionId} PTY vanished` : tailPeek(stripped) || "sent"}
     >
       {lost ? (
@@ -537,8 +539,11 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
   const variants = queries.length > 1 ? ` +${queries.length - 1} variants` : "";
   const running = item.status === "running";
   // web_search may surface a results array on the output when the host enriches it.
-  const results = Array.isArray((item.output as { results?: unknown })?.results)
-    ? ((item.output as { results: WebSearchResult[] }).results)
+  // Filter out null/undefined/non-object entries before casting: host-provided
+  // data is untrusted and a null element would throw on result.title access.
+  const rawResults = (item.output as { results?: unknown } | undefined)?.results;
+  const results = Array.isArray(rawResults)
+    ? (rawResults as unknown[]).filter((r): r is WebSearchResult => !!r && typeof r === "object")
     : undefined;
 
   if (running) {
@@ -561,6 +566,7 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
       iconTone="muted"
       title="Searched the web"
       preview={`${query}${variants}`}
+      failed={item.status === "failed"}
     >
       {results && results.length ? (
         <ul className="flex flex-col gap-2">
