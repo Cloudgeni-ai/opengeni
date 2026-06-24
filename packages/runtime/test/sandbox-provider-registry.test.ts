@@ -81,8 +81,8 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.appName).toBe("my-app");
     expect(client.options?.tokenId).toBe("tok-id");
     expect(client.options?.tokenSecret).toBe("tok-secret");
-    // 900s default → ms.
-    expect(client.options?.timeoutMs).toBe(900_000);
+    // 3600s default → ms.
+    expect(client.options?.timeoutMs).toBe(3_600_000);
   });
 
   test("modal both-or-neither token validation fails fast (typed error)", () => {

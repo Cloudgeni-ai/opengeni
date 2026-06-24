@@ -93,6 +93,8 @@ type TerminableSession = {
   closed?: boolean;
 };
 
+type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
+
 /** The provider-terminate seam. Production wires the real resume-by-id +
  *  provider stop() (`terminateProviderBox`); a unit test injects a spy so the
  *  drain/CAS logic is exercised against a real DB without a live provider box. */
@@ -364,6 +366,7 @@ export async function terminateProviderBox(
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
   observability: ActivityServices["observability"],
+  createClientForBackend: CreateSandboxClientForBackendFn = createSandboxClientForBackend,
 ): Promise<void> {
   const backend = (lease.resumeBackendId ?? lease.backend) as string;
   // 'none' / no backend -> nothing to terminate.
@@ -377,7 +380,7 @@ export async function terminateProviderBox(
     return;
   }
 
-  const client = createSandboxClientForBackend(backend as never, settings) as TerminableClient | undefined;
+  const client = createClientForBackend(backend as never, settings) as TerminableClient | undefined;
   if (!client) {
     // 'none' backend resolved to no client.
     return;

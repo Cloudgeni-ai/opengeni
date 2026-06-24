@@ -214,14 +214,24 @@ export class SandboxChannelAService {
   async fsList(req: FsListRequest): Promise<FsListResponse> {
     const root = normalizeRelPath(req.path);
     // A single bounded `find` (NUL-delimited) builds the whole subtree in one
-    // round-trip — far cheaper than N listDir calls. GNU find (-printf) is on
-    // the Ubuntu-based images; a non-GNU find degrades to an empty tree node
-    // (the route still returns a coherent root, never throws).
+    // round-trip. Prefer GNU find's -printf on the Ubuntu-based images, but fall
+    // back to a POSIX-ish find+stat loop for unix_local on macOS/BSD.
     const findRoot = root === "" ? "." : shellQuote(root);
     const depthArg = Math.max(1, req.depth);
     const hidden = req.includeHidden ? "" : ` -not -path '*/.*'`;
-    const cmd = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -printf '%y\\t%s\\t%T@\\t%m\\t%p\\0' 2>/dev/null`;
-    const { stdout } = await this.run({ cmd, workdir: this.workspaceRoot || undefined });
+    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -printf '%y\\t%s\\t%T@\\t%m\\t%p\\0' 2>/dev/null`;
+    let { stdout } = await this.run({ cmd: `bash -lc ${shellQuote(gnuFind)}`, workdir: this.workspaceRoot || undefined });
+    if (!stdout) {
+      const portableFind = [
+        `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -print0 2>/dev/null | while IFS= read -r -d '' p; do`,
+        `if [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); elif [ -L "$p" ]; then t=l; size=0; else t=o; size=0; fi;`,
+        `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
+        `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
+        `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
+        `done`,
+      ].join(" ");
+      ({ stdout } = await this.run({ cmd: `bash -lc ${shellQuote(portableFind)}`, workdir: this.workspaceRoot || undefined }));
+    }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
     const rootNode: FsTreeNode = {

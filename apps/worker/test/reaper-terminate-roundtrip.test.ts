@@ -13,16 +13,13 @@
 // client (resume() throws the exact UserError when sandboxId is missing, exactly
 // like the SDK) over a PRODUCTION envelope built by the real
 // serializeEstablishedSandboxEnvelope. Pre-fix it threw; post-fix it resumes by
-// sandboxId and terminates. createSandboxClientForBackend is mock-injected; the
-// real deserialize/serialize/NotFound helpers run unmocked.
+// sandboxId and terminates. The provider client builder is injected explicitly so
+// this test does not mock @opengeni/runtime globally and poison unrelated tests.
 
-import { afterAll, describe, expect, mock, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import * as runtime from "@opengeni/runtime";
-
-// Snapshot the REAL runtime exports BEFORE mocking so the mock factory can spread
-// them (and the test can call the real serialize/deserialize directly).
-const realRuntime = { ...runtime };
+import { terminateProviderBox } from "../src/activities/sandbox-lease";
 
 // A Modal-faithful fake provider client. resume() enforces the SAME invariant the
 // real SDK does (throws when state.sandboxId is absent), so a regressed envelope
@@ -53,16 +50,6 @@ function makeFakeModalClient() {
   };
 }
 
-mock.module("@opengeni/runtime", () => ({
-  ...realRuntime,
-  createSandboxClientForBackend: (backend: string) =>
-    backend === "modal" ? makeFakeModalClient() : undefined,
-}));
-
-afterAll(() => {
-  mock.restore();
-});
-
 const observability = {
   info() {},
   warn() {},
@@ -79,19 +66,19 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       instanceId: "sb-trap",
       backendId: "modal",
     };
-    const envelope = await realRuntime.serializeEstablishedSandboxEnvelope(established as never);
+    const envelope = await runtime.serializeEstablishedSandboxEnvelope(established as never);
     expect(envelope).toBeTruthy();
     // sandboxId lives at envelope.sessionState.providerState.sandboxId — NOT at
     // the top level. Feeding the WHOLE envelope to the deserializer reads
     // top-level `providerState` (undefined) → drops sandboxId (the bug).
-    const dropped = (await realRuntime.deserializeSandboxSessionStateEnvelope(
+    const dropped = (await runtime.deserializeSandboxSessionStateEnvelope(
       makeFakeModalClient() as never,
       envelope as never,
     )) as { sandboxId?: unknown };
     expect(dropped?.sandboxId).toBeUndefined();
     // Unwrapping `.sessionState` first (what the working path / the fix does)
     // preserves sandboxId.
-    const kept = (await realRuntime.deserializeSandboxSessionStateEnvelope(
+    const kept = (await runtime.deserializeSandboxSessionStateEnvelope(
       makeFakeModalClient() as never,
       (envelope as { sessionState?: unknown }).sessionState as never,
     )) as { sandboxId?: unknown };
@@ -102,10 +89,6 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     resumeCalls.length = 0;
     deleteCalls.length = 0;
 
-    // Dynamic import AFTER the mock so terminateProviderBox binds the fake
-    // createSandboxClientForBackend.
-    const { terminateProviderBox } = await import("../src/activities/sandbox-lease");
-
     const established = {
       client: makeFakeModalClient(),
       session: {},
@@ -114,7 +97,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       backendId: "modal",
     };
     // The exact resume_state shape the lease stores on a turn / Channel-A commit.
-    const resumeState = await realRuntime.serializeEstablishedSandboxEnvelope(established as never);
+    const resumeState = await runtime.serializeEstablishedSandboxEnvelope(established as never);
 
     const lease = {
       sandboxGroupId: "group-1",
@@ -127,7 +110,12 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
 
     // Pre-fix this threw the Modal UserError; post-fix it resolves cleanly.
-    await terminateProviderBox(settings, lease as never, observability);
+    await terminateProviderBox(
+      settings,
+      lease as never,
+      observability,
+      ((backend: string) => backend === "modal" ? makeFakeModalClient() : undefined) as never,
+    );
 
     expect(resumeCalls).toEqual(["sb-live-123"]); // resumed BY ID, not thrown
     expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID
