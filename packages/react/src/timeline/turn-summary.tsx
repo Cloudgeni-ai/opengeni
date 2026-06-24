@@ -1,0 +1,125 @@
+import { CheckIcon, ChevronRightIcon, CircleSlashIcon, TriangleAlertIcon } from "lucide-react";
+import { useState } from "react";
+import { Collapsible } from "radix-ui";
+import { cn } from "../lib/cn";
+import { useForcedDefaultOpen } from "./disclosure-context";
+import { applyPatchOps, isApplyPatch } from "./parsers";
+import { rawTypeOf } from "./registry";
+import type { ActivityItem } from "./types";
+
+/* ----------------------------------------------------------------------------
+   Turn summary
+
+   A completed (or failed/cancelled) turn's activity folds behind one quiet
+   summary chip: "N steps · M files · K commands · 1 screenshot". The chip is the
+   default surface; expanding it reveals the full activity rail (the caller's
+   rendered rows). A live turn never folds — render its rows directly.
+
+   This keeps the timeline calm: a finished turn is a single line until the
+   reader chooses to look inside it.
+   -------------------------------------------------------------------------- */
+
+export type TurnOutcome = "complete" | "failed" | "cancelled";
+
+export type TurnSummaryProps = {
+  /** The activity items in the turn (used only to compute the facet counts). */
+  items: ActivityItem[];
+  outcome: TurnOutcome;
+  /** A short failure reason shown inline on a failed chip (never hidden). */
+  failureText?: string | undefined;
+  /** Start expanded. */
+  defaultOpen?: boolean | undefined;
+  /** The rendered activity rail revealed on expand. */
+  children: React.ReactNode;
+};
+
+export function TurnSummary({ items, outcome, failureText, defaultOpen, children }: TurnSummaryProps) {
+  // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
+  // (screenshot instrumentation); otherwise the turn starts folded.
+  const forcedDefaultOpen = useForcedDefaultOpen();
+  const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
+  const facets = summarizeTurn(items);
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen} className="animate-og-enter">
+      <Collapsible.Trigger
+        className={cn(
+          "group flex w-full items-center gap-2.5 rounded-og-md border px-3 py-2 text-left text-og-base transition-colors",
+          // Only a failed turn earns the one filled/tinted card in the timeline;
+          // complete and cancelled stay flat and calm.
+          outcome === "failed"
+            ? "border-og-status-failed/30 bg-og-status-failed/[0.06] hover:border-og-status-failed/50"
+            : "border-og-border bg-og-surface-1/50 hover:border-og-border-strong",
+        )}
+      >
+        {/* Disclosure grammar matches the rows: chevron leads (far left), then the
+            outcome glyph, then the facets — one expand affordance side everywhere. */}
+        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
+        {/* Only the exceptional outcomes earn a filled tinted circle. A clean
+            (complete) run draws a bare muted check — zero colored fills, so the
+            eye is pulled only to a turn that needs attention. */}
+        <span
+          className={cn(
+            "inline-flex size-5 shrink-0 items-center justify-center rounded-full",
+            outcome === "failed"
+              ? "bg-og-status-failed/15 text-og-status-failed"
+              : outcome === "cancelled"
+                ? "bg-og-fg-subtle/15 text-og-fg-subtle"
+                : "text-og-fg-subtle",
+          )}
+        >
+          {outcome === "failed" ? (
+            <TriangleAlertIcon className="size-3" />
+          ) : outcome === "cancelled" ? (
+            <CircleSlashIcon className="size-3" />
+          ) : (
+            <CheckIcon className="size-3.5" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-og-fg-muted">
+          {facets}
+          {outcome === "failed" && failureText ? (
+            <span className="text-og-status-failed"> · {failureText}</span>
+          ) : null}
+          {outcome === "cancelled" ? <span className="text-og-fg-subtle"> · interrupted</span> : null}
+        </span>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">
+        <div className="pt-2">{children}</div>
+      </Collapsible.Content>
+    </Collapsible.Root>
+  );
+}
+
+/** Compose the facet summary line ("14 steps · 3 files · 2 commands · 1 screenshot · 4m"). */
+function summarizeTurn(items: ActivityItem[]): string {
+  let files = 0;
+  let commands = 0;
+  let screenshots = 0;
+  for (const item of items) {
+    if (item.kind !== "tool-call") {
+      continue;
+    }
+    // `item` is narrowed to ToolCallItem by the guard above — no cast needed.
+    if (isApplyPatch(item)) {
+      files += applyPatchOps(item.raw).length;
+    } else if (item.name === "exec_command") {
+      commands += 1;
+    } else if (rawTypeOf(item) === "computer_call" || item.name === "computer_call") {
+      if (typeof item.output === "string" && item.output.startsWith("data:image")) {
+        screenshots += 1;
+      }
+    }
+  }
+  const parts = [`${items.length} ${items.length === 1 ? "step" : "steps"}`];
+  if (files) {
+    parts.push(`${files} ${files === 1 ? "file" : "files"} edited`);
+  }
+  if (commands) {
+    parts.push(`${commands} ${commands === 1 ? "command" : "commands"}`);
+  }
+  if (screenshots) {
+    parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
+  }
+  return parts.join(" · ");
+}

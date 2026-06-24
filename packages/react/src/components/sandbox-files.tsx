@@ -2,6 +2,7 @@ import type { FsReadResponse, GitFileDiff } from "@opengeni/sdk";
 import { FileIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../lib/cn";
+import { useThemeType } from "../lib/use-theme-type";
 import type { UseSandboxFilesResult } from "../hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../hooks/use-sandbox-git";
 import { CodeEditor } from "./code-editor";
@@ -405,32 +406,6 @@ function Segmented({
       ))}
     </div>
   );
-}
-
-/**
- * Resolve the diff theme. An explicit prop wins; otherwise read the host's
- * `data-og-theme` (set on `<html>` or an ancestor) and default to dark. Tracks
- * live theme flips via a MutationObserver.
- */
-function useThemeType(forced: "dark" | "light" | undefined): "dark" | "light" {
-  const [detected, setDetected] = useState<"dark" | "light">("dark");
-  useEffect(() => {
-    if (forced || typeof document === "undefined") return;
-    const read = () => {
-      const el = document.querySelector("[data-og-theme]");
-      const value = el?.getAttribute("data-og-theme");
-      setDetected(value === "light" ? "light" : "dark");
-    };
-    read();
-    const observer = new MutationObserver(read);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-og-theme"],
-      subtree: true,
-    });
-    return () => observer.disconnect();
-  }, [forced]);
-  return forced ?? detected;
 }
 
 type FileViewState = {

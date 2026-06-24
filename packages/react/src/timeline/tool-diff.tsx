@@ -1,0 +1,91 @@
+import type { GitFileDiff } from "@opengeni/sdk";
+import { useState } from "react";
+import { cn } from "../lib/cn";
+import { useThemeType } from "../lib/use-theme-type";
+import { DiffView } from "../components/diff-view";
+import { PierreDiff } from "../components/pierre-diff";
+
+/* ----------------------------------------------------------------------------
+   Tool diff
+
+   Renders parsed `GitFileDiff[]` (from the V4A apply_patch parser) through the
+   EXACT same diff stack the Files tab uses: `DiffView` with `PierreDiff` wired
+   into its `fallback` seam, so a host with `@pierre/diffs` installed gets the
+   Shiki-highlighted Pierre renderer and everyone else gets the hand-rolled
+   one — a single data contract, zero divergence. A per-block Unified/Split
+   toggle sits in the header.
+   -------------------------------------------------------------------------- */
+
+export function ToolDiff({ files }: { files: GitFileDiff[] }) {
+  const [layout, setLayout] = useState<"unified" | "split">("unified");
+  // Resolve the host theme (auto-detect via `data-og-theme`) with the SAME hook
+  // the Files tab uses, then thread it into Pierre. Without it Pierre falls back
+  // to its hard dark default and renders a github-dark slab inside a light page.
+  const themeType = useThemeType(undefined);
+  // The fallback chain reads top-down: try Pierre's Shiki renderer, and if it's
+  // not installed fall back to the built-in DiffView. The plain node is named
+  // once and reused, so the same props aren't threaded through three JSX nodes.
+  const plain = <DiffView diff={files} layout={layout} />;
+  return (
+    <div className="min-w-0">
+      <div className="mb-1.5 flex justify-end">
+        <LayoutToggle layout={layout} onChange={setLayout} />
+      </div>
+      <DiffView
+        diff={files}
+        layout={layout}
+        fallback={<PierreDiff diff={files} layout={layout} themeType={themeType} fallback={plain} />}
+      />
+    </div>
+  );
+}
+
+function LayoutToggle({ layout, onChange }: { layout: "unified" | "split"; onChange: (next: "unified" | "split") => void }) {
+  return (
+    <div className="inline-flex items-center gap-px rounded-og-xs border border-og-border p-px">
+      {(["unified", "split"] as const).map((value) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => onChange(value)}
+          className={cn(
+            "rounded-[5px] px-2 py-[3px] text-[11px] font-medium capitalize transition-colors",
+            layout === value ? "bg-og-surface-2 text-og-fg" : "text-og-fg-subtle hover:text-og-fg-muted",
+          )}
+        >
+          {value}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Raw-patch fallback for a V4A hunk string the parser could not structure. */
+export function RawPatch({ diff }: { diff: string }) {
+  return (
+    <div className="min-w-0">
+      <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
+        raw patch (could not parse hunks)
+      </p>
+      <pre className="max-h-72 overflow-auto rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-og-xs leading-5">
+        {diff.split("\n").map((line, index) => (
+          <span
+            key={index}
+            className={cn(
+              "block",
+              line.startsWith("@@")
+                ? "text-og-accent"
+                : line.startsWith("+")
+                  ? "text-og-status-idle"
+                  : line.startsWith("-")
+                    ? "text-og-status-failed"
+                    : "text-og-fg-muted",
+            )}
+          >
+            {line || " "}
+          </span>
+        ))}
+      </pre>
+    </div>
+  );
+}

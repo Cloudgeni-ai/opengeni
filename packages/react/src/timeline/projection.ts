@@ -1,5 +1,16 @@
-import type { ResourceRef, SessionEvent, SessionStatus, ToolRef } from "@opengeni/sdk";
-import { stringifyPayload, tryParseJson } from "./lib/format";
+import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+import { tryParseJson } from "../lib/format";
+import type {
+  AgentMessageItem,
+  ActivityItem,
+  GoalItem,
+  SandboxItem,
+  SessionStatusItem,
+  TimelineGroup,
+  TimelineItem,
+  ToolCallItem,
+  WorkerItem,
+} from "./types";
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -14,112 +25,6 @@ import { stringifyPayload, tryParseJson } from "./lib/format";
    It is a pure function — same events in, same items out — so it can be
    memoized, unit-tested, and re-run incrementally as new events stream in.
    -------------------------------------------------------------------------- */
-
-export type UserMessageItem = {
-  kind: "user-message";
-  id: string;
-  text: string;
-  /** Resources attached to this message (file uploads, repositories). */
-  resources: ResourceRef[];
-  /** Tools requested for the turn this message starts. */
-  tools: ToolRef[];
-  occurredAt: string;
-};
-
-export type AgentMessageItem = {
-  kind: "agent-message";
-  id: string;
-  turnId: string | null;
-  text: string;
-  /** Still receiving deltas (no completed/turn-end seen yet). */
-  streaming: boolean;
-  occurredAt: string;
-};
-
-export type ReasoningItem = {
-  kind: "reasoning";
-  id: string;
-  turnId: string | null;
-  text: string;
-  streaming: boolean;
-  occurredAt: string;
-};
-
-export type ToolCallItem = {
-  kind: "tool-call";
-  id: string;
-  turnId: string | null;
-  callId: string | null;
-  name: string;
-  arguments: unknown;
-  output: unknown;
-  status: "running" | "complete";
-  occurredAt: string;
-};
-
-/**
- * An orchestration call against another session — the manager spawning or
- * messaging a worker. Rendered as a first-class "worker" row, not a generic
- * tool call.
- */
-export type WorkerItem = {
-  kind: "worker";
-  id: string;
-  turnId: string | null;
-  callId: string | null;
-  action: "spawn" | "message";
-  /** The worker's initial message / the message sent to it, when parseable. */
-  prompt: string | null;
-  /** The target/spawned worker session id, when parseable from args/output. */
-  workerSessionId: string | null;
-  status: "running" | "complete";
-  occurredAt: string;
-};
-
-export type SandboxItem = {
-  kind: "sandbox";
-  id: string;
-  turnId: string | null;
-  name: string;
-  command: string | null;
-  output: string;
-  status: "running" | "complete" | "failed";
-  occurredAt: string;
-};
-
-export type SessionStatusItem = {
-  kind: "session-status";
-  id: string;
-  status: SessionStatus;
-  occurredAt: string;
-};
-
-export type GoalItem = {
-  kind: "goal";
-  id: string;
-  action: "set" | "updated" | "completed" | "paused" | "resumed" | "continuation";
-  text: string | null;
-  occurredAt: string;
-};
-
-export type NoticeItem = {
-  kind: "notice";
-  id: string;
-  tone: "waiting" | "cancelled" | "failed";
-  text: string;
-  occurredAt: string;
-};
-
-export type TimelineItem =
-  | UserMessageItem
-  | AgentMessageItem
-  | ReasoningItem
-  | ToolCallItem
-  | WorkerItem
-  | SandboxItem
-  | SessionStatusItem
-  | GoalItem
-  | NoticeItem;
 
 /** Tool names on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
@@ -276,6 +181,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           name,
           arguments: args,
           output: undefined,
+          // The provider-native item drives the per-tool renderers (apply_patch
+          // operation, computer_call action, web_search providerData, …).
+          raw: payload.raw,
           status: "running",
           occurredAt: event.occurredAt,
         });
@@ -293,7 +201,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           target.workerSessionId = target.workerSessionId ?? extractSessionRef(payload.output);
           break;
         }
-        target.status = "complete";
+        // An output carrying an explicit error flag (or an MCP isError result)
+        // settles the tool to "failed" so the renderer can surface it loudly.
+        target.status = isErrorOutput(payload) ? "failed" : "complete";
         target.output = payload.output;
         break;
       }
@@ -442,22 +352,32 @@ export function sessionStatusFromEvents(events: SessionEvent[]): SessionStatus |
    sandbox) cluster into one collapsible block between chat messages.
    -------------------------------------------------------------------------- */
 
-export type TimelineGroup =
-  | { kind: "item"; item: TimelineItem }
-  | { kind: "activity"; id: string; items: (ReasoningItem | ToolCallItem | WorkerItem | SandboxItem)[] };
-
-const ACTIVITY_KINDS = new Set(["reasoning", "tool-call", "worker", "sandbox"]);
+/**
+ * Whether an item clusters into an activity block. A `switch` (not a stringly-
+ * typed set) so adding an {@link ActivityItem} kind is a compile-time prompt to
+ * decide its grouping — and it narrows `item` to `ActivityItem` with no cast.
+ */
+function isActivityItem(item: TimelineItem): item is ActivityItem {
+  switch (item.kind) {
+    case "reasoning":
+    case "tool-call":
+    case "worker":
+    case "sandbox":
+      return true;
+    default:
+      return false;
+  }
+}
 
 export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
   const groups: TimelineGroup[] = [];
   for (const item of items) {
-    if (ACTIVITY_KINDS.has(item.kind)) {
+    if (isActivityItem(item)) {
       const open = groups[groups.length - 1];
-      const activity = item as ReasoningItem | ToolCallItem | WorkerItem | SandboxItem;
       if (open?.kind === "activity") {
-        open.items.push(activity);
+        open.items.push(item);
       } else {
-        groups.push({ kind: "activity", id: `activity-${item.id}`, items: [activity] });
+        groups.push({ kind: "activity", id: `activity-${item.id}`, items: [item] });
       }
       continue;
     }
@@ -475,11 +395,11 @@ function asRecord(value: unknown): Record<string, unknown> {
 const SESSION_STATUSES: readonly SessionStatus[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
 
 /** Keep only entries that match the wire shapes; user payloads are untyped. */
-function resourceRefs(value: unknown): ResourceRef[] {
+function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter((entry): entry is ResourceRef => {
+  return value.filter((entry): entry is import("@opengeni/sdk").ResourceRef => {
     const record = asRecord(entry);
     if (record.kind === "repository") {
       return typeof record.uri === "string" && typeof record.ref === "string";
@@ -488,11 +408,11 @@ function resourceRefs(value: unknown): ResourceRef[] {
   });
 }
 
-function toolRefs(value: unknown): ToolRef[] {
+function toolRefs(value: unknown): import("@opengeni/sdk").ToolRef[] {
   if (!Array.isArray(value)) {
     return [];
   }
-  return value.filter((entry): entry is ToolRef => {
+  return value.filter((entry): entry is import("@opengeni/sdk").ToolRef => {
     const record = asRecord(entry);
     return record.kind === "mcp" && typeof record.id === "string";
   });
@@ -500,6 +420,15 @@ function toolRefs(value: unknown): ToolRef[] {
 
 function isSessionStatus(value: unknown): value is SessionStatus {
   return typeof value === "string" && (SESSION_STATUSES as readonly string[]).includes(value);
+}
+
+/** Does this tool output represent an error (explicit flag or MCP `isError`)? */
+function isErrorOutput(payload: Record<string, unknown>): boolean {
+  if (payload.error === true || payload.failed === true) {
+    return true;
+  }
+  const output = payload.output;
+  return !!output && typeof output === "object" && (output as { isError?: unknown }).isError === true;
 }
 
 function findOpenCall(items: TimelineItem[], callId: string | null): ToolCallItem | WorkerItem | undefined {
@@ -623,10 +552,4 @@ function looksLikeId(value: string): boolean {
 /** Readable label for a tool call ("session_create" -> "session create"). */
 export function toolDisplayName(name: string): string {
   return name.replace(/[_-]+/g, " ").trim();
-}
-
-/** Compact, single-line preview of tool arguments/outputs for collapsed rows. */
-export function compactPayloadPreview(value: unknown, maxLength = 120): string {
-  const text = stringifyPayload(value).replace(/\s+/g, " ").trim();
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }

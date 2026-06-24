@@ -20,6 +20,18 @@
   --font-og-sans: var(--og-font-sans);
   --font-og-mono: var(--og-font-mono);
 
+  /* Type ramp — a real 4-step scale (no half-pixel hand-tuning). Every
+     timeline string maps to one of these via `text-og-{xs,sm,base,md}`;
+     mono reuses the same steps. */
+  --text-og-xs: 11px;
+  --text-og-xs--line-height: 1.45;
+  --text-og-sm: 12px;
+  --text-og-sm--line-height: 1.5;
+  --text-og-base: 13px;
+  --text-og-base--line-height: 1.55;
+  --text-og-md: 15px;
+  --text-og-md--line-height: 1.6;
+
   --color-og-bg: var(--og-color-bg);
   --color-og-surface-1: var(--og-color-surface-1);
   --color-og-surface-2: var(--og-color-surface-2);
@@ -63,6 +75,44 @@
   --animate-og-blink: og-blink 1s steps(2, start) infinite;
   --animate-og-shimmer: og-shimmer 2.2s linear infinite;
   --animate-og-spin: og-spin 0.9s linear infinite;
+  --animate-og-expand: og-expand var(--og-duration-fast) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--og-duration-fast) var(--og-ease-in-out);
+}
+
+/* Radix Collapsible disclosure: height auto-animates via the content var. Used
+   by the timeline tool rows so an expand glides open instead of snapping.
+
+   Height carries the motion; opacity is a SUBTLE fade that resolves slightly
+   ahead of the height so the body never pops in at full size, but also never
+   flickers half-transparent mid-glide. The ease is a symmetric ease-in-out
+   (no overshoot), so open and close feel like the same short, calm motion with
+   no double-bounce. */
+@keyframes og-expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes og-collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  40% {
+    opacity: 0;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
 }
 
 /* Entry: messages and timeline rows slide in just enough to feel placed. */

@@ -84,13 +84,13 @@ export type { PendingApproval } from "./approvals";
 // Timeline projection
 export {
   buildTimeline,
-  compactPayloadPreview,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
   toolDisplayName,
 } from "./timeline";
 export type {
+  ActivityItem,
   AgentMessageItem,
   GoalItem,
   NoticeItem,
@@ -103,6 +103,60 @@ export type {
   UserMessageItem,
   WorkerItem,
 } from "./timeline";
+
+// Tool-renderer registry + the per-tool renderers (the timeline's extension API)
+export { createDefaultToolRegistry, createToolRegistry, defaultToolRegistry, rawTypeOf } from "./timeline";
+export type {
+  CreateToolRegistryOptions,
+  ToolRegistry,
+  ToolRegistryEntry,
+  ToolRenderer,
+  ToolRendererProps,
+} from "./timeline";
+
+// Timeline rendering primitives + the screenshot lightbox (compose custom renderers)
+export {
+  ActivityDisclosure,
+  ActivityRail,
+  BodyNote,
+  DisclosureDefaultsProvider,
+  LightboxProvider,
+  MediaEmpty,
+  MediaSkeleton,
+  PayloadBlock,
+  ScreenshotFigure,
+  TermBlock,
+  Thumbnail,
+  TurnSummary,
+  useLightbox,
+  useLightboxOptional,
+} from "./timeline";
+export type {
+  ActivityDisclosureProps,
+  ActivityRailProps,
+  DisclosureChip,
+  TurnOutcome,
+  TurnSummaryProps,
+} from "./timeline";
+
+// Pure provider-shape parsers (exec banner, V4A diff, secret redaction, …)
+export {
+  applyPatchOps,
+  controlCaret,
+  execTruncated,
+  isApplyPatch,
+  isExecSessionLostBanner,
+  looksBinary,
+  parseExecBannerSessionId,
+  parseToolArgs,
+  redactSecrets,
+  sandboxCommandExitCode,
+  stripExecBanner,
+  tailPeek,
+  unwrapMcpOutput,
+  v4aToGitFileDiff,
+} from "./timeline";
+export type { ApplyPatchOperation } from "./timeline";
 
 // Slash-command palette (registry + UI + hook)
 export {
@@ -138,7 +192,7 @@ export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
-export { MessageTimeline } from "./components/message-timeline";
+export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
 export { Markdown } from "./components/markdown";
 export type { MarkdownProps } from "./components/markdown";

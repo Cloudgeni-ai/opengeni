@@ -1,34 +1,32 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   ArrowDownIcon,
-  BotIcon,
-  BrainIcon,
-  ChevronRightIcon,
-  SquareTerminalIcon,
+  ArrowRightIcon,
+  CheckIcon,
+  PauseIcon,
+  PencilLineIcon,
+  PlayIcon,
   TargetIcon,
   TriangleAlertIcon,
-  WrenchIcon,
 } from "lucide-react";
+import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
-import { formatRelativeTime, stringifyPayload, truncate } from "../lib/format";
+import { formatRelativeTime, truncate } from "../lib/format";
 import { Markdown } from "./markdown";
 import {
+  ActivityRail,
   buildTimeline,
-  compactPayloadPreview,
+  defaultToolRegistry,
   groupTimeline,
-  toolDisplayName,
+  LightboxProvider,
   type AgentMessageItem,
   type GoalItem,
   type NoticeItem,
-  type ReasoningItem,
-  type SandboxItem,
   type TimelineItem,
-  type ToolCallItem,
+  type ToolRegistry,
   type UserMessageItem,
-  type WorkerItem,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 
@@ -43,6 +41,12 @@ export type MessageTimelineProps = {
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * The tool-renderer registry that resolves how each tool call is drawn.
+   * Defaults to {@link defaultToolRegistry}; pass a registry from
+   * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
+   */
+  toolRegistry?: ToolRegistry | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
   emptyState?: ReactNode | undefined;
@@ -61,6 +65,7 @@ export function MessageTimeline({
   status,
   renderMessageText,
   onOpenSession,
+  toolRegistry = defaultToolRegistry,
   autoFollow = true,
   emptyState,
   className,
@@ -91,6 +96,7 @@ export function MessageTimeline({
   };
 
   return (
+    <LightboxProvider>
     <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
@@ -99,7 +105,7 @@ export function MessageTimeline({
             : null}
           {groups.map((group) =>
             group.kind === "activity" ? (
-              <ActivityCluster key={group.id} items={group.items} onOpenSession={onOpenSession} />
+              <ActivityRail key={group.id} items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
             ) : (
               <TimelineRow key={group.item.id} item={group.item} renderMessageText={renderMessageText} />
             ),
@@ -139,12 +145,18 @@ export function MessageTimeline({
         ) : null}
       </AnimatePresence>
     </div>
+    </LightboxProvider>
   );
 }
 
 /* --- single rows ------------------------------------------------------------ */
 
-function TimelineRow({
+/**
+ * Render one non-activity timeline item (chat message, status divider, goal
+ * landmark, notice). Exported so the component demo draws the EXACT same rows as
+ * the live app — no forked bubble/goal markup.
+ */
+export function TimelineRow({
   item,
   renderMessageText,
 }: {
@@ -176,7 +188,7 @@ function UserMessageRow({
 }) {
   return (
     <div className="animate-og-enter flex justify-end">
-      <div className="max-w-[85%] min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-[15px] leading-6 text-og-fg">
+      <div className="max-w-[85%] min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
         {renderMessageText ? renderMessageText(item.text, item) : <Markdown>{item.text}</Markdown>}
       </div>
     </div>
@@ -194,7 +206,7 @@ function AgentMessageRow({
     <span className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent" aria-hidden />
   ) : null;
   return (
-    <div className="animate-og-enter min-w-0 text-[15px] leading-7 text-og-fg">
+    <div className="animate-og-enter min-w-0 text-og-md leading-7 text-og-fg">
       {renderMessageText ? (
         <>
           {renderMessageText(item.text, item)}
@@ -216,7 +228,7 @@ function AgentMessageRow({
 function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
   const meta = SESSION_STATUS_META[item.status];
   return (
-    <div className="animate-og-enter flex items-center gap-3 text-[11px] text-og-fg-subtle" role="status">
+    <div className="animate-og-enter flex items-center gap-3 text-og-xs text-og-fg-subtle" role="status">
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
         <StatusDot status={item.status} className="size-1" />
@@ -227,23 +239,47 @@ function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt:
   );
 }
 
+/**
+ * The per-action presentation of a goal landmark pill. Each of the six goal
+ * actions reads distinctly, but the palette stays quiet — color is spent only on
+ * the two states that genuinely earn it, the rest are neutral pills set apart by
+ * their glyph alone:
+ *
+ *   completed   success      green (status-idle) check — the only "done" hue
+ *   paused      attention    waiting-tinted pause — a held goal asks to resume
+ *   set         a landmark   a quiet accent target — opening a fresh goal
+ *   resumed     forward      neutral play — motion picking back up
+ *   updated     a revision   neutral pencil — the goal text changed
+ *   continuation steady on   neutral arrow — still tracking the same goal
+ *
+ * The pill class is the established badge convention (`text-X border-X/30
+ * bg-X/10`); neutral actions reuse the surface/border tokens so a clean run of
+ * landmarks stays calm rather than a row of colored chips.
+ */
+type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?: string }> };
+
+const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
+
+const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
+  set: { label: "Goal set", pill: "border-og-accent/30 bg-og-accent/10 text-og-accent", icon: TargetIcon },
+  updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+  completed: { label: "Goal completed", pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle", icon: CheckIcon },
+  paused: { label: "Goal paused", pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting", icon: PauseIcon },
+  resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+};
+
+/**
+ * A goal landmark pill. Resolves its label, accent/tone, and glyph from
+ * {@link GOAL_META} so all six actions are visually distinguishable while the
+ * palette stays restrained — see that table for the per-action rationale.
+ */
 function GoalRow({ item }: { item: GoalItem }) {
-  const label =
-    item.action === "set"
-      ? "Goal set"
-      : item.action === "updated"
-        ? "Goal updated"
-        : item.action === "completed"
-          ? "Goal completed"
-          : item.action === "paused"
-            ? "Goal paused"
-            : item.action === "resumed"
-              ? "Goal resumed"
-              : "Continuing toward the goal";
+  const { label, pill, icon: Icon } = GOAL_META[item.action];
   return (
     <div className="animate-og-enter flex justify-center">
-      <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-og-border bg-og-surface-1 px-3 py-1 text-xs text-og-fg-muted">
-        <TargetIcon className="size-3.5 shrink-0 text-og-accent" />
+      <span className={cn("inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm", pill)}>
+        <Icon className="size-3.5 shrink-0" />
         <span className="truncate">
           {label}
           {item.text ? `: ${truncate(item.text, 90)}` : ""}
@@ -268,165 +304,3 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   );
 }
 
-/* --- activity cluster -------------------------------------------------------- */
-
-type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem;
-
-function ActivityCluster({
-  items,
-  onOpenSession,
-}: {
-  items: ActivityItem[];
-  onOpenSession?: ((sessionId: string) => void) | undefined;
-}) {
-  return (
-    <div className="animate-og-enter flex flex-col gap-1.5 border-l-2 border-og-border pl-3 sm:pl-4">
-      {items.map((item) => {
-        switch (item.kind) {
-          case "reasoning":
-            return <ReasoningRow key={item.id} item={item} />;
-          case "tool-call":
-            return <ToolCallRow key={item.id} item={item} />;
-          case "worker":
-            return <WorkerRow key={item.id} item={item} onOpenSession={onOpenSession} />;
-          case "sandbox":
-            return <SandboxRow key={item.id} item={item} />;
-        }
-      })}
-    </div>
-  );
-}
-
-function ActivityDisclosure({
-  icon,
-  title,
-  running,
-  failed,
-  preview,
-  children,
-}: {
-  icon: ReactNode;
-  title: string;
-  running: boolean;
-  failed?: boolean | undefined;
-  preview?: string | undefined;
-  children?: ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <Collapsible.Trigger
-        className={cn(
-          "group flex w-full min-w-0 items-center gap-2 rounded-og-sm px-1.5 py-1 text-left text-[13px]",
-          "text-og-fg-muted transition-colors duration-150 hover:bg-og-surface-1 hover:text-og-fg",
-        )}
-      >
-        <ChevronRightIcon className="size-3.5 shrink-0 text-og-fg-subtle transition-transform duration-150 group-data-[state=open]:rotate-90" />
-        <span className={cn("shrink-0", failed ? "text-og-status-failed" : running ? "text-og-status-running" : "text-og-fg-subtle")}>{icon}</span>
-        <span className={cn("shrink-0 font-medium", running && "og-shimmer-text", failed && "text-og-status-failed")}>{title}</span>
-        {preview ? <span className="min-w-0 flex-1 truncate font-og-mono text-xs text-og-fg-subtle">{preview}</span> : null}
-        {running ? <span className="ml-auto size-1.5 shrink-0 animate-og-pulse rounded-full bg-og-status-running" /> : null}
-      </Collapsible.Trigger>
-      <Collapsible.Content className="overflow-hidden">
-        <div className="mt-1 mb-1.5 ml-7 flex flex-col gap-2">{children}</div>
-      </Collapsible.Content>
-    </Collapsible.Root>
-  );
-}
-
-function PayloadBlock({ label, value }: { label: string; value: unknown }) {
-  const text = stringifyPayload(value);
-  if (!text) {
-    return null;
-  }
-  return (
-    <div className="min-w-0">
-      <p className="mb-1 text-[10px] font-medium uppercase tracking-[0.08em] text-og-fg-subtle">{label}</p>
-      <pre className="max-h-64 overflow-auto rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-xs leading-5 text-og-fg-muted">
-        {text}
-      </pre>
-    </div>
-  );
-}
-
-function ReasoningRow({ item }: { item: ReasoningItem }) {
-  return (
-    <ActivityDisclosure
-      icon={<BrainIcon className="size-3.5" />}
-      title={item.streaming ? "Thinking" : "Thought"}
-      running={item.streaming}
-      preview={truncate(item.text, 110)}
-    >
-      <p className="whitespace-pre-wrap text-[13px] leading-6 text-og-fg-muted">{item.text}</p>
-    </ActivityDisclosure>
-  );
-}
-
-function ToolCallRow({ item }: { item: ToolCallItem }) {
-  return (
-    <ActivityDisclosure
-      icon={<WrenchIcon className="size-3.5" />}
-      title={toolDisplayName(item.name)}
-      running={item.status === "running"}
-      preview={compactPayloadPreview(item.arguments)}
-    >
-      <PayloadBlock label="Arguments" value={item.arguments} />
-      {item.status === "complete" ? <PayloadBlock label="Output" value={item.output} /> : null}
-    </ActivityDisclosure>
-  );
-}
-
-function SandboxRow({ item }: { item: SandboxItem }) {
-  return (
-    <ActivityDisclosure
-      icon={<SquareTerminalIcon className="size-3.5" />}
-      title={toolDisplayName(item.name)}
-      running={item.status === "running"}
-      failed={item.status === "failed"}
-      preview={item.command ?? undefined}
-    >
-      {item.command ? <PayloadBlock label="Command" value={item.command} /> : null}
-      {item.output ? <PayloadBlock label="Output" value={item.output} /> : null}
-    </ActivityDisclosure>
-  );
-}
-
-/** Spawned/messaged worker sessions get a first-class card, not a tool row. */
-function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: ((sessionId: string) => void) | undefined }) {
-  const running = item.status === "running";
-  const title = item.action === "spawn" ? (running ? "Spawning worker" : "Worker spawned") : running ? "Messaging worker" : "Worker messaged";
-  return (
-    <div className="my-0.5 flex items-start gap-3 rounded-og-md border border-og-border bg-og-surface-1 p-3 shadow-og-sm">
-      <span
-        className={cn(
-          "mt-0.5 inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
-          "bg-og-accent-soft text-og-accent",
-        )}
-      >
-        <BotIcon className="size-4" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className={cn("text-[13px] font-medium", running ? "og-shimmer-text" : "text-og-fg")}>{title}</span>
-          {running ? <span className="size-1.5 animate-og-pulse rounded-full bg-og-status-running" /> : null}
-        </div>
-        {item.prompt ? <p className="mt-0.5 truncate text-xs text-og-fg-muted">{truncate(item.prompt, 140)}</p> : null}
-        {item.workerSessionId ? (
-          <p className="mt-1 font-og-mono text-[11px] text-og-fg-subtle">{item.workerSessionId.slice(0, 8)}</p>
-        ) : null}
-      </div>
-      {item.workerSessionId && onOpenSession ? (
-        <button
-          type="button"
-          onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}
-          className={cn(
-            "shrink-0 self-center rounded-og-sm border border-og-border px-2.5 py-1 text-xs font-medium text-og-fg-muted",
-            "transition-colors duration-150 hover:border-og-border-strong hover:text-og-fg",
-          )}
-        >
-          Open session
-        </button>
-      ) : null}
-    </div>
-  );
-}
