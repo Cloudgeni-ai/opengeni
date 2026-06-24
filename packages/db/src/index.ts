@@ -2313,7 +2313,7 @@ export async function appendSessionHistoryItems(db: Database, input: {
       sessionId: input.sessionId,
       turnId: input.turnId ?? null,
       position: entry.position,
-      item: entry.item,
+      item: sanitizeEventPayload(entry.item),
     }))).onConflictDoNothing({
       target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
     });
@@ -2535,7 +2535,7 @@ export async function applyContextCompaction(db: Database, input: {
         sessionId: input.sessionId,
         turnId: input.turnId ?? null,
         position: input.summaryPosition,
-        item: input.summaryItem,
+        item: sanitizeEventPayload(input.summaryItem),
         active: true,
       }).onConflictDoUpdate({
         target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
@@ -2668,7 +2668,7 @@ export async function clearSessionContext(db: Database, input: {
         sessionId: input.sessionId,
         turnId: null,
         position: markerPosition,
-        item: clearedContextMarkerItem(),
+        item: sanitizeEventPayload(clearedContextMarkerItem()),
         active: true,
       }).onConflictDoNothing({
         target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],

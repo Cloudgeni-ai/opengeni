@@ -113,3 +113,43 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(reparsed.stream).toBe("stdout");
   });
 });
+
+describe("session_history_items jsonb safety (durable SDK item)", () => {
+  test("FAILURE-SENSITIVE: a function_call_result item with binary tool output round-trips as valid jsonb", () => {
+    // The agent-SDK durable history `item` jsonb carries raw tool/command
+    // output. A NUL byte or lone surrogate in that output 400s the INSERT and
+    // silently drops resumption history. Reproduce a realistic SDK item.
+    const rawToolOutput = `build log ${NUL} chunk ${LONE_HIGH} ${VALID_PAIR} done`;
+    const historyItem = {
+      type: "function_call_result",
+      call_id: "call_abc123",
+      name: "run_command",
+      output: {
+        type: "text",
+        text: rawToolOutput,
+      },
+    };
+
+    // The raw nested value is NOT jsonb-safe — this is what makes the INSERT throw.
+    expect(isJsonbSafe(historyItem.output.text)).toBe(false);
+
+    const cleaned = sanitizeEventPayload(historyItem);
+
+    // After sanitization the nested value is jsonb-safe.
+    expect(isJsonbSafe(cleaned.output.text)).toBe(true);
+
+    // Structure is preserved beyond the NUL / lone-surrogate byte classes.
+    expect(cleaned.type).toBe("function_call_result");
+    expect(cleaned.call_id).toBe("call_abc123");
+    expect(cleaned.name).toBe("run_command");
+    expect(cleaned.output.type).toBe("text");
+
+    // NUL dropped, lone surrogate -> replacement char, valid emoji preserved.
+    expect(cleaned.output.text).toBe(`build log  chunk ${REPLACEMENT} ${VALID_PAIR} done`);
+
+    // ...and the cleaned item survives a JSON serialize/parse round-trip.
+    const reparsed = JSON.parse(JSON.stringify(cleaned)) as typeof cleaned;
+    expect(reparsed.output.text).toBe(`build log  chunk ${REPLACEMENT} ${VALID_PAIR} done`);
+    expect(reparsed.type).toBe("function_call_result");
+  });
+});
