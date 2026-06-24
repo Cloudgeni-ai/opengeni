@@ -166,6 +166,33 @@ describe("buildTimeline", () => {
     expect(item.workerSessionId).toBe(worker.id);
   });
 
+  test("a worker spawn whose output carries an error flag settles to failed, not complete", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_create",
+        arguments: JSON.stringify({ initialMessage: "Run the drift check on prod" }),
+      }),
+      event("agent.toolCall.output", { id: "call-1", output: "spawn rejected", error: true }),
+    ]);
+    expect((items[0] as WorkerItem).kind).toBe("worker");
+    expect((items[0] as WorkerItem).status).toBe("failed");
+  });
+
+  test("a worker message whose MCP output isError settles to failed", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_send_message",
+        arguments: JSON.stringify({ sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", message: "go" }),
+      }),
+      event("agent.toolCall.output", { id: "call-1", output: { isError: true, content: [{ type: "text", text: "delivery failed" }] } }),
+    ]);
+    expect((items[0] as WorkerItem).status).toBe("failed");
+  });
+
   test("session_send_message becomes a worker message item targeting the session in the arguments", () => {
     reset();
     const items = buildTimeline([

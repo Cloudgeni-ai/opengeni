@@ -197,7 +197,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           break;
         }
         if (target.kind === "worker") {
-          target.status = "complete";
+          // A worker spawn/message that returns an error flag (or an MCP
+          // isError result) settles to "failed" too, so WorkerRow surfaces it.
+          target.status = isErrorOutput(payload) ? "failed" : "complete";
           target.workerSessionId = target.workerSessionId ?? extractSessionRef(payload.output);
           break;
         }
