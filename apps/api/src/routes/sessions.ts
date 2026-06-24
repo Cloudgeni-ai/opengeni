@@ -584,16 +584,26 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid viewer attach request" });
     }
-    // Consent gate (P3.2 / addendum E.1): the un-redacted desktop path requires
-    // the calling principal's acknowledgment, recorded per (group, subject). A
-    // shared box additionally requires the shared-exposure consent.
+    // Consent gate (P3.2 / addendum E.1): ONLY the un-redacted DESKTOP pixel plane
+    // requires the calling principal's acknowledgment (recorded per group+subject;
+    // a shared box additionally needs the shared-exposure consent). A TERMINAL-ONLY
+    // warm attach (`desktop:false`, the default) carries NO consent gate — a shell
+    // is interactive by nature and the gate is the scoped tunnel URL + stream token
+    // — so it warms the box and mints the pty-ws terminal cell without a 409. Gating
+    // the terminal attach behind the desktop ack (the bug this fixes) dead-ended the
+    // interactive terminal: the box never warmed → the Terminal cell stayed on the
+    // read-only sse-events firehose forever ("read only"), and with the desktop tier
+    // off by default there was no consent flow to ever clear the gate.
+    const wantDesktop = parsed.data.desktop ?? false;
     const { shared } = await resolveSharedExposure(workspaceId, session);
-    const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
-    if (!ack?.acknowledgedUnredacted) {
-      throw new HTTPException(409, { message: "stream_acknowledgment_required" });
-    }
-    if (shared && !ack.acknowledgedShared) {
-      throw new HTTPException(409, { message: "shared_acknowledgment_required" });
+    if (wantDesktop) {
+      const ack = await getStreamAcknowledgment(db, { workspaceId, sandboxGroupId: session.sandboxGroupId, subjectId: grant.subjectId });
+      if (!ack?.acknowledgedUnredacted) {
+        throw new HTTPException(409, { message: "stream_acknowledgment_required" });
+      }
+      if (shared && !ack.acknowledgedShared) {
+        throw new HTTPException(409, { message: "shared_acknowledgment_required" });
+      }
     }
     const result = await attachViewer({ db, settings }, {
       accountId: grant.accountId,
@@ -617,7 +627,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     ) {
       const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
       if (lease) {
-        if (settings.sandboxDesktopEnabled) {
+        // The pixel cell is minted only when the caller asked for the desktop plane
+        // (and consented above). A terminal-only attach skips it — the box is warm,
+        // the terminal mint below still runs.
+        if (wantDesktop && settings.sandboxDesktopEnabled) {
           stream = await mintDesktopStream({ db, settings, bus }, {
             accountId: grant.accountId,
             workspaceId,

@@ -150,7 +150,10 @@ export type StreamRevokedPayload = {
 
 // Mirror of `@opengeni/contracts` AttachViewerRequest. Omitting `viewerId` mints
 // a fresh holder id (returned on the response, carried through heartbeat/detach).
-export type AttachViewerRequest = { viewerId?: string | undefined };
+// `desktop:true` opts into the un-redacted pixel plane (the consent-gated noVNC
+// stream); a terminal/files-only warm attach omits it (defaults false) so it
+// warms the box + mints the pty-ws terminal cell WITHOUT tripping the consent 409.
+export type AttachViewerRequest = { viewerId?: string | undefined; desktop?: boolean | undefined };
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
 // the POST /viewers handler folds in when the pixel plane is minted in-process.

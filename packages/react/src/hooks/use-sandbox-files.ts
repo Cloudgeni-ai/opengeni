@@ -1,4 +1,12 @@
-import type { FsReadResponse, FsTreeNode, FsWriteResponse, GitFileStatusCode, SessionEvent } from "@opengeni/sdk";
+import type {
+  FsChangedPayload,
+  FsReadResponse,
+  FsTreeNode,
+  FsWriteResponse,
+  GitChangedPayload,
+  GitFileStatusCode,
+  SessionEvent,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
@@ -30,6 +38,10 @@ export type UseSandboxFilesOptions = ClientOverride & {
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
   liveness?: string | undefined;
+  /** Called when an OPTIMISTIC mutation is reverted because its background
+   *  Channel-A op failed (e.g. a 409 rename collision). The host wires this to a
+   *  toast — the tree silently rolls the node back, the user sees why. */
+  onMutationError?: ((error: Error, op: string) => void) | undefined;
 };
 
 export type UseSandboxFilesResult = {
@@ -42,8 +54,9 @@ export type UseSandboxFilesResult = {
   expandingPaths: Set<string>;
   /** Read a file for the preview pane (text or base64-for-binary, size-capped). */
   readFile: (path: string) => Promise<FsReadResponse>;
-  /** Write a file (overwrite, last-writer-wins) — the editor save path. Re-lists
-   *  the parent on return so a brand-new file appears even before fs.changed. */
+  /** Write a file (overwrite, last-writer-wins) — the editor save path.
+   *  Optimistic: a brand-new file is spliced into the tree immediately and the
+   *  Channel-A write runs in the background; on failure the splice is reverted. */
   writeFile: (path: string, content: string) => Promise<FsWriteResponse>;
   /** Create a new empty file (refuses to clobber an existing path: overwrite=false). */
   createFile: (path: string) => Promise<void>;
@@ -63,6 +76,27 @@ export type UseSandboxFilesResult = {
 function parentOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i <= 0 ? "" : path.slice(0, i);
+}
+
+/** The leaf name of a POSIX path. */
+function leafOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i < 0 ? path : path.slice(i + 1);
+}
+
+/** Join a parent dir with a leaf name (handles the root "" parent). */
+function joinPath(parent: string, name: string): string {
+  return parent ? `${parent}/${name}` : name;
+}
+
+/** Stable sibling ordering: dirs before files, then case-insensitive by name —
+ *  matches a typical depth-1 list so an optimistic insert lands where a real
+ *  re-list would put it (no jump when the server reconciles). */
+function sortNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+  return [...nodes].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
 }
 
 function fsNodeToTree(node: FsTreeNode): FileTreeNode {
@@ -110,6 +144,114 @@ function replaceChildren(nodes: FileTreeNode[], targetPath: string, children: Fi
   });
 }
 
+/** Find a node by exact path (depth-first). */
+function findNodeByPath(nodes: FileTreeNode[], path: string): FileTreeNode | undefined {
+  for (const node of nodes) {
+    if (node.path === path) return node;
+    if (node.kind === "dir" && node.children && path.startsWith(`${node.path}/`)) {
+      const hit = findNodeByPath(node.children, path);
+      if (hit) return hit;
+    }
+  }
+  return undefined;
+}
+
+// ── In-place (optimistic) tree mutations ────────────────────────────────────
+// The Pierre mutation-handle analogue. These splice a single node in/out/across
+// the immutable tree, PRESERVING every other node's `children` (and therefore the
+// FileBrowser's expansion + selection). The old data flow re-listed the whole
+// root and `setTree(rootChildren)` — that dropped every expanded dir back to the
+// unexpanded marker, which is exactly the "everything refreshes / collapses to
+// .config" the user saw. Mutating in place is the fix.
+//
+// `parent === ""` targets the root list directly. A parent that isn't present in
+// the (lazily-loaded) tree means it's collapsed/unloaded — the helpers return the
+// tree UNCHANGED in that case (caller treats it as "nothing visible to update",
+// which is correct: a collapsed dir re-lists fresh when the user expands it).
+
+/** True when `parent` is the root ("") or a dir node that is actually present in
+ *  the loaded tree (so an insert/remove there would be visible). */
+function parentIsLoaded(nodes: FileTreeNode[], parent: string): boolean {
+  if (parent === "") return true;
+  const node = findNodeByPath(nodes, parent);
+  return Boolean(node && node.kind === "dir" && node.children !== undefined);
+}
+
+/** Insert `child` under `parent` (immutably), keeping siblings sorted. A no-op
+ *  (returns the same array) when the parent isn't a loaded dir or the child
+ *  already exists. */
+function insertNode(nodes: FileTreeNode[], parent: string, child: FileTreeNode): FileTreeNode[] {
+  if (parent === "") {
+    if (nodes.some((n) => n.path === child.path)) return nodes;
+    return sortNodes([...nodes, child]);
+  }
+  return nodes.map((node) => {
+    if (node.path === parent) {
+      if (node.kind !== "dir" || node.children === undefined) return node;
+      if (node.children.some((n) => n.path === child.path)) return node;
+      return { ...node, children: sortNodes([...node.children, child]) };
+    }
+    if (node.kind === "dir" && node.children && parent.startsWith(`${node.path}/`)) {
+      return { ...node, children: insertNode(node.children, parent, child) };
+    }
+    return node;
+  });
+}
+
+/** Remove the node at `path` (immutably). No-op when it isn't in the tree. */
+function removeNode(nodes: FileTreeNode[], path: string): FileTreeNode[] {
+  const parent = parentOf(path);
+  if (parent === "") {
+    if (!nodes.some((n) => n.path === path)) return nodes;
+    return nodes.filter((n) => n.path !== path);
+  }
+  return nodes.map((node) => {
+    if (node.path === parent) {
+      if (node.kind !== "dir" || node.children === undefined) return node;
+      return { ...node, children: node.children.filter((n) => n.path !== path) };
+    }
+    if (node.kind === "dir" && node.children && parent.startsWith(`${node.path}/`)) {
+      return { ...node, children: removeNode(node.children, path) };
+    }
+    return node;
+  });
+}
+
+/** Reconcile a freshly-listed depth-1 set of children against the CURRENT nodes
+ *  at the same level, PRESERVING expansion: an existing dir keeps its already-
+ *  loaded `children` (so its expanded subtree survives), new entries are added,
+ *  and entries the server no longer returns are dropped. This is the in-place
+ *  merge a root ("") reconcile needs — a blind replace would collapse every
+ *  expanded top-level dir back to the unexpanded marker (the reported bug). */
+function mergeChildren(current: FileTreeNode[], listed: FileTreeNode[]): FileTreeNode[] {
+  const byPath = new Map(current.map((n) => [n.path, n] as const));
+  const merged = listed.map((next) => {
+    const existing = byPath.get(next.path);
+    // Keep an already-expanded dir's loaded children; otherwise take the listing's
+    // marker (undefined = unexpanded). Carry forward size/status from the listing.
+    if (existing && existing.kind === "dir" && next.kind === "dir" && existing.children !== undefined) {
+      return { ...next, children: existing.children };
+    }
+    return next;
+  });
+  return sortNodes(merged);
+}
+
+/** Root-level ("") reconcile: merge a fresh depth-1 listing into the root list
+ *  without collapsing expanded top-level dirs. */
+function mergeRootChildren(nodes: FileTreeNode[], listed: FileTreeNode[]): FileTreeNode[] {
+  return mergeChildren(nodes, listed);
+}
+
+/** Re-path a subtree rooted at `node` from `fromPrefix` to `toPrefix` (so a moved
+ *  dir's descendants keep correct paths without a re-list). */
+function repathNode(node: FileTreeNode, fromPrefix: string, toPrefix: string): FileTreeNode {
+  const newPath = toPrefix + node.path.slice(fromPrefix.length);
+  const next: FileTreeNode = { ...node, path: newPath, name: leafOf(newPath) };
+  if (node.children) next.children = node.children.map((c) => repathNode(c, fromPrefix, toPrefix));
+  return next;
+}
+
 /**
  * Project the FileSystem service into a lazy-loaded Pierre tree. The initial
  * list pulls one level (depth 1); `expand(path)` lists a directory's immediate
@@ -126,10 +268,29 @@ export function useSandboxFiles(
   const rootPath = options.rootPath ?? "";
 
   const [tree, setTree] = useState<FileTreeNode[]>([]);
+  // A ref mirror of the current tree — lets the optimistic path snapshot the
+  // pre-op tree WITHOUT relying on a `setTree` updater (which StrictMode invokes
+  // twice, corrupting an in-closure snapshot). Kept in sync on every set below
+  // and in a layout effect for any path that sets `tree` directly.
+  const treeRef = useRef<FileTreeNode[]>([]);
   const [loading, setLoading] = useState(false);
   const [expandingPaths, setExpandingPaths] = useState<Set<string>>(new Set());
   const [error, setError] = useState<Error | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
+
+  // ── Self-emitted fs.changed de-dupe ───────────────────────────────────────
+  // Every one of OUR mutations emits an `fs.changed` event back on the live log
+  // (source:"write"). The old flow auto-refreshed on EVERY fs.changed, so each
+  // edit self-triggered a full root collapse-reload (~5s, lost expansion). We now
+  // (a) ignore fs.changed whose `source === "write"` (our own control-plane ops),
+  // and (b) belt-and-braces, track the revisions WE caused so even a watch-sourced
+  // echo of our own write is suppressed. Only EXTERNAL changes (the agent writing,
+  // source:"agent"/"watch" we didn't cause) drive a targeted reconcile.
+  const ownRevisionsRef = useRef<Set<number>>(new Set());
+  const onMutationError = options.onMutationError;
+
+  // Keep the ref mirror current for the optimistic snapshot path.
+  treeRef.current = tree;
 
   const applyStatus = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
     const overlay = statusRef.current;
@@ -166,7 +327,10 @@ export function useSandboxFiles(
       }
       const listed = await client.fsList(workspaceId, sessionId, { path: rootPath, depth: 1 });
       const children = (listed.root.children ?? []).map(fsNodeToTree);
-      setTree(applyStatus(children));
+      // Merge rather than replace so an explicit refresh / cold→warm re-list folds
+      // in new entries WITHOUT collapsing the dirs the user already expanded. On a
+      // first (empty) load this is a plain set.
+      setTree((prev) => applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)));
     } catch (cause) {
       setError(cause instanceof Error ? cause : new Error(String(cause)));
     } finally {
@@ -211,113 +375,166 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId],
   );
 
-  // Targeted re-list of a single directory after a mutation. The root ("") goes
-  // through a full refresh (which also refreshes the git overlay); a nested dir
-  // re-lists in place via the same depth-1 splice `expand` uses. This makes a
-  // mutation reflect immediately even on no-event environments where the
-  // fs.changed auto-refresh never fires (and is harmless where it does).
-  const relistPath = useCallback(
+  // TARGETED reconcile of a single directory — re-list ONE parent at depth 1 and
+  // splice its children in place via `replaceChildren`, preserving the rest of the
+  // tree's expansion. NEVER falls back to a root refresh (that's the collapse).
+  // Used to (a) reconcile an optimistic insert against the server's real
+  // size/mtime, and (b) fold an EXTERNAL (agent) change into the tree. A reconcile
+  // of a parent that isn't loaded (collapsed/unmounted) is a no-op — there's
+  // nothing visible to update, and it re-lists fresh when the user expands it.
+  const reconcilePath = useCallback(
     async (path: string) => {
       if (!sessionId) return;
-      if (path === "" || path === rootPath) {
-        await refresh();
-        return;
-      }
+      // Skip parents that aren't currently loaded/expanded in the tree (nothing
+      // visible to update; they re-list fresh on the next expand).
+      if (!parentIsLoaded(treeRef.current, path)) return;
       try {
         const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 });
         const children = (listed.root.children ?? []).map(fsNodeToTree);
-        setTree((prev) => applyStatus(replaceChildren(prev, path, children)));
+        if (path === "") setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
+        else
+          setTree((prev) => {
+            const existing = findNodeByPath(prev, path);
+            const merged = existing?.children ? mergeChildren(existing.children, children) : children;
+            return applyStatus(replaceChildren(prev, path, merged));
+          });
       } catch {
-        // The parent may not be mounted in the tree yet (collapsed) — fall back to
-        // a root refresh rather than surfacing an error on an otherwise-OK mutation.
-        await refresh();
+        // A failed reconcile is non-fatal: the optimistic state stands. We never
+        // root-refresh here (that would collapse the tree the user is working in).
       }
     },
-    [client, workspaceId, sessionId, rootPath, applyStatus, refresh],
+    [client, workspaceId, sessionId, applyStatus],
+  );
+
+  // Run a Channel-A op behind an OPTIMISTIC tree edit. `apply` splices the change
+  // in immediately (preserving expansion/selection); the op runs in the
+  // background; on failure we revert to the pre-op snapshot and surface a toast.
+  // On success we keep the optimistic state and (optionally) reconcile the
+  // affected parent(s) to pick up the server's real size/revision — NEVER a full
+  // refresh. The returned promise resolves/rejects with the op so callers (the
+  // editor save, inline rename) can still await it.
+  const runOptimistic = useCallback(
+    async <T,>(
+      opName: string,
+      apply: (nodes: FileTreeNode[]) => FileTreeNode[],
+      op: () => Promise<T>,
+      reconcileParents: string[],
+    ): Promise<T> => {
+      // Snapshot the pre-op tree from the ref (StrictMode-safe — see treeRef).
+      const snapshot = treeRef.current;
+      setTree(applyStatus(apply(snapshot)));
+      try {
+        const res = await op();
+        // Remember the revision WE caused so the matching fs.changed echo is
+        // ignored by the event effect (no self-triggered refresh).
+        if (res && typeof res === "object" && "revision" in res) {
+          const rev = (res as { revision?: unknown }).revision;
+          if (typeof rev === "number") ownRevisionsRef.current.add(rev);
+        }
+        // Reconcile loaded parents to fold the server's real metadata. Sequential
+        // and best-effort — purely cosmetic over the already-correct optimistic UI.
+        for (const parent of reconcileParents) await reconcilePath(parent);
+        return res;
+      } catch (cause) {
+        const err = cause instanceof Error ? cause : new Error(String(cause));
+        // Revert the optimistic edit to the exact pre-op tree.
+        setTree(applyStatus(snapshot));
+        setError(err);
+        onMutationError?.(err, opName);
+        throw err;
+      }
+    },
+    [applyStatus, reconcilePath, onMutationError],
   );
 
   const writeFile = useCallback(
     async (path: string, content: string): Promise<FsWriteResponse> => {
       if (!sessionId) throw new Error("no session");
-      try {
-        const res = await client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true });
-        await relistPath(parentOf(path));
-        return res;
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        setError(err);
-        throw err;
-      }
+      const parent = parentOf(path);
+      // Splice a new file node in immediately ONLY when the path doesn't already
+      // exist in a loaded parent (an editor SAVE to an existing file mutates no
+      // tree shape — just content — so it needs no optimistic node, no reconcile).
+      const exists = Boolean(findNodeByPath(tree, path));
+      const node: FileTreeNode = { path, name: leafOf(path), kind: "file", size: content.length };
+      return await runOptimistic(
+        "write",
+        (nodes) => (exists ? nodes : insertNode(nodes, parent, node)),
+        () => client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true }),
+        exists ? [] : [parent],
+      );
     },
-    [client, workspaceId, sessionId, relistPath],
+    [client, workspaceId, sessionId, tree, runOptimistic],
   );
 
   const createFile = useCallback(
     async (path: string): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      try {
-        await client.fsWrite(workspaceId, sessionId, { path, content: "", overwrite: false });
-        await relistPath(parentOf(path));
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        setError(err);
-        throw err;
-      }
+      const parent = parentOf(path);
+      const node: FileTreeNode = { path, name: leafOf(path), kind: "file", size: 0 };
+      await runOptimistic(
+        "create file",
+        (nodes) => insertNode(nodes, parent, node),
+        () => client.fsWrite(workspaceId, sessionId, { path, content: "", overwrite: false }),
+        [parent],
+      );
     },
-    [client, workspaceId, sessionId, relistPath],
+    [client, workspaceId, sessionId, runOptimistic],
   );
 
   const createDir = useCallback(
     async (path: string): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      try {
-        await client.fsMkdir(workspaceId, sessionId, { path, recursive: true });
-        await relistPath(parentOf(path));
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        setError(err);
-        throw err;
-      }
+      const parent = parentOf(path);
+      // A freshly-created dir is empty + expanded: children:[] (not undefined, so
+      // it doesn't show the lazy-expand marker over a dir we KNOW is empty).
+      const node: FileTreeNode = { path, name: leafOf(path), kind: "dir", children: [] };
+      await runOptimistic(
+        "create folder",
+        (nodes) => insertNode(nodes, parent, node),
+        () => client.fsMkdir(workspaceId, sessionId, { path, recursive: true }),
+        [parent],
+      );
     },
-    [client, workspaceId, sessionId, relistPath],
+    [client, workspaceId, sessionId, runOptimistic],
   );
 
   const deleteEntry = useCallback(
     async (path: string, recursive = false): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      try {
-        await client.fsDelete(workspaceId, sessionId, { path, recursive });
-        await relistPath(parentOf(path));
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        setError(err);
-        throw err;
-      }
+      await runOptimistic(
+        "delete",
+        (nodes) => removeNode(nodes, path),
+        () => client.fsDelete(workspaceId, sessionId, { path, recursive }),
+        [parentOf(path)],
+      );
     },
-    [client, workspaceId, sessionId, relistPath],
+    [client, workspaceId, sessionId, runOptimistic],
   );
 
   const moveEntry = useCallback(
     async (path: string, newPath: string, opts?: { overwrite?: boolean }): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      try {
-        await client.fsMove(workspaceId, sessionId, {
-          path,
-          newPath,
-          overwrite: opts?.overwrite ?? false,
-        });
-        // A move touches two parents (source + destination); re-list both.
-        const from = parentOf(path);
-        const to = parentOf(newPath);
-        await relistPath(from);
-        if (to !== from) await relistPath(to);
-      } catch (cause) {
-        const err = cause instanceof Error ? cause : new Error(String(cause));
-        setError(err);
-        throw err;
-      }
+      const from = parentOf(path);
+      const to = parentOf(newPath);
+      await runOptimistic(
+        "move",
+        (nodes) => {
+          const moving = findNodeByPath(nodes, path);
+          if (!moving) return nodes; // not loaded — let the reconcile pick it up
+          // Re-path the moved subtree, drop it from its old parent, splice into new.
+          const moved = repathNode(moving, path, newPath);
+          return insertNode(removeNode(nodes, path), to, moved);
+        },
+        () =>
+          client.fsMove(workspaceId, sessionId, {
+            path,
+            newPath,
+            overwrite: opts?.overwrite ?? false,
+          }),
+        to === from ? [from] : [from, to],
+      );
     },
-    [client, workspaceId, sessionId, relistPath],
+    [client, workspaceId, sessionId, runOptimistic],
   );
 
   // Initial load + reset on identity change.
@@ -329,22 +546,95 @@ export function useSandboxFiles(
     void refresh();
   }, [enabled, refresh]);
 
-  // Auto-refresh on fs/git change notifications.
+  // Re-pull JUST the git-status overlay and re-tint the existing tree in place —
+  // no fs re-list, no collapse. This is all a `git.changed` (commit/stage/checkout)
+  // needs: the tree SHAPE is unchanged, only the tints move.
+  const refreshGitOverlay = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const status = await client.gitStatus(workspaceId, sessionId, { path: rootPath });
+      const overlay = new Map<string, FileTreeStatus>();
+      for (const file of status.files) {
+        const code = file.worktree ?? file.index;
+        const mapped = code ? GIT_STATUS_TO_TREE[code] : undefined;
+        if (mapped) overlay.set(file.path, mapped);
+      }
+      statusRef.current = overlay;
+      setTree((prev) => applyStatus(prev));
+    } catch {
+      /* a non-repo box has no overlay — leave the tree untinted */
+    }
+  }, [client, workspaceId, sessionId, rootPath, applyStatus]);
+
+  // Auto-reconcile on fs/git change notifications — TARGETED, never a root
+  // collapse-reload, and de-duped against our OWN mutations.
+  //
+  //   • Our own ops (`source:"write"`, or a revision WE caused) are IGNORED —
+  //     the optimistic edit already reflects them, so a refresh here would be the
+  //     pointless 5s collapse the user reported.
+  //   • An EXTERNAL fs.changed (the agent writing files: `source:"agent"`/`watch`)
+  //     reconciles ONLY the affected parent directories (in place, expansion
+  //     preserved). Bursts are debounced into a single reconcile pass.
+  //   • A git.changed just re-tints (refreshes the status overlay) — no fs re-list.
   const events = options.events;
-  const lastChangeRef = useRef(0);
+  const lastSeqRef = useRef(0);
+  const pendingParentsRef = useRef<Set<string>>(new Set());
+  const pendingGitRef = useRef(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (!enabled || !events) return;
-    let latest = lastChangeRef.current;
+    let sawNew = false;
     for (const event of events) {
-      if ((event.type === "fs.changed" || event.type === "git.changed") && event.sequence > latest) {
-        latest = event.sequence;
+      if (event.sequence <= lastSeqRef.current) continue;
+      if (event.type === "fs.changed") {
+        sawNew = true;
+        const payload = event.payload as FsChangedPayload | null;
+        if (!payload || typeof payload !== "object") continue;
+        // Suppress our own writes: the optimistic tree already shows them.
+        if (payload.source === "write") continue;
+        if (typeof payload.revision === "number" && ownRevisionsRef.current.has(payload.revision)) continue;
+        for (const change of payload.changes ?? []) {
+          pendingParentsRef.current.add(parentOf(change.path));
+          if (change.oldPath) pendingParentsRef.current.add(parentOf(change.oldPath));
+        }
+      } else if (event.type === "git.changed") {
+        sawNew = true;
+        const payload = event.payload as GitChangedPayload | null;
+        // A git.changed our own write triggered (commit/stage from the agent is
+        // external; a checkout we caused isn't — but we don't cause git ops here,
+        // so any git.changed is external) → re-tint.
+        if (payload && typeof payload === "object" && typeof payload.revision === "number"
+          && ownRevisionsRef.current.has(payload.revision)) continue;
+        pendingGitRef.current = true;
       }
     }
-    if (latest > lastChangeRef.current) {
-      lastChangeRef.current = latest;
-      void refresh();
-    }
-  }, [enabled, events, refresh]);
+    // Advance the high-water mark past everything we've folded.
+    for (const event of events) if (event.sequence > lastSeqRef.current) lastSeqRef.current = event.sequence;
+    if (!sawNew) return;
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      const parents = pendingParentsRef.current;
+      pendingParentsRef.current = new Set();
+      const wantGit = pendingGitRef.current;
+      pendingGitRef.current = false;
+      // Reconcile the changed directories (in place). A git change re-tints first
+      // so the freshly-listed nodes get the correct overlay.
+      void (async () => {
+        if (wantGit) await refreshGitOverlay();
+        for (const parent of parents) await reconcilePath(parent);
+      })();
+    }, 150);
+  }, [enabled, events, reconcilePath, refreshGitOverlay]);
+
+  useEffect(
+    () => () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    },
+    [],
+  );
 
   // Re-list when the box first becomes warm. The FileSystem capability is
   // advertised on a cold box too, so the mount-time `refresh()` can run before

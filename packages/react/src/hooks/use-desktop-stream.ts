@@ -145,6 +145,12 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
           credentials: token ? { password: token } : undefined,
         });
         rfb.viewOnly = viewOnlyFor(modeRef.current, interactiveRef.current);
+        // Fit-to-panel: SCALE the 1280x800 framebuffer down to the container
+        // (aspect-preserved) and never 1:1-clip. `clipViewport=false` is pinned
+        // explicitly — noVNC forces it off while scaling, but a fresh RFB on a
+        // url rotation could otherwise start from a stale clip and read as
+        // "zoomed in". Order matters: clip off, then scale on.
+        rfb.clipViewport = false;
         rfb.scaleViewport = scaleViewportRef.current ?? true;
         rfb.addEventListener("connect", onConnect);
         rfb.addEventListener("disconnect", onDisconnect);
@@ -189,10 +195,18 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactive, mode, state]);
 
-  // Re-scale the live RFB in place (no reconnect) when the scale preference flips.
+  // Re-scale the live RFB in place (no reconnect) when the scale preference flips
+  // OR the connection state advances (e.g. the first framebuffer paints after a
+  // take-control flip / a re-attach). Re-asserting clip-off + scale-on here is the
+  // belt-and-suspenders against a "zoomed" surface: it re-fits the canvas to the
+  // panel on every meaningful transition, so a transient mis-measure at connect
+  // time can never stick.
   useEffect(() => {
     const rfb = rfbRef.current;
-    if (rfb) rfb.scaleViewport = scaleViewport ?? true;
+    if (rfb) {
+      rfb.clipViewport = false;
+      rfb.scaleViewport = scaleViewport ?? true;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scaleViewport, state]);
 

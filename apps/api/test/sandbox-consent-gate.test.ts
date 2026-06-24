@@ -254,9 +254,12 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
     const { accountId, workspaceId, sessionId } = await soloSession();
     const auth = await bearer({ accountId, workspaceId, subjectId: "viewer-1", permissions: ["stream:view", "stream:acknowledge"] });
 
-    // (1) Un-acknowledged → 409 stream_acknowledgment_required.
+    // (1) Un-acknowledged → 409 stream_acknowledgment_required. The consent gate
+    // is scoped to the DESKTOP pixel plane, so the attach declares `desktop:true`
+    // (a terminal-only attach is ungated by design).
     const blocked = await app.request(url(workspaceId, sessionId, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: "{}",
+      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: true }),
     });
     expect(blocked.status).toBe(409);
     // The bare Hono renders HTTPException as plain text (no global JSON error
@@ -272,9 +275,10 @@ describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
     expect(acked.status).toBe(200);
     expect((await acked.json()).acknowledged).toBe(true);
 
-    // (3) Now the attach is allowed (201, a viewer holder on the warm box).
+    // (3) Now the desktop attach is allowed (201, a viewer holder on the warm box).
     const allowed = await app.request(url(workspaceId, sessionId, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: "{}",
+      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: true }),
     });
     expect(allowed.status).toBe(201);
     const attached = await allowed.json();
@@ -341,7 +345,8 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
       body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: false }),
     });
     const blockedShared = await app.request(url(workspaceId, a, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: "{}",
+      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: true }),
     });
     expect(blockedShared.status).toBe(409);
     expect(await blockedShared.text()).toContain("shared_acknowledgment_required");
@@ -352,7 +357,8 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
       body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: true }),
     });
     const allowed = await app.request(url(workspaceId, a, "/viewers"), {
-      method: "POST", headers: { authorization: auth, "content-type": "application/json" }, body: "{}",
+      method: "POST", headers: { authorization: auth, "content-type": "application/json" },
+      body: JSON.stringify({ desktop: true }),
     });
     expect(allowed.status).toBe(201);
   }, 60_000);

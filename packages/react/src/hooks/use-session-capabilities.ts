@@ -34,6 +34,18 @@ export type UseSessionCapabilitiesOptions = ClientOverride & {
    * folds the minted `pty-ws` url+token into the `Terminal` cell.
    */
   attachTerminal?: boolean | undefined;
+  /**
+   * Whether to acquire a viewer holder purely to KEEP THE BOX WARM while the
+   * structured Files surface is open. Shares the SAME viewer attach as the
+   * desktop/terminal (one warm box, one holder) and — like the terminal — needs
+   * NO un-redacted acknowledgment: listing/reading/writing files is the ordinary
+   * Channel-A control plane, not the pixel plane. Default false: the Files tab
+   * negotiates read-only and each op pays the cold-box resume (~5s). When true,
+   * the holder warms the box once and heartbeats it, so subsequent fs ops are
+   * ~100ms instead of re-resuming the box on every list/write. It folds NO live
+   * URL (files ride the stateless HTTP plane) — it only refcounts liveness.
+   */
+  attachFiles?: boolean | undefined;
   /** Hold off negotiating (e.g. the workbench panel is collapsed). Default true. */
   enabled?: boolean | undefined;
   /** Poll cadence (ms) while the lease is cold/warming. Default 1500. */
@@ -127,6 +139,7 @@ export function useSessionCapabilities(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const attachDesktop = options.attachDesktop ?? false;
   const attachTerminal = options.attachTerminal ?? false;
+  const attachFiles = options.attachFiles ?? false;
   const warmingPollMs = options.warmingPollMs ?? 1500;
   const warmingDeadlineMs = options.warmingDeadlineMs ?? 30_000;
 
@@ -253,9 +266,17 @@ export function useSessionCapabilities(
         // mint the URLs. Only a genuinely-unsupported reason suppresses the attach.
         const wantDesktopAttach = attachDesktop && desktopAttachable(caps.DesktopStream);
         const wantTerminalAttach = attachTerminal && terminalAttachable(caps.Terminal);
-        if (wantDesktopAttach || wantTerminalAttach) {
+        // The Files surface warms the box for fast Channel-A ops. It folds no live
+        // URL (files are stateless HTTP) — the attach is purely a liveness refcount,
+        // so it's wanted whenever the FileSystem capability is advertised at all.
+        const wantFilesAttach = attachFiles && caps.FileSystem.available;
+        if (wantDesktopAttach || wantTerminalAttach || wantFilesAttach) {
           try {
-            const holder = await client.attachViewer(workspaceId, sessionId, {});
+            // Declare WHICH plane we're attaching for. `desktop:true` opts into the
+            // un-redacted pixel plane (which carries the consent gate); a
+            // terminal-only attach (`desktop:false`) warms the box + mints the
+            // pty-ws terminal cell WITHOUT tripping the desktop consent 409.
+            const holder = await client.attachViewer(workspaceId, sessionId, { desktop: wantDesktopAttach });
             if (cancelled) return;
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
@@ -356,7 +377,7 @@ export function useSessionCapabilities(
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [client, workspaceId, sessionId, enabled, attachDesktop, attachTerminal, warmingPollMs, warmingDeadlineMs, nonce]);
+  }, [client, workspaceId, sessionId, enabled, attachDesktop, attachTerminal, attachFiles, warmingPollMs, warmingDeadlineMs, nonce]);
 
   // ── Fold stream.url.rotated from the live event log (no round trip) ──────────
   const events = options.events;

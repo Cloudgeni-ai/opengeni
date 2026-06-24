@@ -18,6 +18,12 @@
 #   --no-sandbox            : MANDATORY — box runs as root; Chrome's setuid/zygote
 #                             sandbox cannot initialize as uid 0 (single-tenant
 #                             disposable sandbox, so dropping the sandbox is acceptable).
+#   --test-type             : suppresses Chrome's yellow "You are using an unsupported
+#                             command-line flag: --no-sandbox. Stability and security
+#                             will suffer." infobar. --no-sandbox is required here (root
+#                             in container), so the warning is pure noise; --test-type
+#                             dismisses the unsupported-flag bar WITHOUT changing browser
+#                             behavior (it does not relax sandboxing or any other policy).
 #   --disable-dev-shm-usage : Modal /dev/shm is tiny; force Chrome to use a temp dir
 #                             instead of shared memory (avoids renderer crashes).
 #   --disable-gpu           : headless Xvfb has no GPU; avoids GL init churn/spam.
@@ -58,6 +64,7 @@ case "$BIN" in
   *)
     exec "$BIN" \
       --no-sandbox \
+      --test-type \
       --disable-dev-shm-usage \
       --disable-gpu \
       --no-first-run \

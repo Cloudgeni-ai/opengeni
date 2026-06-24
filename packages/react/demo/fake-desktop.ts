@@ -108,6 +108,7 @@ function paintDesktop(canvas: HTMLCanvasElement, dpr = 1) {
 class FakeRfb implements DesktopRfbLike {
   viewOnly = true;
   scaleViewport = true;
+  clipViewport = false;
   private listeners = new Map<string, Set<Listener>>();
   private canvas: HTMLCanvasElement;
   private raf = 0;

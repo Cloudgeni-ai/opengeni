@@ -373,9 +373,16 @@ export function DesktopViewer({
       data-ui-state={uiState}
       data-in-control={inControl ? "true" : undefined}
     >
+      {/* noVNC mount target. It appends a `width:100%;height:100%` `_screen` div
+          and AUTOSCALES the 1280x800 framebuffer to fit THIS box. We pin it to
+          the bounded `relative` wrapper with `absolute inset-0` (not just
+          `h-full w-full`) so its measured size is ALWAYS the panel — never the
+          canvas content. A content-sized mount is exactly what makes noVNC
+          measure a huge screen and paint the desktop "zoomed in". `overflow-hidden`
+          keeps the centered (margin:auto) canvas from ever spilling the panel. */}
       <div
         ref={containerRef}
-        className="h-full w-full"
+        className="absolute inset-0 overflow-hidden"
         data-opengeni-desktop-canvas
         data-state={stream.state}
       />

@@ -547,11 +547,14 @@ export class OpenGeniClient {
       "POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities/acknowledge`, request);
   }
 
-  /** Attach a viewer to the desktop stream: acquire a viewer holder (refcounted
-   *  liveness — keeps the box warm while watched), spinning the box up in-process
-   *  when cold, and mint the scoped direct-to-provider pixel URL for THIS holder.
-   *  Throws `OpenGeniApiError(409)` when the un-redacted/shared acknowledgment is
-   *  missing (the consent gate). An omitted `viewerId` mints a fresh one. */
+  /** Attach a viewer holder (refcounted liveness — keeps the box warm while
+   *  watched/used), spinning the box up in-process when cold, and mint the scoped
+   *  direct-to-provider URLs for the requested plane(s). `request.desktop:true`
+   *  opts into the un-redacted pixel plane and mints the noVNC URL — that plane
+   *  alone throws `OpenGeniApiError(409)` when the un-redacted/shared
+   *  acknowledgment is missing (the consent gate). A terminal-only attach
+   *  (`desktop` omitted/false) warms the box + mints the pty-ws terminal cell with
+   *  NO consent gate. An omitted `viewerId` mints a fresh one. */
   async attachViewer(
     workspaceId: string, sessionId: string, request: AttachViewerRequest = {},
   ): Promise<AttachViewerResponse> {

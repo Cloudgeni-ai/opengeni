@@ -201,10 +201,15 @@ function SessionDock(props: {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
 }) {
+  // Track the dock's active tab so the Files surface can hold the box WARM only
+  // while it's actually on screen (fast ~100ms Channel-A ops instead of a cold
+  // ~5s resume per list/write). Default to the dock's first tab ("run").
+  const [activeTab, setActiveTab] = useState<string>("run");
   const { tabs: sandboxTabs } = useSandboxWorkspaceTabs({
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     events: props.events,
+    filesActive: activeTab === "files",
   });
 
   const tabs: WorkspaceTab[] = [
@@ -228,7 +233,15 @@ function SessionDock(props: {
     },
   ];
 
-  return <WorkspaceDock primary={props.primary} tabs={tabs} autoSaveId="og.session.dock" />;
+  return (
+    <WorkspaceDock
+      primary={props.primary}
+      tabs={tabs}
+      autoSaveId="og.session.dock"
+      activeTab={activeTab}
+      onActiveTabChange={setActiveTab}
+    />
+  );
 }
 
 function SessionChatPane(props: {

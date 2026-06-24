@@ -2516,8 +2516,16 @@ export type SessionCapabilities = z.infer<typeof SessionCapabilities>;
 
 // POST .../viewers — acquire a viewer holder. An omitted viewerId mints a fresh
 // one (returned in the response, to carry through heartbeats + detach).
+//
+// `desktop` declares intent to attach the UN-REDACTED pixel plane (noVNC). ONLY
+// that plane carries the consent gate (the un-redacted/shared acknowledgment). A
+// terminal-only warm attach (`desktop:false`, the default) needs NO consent — a
+// shell is interactive by nature and the gate is the scoped tunnel URL + stream
+// token — so it warms the box and mints the pty-ws terminal cell WITHOUT a 409.
+// Omitted defaults to `false` so a terminal-only client never trips the gate.
 export const AttachViewerRequest = z.object({
   viewerId: z.string().uuid().optional(),
+  desktop: z.boolean().optional(),
 });
 export type AttachViewerRequest = z.infer<typeof AttachViewerRequest>;
 

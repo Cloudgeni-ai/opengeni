@@ -368,6 +368,166 @@ describe("useSandboxFiles", () => {
     await hook.unmount();
   });
 
+  test("createFile is OPTIMISTIC: the node appears immediately, expansion preserved, no root re-list", async () => {
+    let rootLists = 0;
+    const writes: string[] = [];
+    const client = fakeClient({
+      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      fsList: async (_ws, _s, req) => {
+        const path = req?.path ?? "";
+        if (path === "") rootLists++;
+        if (path === "src") {
+          // After the create, a real server re-list of src includes the new file.
+          const children = [
+            { name: "app.ts", path: "src/app.ts", type: "file" as const, sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
+          ];
+          if (writes.includes("src/new.ts")) {
+            children.push({ name: "new.ts", path: "src/new.ts", type: "file" as const, sizeBytes: 0, mtimeMs: null, mode: null, truncated: false });
+          }
+          return {
+            root: { name: "src", path: "src", type: "dir" as const, sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children },
+            revision: 0, truncated: false,
+          };
+        }
+        return {
+          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+            { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
+          ] },
+          revision: 0, truncated: false,
+        };
+      },
+      fsWrite: async (_ws, _s, req) => {
+        writes.push(req.path);
+        return { path: req.path, sizeBytes: 0, revision: 5 };
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    // Expand src so it has loaded children we must NOT lose.
+    await hook.result.current.expand("src");
+    await flush();
+    expect(hook.result.current.tree.find((n) => n.path === "src")?.children?.length).toBe(1);
+    const rootListsBefore = rootLists;
+
+    await hook.result.current.createFile("src/new.ts");
+    await flush();
+    const src = hook.result.current.tree.find((n) => n.path === "src");
+    // The new file is spliced in (optimistic) AND the existing app.ts survives —
+    // no collapse. The write went through.
+    expect(src?.children?.map((c) => c.name).sort()).toEqual(["app.ts", "new.ts"]);
+    expect(writes).toEqual(["src/new.ts"]);
+    // NO root re-list happened (the old flow did a full root collapse-reload here).
+    expect(rootLists).toBe(rootListsBefore);
+    await hook.unmount();
+  });
+
+  test("a failed optimistic mutation REVERTS the tree and reports via onMutationError", async () => {
+    const errors: { op: string; message: string }[] = [];
+    const client = fakeClient({
+      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      fsList: async () => ({
+        root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+          { name: "a.ts", path: "a.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
+        ] },
+        revision: 0, truncated: false,
+      }),
+      fsWrite: async () => {
+        throw new OpenGeniApiError(409, "destination exists");
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, {
+        client, workspaceId: WORKSPACE_ID,
+        onMutationError: (e, op) => errors.push({ op, message: e.message }),
+      }),
+      undefined,
+    );
+    await flush();
+    await hook.result.current.createFile("b.ts").catch(() => {});
+    await flush();
+    // The optimistic b.ts was rolled back — only the original a.ts remains.
+    expect(hook.result.current.tree.map((n) => n.name)).toEqual(["a.ts"]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.op).toBe("create file");
+    expect(errors[0]?.message).toContain("destination exists");
+    await hook.unmount();
+  });
+
+  test("self-emitted fs.changed (source:write) is IGNORED — no re-list, no collapse", async () => {
+    let listCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      fsList: async () => {
+        listCalls++;
+        return {
+          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+            { name: "a.ts", path: "a.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
+          ] },
+          revision: 0, truncated: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    const listsAfterInitial = listCalls;
+    // A self-emitted write echo must NOT trigger any reconcile/list.
+    await hook.rerender({ events: [
+      fakeEvent(1, "fs.changed", { changes: [{ path: "a.ts", kind: "modified", isDir: false, sizeBytes: 2 }], source: "write", revision: 1, leaseEpoch: 0 }),
+    ] });
+    await flush(220);
+    expect(listCalls).toBe(listsAfterInitial);
+    await hook.unmount();
+  });
+
+  test("an EXTERNAL fs.changed reconciles ONLY the affected parent (targeted, not root collapse)", async () => {
+    const listPaths: string[] = [];
+    const client = fakeClient({
+      gitStatus: async () => ({ isRepo: false, head: null, detached: false, upstream: null, ahead: 0, behind: 0, files: [], revision: 0 }),
+      fsList: async (_ws, _s, req) => {
+        const path = req?.path ?? "";
+        listPaths.push(path);
+        if (path === "src") {
+          return {
+            root: { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+              { name: "app.ts", path: "src/app.ts", type: "file", sizeBytes: 1, mtimeMs: null, mode: null, truncated: false },
+              { name: "added.ts", path: "src/added.ts", type: "file", sizeBytes: 3, mtimeMs: null, mode: null, truncated: false },
+            ] },
+            revision: 0, truncated: false,
+          };
+        }
+        return {
+          root: { name: "", path: "", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false, children: [
+            { name: "src", path: "src", type: "dir", sizeBytes: null, mtimeMs: null, mode: null, truncated: false },
+          ] },
+          revision: 0, truncated: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { events: SessionEvent[] }) => useSandboxFiles(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: props.events }),
+      { events: [] as SessionEvent[] },
+    );
+    await flush();
+    await hook.result.current.expand("src");
+    await flush();
+    listPaths.length = 0;
+    // The AGENT writes src/added.ts → reconcile ONLY "src" (not a root re-list).
+    await hook.rerender({ events: [
+      fakeEvent(1, "fs.changed", { changes: [{ path: "src/added.ts", kind: "created", isDir: false, sizeBytes: 3 }], source: "agent", revision: 7, leaseEpoch: 0 }),
+    ] });
+    await flush(220);
+    expect(listPaths).toEqual(["src"]);
+    const src = hook.result.current.tree.find((n) => n.path === "src");
+    expect(src?.children?.map((c) => c.name).sort()).toEqual(["added.ts", "app.ts"]);
+    await hook.unmount();
+  });
+
   test("readFile proxies fs.read for the viewer pane (no repo required)", async () => {
     const reads: string[] = [];
     const client = fakeClient({

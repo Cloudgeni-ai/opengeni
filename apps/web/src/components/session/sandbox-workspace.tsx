@@ -34,10 +34,15 @@ export function useSandboxWorkspaceTabs({
   workspaceId,
   sessionId,
   events,
+  filesActive = false,
 }: {
   workspaceId: string;
   sessionId: string;
   events: SessionEvent[];
+  /** Whether the Files tab is the one on screen. Drives the warm-box viewer
+   *  holder so Channel-A fs ops are ~100ms (warm) instead of ~5s (cold resume).
+   *  Off ⇒ the Files surface negotiates read-only and lets the box drain. */
+  filesActive?: boolean;
 }): { tabs: WorkspaceTab[]; defaultTab: string } {
   const context = useAppContext();
 
@@ -55,6 +60,10 @@ export function useSandboxWorkspaceTabs({
     events,
     attachDesktop: watchDesktop,
     attachTerminal: warmTerminal,
+    // Keep the box warm while the Files tab is on screen — one shared viewer
+    // holder (no consent needed) so fs list/read/write/move are fast, not a cold
+    // ~5s resume per op. Releases when the user leaves the tab (box drains).
+    attachFiles: filesActive,
   });
   const capabilities = caps.capabilities;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
@@ -74,7 +83,17 @@ export function useSandboxWorkspaceTabs({
     (capabilities?.DesktopStream.transport ?? null) !== null ||
     capabilities?.DesktopStream.reason === "lease_cold";
 
-  const files = useSandboxFiles(sessionId, { events, enabled: fileSystemOn, liveness: capabilities?.liveness });
+  const files = useSandboxFiles(sessionId, {
+    events,
+    enabled: fileSystemOn,
+    liveness: capabilities?.liveness,
+    // Surface a reverted optimistic mutation (e.g. a 409 rename collision) as a
+    // toast — the tree silently rolls back, the user sees why.
+    onMutationError: (error, op) =>
+      toast.error(`Could not ${op}`, {
+        description: error.message,
+      }),
+  });
   const git = useSandboxGit(sessionId, { events, enabled: gitOn });
   const stagedGit = useSandboxGit(sessionId, { events, enabled: gitOn, staged: true });
 

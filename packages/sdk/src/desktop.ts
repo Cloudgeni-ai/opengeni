@@ -54,6 +54,15 @@ export function desktopSocketUrl(cap: Pick<DesktopStreamCapability, "url">): str
 export interface DesktopRfbLike {
   viewOnly: boolean;
   scaleViewport: boolean;
+  /**
+   * 1:1 viewport clipping. We always drive this FALSE: with clipping on, noVNC
+   * paints the framebuffer pixel-for-pixel and scrolls/crops to the container
+   * (the "zoomed in" look). FALSE lets `scaleViewport` shrink the 1280x800 frame
+   * to fit the panel (aspect-preserved). Declared so the hook can pin it instead
+   * of relying on noVNC's default — `scaleViewport=true` forces clip off
+   * internally, but a stale/partial state on reconnect could leave it on.
+   */
+  clipViewport: boolean;
   addEventListener(
     type: "connect" | "disconnect" | "securityfailure",
     cb: (e?: unknown) => void,

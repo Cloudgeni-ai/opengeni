@@ -104,19 +104,30 @@ describe("DiffView", () => {
 });
 
 describe("DesktopViewer", () => {
-  // A fake RFB that records construction + reports its viewOnly setting.
-  function fakeRfb(): { factory: DesktopRfbFactory; calls: { url: string; viewOnly: boolean }[] } {
-    const calls: { url: string; viewOnly: boolean }[] = [];
+  // A fake RFB that records construction + reports its viewOnly + scaling setting.
+  function fakeRfb(): {
+    factory: DesktopRfbFactory;
+    calls: { url: string; viewOnly: boolean; scaleViewport: boolean; clipViewport: boolean }[];
+  } {
+    const calls: { url: string; viewOnly: boolean; scaleViewport: boolean; clipViewport: boolean }[] = [];
     const factory: DesktopRfbFactory = (_target, url) => {
       const rfb: DesktopRfbLike = {
         viewOnly: false,
         scaleViewport: false,
+        clipViewport: false,
         addEventListener: () => {},
         removeEventListener: () => {},
         disconnect: () => {},
       };
-      // Record after the hook sets viewOnly on the next tick.
-      queueMicrotask(() => calls.push({ url, viewOnly: rfb.viewOnly }));
+      // Record after the hook sets viewOnly/scaling on the next tick.
+      queueMicrotask(() =>
+        calls.push({
+          url,
+          viewOnly: rfb.viewOnly,
+          scaleViewport: rfb.scaleViewport,
+          clipViewport: rfb.clipViewport,
+        }),
+      );
       return rfb;
     };
     return { factory, calls };
@@ -166,6 +177,10 @@ describe("DesktopViewer", () => {
     // The socket url was normalized to wss + websockify path.
     expect(calls[0]?.url.startsWith("wss://")).toBe(true);
     expect(calls[0]?.url).toContain("/websockify");
+    // Fit-to-panel: the 1280x800 framebuffer SCALES to the container and is
+    // never 1:1-clipped (the "zoomed in" regression).
+    expect(calls[0]?.scaleViewport).toBe(true);
+    expect(calls[0]?.clipViewport).toBe(false);
     await r.unmount();
   });
 
@@ -177,6 +192,7 @@ describe("DesktopViewer", () => {
       const rfb: DesktopRfbLike = {
         viewOnly: false,
         scaleViewport: false,
+        clipViewport: false,
         addEventListener: () => {},
         removeEventListener: () => {},
         disconnect: () => {},
