@@ -186,12 +186,28 @@ function ExecRenderer({ item }: ToolRendererProps) {
 
 function WriteStdinRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
-  const sessionId = args.session_id;
+  const sessionId = typeof args.session_id === "string" || typeof args.session_id === "number" ? args.session_id : undefined;
+  const running = item.status === "running";
   const text = typeof item.output === "string" ? item.output : stringifyPayload(item.output);
   const lost = isExecSessionLostBanner(text);
   const keys = controlCaret(typeof args.chars === "string" ? args.chars : "");
   const exitCode = sandboxCommandExitCode(text);
   const stripped = stripExecBanner(text);
+
+  if (running) {
+    return (
+      <ActivityDisclosure
+        icon={<KeyboardIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={`session ${sessionId} ← ${keys || "∅"}`}
+        titleMono
+        running
+        preview={<RunningPreview>sending…</RunningPreview>}
+      >
+        <BodyNote>sending input to session {sessionId}…</BodyNote>
+      </ActivityDisclosure>
+    );
+  }
 
   // Success (exit 0 or a quiet ack) earns no chip; only a lost PTY / non-zero
   // exit gets the one red token.
@@ -267,7 +283,36 @@ function PathPreview({ path, add, del }: { path: string; add?: number | undefine
 function ApplyPatchRenderer({ item }: ToolRendererProps) {
   const ops = applyPatchOps(item.raw);
   const failed = item.status === "failed";
+  const running = item.status === "running";
   const firstOp = ops[0];
+
+  if (running) {
+    // Show the patch structure from the arguments (available immediately on
+    // creation), but mark the row clearly as in-progress — not applied yet.
+    const fileCount = ops.length;
+    const titleVerb = firstOp ? `Applying ${basename(firstOp.path)}` : "Applying patch";
+    return (
+      <ActivityDisclosure
+        icon={<FileDiffIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={fileCount > 1 ? `Applying ${fileCount} files` : titleVerb}
+        running
+        preview={<RunningPreview>{fileCount > 1 ? `${fileCount} files` : firstOp ? firstOp.path : "applying…"}</RunningPreview>}
+      >
+        {ops.map((op) => {
+          const file = safeParseOp(op);
+          return file ? (
+            <ToolDiff key={op.path} files={[file]} />
+          ) : (
+            <div key={op.path}>
+              <p className="mb-1 font-og-mono text-og-xs text-og-fg-muted">{op.path}</p>
+              <RawPatch diff={op.diff ?? ""} />
+            </div>
+          );
+        })}
+      </ActivityDisclosure>
+    );
+  }
 
   if (failed) {
     return (
@@ -599,6 +644,21 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
   const out = item.output;
   const text = typeof out === "string" ? out : "";
 
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<ImageIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={`View ${basename(path)}`}
+        running
+        preview={<RunningPreview>reading…</RunningPreview>}
+        media={<MediaSkeleton />}
+      >
+        <BodyNote>reading image…</BodyNote>
+      </ActivityDisclosure>
+    );
+  }
+
   const errMatch = VIEW_IMAGE_ERRORS.find((p) => text.includes(p));
   if (errMatch) {
     const tooBig = text.includes("exceeded the allowed size");
@@ -658,6 +718,21 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
 function SecretSetRenderer({ item }: ToolRendererProps) {
   const args = parseToolArgs(item.arguments);
   const name = typeof args.name === "string" ? args.name : "variable";
+
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<KeyRoundIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={`Set ${name}`}
+        running
+        preview={<RunningPreview>setting…</RunningPreview>}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+      </ActivityDisclosure>
+    );
+  }
+
   return (
     <ActivityDisclosure
       icon={<KeyRoundIcon className={ICON_SIZE} />}

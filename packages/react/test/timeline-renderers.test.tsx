@@ -264,3 +264,197 @@ describe("ExecRenderer — failed status with non-empty output", () => {
     await r.unmount();
   });
 });
+
+/* ---- Running-state: apply_patch_call -------------------------------------- */
+
+describe("ApplyPatchRenderer — running state (in-flight affordance)", () => {
+  const rawSingleOp = {
+    type: "apply_patch_call",
+    operations: [{ type: "update_file", path: "src/foo.ts", diff: "@@ -1,2 +1,2 @@\n context\n-old\n+new" }],
+  };
+  const rawMultiOp = {
+    type: "apply_patch_call",
+    operations: [
+      { type: "update_file", path: "src/a.ts", diff: "@@ -1,2 +1,2 @@\n context\n-old\n+new" },
+      { type: "update_file", path: "src/b.ts", diff: "@@ -1,2 +1,2 @@\n ctx\n-x\n+y" },
+    ],
+  };
+
+  test("running single-op: row shimmers (running class) and shows in-flight copy, not 'Edited'", async () => {
+    const item = toolItem({
+      name: "apply_patch_call",
+      raw: rawSingleOp,
+      status: "running",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // Must show "Applying" verb, not the settled "Edited" verb.
+    expect(text).toContain("Applying");
+    expect(text).not.toContain("Edited");
+    // The shimmer class must be present on the title element.
+    const shimmer = r.container.querySelector(".og-shimmer-text");
+    expect(shimmer).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("running multi-op: row shimmers and shows file count as in-flight, not settled count", async () => {
+    const item = toolItem({
+      name: "apply_patch_call",
+      raw: rawMultiOp,
+      status: "running",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // Title must say "Applying 2 files" (not "Edited 2 files").
+    expect(text).toContain("Applying");
+    expect(text).toContain("2");
+    expect(text).not.toContain("Edited");
+    const shimmer = r.container.querySelector(".og-shimmer-text");
+    expect(shimmer).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("settled apply_patch still shows 'Edited' (regression guard)", async () => {
+    const item = toolItem({
+      name: "apply_patch_call",
+      raw: rawSingleOp,
+      status: "complete",
+      output: "ok",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Edited");
+    expect(text).not.toContain("Applying");
+
+    await r.unmount();
+  });
+});
+
+/* ---- Running-state: write_stdin ------------------------------------------- */
+
+describe("WriteStdinRenderer — running state (in-flight affordance)", () => {
+  test("running write_stdin: row shimmers and shows 'sending…', not settled 'sent'", async () => {
+    const item = toolItem({
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: "sess-42", chars: "ls\n" }),
+      status: "running",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // Must show in-flight copy.
+    expect(text.toLowerCase()).toContain("sending");
+    // Must NOT show the settled "sent" copy.
+    expect(text).not.toContain("sent");
+    // Shimmer class must be on the title.
+    const shimmer = r.container.querySelector(".og-shimmer-text");
+    expect(shimmer).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("settled write_stdin shows 'sent' copy (regression guard)", async () => {
+    const item = toolItem({
+      name: "write_stdin",
+      arguments: JSON.stringify({ session_id: "sess-42", chars: "ls\n" }),
+      status: "complete",
+      output: "",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("sent");
+
+    await r.unmount();
+  });
+});
+
+/* ---- Running-state: view_image -------------------------------------------- */
+
+describe("ViewImageRenderer — running state (in-flight affordance)", () => {
+  test("running view_image: row shimmers (not settled); body shows 'reading' copy on expand", async () => {
+    const item = toolItem({
+      name: "view_image",
+      arguments: JSON.stringify({ path: "/tmp/screenshot.png" }),
+      status: "running",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    // Shimmer class must be present on the title — this is the in-flight signal.
+    const shimmer = r.container.querySelector(".og-shimmer-text");
+    expect(shimmer).not.toBeNull();
+
+    // Expand the row to see the body note.
+    const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("reading");
+
+    await r.unmount();
+  });
+});
+
+/* ---- Running-state: environment_set_variable ------------------------------ */
+
+describe("SecretSetRenderer — running state (in-flight affordance)", () => {
+  test("running environment_set_variable: row shimmers and shows 'setting…'", async () => {
+    const item = toolItem({
+      name: "environment_set_variable",
+      arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
+      status: "running",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("setting");
+    // Settled copy "write-only · never returned" must NOT appear during in-flight.
+    expect(text).not.toContain("write-only");
+    const shimmer = r.container.querySelector(".og-shimmer-text");
+    expect(shimmer).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("settled environment_set_variable shows write-only copy (regression guard)", async () => {
+    const item = toolItem({
+      name: "environment_set_variable",
+      arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
+      status: "complete",
+      output: "ok",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("write-only");
+
+    await r.unmount();
+  });
+});
