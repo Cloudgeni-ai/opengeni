@@ -788,6 +788,7 @@ describe("worker activities integration", () => {
     let observedDuringRun: { status?: string; activeTurnId?: string | null } | null = null;
     const runtime: OpenGeniRuntime = {
       configure: () => {},
+      resolveTurnModel: () => null,
       buildAgent: () => ({} as never),
       prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
       prepareInput: async (_agent, input) => {

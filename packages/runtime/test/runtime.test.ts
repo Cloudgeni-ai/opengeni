@@ -379,11 +379,15 @@ describe("runtime event normalization", () => {
     expect(agent.mcpServers).toEqual([]);
   });
 
-  test("sets sandbox runAs only for backends that support manifest users", () => {
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBe("sandbox");
+  test("does not override the sandbox provider's default execution user", () => {
+    // The sandbox provider is responsible for choosing a user that can write to
+    // its workspace. Supplying a synthetic runAs user can break normal writes.
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBeUndefined();
+    expect(sandboxRunAs(testSettings({ sandboxBackend: "local" }))).toBeUndefined();
     expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBeUndefined();
     expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
-    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs).toBe("sandbox");
+    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs).toBeUndefined();
+    expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "local" }), []) as any).runAs).toBeUndefined();
     expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []) as any).runAs).toBeUndefined();
     expect((buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []) as any).runAs).toBeUndefined();
   });

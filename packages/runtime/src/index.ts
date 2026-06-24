@@ -69,7 +69,6 @@ import {
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
-import { userInfo } from "node:os";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -786,13 +785,7 @@ export function buildAgentCapabilities(
   return caps;
 }
 
-export function sandboxRunAs(settings: Settings): string | undefined {
-  if (settings.sandboxBackend === "docker") {
-    return "sandbox";
-  }
-  if (settings.sandboxBackend === "local") {
-    return userInfo().username;
-  }
+export function sandboxRunAs(_settings: Settings): string | undefined {
   return undefined;
 }
 
