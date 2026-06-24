@@ -74,7 +74,7 @@ export type WorkerItem = {
   prompt: string | null;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
-  status: "running" | "complete";
+  status: "running" | "complete" | "failed";
   occurredAt: string;
 };
 

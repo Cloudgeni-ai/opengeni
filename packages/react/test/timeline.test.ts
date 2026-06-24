@@ -245,6 +245,34 @@ describe("buildTimeline", () => {
     expect((items[1] as AgentMessageItem).streaming).toBe(false);
   });
 
+  // Fix 3: in-flight tools when turn.failed must become "failed", not "complete"
+  test("turn.failed marks in-flight tool calls as failed (not complete)", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+      event("turn.failed", { error: "model provider unavailable" }),
+    ]);
+    expect((items[0] as ToolCallItem).status).toBe("failed");
+  });
+
+  test("turn.cancelled marks in-flight tool calls as failed (not complete)", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make test" } }),
+      event("turn.cancelled", {}),
+    ]);
+    expect((items[0] as ToolCallItem).status).toBe("failed");
+  });
+
+  test("turn.failed marks in-flight sandbox operations as failed", () => {
+    reset();
+    const items = buildTimeline([
+      event("sandbox.operation.started", { name: "exec", command: "terraform apply" }),
+      event("turn.failed", { error: "storage error" }),
+    ]);
+    expect((items[0] as SandboxItem).status).toBe("failed");
+  });
+
   test("goal events become goal markers with text", () => {
     reset();
     const items = buildTimeline([event("goal.set", { goal: { text: "Keep staging green" } })]);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { registerDom, renderComponent, flush } from "./render-hook";
-import { defaultToolRegistry } from "../src/timeline";
-import type { ToolCallItem } from "../src/timeline";
+import { defaultToolRegistry, ActivityRail } from "../src/timeline";
+import type { ToolCallItem, SandboxItem } from "../src/timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -454,6 +454,89 @@ describe("SecretSetRenderer — running state (in-flight affordance)", () => {
 
     const text = r.container.textContent ?? "";
     expect(text.toLowerCase()).toContain("write-only");
+
+    await r.unmount();
+  });
+
+  // Fix 2: failed environment_set_variable must show failure affordance, NOT success copy
+  test("failed environment_set_variable shows failed affordance, NOT write-only success copy", async () => {
+    const item = toolItem({
+      name: "environment_set_variable",
+      arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
+      status: "failed",
+      output: "permission denied",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // Must surface the failure affordance.
+    expect(text.toLowerCase()).toContain("fail");
+    // Must NOT show the success "write-only" copy.
+    expect(text.toLowerCase()).not.toContain("write-only");
+    // The error output must be accessible.
+    expect(text).toContain("permission denied");
+
+    await r.unmount();
+  });
+
+  test("failed environment_set_variable with no output shows generic failure, NOT write-only copy", async () => {
+    const item = toolItem({
+      name: "environment_set_variable",
+      arguments: JSON.stringify({ name: "MY_SECRET", value: "hunter2" }),
+      status: "failed",
+      output: undefined,
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text.toLowerCase()).toContain("fail");
+    expect(text.toLowerCase()).not.toContain("write-only");
+
+    await r.unmount();
+  });
+});
+
+/* ---- Fix 1: SandboxRow — failed chip ---------------------------------------- */
+
+function sandboxItem(overrides: Partial<SandboxItem>): SandboxItem {
+  return {
+    kind: "sandbox",
+    id: "sb-1",
+    turnId: "turn-1",
+    name: "exec",
+    command: "terraform apply",
+    output: "",
+    status: "complete",
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("SandboxRow — failed chip", () => {
+  test("a failed sandbox item shows the failed chip (not just the red icon tone)", async () => {
+    const item = sandboxItem({ status: "failed", output: "connection refused" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // The "failed" chip text must appear in the collapsed row.
+    expect(text.toLowerCase()).toContain("failed");
+
+    await r.unmount();
+  });
+
+  test("a complete sandbox item does NOT show a failed chip (regression guard)", async () => {
+    const item = sandboxItem({ status: "complete" });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    // No failure chip for a successful op.
+    expect(text.toLowerCase()).not.toContain("failed");
 
     await r.unmount();
   });

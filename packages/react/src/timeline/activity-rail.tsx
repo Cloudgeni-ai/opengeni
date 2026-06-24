@@ -121,6 +121,7 @@ function SandboxRow({ item }: { item: SandboxItem }) {
       iconTone={item.status === "failed" ? "failed" : item.status === "running" ? "running" : "muted"}
       title={toolDisplayName(item.name)}
       running={item.status === "running"}
+      failed={item.status === "failed"}
       preview={item.command ?? undefined}
     >
       {item.command ? <PayloadBlock label="Command" value={item.command} /> : null}

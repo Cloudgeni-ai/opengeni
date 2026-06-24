@@ -733,6 +733,22 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
     );
   }
 
+  if (item.status === "failed") {
+    const errorText = typeof item.output === "string" ? item.output : null;
+    return (
+      <ActivityDisclosure
+        icon={<KeyRoundIcon className={ICON_SIZE} />}
+        iconTone="failed"
+        title={`Set ${name}`}
+        failed
+        preview={errorText ?? "variable write failed"}
+      >
+        <PayloadBlock label="Arguments" value={redactSecrets(args)} />
+        {errorText ? <PayloadBlock label="Error" value={errorText} failed /> : <BodyNote tone="error">the tool call failed with no output.</BodyNote>}
+      </ActivityDisclosure>
+    );
+  }
+
   return (
     <ActivityDisclosure
       icon={<KeyRoundIcon className={ICON_SIZE} />}

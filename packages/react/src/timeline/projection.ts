@@ -44,7 +44,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
     }
   };
 
-  const finalizeOpen = (turnId?: string | null): void => {
+  const finalizeOpen = (turnId?: string | null, disposition: "complete" | "failed" = "complete"): void => {
     for (const item of items) {
       if (turnId !== undefined && "turnId" in item && item.turnId && turnId && item.turnId !== turnId) {
         continue;
@@ -53,10 +53,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         item.streaming = false;
       }
       if ((item.kind === "tool-call" || item.kind === "worker") && item.status === "running") {
-        item.status = "complete";
+        item.status = disposition;
       }
       if (item.kind === "sandbox" && item.status === "running") {
-        item.status = "complete";
+        item.status = disposition;
       }
     }
   };
@@ -285,7 +285,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.failed": {
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "failed");
         items.push({
           kind: "notice",
           id: event.id,
@@ -297,7 +297,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.cancelled": {
-        finalizeOpen(turnId);
+        finalizeOpen(turnId, "failed");
         items.push({
           kind: "notice",
           id: event.id,
