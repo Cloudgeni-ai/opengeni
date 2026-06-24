@@ -256,7 +256,17 @@ const SettingsSchema = z.object({
   dockerNetwork: z.string().optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
-  modalTimeoutSeconds: z.coerce.number().int().positive().default(900),
+  // Modal's hard sandbox lifetime (timeoutMs = this * 1000), counted from each
+  // create/resume — it is the BACKSTOP that reclaims a box if the reaper/worker is
+  // down, NOT the warm-window controller (that's sandboxIdleGraceMs). It must
+  // comfortably exceed reaperPeriod + idleGrace so the reaper terminates a
+  // genuinely-idle box FIRST; the boot invariant below enforces that. Default 1h
+  // (was 900s/15min): the 15-min drain grace counts from the user's LAST release,
+  // but Modal's clock starts at the preceding turn's resume — so a 15-min grace on
+  // top of a 900s lifetime would let Modal kill the box mid-warm-window. 3600s
+  // leaves ~45min of headroom for the active turn before the warm window opens.
+  // Knob: OPENGENI_MODAL_TIMEOUT_SECONDS.
+  modalTimeoutSeconds: z.coerce.number().int().positive().default(3600),
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -350,12 +360,20 @@ const SettingsSchema = z.object({
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
-  // reaperPeriod < viewerHolderTTL < providerIdleTimeout (modalTimeoutSeconds).
-  // No keep-alive knob: between turns the box survives on the provider's
-  // existing idle-timeout; there is no keepalive loop to bound.
+  // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < providerIdleTimeout
+  // (modalTimeoutSeconds*1000). No keep-alive knob: between turns the box survives
+  // on the provider's existing idle-timeout; there is no keepalive loop to bound.
   sandboxLeaseReaperPeriodMs: z.coerce.number().int().positive().default(30_000),
   sandboxViewerHolderTtlMs: z.coerce.number().int().positive().default(90_000),
-  sandboxIdleGraceMs: z.coerce.number().int().positive().default(45_000),
+  // The DRAIN grace: how long a refcount-0 (draining) lease stays WARM before the
+  // reaper resume-by-ids the box and terminates it. This is the cost-vs-snappiness
+  // dial — when the user navigates away the box keeps refcount 0, but it survives
+  // this whole window so a "glanced away then came back" re-arms the SAME warm box
+  // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
+  // skips a re-armed box). Default 15min so a brief detour never cold-creates a
+  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim. Knob:
+  // OPENGENI_SANDBOX_IDLE_GRACE_MS.
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -1636,25 +1654,40 @@ function validateSettings(settings: Settings): void {
     serverIds.add(server.id);
   }
   // --- sandbox lease cadence invariant (fail fast at boot) ---
-  // reaperPeriod (30s) < viewerHolderTTL (90s) < providerIdleTimeout (900s):
-  // the reaper must run more often than the TTL it polices, and a viewer holder
-  // must be reapable before the box idles out from under it (the provider
-  // idle-timeout is the backstop). idleTimeout derives from modalTimeoutSeconds.
+  // reaperPeriod (30s) < viewerHolderTTL (90s), and reaperPeriod + idleGrace must
+  // be strictly less than the provider lifetime (modalTimeoutSeconds*1000):
+  //   - the reaper must run more often than the TTL it polices; and
+  //   - the reaper must terminate a genuinely-idle box (after the full drain grace,
+  //     observed on the NEXT sweep) BEFORE the provider's hard lifetime reclaims it
+  //     out from under us — the provider lifetime is the backstop, not the
+  //     warm-window controller. idleGrace counts from the user's last release;
+  //     the provider clock counts from the preceding resume, so we leave the
+  //     active-turn headroom in modalTimeoutSeconds (default 3600s).
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
-    const idleTimeoutMs = settings.modalTimeoutSeconds * 1000;
+    const idleGraceMs = settings.sandboxIdleGraceMs;
+    const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
     if (!(reaperPeriod < viewerTtl)) {
       throw new Error(
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than `
         + `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}): the reaper must run more often `
         + `than the TTL it polices, or stale viewer holders outlive a full reaper period.`);
     }
-    if (!(viewerTtl < idleTimeoutMs)) {
+    if (!(viewerTtl < providerLifetimeMs)) {
       throw new Error(
         `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the provider `
-        + `idle timeout (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${idleTimeoutMs}): a viewer holder must be `
+        + `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): a viewer holder must be `
         + `reapable before the box idles out from under it (the provider idle-timeout is the backstop).`);
+    }
+    if (!(reaperPeriod + idleGraceMs < providerLifetimeMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_GRACE_MS `
+        + `(${reaperPeriod} + ${idleGraceMs} = ${reaperPeriod + idleGraceMs}) must be strictly less than the `
+        + `provider lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the reaper must be `
+        + `able to terminate a genuinely-idle box on the sweep AFTER the drain grace elapses, before the `
+        + `provider's hard idle-timeout reclaims it (the provider timeout is the backstop). Raise `
+        + `OPENGENI_MODAL_TIMEOUT_SECONDS or lower OPENGENI_SANDBOX_IDLE_GRACE_MS.`);
     }
   }
   // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (I8) ---

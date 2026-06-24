@@ -79,8 +79,8 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
  *
  * The Schedule fires sandboxReaperWorkflow on the worker's global task queue
  * every settings.sandboxLeaseReaperPeriodMs (the SAME cadence the boot invariant
- * `reaperPeriod < viewerHolderTTL < providerIdleTimeout` validates in
- * packages/config — wiring the schedule period to it). SKIP overlap means a slow
+ * `reaperPeriod < viewerHolderTTL` and `reaperPeriod + idleGrace < providerLifetime`
+ * validates in packages/config — wiring the schedule period to it). SKIP overlap means a slow
  * sweep never overlaps itself. Idempotent: a duplicate scheduleId across the
  * worker pool collides on ScheduleAlreadyRunning and no-ops, so the Schedule is
  * registered exactly once per deployment.
@@ -102,7 +102,8 @@ export async function registerSandboxReaperSchedule(
       scheduleId: SANDBOX_REAPER_SCHEDULE_ID,
       spec: {
         // @every-style interval: fire once per reaper period. The boot invariant
-        // (config) guarantees reaperPeriod < viewerHolderTTL < providerIdleTimeout.
+        // (config) guarantees reaperPeriod < viewerHolderTTL and
+        // reaperPeriod + idleGrace < providerLifetime.
         intervals: [{ every: settings.sandboxLeaseReaperPeriodMs }],
       },
       action: {

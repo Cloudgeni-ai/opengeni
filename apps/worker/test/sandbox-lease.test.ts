@@ -13,8 +13,10 @@
 //       turn holder is released) is reapable: once the turn holder is gone the
 //       lease drains and the box is terminated — TTL-exemption protects a *live*
 //       turn, not a dead one's leaked holder.
-//   (4) the boot invariant reaperPeriod < viewerHolderTTL < providerIdleTimeout
-//       rejects a misconfigured cadence (validated in @opengeni/config).
+//   (3b) the drain grace (settings.sandboxIdleGraceMs) holds a refcount-0 box WARM:
+//        younger-than-grace is NOT terminated, grace-elapsed IS.
+//   (4) the boot invariant (reaperPeriod < viewerHolderTTL; reaperPeriod + idleGrace
+//       < providerLifetime) rejects a misconfigured cadence (validated in @opengeni/config).
 //   (5) the Schedule registration is idempotent — registers exactly once (a
 //       second create() collides on ScheduleAlreadyRunning and no-ops).
 //
@@ -382,7 +384,70 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(afterSecond?.instance_id).toBeNull();
   }, 60_000);
 
-  test("(4) the boot invariant reaperPeriod < viewerHolderTTL < providerIdleTimeout rejects a misconfigured cadence", () => {
+  test("(3b) the drain grace holds a refcount-0 box WARM: younger-than-grace is NOT terminated, older IS (settings.sandboxIdleGraceMs)", async () => {
+    if (!available) return;
+    const spy = makeTerminateSpy();
+
+    // A reaper configured with a LONG drain grace (10 min) — the production default
+    // shape: when a box drops to refcount 0 it stays warm for the whole grace so a
+    // "glanced away then came back" never loses the box. We assert the warm->draining
+    // re-stamp uses THIS settings value, and that a draining row younger than the
+    // grace survives while an older one is terminated.
+    const tenMinGraceMs = 600_000;
+    const longGrace = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      sandboxOwnershipEnabled: true,
+      sandboxViewerHolderTtlMs: 90_000,
+      sandboxLeaseReaperPeriodMs: 30_000,
+      sandboxIdleGraceMs: tenMinGraceMs,
+    });
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(longGrace), { terminateBox: spy.fn });
+
+    // (a) a WARM box that just dropped to refcount 0 (NO holders) → the sweep
+    //     recomputes 0 holders → warm->draining and stamps expires_at = now +
+    //     sandboxIdleGraceMs (10 min in the future). It must NOT be terminated this
+    //     sweep — the user could navigate back within the grace.
+    const justIdle = await freshWorkspace();
+    await insertLease(justIdle, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 11, instanceId: "box-justidle",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    // (b) a box already DRAINING whose grace has fully elapsed (expires in the past)
+    //     → terminated this sweep. Proves the grace is a deadline, not an immortality.
+    const graceElapsed = await freshWorkspace();
+    await insertLease(graceElapsed, {
+      liveness: "draining", refcount: 0, leaseEpoch: 12, expiresInMs: -1_000, instanceId: "box-elapsed",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    await reapSandboxLeases();
+
+    // (a) entered draining with a grace deadline ~10 min out, and was NOT terminated.
+    const justIdleRow = await readRow(justIdle.workspaceId, justIdle.groupId);
+    expect(justIdleRow?.liveness).toBe("draining");
+    expect(justIdleRow?.refcount).toBe(0);
+    expect(spy.calls.some((c) => c.group === justIdle.groupId)).toBe(false);
+    // The stamped grace deadline is ~now+10min (well in the future — the warm window).
+    const [graceRow] = await admin<{ remaining_ms: string }[]>`
+      select extract(epoch from (expires_at - now())) * 1000 as remaining_ms
+      from sandbox_leases where workspace_id = ${justIdle.workspaceId} and sandbox_group_id = ${justIdle.groupId}`;
+    // (postgres returns the numeric as a string) Generous bounds (sweep + clock
+    // jitter): clearly far above the OLD 45s grace, and no more than the configured
+    // 10-min grace.
+    const remainingMs = Number(graceRow!.remaining_ms);
+    expect(remainingMs).toBeGreaterThan(tenMinGraceMs - 60_000);
+    expect(remainingMs).toBeLessThanOrEqual(tenMinGraceMs + 1_000);
+
+    // (b) the grace-elapsed box WAS terminated → cold.
+    expect(spy.calls.some((c) => c.group === graceElapsed.groupId && c.epoch === 12)).toBe(true);
+    const elapsedRow = await readRow(graceElapsed.workspaceId, graceElapsed.groupId);
+    expect(elapsedRow?.liveness).toBe("cold");
+    expect(elapsedRow?.instance_id).toBeNull();
+  }, 60_000);
+
+  test("(4) the boot invariant (reaper<viewerTTL; reaper+idleGrace<providerLifetime) rejects a misconfigured cadence", () => {
     // Driven through the REAL @opengeni/config getSettings validation (the same
     // boot path the worker uses): getSettings reads process.env, so withEnv swaps
     // it for the duration of each parse.
@@ -401,20 +466,32 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
     }, () => getSettings())).toThrow(/REAPER_PERIOD_MS.*less than.*VIEWER_HOLDER_TTL_MS/s);
 
-    // viewerHolderTTL (1_000_000ms ≈ 1000s) >= providerIdleTimeout (900s) → throws.
+    // viewerHolderTTL (4000s) >= providerLifetime (3600s) → throws.
     expect(() => withEnv({
       ...base,
       OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
-      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "1000000",
-      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
-    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than.*idle timeout/s);
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "4000000",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
+    }, () => getSettings())).toThrow(/VIEWER_HOLDER_TTL_MS.*less than the provider lifetime/s);
 
-    // A correctly-ordered cadence validates (reaper 30s < viewer 90s < idle 900s).
+    // reaperPeriod + idleGrace (30s + 900s = 930s) >= providerLifetime (900s) → throws.
+    // This is the warm-window guard: the reaper must terminate a genuinely-idle box
+    // (on the sweep after the drain grace elapses) BEFORE the provider's hard
+    // lifetime reclaims it out from under us.
     expect(() => withEnv({
       ...base,
       OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
       OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
+      OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
       OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+    }, () => getSettings())).toThrow(/REAPER_PERIOD_MS \+ OPENGENI_SANDBOX_IDLE_GRACE_MS.*less than the.*provider lifetime/s);
+
+    // The shipped defaults validate: reaper 30s < viewer 90s; reaper 30s + idleGrace
+    // 900s = 930s < providerLifetime 3600s. (No idle-grace/modal env set → defaults.)
+    expect(() => withEnv({
+      ...base,
+      OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS: "30000",
+      OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS: "90000",
     }, () => getSettings())).not.toThrow();
   });
 
