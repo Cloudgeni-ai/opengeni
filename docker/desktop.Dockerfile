@@ -94,8 +94,15 @@ RUN set -eux; dbus-uuidgen --ensure=/var/lib/dbus/machine-id; \
 # Input/output error." We fix BOTH the human menu path and the agent path with ONE
 # wrapper that supplies the container-safe flags, and we wire it as the system default
 # browser so every exo/x-www-browser/mimeapps resolution lands on it.
-ARG OPENGENI_BROWSER_BIN_AMD64=/usr/bin/google-chrome-stable
-ARG OPENGENI_BROWSER_BIN_ARM64=/usr/bin/firefox-esr
+# The REAL engine binary the wrapper execs — ABSOLUTE path into the package payload,
+# NEVER a /usr/bin name, because below we alias the /usr/bin browser NAMES
+# (google-chrome, google-chrome-stable, chromium, chromium-browser) to the wrapper
+# itself. Pointing OPENGENI_BROWSER_BIN at /usr/bin/google-chrome-stable would make the
+# wrapper exec a symlink that resolves straight back to the wrapper => infinite loop.
+# /opt/google/chrome/google-chrome (chrome deb) and /usr/lib/firefox-esr/firefox-esr
+# (firefox-esr deb) are the real launcher binaries and are NOT aliased.
+ARG OPENGENI_BROWSER_BIN_AMD64=/opt/google/chrome/google-chrome
+ARG OPENGENI_BROWSER_BIN_ARM64=/usr/lib/firefox-esr/firefox-esr
 
 # (i) the wrapper + the default-browser config files (one COPY, used right below).
 COPY docker/desktop/opengeni-browser.sh            /usr/local/bin/opengeni-browser
@@ -151,15 +158,38 @@ RUN set -eux; \
     printf '[Default Applications]\nx-scheme-handler/http=opengeni-browser.desktop\nx-scheme-handler/https=opengeni-browser.desktop\ntext/html=opengeni-browser.desktop\nx-scheme-handler/about=opengeni-browser.desktop\nx-scheme-handler/unknown=opengeni-browser.desktop\n' \
         > /etc/xdg/mimeapps.list; \
     update-desktop-database /usr/share/applications 2>/dev/null || true; \
-    # (v) prove the wrapper actually launches the real engine (--version, NO_AT_BRIDGE
+    # (v) NAME ALIASES — make every common browser command name resolve to the wrapper.
+    #     The agent's computer-use shell runs `google-chrome --new-window <url>` /
+    #     `chromium` / `chromium-browser`; none of those are container-safe on their own
+    #     (chromium isn't installed; bare google-chrome crashes as root w/o --no-sandbox).
+    #     We symlink each NAME into /usr/local/bin -> the wrapper. /usr/local/bin precedes
+    #     /usr/bin on the default PATH, so these shadow the chrome deb's own
+    #     /usr/bin/google-chrome{,-stable} symlinks WITHOUT removing them (the deb's
+    #     /usr/bin links stay intact -> /opt/google/chrome/google-chrome, keeping the
+    #     wrapper's exec target healthy). NO LOOP: the wrapper execs the REAL binary by
+    #     absolute path (/opt/google/chrome/google-chrome via OPENGENI_BROWSER_BIN), never
+    #     one of these names — so a name never resolves back into the wrapper recursively.
+    for alias_name in google-chrome google-chrome-stable chromium chromium-browser; do \
+        ln -sf /usr/local/bin/opengeni-browser "/usr/local/bin/${alias_name}"; \
+    done; \
+    # x-www-browser stays owned by update-alternatives (set in step iii above); leave it.
+    # (vi) prove the wrapper actually launches the real engine (--version, NO_AT_BRIDGE
     #     keeps it quiet). Uses the baked env via the ENV directive below at runtime;
     #     here we pass it inline so the build-time check exercises the same path.
-    OPENGENI_BROWSER_BIN="${BROWSER_BIN}" /usr/local/bin/opengeni-browser --version
+    OPENGENI_BROWSER_BIN="${BROWSER_BIN}" /usr/local/bin/opengeni-browser --version; \
+    # (vii) prove the NAME aliases resolve to the wrapper AND launch (loop-free): invoke
+    #     via the alias names (PATH resolution) with the real engine baked in. If any name
+    #     had recursed into the wrapper the process would spin/EMFILE instead of printing
+    #     a version; a clean --version here is the no-loop proof.
+    for alias_name in google-chrome google-chrome-stable chromium chromium-browser; do \
+        OPENGENI_BROWSER_BIN="${BROWSER_BIN}" "${alias_name}" --version; \
+    done
 
 # the per-arch real engine the wrapper execs (amd64 chrome by default; the ARM build
 # arg path overrides at build time). Lives in process env so the wrapper picks it up
-# from BOTH the human exo launch and the agent computer-use launch.
-ENV OPENGENI_BROWSER_BIN=/usr/bin/google-chrome-stable
+# from BOTH the human exo launch and the agent computer-use launch. ABSOLUTE real-binary
+# path — NOT /usr/bin/google-chrome-stable, which is now a wrapper alias (loop guard).
+ENV OPENGENI_BROWSER_BIN=/opt/google/chrome/google-chrome
 
 # ---- Layer 6: terraform / checkov / az / gh (parity with docker/sandbox.Dockerfile) ----
 RUN set -eux; \

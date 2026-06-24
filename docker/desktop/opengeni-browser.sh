@@ -37,12 +37,20 @@
 # it doesn't know, but it DOES need --no-remote/profile handling, so we branch.
 set -euo pipefail
 
-BIN="${OPENGENI_BROWSER_BIN:-/usr/bin/google-chrome-stable}"
+# OPENGENI_BROWSER_BIN MUST point at the REAL engine binary by ABSOLUTE PATH, never
+# at one of the wrapper's own name aliases (google-chrome / google-chrome-stable /
+# chromium / chromium-browser now ALL symlink to THIS wrapper — see desktop.Dockerfile
+# Layer 5). The real Google Chrome deb installs its launcher at the fixed absolute path
+# /opt/google/chrome/google-chrome; we exec THAT so the wrapper can never re-enter
+# itself (no symlink loop). Default reflects that real path.
+BIN="${OPENGENI_BROWSER_BIN:-/opt/google/chrome/google-chrome}"
 # Resolve robustly across arch: if the configured binary isn't executable (e.g. an
 # arm64 image that ships firefox-esr instead of chrome), fall back to whichever real
-# browser IS present so the wrapper never dead-ends on a missing path.
+# browser IS present so the wrapper never dead-ends on a missing path. EVERY candidate
+# here is a REAL engine binary by absolute path — NOT a /usr/bin name that now aliases
+# back to this wrapper (that would recurse) — so the fallback is always loop-free.
 if [ ! -x "$BIN" ]; then
-  for cand in /usr/bin/google-chrome-stable /usr/bin/google-chrome /usr/bin/firefox-esr /usr/bin/firefox; do
+  for cand in /opt/google/chrome/google-chrome /opt/google/chrome/chrome /usr/lib/firefox-esr/firefox-esr /usr/lib/firefox/firefox; do
     if [ -x "$cand" ]; then BIN="$cand"; break; fi
   done
 fi
