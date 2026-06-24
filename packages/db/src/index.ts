@@ -57,10 +57,12 @@ import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
+import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import * as schema from "./schema";
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
 
 export type Database = PostgresJsDatabase<typeof schema>;
 
@@ -4677,7 +4679,7 @@ export async function wakeParentSessionForChildCompletion(
       sessionId: parent.id,
       sequence: ++sequence,
       type: event.type,
-      payload: event.payload,
+      payload: sanitizeEventPayload(event.payload),
       clientEventId: event.clientEventId ?? null,
       turnId: null,
       producerId: null,
@@ -4717,7 +4719,7 @@ export async function wakeParentSessionForChildCompletion(
       sessionId: parent.id,
       sequence,
       type: "turn.queued",
-      payload: { turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source },
+      payload: sanitizeEventPayload({ turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source }),
       clientEventId: null,
       turnId: turn.id,
       producerId: null,
@@ -4902,7 +4904,7 @@ export async function appendSessionEvents(db: Database, workspaceId: string, ses
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
@@ -4942,7 +4944,7 @@ export async function appendSessionEventsAndUpdateSession(db: Database, workspac
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
@@ -4992,7 +4994,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, w
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
