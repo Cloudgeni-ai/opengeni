@@ -844,6 +844,17 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Delete a document from a base. Removes the document row and its indexed
+   * chunks while leaving the uploaded file asset available for other uses.
+   */
+  async deleteDocument(workspaceId: string, baseId: string, documentId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents/${documentId}`,
+    );
+  }
+
   async searchDocuments(
     workspaceId: string,
     baseId: string,

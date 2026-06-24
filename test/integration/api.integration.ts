@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -2894,6 +2894,31 @@ describe("API component integration", () => {
     const search = await searchResponse.json() as { results: Array<{ text: string; title: string }> };
     expect(search.results[0]?.text).toContain("network policy");
     expect(search.results[0]?.title).toBe("network-runbook.txt");
+
+    const deleteResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`), { method: "DELETE" });
+    expect(deleteResponse.status).toBe(204);
+    expect(await deleteResponse.text()).toBe("");
+
+    const deletedListResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`));
+    expect(deletedListResponse.status).toBe(200);
+    expect(await deletedListResponse.json()).toEqual([]);
+
+    const deletedSearchResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/search`), {
+      method: "POST",
+      body: JSON.stringify({ query: "network policy", limit: 3 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(deletedSearchResponse.status).toBe(200);
+    const deletedSearch = await deletedSearchResponse.json() as { results: unknown[] };
+    expect(deletedSearch.results).toEqual([]);
+
+    await expect(requireFile(dbClient.db, workspaceId, upload.fileId)).resolves.toMatchObject({
+      id: upload.fileId,
+      filename: "network-runbook.txt",
+    });
+
+    const missingDeleteResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`), { method: "DELETE" });
+    expect(missingDeleteResponse.status).toBe(404);
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {

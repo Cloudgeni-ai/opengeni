@@ -142,6 +142,7 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/turns/turn-1`)).toBe("/v1/workspaces/:workspaceId/sessions/:id/turns/:turnId");
     expect(routeLabel(`/v1/workspaces/${workspace}/files/uploads/upload-1/complete`)).toBe("/v1/workspaces/:workspaceId/files/uploads/:id/complete");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents");
+    expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents/document-1`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId");
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents/document-1/reindex`)).toBe("/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId/reindex");
     expect(routeLabel(`/v1/workspaces/${workspace}/scheduled-tasks/task-1/runs`)).toBe("/v1/workspaces/:workspaceId/scheduled-tasks/:id/runs");
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities`)).toBe("/v1/workspaces/:workspaceId/capabilities");

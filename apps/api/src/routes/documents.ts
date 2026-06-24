@@ -8,6 +8,7 @@ import {
 import {
   addDocumentToBase,
   createDocumentBase,
+  deleteDocumentFromBase,
   getDocument,
   getDocumentBase,
   listDocumentBases,
@@ -84,6 +85,22 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
     return c.json((await listDocuments(db, workspaceId, c.req.param("baseId"))).map((document) => Document.parse(document)));
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+    try {
+      await deleteDocumentFromBase(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        baseId: c.req.param("baseId"),
+        documentId: c.req.param("documentId"),
+      });
+      return c.body(null, 204);
+    } catch (error) {
+      throw documentHttpException(error);
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex", async (c) => {

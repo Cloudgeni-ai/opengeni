@@ -329,6 +329,25 @@ export async function addDocumentToBase(db: Database, input: AddDocumentRequest 
   });
 }
 
+export async function deleteDocumentFromBase(
+  db: Database,
+  input: { accountId: string; workspaceId: string; baseId: string; documentId: string },
+): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [document] = await scopedDb.select().from(schema.documents)
+      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, input.documentId)))
+      .limit(1);
+    if (!document) {
+      throw new Error(`Document not found: ${input.documentId}`);
+    }
+    if (document.baseId !== input.baseId) {
+      throw new Error(`Document not found: ${input.documentId}`);
+    }
+    await scopedDb.delete(schema.documents)
+      .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, input.documentId)));
+  });
+}
+
 export async function listDocuments(db: Database, workspaceId: string, baseId: string): Promise<Document[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.documents)

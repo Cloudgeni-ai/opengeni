@@ -294,6 +294,7 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/scheduled-tasks\/[^/]+$/, label: "/v1/workspaces/:workspaceId/scheduled-tasks/:id" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases$/, label: "/v1/workspaces/:workspaceId/document-bases" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/documents\/[^/]+\/reindex$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId/reindex" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/documents\/[^/]+$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/documents/:documentId" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/documents$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/documents" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+\/search$/, label: "/v1/workspaces/:workspaceId/document-bases/:id/search" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/document-bases\/[^/]+$/, label: "/v1/workspaces/:workspaceId/document-bases/:id" },

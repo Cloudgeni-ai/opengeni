@@ -502,6 +502,15 @@ describe("OpenGeniClient documents", () => {
     ]);
     expect(JSON.parse(requests[6]!.body!)).toEqual({ query: "rollback steps", limit: 3 });
   });
+
+  test("deleteDocument DELETEs the document and resolves on 204", async () => {
+    const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
+    await client.deleteDocument(WORKSPACE_ID, BASE_ID, DOCUMENT_ID);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      `DELETE /v1/workspaces/${WORKSPACE_ID}/document-bases/${BASE_ID}/documents/${DOCUMENT_ID}`,
+    ]);
+    expect(requests[0]!.body).toBeNull();
+  });
 });
 
 describe("OpenGeniClient packs", () => {
