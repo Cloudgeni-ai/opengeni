@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use opengeni_agent_platform::{NativePlatform, Platform};
+use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -109,8 +110,6 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
-    let platform = Arc::new(NativePlatform::new());
-
     // Enroll if we have no persisted credentials yet ("enroll-if-needed").
     let creds = if let Some(creds) = config::load_credentials().map_err(to_boxed)? {
         info!(agent_id = %creds.agent_id, "loaded existing enrollment");
@@ -125,6 +124,23 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         enroll_command(enroll_args, api_url).await?
     };
 
+    // Opt-in Xvfb for a headless Linux box (`--virtual-desktop`). Held for the run
+    // lifetime; dropping it (on stop) tears the virtual display down. Linux-only.
+    let _virtual_desktop = maybe_spawn_virtual_desktop(&args);
+
+    // Wire the relay stream hub so pty/desktop ops serve over the relay. The hub
+    // presents the agent's enrollment-scoped relay token on channel registration.
+    let hub = RelayHub::new(RelayHubConfig {
+        workspace_id: creds.workspace_id.clone(),
+        agent_id: creds.agent_id.clone(),
+        relay_url: creds.relay_url.clone(),
+        agent_token: creds.relay_token.clone(),
+        allow_screen_control: creds.consented_screen_control,
+    });
+    // Build the platform with the relay registrar wired; its desktop backend is
+    // (re)resolved against the now-present $DISPLAY (a real screen or the Xvfb one).
+    let platform = Arc::new(NativePlatform::new().with_stream_registry(Arc::new(hub)));
+
     let supervisor = Supervisor::new(platform.clone(), creds, env!("CARGO_PKG_VERSION"));
     let shutdown = supervisor.shutdown_handle();
 
@@ -136,6 +152,48 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     supervisor.run().await.map_err(to_boxed)?;
     info!("agent stopped");
     Ok(())
+}
+
+/// Spawns an Xvfb virtual framebuffer when `--virtual-desktop` is set on Linux,
+/// returning the handle (held for the run lifetime). A spawn failure is logged but
+/// non-fatal — the agent still runs, just headless (`display_unavailable`). On
+/// non-Linux the flag is ignored.
+#[cfg(target_os = "linux")]
+fn maybe_spawn_virtual_desktop(
+    args: &RunArgs,
+) -> Option<opengeni_agent_platform::virtual_desktop::VirtualXvfb> {
+    if !args.virtual_desktop {
+        return None;
+    }
+    let (w, h) = parse_geometry(&args.virtual_geometry);
+    match opengeni_agent_platform::virtual_desktop::VirtualXvfb::spawn(&args.virtual_display, w, h)
+    {
+        Ok(xvfb) => {
+            info!(display = xvfb.display(), "spawned Xvfb virtual desktop");
+            Some(xvfb)
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to spawn Xvfb; running headless (desktop unavailable)");
+            None
+        }
+    }
+}
+
+/// Non-Linux stub: a virtual framebuffer is not the macOS/Windows model (the user's
+/// real GUI session is the desktop), so the flag is a no-op.
+#[cfg(not(target_os = "linux"))]
+fn maybe_spawn_virtual_desktop(_args: &RunArgs) -> Option<()> {
+    None
+}
+
+/// Parses a `WIDTHxHEIGHT` geometry string, defaulting to 1280x800 on a malformed
+/// value.
+#[cfg(target_os = "linux")]
+fn parse_geometry(geometry: &str) -> (u32, u32) {
+    let mut parts = geometry.split(['x', 'X']);
+    let w = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1280);
+    let h = parts.next().and_then(|s| s.parse().ok()).unwrap_or(800);
+    (w, h)
 }
 
 /// The `enroll` command: drive the device flow, persist the credentials, and

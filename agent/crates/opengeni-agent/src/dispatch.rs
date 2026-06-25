@@ -170,7 +170,7 @@ async fn dispatch_future<P: Platform>(
         ),
         Op::Git(req) => result(request_id, platform.git(&req).await, RespResult::Git),
 
-        // --- M8 stream seams (typed Unsupported until M8) --------------------
+        // --- M8 stream ops: pty + desktop over the relay --------------------
         Op::PtyOpen(req) => result(
             request_id,
             platform.pty_open(&req).await,
@@ -181,17 +181,21 @@ async fn dispatch_future<P: Platform>(
             platform.desktop_ensure(&req).await,
             RespResult::DesktopEnsure,
         ),
-        Op::PtyWrite(_) | Op::PtyResize(_) | Op::PtyClose(_) => {
-            // The remaining pty control ops need a live pty handle, which only
-            // exists once the M8 stream pumps land. Until then they are a typed
-            // Unsupported, consistent with pty_open.
-            err_response(
-                request_id,
-                &PlatformError::Unsupported("pty control ops are an M8 seam".to_string()),
-                PlatformError::Unsupported("pty control ops are an M8 seam".to_string())
-                    .to_agent_error(),
-            )
-        }
+        Op::PtyWrite(req) => result(
+            request_id,
+            platform.pty_write(&req).await,
+            RespResult::PtyWrite,
+        ),
+        Op::PtyResize(req) => result(
+            request_id,
+            platform.pty_resize(&req).await,
+            RespResult::PtyResize,
+        ),
+        Op::PtyClose(req) => result(
+            request_id,
+            platform.pty_close(&req).await,
+            RespResult::PtyClose,
+        ),
     }
 }
 
@@ -284,6 +288,17 @@ mod tests {
         }
         fn workspace_root(&self) -> String {
             "/work".to_string()
+        }
+        fn desktop(&self) -> std::sync::Arc<dyn opengeni_agent_platform::DesktopBackend> {
+            std::sync::Arc::new(opengeni_agent_platform::NoDesktop)
+        }
+        fn default_shell(&self) -> Vec<String> {
+            vec!["/bin/sh".to_string()]
+        }
+        fn stream_registry(
+            &self,
+        ) -> Option<std::sync::Arc<dyn opengeni_agent_platform::StreamRegistry>> {
+            None
         }
         async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
             if self.fail_exec {

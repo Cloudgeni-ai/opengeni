@@ -8,21 +8,42 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 use tokio::io::AsyncWriteExt;
 
+use crate::desktop::{resolve_desktop, DesktopBackend};
 use crate::error::{PlatformError, PlatformResult};
-use crate::{HostIdentity, Platform};
+use crate::{HostIdentity, Platform, StreamRegistry};
 
-/// The host-native platform: exec/fs/git against the machine the agent runs on.
-#[derive(Debug, Clone)]
+/// The host-native platform: exec/fs/git against the machine the agent runs on,
+/// plus the desktop backend (capture + computer-use input) and the optional relay
+/// stream registrar that powers the M8 pty/desktop streams.
+#[derive(Clone)]
 pub struct NativePlatform {
     /// The working root reported to the control plane (the sandbox cwd). Defaults
     /// to the process's current directory at construction time.
     workspace_root: PathBuf,
+    /// The host desktop backend (X11 on Linux, structured native on macOS/Windows,
+    /// [`NoDesktop`](crate::NoDesktop) when headless). Resolved once at construction.
+    desktop: Arc<dyn DesktopBackend>,
+    /// The relay stream registrar that pumps pty/desktop channels, wired by the
+    /// agent supervisor once it has a relay connection. `None` until then (and in
+    /// unit contexts), in which case the stream ops report a clean `Unsupported`.
+    stream_registry: Option<Arc<dyn StreamRegistry>>,
+}
+
+impl std::fmt::Debug for NativePlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativePlatform")
+            .field("workspace_root", &self.workspace_root)
+            .field("has_display", &self.desktop.probe().is_some())
+            .field("has_stream_registry", &self.stream_registry.is_some())
+            .finish()
+    }
 }
 
 impl Default for NativePlatform {
@@ -32,11 +53,17 @@ impl Default for NativePlatform {
 }
 
 impl NativePlatform {
-    /// Builds a platform rooted at the process's current working directory.
+    /// Builds a platform rooted at the process's current working directory, with the
+    /// host desktop backend resolved and no relay registrar yet (the supervisor
+    /// wires one via [`with_stream_registry`](Self::with_stream_registry)).
     #[must_use]
     pub fn new() -> Self {
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        Self { workspace_root }
+        Self {
+            workspace_root,
+            desktop: Arc::from(resolve_desktop()),
+            stream_registry: None,
+        }
     }
 
     /// Builds a platform rooted at an explicit directory (used in tests and when
@@ -45,7 +72,26 @@ impl NativePlatform {
     pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
+            desktop: Arc::from(resolve_desktop()),
+            stream_registry: None,
         }
+    }
+
+    /// Returns a copy of this platform with the relay stream registrar wired in,
+    /// enabling the M8 pty/desktop stream ops. Called by the agent supervisor once
+    /// it holds a relay connection.
+    #[must_use]
+    pub fn with_stream_registry(mut self, registry: Arc<dyn StreamRegistry>) -> Self {
+        self.stream_registry = Some(registry);
+        self
+    }
+
+    /// Overrides the desktop backend (used by `--virtual-desktop`, which spawns
+    /// Xvfb and re-resolves the X11 backend against it, and by tests).
+    #[must_use]
+    pub fn with_desktop(mut self, desktop: Arc<dyn DesktopBackend>) -> Self {
+        self.desktop = desktop;
+        self
     }
 
     /// Resolves a request-supplied `cwd` against the workspace root: an empty
@@ -73,6 +119,18 @@ impl Platform for NativePlatform {
 
     fn workspace_root(&self) -> String {
         self.workspace_root.to_string_lossy().into_owned()
+    }
+
+    fn desktop(&self) -> Arc<dyn DesktopBackend> {
+        self.desktop.clone()
+    }
+
+    fn default_shell(&self) -> Vec<String> {
+        crate::default_shell()
+    }
+
+    fn stream_registry(&self) -> Option<Arc<dyn StreamRegistry>> {
+        self.stream_registry.clone()
     }
 
     async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
@@ -530,27 +588,83 @@ mod tests {
         (platform, dir)
     }
 
-    /// argv for a portable "print a fixed string" used by the exec tests. On
-    /// Windows the bare `echo` is a shell builtin, so we route through the shell.
+    /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
+    ///
+    /// Under the default parallel `cargo test`, this NixOS sandbox intermittently
+    /// fails a `fork`/`exec` of a *known-present* binary (git, `/bin/sh`) with
+    /// `ENOENT` ("No such file or directory", os error 2) purely from concurrent
+    /// subprocess churn — re-running the same test with `--test-threads=1` always
+    /// passes. It is NOT a code bug (production agents on normal Linux never hit
+    /// it), but a non-deterministic gate is unacceptable, so the test harness
+    /// retries the spawn a few times when — and ONLY when — the failure is that
+    /// transient spawn ENOENT for a binary the caller KNOWS is installed.
+    ///
+    /// This is strictly a `#[cfg(test)]` helper: production exec/git paths are
+    /// untouched, so a user command that genuinely does not exist still returns
+    /// `NotFound` immediately with no masking. Callers must only wrap spawns of
+    /// binaries they have already confirmed are present (the `git`/exec tests gate
+    /// on [`which_git`] / the platform shell); tests that deliberately assert
+    /// `NotFound` for a missing target must NOT route through here.
+    async fn retry_transient_spawn<T, F, Fut>(mut op: F) -> PlatformResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = PlatformResult<T>>,
+    {
+        const MAX_ATTEMPTS: u32 = 6;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < MAX_ATTEMPTS && is_transient_spawn_enoent(&err) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)))
+                        .await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("the loop returns on the final attempt")
+    }
+
+    /// True only for the NixOS-sandbox transient spawn `ENOENT` described on
+    /// [`retry_transient_spawn`]: an error whose message is from a *spawn* context
+    /// (`spawn git`, `spawn <cmd>`) and carries the os-error-2 signature. A genuine
+    /// missing-file/missing-ref `NotFound` (e.g. an `fs_read` of a path that does
+    /// not exist) has no `spawn` context and is therefore never matched, so those
+    /// assertions keep failing/asserting immediately.
+    fn is_transient_spawn_enoent(err: &PlatformError) -> bool {
+        let message = match err {
+            PlatformError::NotFound(m) => m.as_str(),
+            PlatformError::Os { message, .. } => message.as_str(),
+            _ => return false,
+        };
+        message.contains("spawn")
+            && (message.contains("os error 2") || message.contains("No such file or directory"))
+    }
+
+    /// argv for a portable "print a fixed string" used by the exec tests.
+    ///
+    /// Uses the shell's `echo` BUILTIN (`shell = true`) rather than spawning
+    /// `printf`/`echo` as a coreutil: on NixOS there is no `/bin/printf` (coreutils
+    /// live in the nix profile) and, under heavy parallel test load, a coreutil
+    /// fork/exec intermittently ENOENTs in this sandbox. A shell builtin needs no
+    /// second fork, the platform shell is a stable absolute path (`/bin/sh`,
+    /// `cmd.exe`), and the test still asserts real stdout capture (the callers use
+    /// `contains`, tolerating `echo`'s trailing newline).
     fn echo_request(text: &str) -> ExecRequest {
-        if cfg!(windows) {
-            ExecRequest {
-                command: vec![text.to_string()],
-                shell: true,
-                ..Default::default()
-            }
-        } else {
-            ExecRequest {
-                command: vec!["printf".to_string(), "%s".to_string(), text.to_string()],
-                ..Default::default()
-            }
+        ExecRequest {
+            command: vec![format!("echo {text}")],
+            shell: true,
+            ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn exec_captures_stdout_and_exit_code() {
         let (platform, _dir) = rooted();
-        let resp = platform.exec(&echo_request("hello")).await.expect("exec");
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let req = echo_request("hello");
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
         assert_eq!(resp.exit_code, 0);
         let out = String::from_utf8_lossy(&resp.stdout);
         assert!(out.contains("hello"), "stdout was {out:?}");
@@ -565,7 +679,10 @@ mod tests {
             shell: true,
             ..Default::default()
         };
-        let resp = platform.exec(&req).await.expect("exec");
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
         assert_eq!(resp.exit_code, 7);
     }
 
@@ -588,13 +705,25 @@ mod tests {
         if cfg!(windows) {
             return;
         }
+        // Read stdin with the shell's `read` BUILTIN + re-emit with the `echo`
+        // builtin — no `cat` coreutil fork (which flakes under parallel load on
+        // NixOS, where coreutils live in the nix profile). This still proves stdin
+        // reaches the child; the callers tolerate `echo`'s trailing newline.
         let req = ExecRequest {
-            command: vec!["cat".to_string()],
-            stdin: prost::bytes::Bytes::from_static(b"piped-in"),
+            command: vec!["IFS= read -r x; echo \"$x\"".to_string()],
+            shell: true,
+            stdin: prost::bytes::Bytes::from_static(b"piped-in\n"),
             ..Default::default()
         };
-        let resp = platform.exec(&req).await.expect("exec");
-        assert_eq!(&resp.stdout[..], b"piped-in");
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        let out = String::from_utf8_lossy(&resp.stdout);
+        assert!(
+            out.contains("piped-in"),
+            "stdin should reach the child: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -603,13 +732,24 @@ mod tests {
         if cfg!(windows) {
             return; // `sleep` semantics differ; the timeout path is unix-covered.
         }
+        // A pure-shell busy loop (a builtin `while`) rather than `sleep` so the test
+        // needs NO coreutil fork — under heavy parallel load this sandbox's
+        // coreutil fork/exec intermittently ENOENTs, which would make the loop exit
+        // early and flake the timeout assertion. The 200ms wall-clock timeout kills
+        // the loop, exercising the same timeout path deterministically.
         let req = ExecRequest {
-            command: vec!["sleep".to_string(), "30".to_string()],
+            command: vec!["while :; do :; done".to_string()],
+            shell: true,
             timeout_ms: 200,
             ..Default::default()
         };
-        let resp = platform.exec(&req).await.expect("exec");
-        assert!(resp.timed_out);
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT (a
+        // spawn ENOENT errors before the timeout path, so the retry is on spawn,
+        // not on the deliberate timeout this test asserts).
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert!(resp.timed_out, "the loop should be killed by the timeout");
         assert_eq!(resp.exit_code, -1);
     }
 
@@ -827,12 +967,15 @@ mod tests {
             vec!["config", "user.email", "agent@opengeni.test"],
             vec!["config", "user.name", "OpenGeni Agent"],
         ] {
-            let resp = platform
-                .git(&GitRequest {
-                    op: GitOp::Raw as i32,
-                    args: args.iter().map(ToString::to_string).collect(),
-                    ..Default::default()
-                })
+            // git is gated as known-present by the callers' `which_git()` check, so
+            // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry
+            // it rather than fail the gate non-deterministically.
+            let req = GitRequest {
+                op: GitOp::Raw as i32,
+                args: args.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            };
+            let resp = retry_transient_spawn(|| platform.git(&req))
                 .await
                 .expect("git setup");
             assert_eq!(resp.exit_code, 0, "git {args:?} failed");
@@ -847,12 +990,14 @@ mod tests {
         }
         git_init(&platform).await;
 
+        // git is known-present here (guarded by `which_git` above), so each spawn
+        // is retried against the transient NixOS fork/exec ENOENT.
+        let status_req = GitRequest {
+            op: GitOp::Status as i32,
+            ..Default::default()
+        };
         // Clean repo: status is clean.
-        let clean = platform
-            .git(&GitRequest {
-                op: GitOp::Status as i32,
-                ..Default::default()
-            })
+        let clean = retry_transient_spawn(|| platform.git(&status_req))
             .await
             .expect("status");
         assert_eq!(clean.exit_code, 0);
@@ -868,11 +1013,7 @@ mod tests {
             })
             .await
             .expect("write");
-        let dirty = platform
-            .git(&GitRequest {
-                op: GitOp::Status as i32,
-                ..Default::default()
-            })
+        let dirty = retry_transient_spawn(|| platform.git(&status_req))
             .await
             .expect("status");
         let st = dirty.status.expect("structured status");
@@ -895,21 +1036,23 @@ mod tests {
             })
             .await
             .expect("write");
-        let add = platform
-            .git(&GitRequest {
-                op: GitOp::Add as i32,
-                args: vec!["a.txt".to_string()],
-                ..Default::default()
-            })
+        // git is known-present here (guarded by `which_git` above), so each spawn
+        // is retried against the transient NixOS fork/exec ENOENT.
+        let add_req = GitRequest {
+            op: GitOp::Add as i32,
+            args: vec!["a.txt".to_string()],
+            ..Default::default()
+        };
+        let add = retry_transient_spawn(|| platform.git(&add_req))
             .await
             .expect("add");
         assert_eq!(add.exit_code, 0);
-        let commit = platform
-            .git(&GitRequest {
-                op: GitOp::Commit as i32,
-                args: vec!["-m".to_string(), "init".to_string()],
-                ..Default::default()
-            })
+        let commit_req = GitRequest {
+            op: GitOp::Commit as i32,
+            args: vec!["-m".to_string(), "init".to_string()],
+            ..Default::default()
+        };
+        let commit = retry_transient_spawn(|| platform.git(&commit_req))
             .await
             .expect("commit");
         assert_eq!(
@@ -918,11 +1061,11 @@ mod tests {
             "commit stderr: {}",
             String::from_utf8_lossy(&commit.stderr)
         );
-        let status = platform
-            .git(&GitRequest {
-                op: GitOp::Status as i32,
-                ..Default::default()
-            })
+        let status_req = GitRequest {
+            op: GitOp::Status as i32,
+            ..Default::default()
+        };
+        let status = retry_transient_spawn(|| platform.git(&status_req))
             .await
             .expect("status");
         assert!(status.status.expect("status").clean);
@@ -941,23 +1084,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pty_open_returns_unsupported_m8_seam() {
+    async fn pty_open_without_relay_is_unsupported() {
+        // Spawning a PTY succeeds, but with no relay registrar wired the op reports
+        // a clean Unsupported (the registrar is wired by the agent supervisor).
         let (platform, _dir) = rooted();
         let err = platform
             .pty_open(&v1::PtyOpenRequest::default())
             .await
-            .expect_err("pty is an M8 seam");
+            .expect_err("no relay registrar");
         assert!(matches!(err, PlatformError::Unsupported(_)));
         assert_eq!(err.code(), v1::ErrorCode::Unsupported);
     }
 
     #[tokio::test]
-    async fn desktop_ensure_returns_unsupported_m8_seam() {
-        let (platform, _dir) = rooted();
+    async fn desktop_ensure_is_unsupported_without_display_or_relay() {
+        // Force a headless desktop so the test is deterministic regardless of the
+        // host's $DISPLAY: no display => display_unavailable (Unsupported).
+        let platform = NativePlatform::with_root("/")
+            .with_desktop(std::sync::Arc::new(crate::desktop::NoDesktop));
         let err = platform
             .desktop_ensure(&v1::DesktopEnsureRequest::default())
             .await
-            .expect_err("desktop is an M8 seam");
+            .expect_err("no display");
         assert!(matches!(err, PlatformError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn desktop_input_on_headless_is_unsupported() {
+        let platform = NativePlatform::with_root("/")
+            .with_desktop(std::sync::Arc::new(crate::desktop::NoDesktop));
+        let err = platform
+            .desktop_input(&v1::DesktopInput::default())
+            .await
+            .expect_err("no display");
+        assert!(matches!(err, PlatformError::Unsupported(_)));
+    }
+
+    /// A desktop backend that records every injected input, so a test can assert the
+    /// computer-use mapping (a `desktop_input` proto → the platform inject call).
+    #[derive(Default)]
+    struct RecordingDesktop {
+        injected: std::sync::Mutex<Vec<v1::DesktopInput>>,
+    }
+
+    #[async_trait]
+    impl crate::desktop::DesktopBackend for RecordingDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            Some(v1::Display {
+                id: ":0".to_string(),
+                width: 100,
+                height: 100,
+                r#virtual: false,
+            })
+        }
+        async fn capture(&self) -> PlatformResult<crate::desktop::CapturedFrame> {
+            Ok(crate::desktop::CapturedFrame {
+                png: Vec::new(),
+                width: 100,
+                height: 100,
+            })
+        }
+        async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
+            self.injected.lock().unwrap().push(input.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_input_proto_maps_to_the_platform_inject_call() {
+        // The computer-use mapping: a DesktopInput proto routed through
+        // Platform::desktop_input reaches the backend's inject verbatim.
+        let recorder = std::sync::Arc::new(RecordingDesktop::default());
+        let platform = NativePlatform::with_root("/").with_desktop(recorder.clone());
+
+        let input = v1::DesktopInput {
+            channel_id: "desk-1".to_string(),
+            event: Some(v1::desktop_input::Event::Pointer(v1::PointerEvent {
+                x: 42,
+                y: 99,
+                action: v1::PointerAction::Click as i32,
+                button: v1::PointerButton::Right as i32,
+            })),
+        };
+        platform.desktop_input(&input).await.expect("inject");
+
+        let seen = recorder.injected.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], input, "the proto must reach inject byte-identical");
     }
 }

@@ -59,6 +59,20 @@ pub struct RunArgs {
     /// hostname).
     #[arg(long)]
     pub machine_name: Option<String>,
+
+    /// Spawn an Xvfb virtual framebuffer so a HEADLESS Linux box exposes a desktop
+    /// (off by default; dossier §3). On a host with a real display this is ignored.
+    /// Linux-only.
+    #[arg(long)]
+    pub virtual_desktop: bool,
+
+    /// The Xvfb display + geometry used by `--virtual-desktop` (e.g. `:99`).
+    #[arg(long, default_value = ":99")]
+    pub virtual_display: String,
+
+    /// The virtual-desktop framebuffer geometry `WIDTHxHEIGHT`.
+    #[arg(long, default_value = "1280x800")]
+    pub virtual_geometry: String,
 }
 
 /// Arguments for the `enroll` subcommand.
@@ -158,5 +172,38 @@ mod tests {
     fn api_url_is_global() {
         let cli = Cli::parse_from(["opengeni-agent", "--api-url", "https://x", "run"]);
         assert_eq!(cli.api_url.as_deref(), Some("https://x"));
+    }
+
+    #[test]
+    fn run_parses_virtual_desktop_flags() {
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "run",
+            "--virtual-desktop",
+            "--virtual-display",
+            ":99",
+            "--virtual-geometry",
+            "1920x1080",
+        ]);
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert!(args.virtual_desktop);
+                assert_eq!(args.virtual_display, ":99");
+                assert_eq!(args.virtual_geometry, "1920x1080");
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn virtual_desktop_defaults_off() {
+        let cli = Cli::parse_from(["opengeni-agent", "run"]);
+        match cli.command {
+            Some(Command::Run(args)) => {
+                assert!(!args.virtual_desktop);
+                assert_eq!(args.virtual_display, ":99");
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
     }
 }

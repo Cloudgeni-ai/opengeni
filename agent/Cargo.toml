@@ -56,7 +56,22 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Misc.
 futures = "0.3"
+futures-util = "0.3"
 hostname = "0.4"
+
+# M8 stream plane.
+# A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe (dossier §10.4).
+portable-pty = "0.9"
+# Desktop frame encoding (capture → PNG chunk over a StreamFrame).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Linux X11 capture + XTEST input + RANDR geometry via the SAFE pure-Rust binding
+# (keeps unsafe_code = forbid; no FFI of our own).
+x11rb = { version = "0.13", features = ["xtest", "randr", "image"] }
+# The relay-dial wss fallback transport (the QUIC/WebTransport preferred path is
+# structured behind a trait; wss is the concrete day-1 impl, dossier §10.1/§10.5).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# Stream byte buffers (prost re-exports bytes, but the stream pumps use it directly).
+bytes = "1"
 
 # Test-only helpers.
 tempfile = "3"

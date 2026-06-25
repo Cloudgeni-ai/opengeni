@@ -294,19 +294,26 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 
     /// The agent's advertised capabilities. Channel-A (exec/fs/git) is always
-    /// available on a connected agent; pty/desktop are the M8 seam and so are
-    /// reported `false` (the control plane degrades those cells with a reason).
+    /// available on a connected agent. The M8 stream surfaces are now served: `pty`
+    /// is true whenever a relay stream registrar is wired (the supervisor always
+    /// wires one); `desktop` is true when the host has a probeable display (a real
+    /// screen or an Xvfb virtual framebuffer) — otherwise the control plane degrades
+    /// the desktop cell to `display_unavailable`. The probed [`Display`] detail
+    /// rides along so the UI can size the viewer + show the virtual flag.
     fn capabilities(&self) -> v1::Capabilities {
+        let display = self.platform.desktop().probe();
+        let has_relay = self.platform.stream_registry().is_some();
         v1::Capabilities {
             exec: true,
             filesystem: true,
             git: true,
-            // M8 stream surfaces — not yet served.
-            pty: false,
-            desktop: false,
+            // A PTY can be opened whenever the relay registrar is wired.
+            pty: has_relay,
+            // A desktop is available when a display probes AND we can stream it.
+            desktop: has_relay && display.is_some(),
             consented_whole_machine: self.creds.consented_whole_machine,
             consented_screen_control: self.creds.consented_screen_control,
-            display: None,
+            display,
         }
     }
 

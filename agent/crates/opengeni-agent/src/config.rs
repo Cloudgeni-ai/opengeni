@@ -109,6 +109,15 @@ pub struct StoredCredentials {
     pub nats_urls: Vec<String>,
     /// The relay edge base URL for stream channels (M8).
     pub relay_url: String,
+    /// The agent's enrollment-scoped relay PRODUCER token, presented on a
+    /// `StreamOpen` when the agent registers a pty/desktop channel (dossier §10.5,
+    /// the relay-dial protocol). Distinct from the viewer's control-plane-minted
+    /// `ogs_` token — the relay validates each side and pairs by channel key. The
+    /// control plane fills this at enrollment; empty until then (a channel open then
+    /// presents an empty token the relay rejects, surfacing the gap rather than
+    /// silently failing).
+    #[serde(default)]
+    pub relay_token: String,
     /// The minisign public key pinned for self-update verification (M11).
     pub update_pubkey: String,
     /// Whether the user consented to whole-machine access.
@@ -144,6 +153,9 @@ impl StoredCredentials {
             nats_credentials: proto.nats_credentials,
             nats_urls: proto.nats_urls,
             relay_url: proto.relay_url,
+            // The proto EnrollmentCredentials has no relay producer-token field yet
+            // (the relay-dial protocol seam M8b reconciles); starts empty.
+            relay_token: String::new(),
             update_pubkey: proto.update_pubkey,
             consented_whole_machine: proto.consented_whole_machine,
             consented_screen_control: proto.consented_screen_control,
@@ -256,6 +268,7 @@ mod tests {
             nats_credentials: "-----BEGIN NATS USER JWT-----\nx\n------END------".to_string(),
             nats_urls: vec!["tls://nats.example:4222".to_string()],
             relay_url: "https://relay.example".to_string(),
+            relay_token: "agent-relay-token".to_string(),
             update_pubkey: "RWQ...".to_string(),
             consented_whole_machine: true,
             consented_screen_control: false,

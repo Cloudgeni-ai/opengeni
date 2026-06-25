@@ -15,9 +15,21 @@ workspace = true
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "rt-multi-thread"] }
 tracing = { workspace = true }
 prost = { workspace = true }
+
+# Interactive terminal: a real PTY (openpty / ConPTY) via the safe portable-pty
+# crate — no unsafe, cross-platform (dossier §10.4, the M8 terminal seam).
+portable-pty = { workspace = true }
+
+# Desktop frame encoding (capture → PNG chunk for the relay framebuffer pump).
+image = { workspace = true }
+
+# Linux X11 desktop: capture (GetImage) + computer-use input (XTEST) + geometry
+# (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }

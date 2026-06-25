@@ -11,5 +11,40 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The preferred QUIC/WebTransport relay transport (the wss fallback is always on).
+# Off by default so the day-1 build needs only the wss dependency; M8b lands the
+# QUIC endpoint behind this feature.
+quic = []
+# Exposes the in-process MockTransport + RelayChannel::with_transport outside test
+# builds (for the M8b relay-double integration tests).
+test-support = []
+
 [dependencies]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+opengeni-agent-platform = { path = "../opengeni-agent-platform" }
+
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "io-util",
+    "net",
+] }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+# The wss relay-dial fallback (TLS WebSocket). rustls-only so the static-musl
+# release build (M11) needs no system OpenSSL.
+tokio-tungstenite = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "time"] }
