@@ -22,10 +22,16 @@ export function gitFileDiffToPatch(file: GitFileDiff): string {
     lines.push(`+++ b/${newPath}`);
   }
   for (const hunk of file.hunks) {
-    const header =
-      hunk.header && hunk.header.startsWith("@@")
-        ? hunk.header
-        : `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
+    // Only trust a pre-parsed header if it carries the full unified range form
+    // `@@ -<o>[,<n>] +<o>[,<n>] @@`. A synthesized create_file hunk (parsers.ts)
+    // can carry a degenerate `@@ +1 @@` with no `-`/`+` ranges; a generic patch
+    // parser (Pierre) renders zero lines from it, so the expanded diff comes up
+    // empty while the collapsed chip still shows the (correct) addition count.
+    // In that case regenerate a valid header from the hunk's range fields.
+    const headerIsValid = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(hunk.header ?? "");
+    const header = headerIsValid
+      ? hunk.header
+      : `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`;
     lines.push(header);
     for (const line of hunk.lines) {
       if (line.type === "meta") continue;

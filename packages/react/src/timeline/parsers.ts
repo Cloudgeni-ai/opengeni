@@ -131,7 +131,12 @@ export function v4aToGitFileDiff(op: ApplyPatchOperation): GitFileDiff {
         hunks.push(cur);
       } else if (cur || op.type === "create_file") {
         if (!cur) {
-          cur = { oldStart: 0, oldLines: 0, newStart: 1, newLines: 0, header: "@@ +1 @@", lines: [] };
+          // No `@@` anchor on a create_file body: synthesize an add-only hunk.
+          // Leave `header` empty so `gitFileDiffToPatch` regenerates a valid
+          // `@@ -0,0 +1,N @@` from the range fields once newLines is counted — a
+          // pre-baked partial header (e.g. `@@ +1 @@`) renders zero lines in a
+          // generic unified-diff parser.
+          cur = { oldStart: 0, oldLines: 0, newStart: 1, newLines: 0, header: "", lines: [] };
           hunks.push(cur);
           oldNo = 0;
           newNo = 1;

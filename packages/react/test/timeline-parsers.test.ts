@@ -16,6 +16,7 @@ import {
   v4aToGitFileDiff,
   type ApplyPatchOperation,
 } from "../src/timeline";
+import { gitFileDiffToPatch } from "../src/index";
 
 /* ----------------------------------------------------------------------------
    Unit tests for the pure provider-shape parsers (src/timeline/parsers.ts).
@@ -140,6 +141,66 @@ describe("V4A apply_patch parsing", () => {
     const diff = v4aToGitFileDiff({ type: "update_file", path: "x.ts", diff: "" });
     expect(diff.status).toBe("modified");
     expect(diff.hunks).toHaveLength(0);
+  });
+
+  test("create_file with no @@ anchor round-trips to a valid unified patch (expanded diff is NOT empty)", () => {
+    // Regression: a create_file body without a `@@` anchor synthesized a hunk
+    // with a degenerate `@@ +1 @@` header. f.additions was counted correctly
+    // (the collapsed chip showed +N), but gitFileDiffToPatch emitted the broken
+    // header verbatim, so the generic unified-diff parser (Pierre) rendered ZERO
+    // lines on expand → collapsed +N / expanded +0. The emitted patch must carry
+    // a structurally valid `@@ -0,0 +1,N @@` header and all N added lines.
+    const N = 17;
+    const body = Array.from({ length: N }, (_, i) => `+line ${i + 1}`).join("\n");
+    const file = v4aToGitFileDiff({ type: "create_file", path: "src/new.ts", diff: body });
+
+    // The chip count (additions) is what the collapsed header shows.
+    expect(file.additions).toBe(N);
+
+    const patch = gitFileDiffToPatch(file);
+    const patchLines = patch.split("\n");
+
+    // A valid create header — NOT the degenerate `@@ +1 @@`.
+    const header = patchLines.find((l) => l.startsWith("@@"));
+    expect(header).toBe(`@@ -0,0 +1,${N} @@`);
+    expect(patch).not.toContain("@@ +1 @@");
+
+    // Every added line is present in the patch body — what Pierre renders on
+    // expand must equal the collapsed chip count.
+    const addedLines = patchLines.filter((l) => l.startsWith("+") && !l.startsWith("+++"));
+    expect(addedLines).toHaveLength(N);
+    expect(addedLines[0]).toBe("+line 1");
+    expect(addedLines[N - 1]).toBe(`+line ${N}`);
+  });
+
+  test("gitFileDiffToPatch regenerates a header missing the unified range form", () => {
+    // Defense in depth: a hunk whose header lacks the `-x,y +a,b` ranges gets a
+    // regenerated header derived from the range fields rather than emitted as-is.
+    const patch = gitFileDiffToPatch({
+      path: "f.txt",
+      oldPath: null,
+      status: "added",
+      isBinary: false,
+      isImage: false,
+      additions: 2,
+      deletions: 0,
+      truncated: false,
+      hunks: [
+        {
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: 2,
+          header: "@@ +1 @@",
+          lines: [
+            { type: "add", oldNo: null, newNo: 1, text: "a" },
+            { type: "add", oldNo: null, newNo: 2, text: "b" },
+          ],
+        },
+      ],
+    });
+    expect(patch).toContain("@@ -0,0 +1,2 @@");
+    expect(patch).not.toContain("@@ +1 @@");
   });
 
   test("applyPatchOps normalizes both wire shapes", () => {
