@@ -64,6 +64,7 @@ import type {
   RunAgentTurnResult,
 } from "./types";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
+import { wrapTurnBoxWithRouting, routingEnabled } from "../sandbox-routing";
 import { beginRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
@@ -453,6 +454,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           "turn",
           sandboxHolderId,
         );
+        // M7 hot-swap: when the selfhosted feature is on, wrap the established
+        // group box in the STABLE routing proxy before it is injected NON-OWNED
+        // into the run. The SDK binds to this ONE object once and calls its
+        // methods per tool call; the proxy re-reads (active_sandbox_id,
+        // active_epoch) per op and dispatches to the currently-active backend, so
+        // a sandbox_swap mid-turn lands the NEXT tool call on the new box. With
+        // the flag off the established group box is injected unchanged (today's
+        // path). The lease still owns the group box lifecycle — the proxy is a
+        // routing veneer, not an owner.
+        if (routingEnabled(settings)) {
+          resolvedSandbox = {
+            ...resolvedSandbox,
+            established: wrapTurnBoxWithRouting(
+              { db, settings, bus },
+              { workspaceId: input.workspaceId, sessionId: input.sessionId },
+              resolvedSandbox.established,
+            ),
+          };
+        }
         // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
         // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
         // is rejected (returns false) and we stop refreshing — the box rides the

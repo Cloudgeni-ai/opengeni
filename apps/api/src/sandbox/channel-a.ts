@@ -45,6 +45,7 @@ import {
   type ChannelASession,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
+import { routingEnabled, wrapChannelABoxWithRouting } from "./routing";
 
 export type ChannelAServices = {
   db: Database;
@@ -201,8 +202,18 @@ export async function withChannelA<T>(
       );
     };
 
+    // M7 hot-swap: when the selfhosted feature is on, route the Channel-A op to
+    // the session's currently-active sandbox (not always the group box). The
+    // proxy re-reads (active_sandbox_id, active_epoch) on each session method the
+    // service calls and dispatches to the active backend (the group box by
+    // default, or a swapped-to selfhosted machine). With the flag off the
+    // established group session is used unchanged.
+    const routedSession = routingEnabled(settings)
+      ? wrapChannelABoxWithRouting({ db, settings, bus }, { workspaceId, sessionId: session.id }, established).session
+      : established.session;
+
     const service = new SandboxChannelAService({
-      session: established.session as ChannelASession,
+      session: routedSession as ChannelASession,
       leaseEpoch: leaseSnapshot.leaseEpoch,
       emit,
     });

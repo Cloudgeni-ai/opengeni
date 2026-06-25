@@ -201,6 +201,26 @@ export {
 } from "./selfhosted/capabilities";
 export { MockAgentResponder, type MockAgentResponderOptions, type MockExecHandler } from "./selfhosted/testing";
 
+// The hot-swap routing proxy (M7): ONE stable session-shaped object the SDK binds
+// to, which re-reads the per-session active pointer per op and dispatches to the
+// currently-active backend (Modal or selfhosted) — flippable mid-turn, single
+// active at a time, fence-retrying on a swap race.
+export {
+  RoutingSandboxSession,
+  RoutingUnsupportedError,
+  type ActivePointer,
+  type RoutableBackendSession,
+  type ResolvedActiveBackend,
+  type RoutingSandboxSessionDeps,
+  type RoutingTransitionEvent,
+} from "./routing/routing-session";
+export {
+  makeActiveBackendResolver,
+  ActiveBackendUnresolvableError,
+  type ActiveBackendResolverDeps,
+  type RoutableSandbox,
+} from "./routing/backend-resolver";
+
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
  * driven (the old flat if/else is gone): the backend's ProviderRegistration owns

@@ -1,0 +1,104 @@
+// apps/api/src/sandbox/routing.ts — wire the agent-loop-free routing proxy to the
+// real DB pointer + the live NATS control plane for the API-DIRECT Channel-A path
+// (M7). Symmetric with apps/worker/src/sandbox-routing.ts (the turn path).
+//
+// A Channel-A op resumes the group box by id and runs ONE op against it. With
+// hot-swap, the op must land on the session's CURRENTLY-active sandbox, not
+// always the group box: if the session swapped to a selfhosted machine, an
+// fs.read / git.status / exec from the API must reach THAT machine. So the
+// established group session is wrapped in a `RoutingSandboxSession` that re-reads
+// (active_sandbox_id, active_epoch) and dispatches to the active backend.
+//
+// The DB-coupled glue (readActiveSandbox / getSandbox / the selfhosted ControlRpc
+// over the events bus) lives here, not in the leaf (which stays db-free).
+
+import type { Settings } from "@opengeni/config";
+import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
+import type { EventBus } from "@opengeni/events";
+import {
+  makeActiveBackendResolver,
+  NatsControlRpc,
+  RoutingSandboxSession,
+  type ControlRpc,
+  type EstablishedSandboxSession,
+  type NatsRequestConnection,
+  type RoutableBackendSession,
+  type RoutableSandbox,
+  type SelfhostedRelayConfig,
+} from "@opengeni/runtime/sandbox";
+
+export type ChannelARoutingServices = {
+  db: Database;
+  settings: Settings;
+  bus?: EventBus;
+};
+
+/** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. */
+export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConfig {
+  const raw = settings.selfhostedRelayUrl?.trim();
+  if (!raw) {
+    return { host: "relay.opengeni.local", port: 443, tls: true };
+  }
+  try {
+    const url = new URL(raw.includes("://") ? raw : `wss://${raw}`);
+    const tls = url.protocol === "wss:" || url.protocol === "https:";
+    const port = url.port ? Number(url.port) : tls ? 443 : 80;
+    return { host: url.hostname, port, tls };
+  } catch {
+    return { host: raw, port: 443, tls: true };
+  }
+}
+
+function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
+  return () =>
+    new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
+      if (!bus) {
+        return null;
+      }
+      return bus.getRequestConnection();
+    });
+}
+
+/** Whether the routing proxy should wrap the Channel-A box: gated by the
+ *  selfhosted flag (the active pointer + swap are only meaningful then). */
+export function routingEnabled(settings: Settings): boolean {
+  return settings.sandboxSelfhostedEnabled === true;
+}
+
+/**
+ * Wrap an established group-box session in a `RoutingSandboxSession` so a
+ * Channel-A op routes to the session's currently-active sandbox. Returns the
+ * established handle with its `session` replaced by the stable proxy. With the
+ * default pointer (active_sandbox_id == null) this routes to the group box
+ * unchanged; a selfhosted active pointer routes the op to the machine.
+ */
+export function wrapChannelABoxWithRouting(
+  services: ChannelARoutingServices,
+  ids: { workspaceId: string; sessionId: string },
+  established: EstablishedSandboxSession,
+): EstablishedSandboxSession {
+  const { db, settings, bus } = services;
+  const resolver = makeActiveBackendResolver({
+    workspaceId: ids.workspaceId,
+    defaultBackend: established.session as RoutableBackendSession,
+    defaultKind: established.backendId,
+    getSandbox: async (sandboxId): Promise<RoutableSandbox | null> => {
+      const sandbox = await getSandbox(db, ids.workspaceId, sandboxId);
+      return sandbox
+        ? { id: sandbox.id, kind: sandbox.kind, name: sandbox.name, enrollmentId: sandbox.enrollmentId }
+        : null;
+    },
+    controlRpcFactory: controlRpcFactory(bus),
+    relay: relayConfigFromSettings(settings),
+  });
+
+  const proxy = new RoutingSandboxSession({
+    readPointer: async () => {
+      const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
+      return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
+    },
+    resolveActiveBackend: resolver,
+  });
+
+  return { ...established, session: proxy };
+}
