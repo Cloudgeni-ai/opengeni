@@ -13,3 +13,12 @@ workspace = true
 
 [dependencies]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros"] }
+tracing = { workspace = true }
+prost = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
+tempfile = { workspace = true }

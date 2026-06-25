@@ -29,6 +29,38 @@ prost-build = "0.13"
 protox = "0.7"
 thiserror = "2"
 
+# Async runtime + ergonomics. The agent is IO-bound (NATS, child processes,
+# filesystem) so tokio is the natural fit; async-trait gives object-safe async
+# methods on the `Platform` trait.
+tokio = { version = "1", default-features = false }
+async-trait = "0.1"
+
+# Control-plane transport. async-nats is the official Rust NATS client; the agent
+# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests (dossier §10.1).
+async-nats = "0.49"
+
+# Structured logging (never log secret values — dossier §10.6).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Enrollment: ed25519 install keypair + the device-flow HTTP client.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# CLI parsing.
+clap = { version = "4", features = ["derive", "env"] }
+
+# Misc.
+futures = "0.3"
+hostname = "0.4"
+
+# Test-only helpers.
+tempfile = "3"
+
 [workspace.lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
