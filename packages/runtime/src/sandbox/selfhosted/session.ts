@@ -36,18 +36,23 @@ const encoder = new TextEncoder();
  *  (the turn pauses + retries); it is NOT a hard failure. */
 export const SELFHOSTED_DEFAULT_TIMEOUT_MS = 30_000;
 
-/** The relay-URL shape config the session needs to build a stream endpoint. The
- *  real relay tier is M8; M3 returns the URL SHAPE from a configured (or stub)
- *  relay host so `buildStreamUrl` works unchanged behind `resolveExposedPort`. */
+/** The relay-URL shape config the session needs to build a stream endpoint. M8b
+ *  wires the real relay deployment behind THIS seam so `buildStreamUrl` works
+ *  unchanged behind `resolveExposedPort`. */
 export interface SelfhostedRelayConfig {
-  /** The relay edge host (no scheme), e.g. "relay.opengeni.ai". M3 may be a stub
-   *  placeholder; M8 wires the real relay deployment behind THIS seam. */
+  /** The relay edge host (no scheme), e.g. "relay.opengeni.ai". */
   host: string;
   /** The relay port. Defaults to 443 (the relay terminates TLS). */
   port?: number;
   /** Whether the relay endpoint is TLS (wss/https). Defaults true. */
   tls?: boolean;
+  /** The relay's stream-dial path (the `opengeni-relay` wss route). Defaults to
+   *  "/stream" — the route the relay listens on (M8b). */
+  path?: string;
 }
+
+/** The relay's default wss dial path (the `opengeni-relay` server route). */
+export const SELFHOSTED_RELAY_STREAM_PATH = "/stream";
 
 export interface SelfhostedSessionDeps {
   workspaceId: string;
@@ -234,16 +239,23 @@ export class SelfhostedSession {
 
   /**
    * Resolve an exposed port to a relay stream endpoint (the viewer/pty plane).
-   * M3 returns the relay URL SHAPE from config — `{host:relay, port, tls,
-   * query:channel-key}` — after asking the agent to ensure a stream channel for
-   * the port. The real relay tier (the byte pump) is M8 behind THIS seam; a
-   * configured/stub relay host is fine here.
+   * Returns the relay URL SHAPE — `{host:relay, port, tls, query:channel-key}` —
+   * after asking the agent to ensure a stream channel for the port. M8b wires the
+   * real relay tier (the byte pump) behind THIS seam.
+   *
+   * THE CHANNEL-KEY QUERY (the M8b relay-dial contract, dossier §10.5): the relay
+   * routes by `{workspaceId, agentId, port}` — the EXACT `ChannelKey::query` the
+   * agent's relay client (`opengeni-agent-stream`) appends when it registers the
+   * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>`. We append the
+   * agent-registered `channel=<channelId>` as a correlation hint. So the viewer
+   * dials `wss://<relay>/stream?ws=&agent=&port=&channel=` and presents the minted
+   * `ogs_` token in-band (NEVER as a URL param) — the relay pairs it with the
+   * producer by the routing key.
    */
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {
-    // Ask the agent to ensure a desktop stream channel exists for the port. M3
-    // uses the desktopEnsure op as the "ensure a channel" RPC (the only stream-
-    // channel op in the M0 proto); M8 generalizes this to any port. The channel
-    // id keys the relay route.
+    // Ask the agent to ensure a stream channel exists for the port. M8b still uses
+    // the desktopEnsure op as the "ensure a channel" RPC (the only stream-channel
+    // op in the proto); the returned channelId is the relay correlation hint.
     const result = await this.call({
       $case: "desktopEnsure",
       desktopEnsure: { width: 0, height: 0 },
@@ -253,13 +265,20 @@ export class SelfhostedSession {
     }
     const channelId = result.desktopEnsure.channel?.channelId ?? channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
+    // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
+    // agent's `ChannelKey::query` — plus the channel-id correlation hint.
+    const routingQuery =
+      `ws=${encodeURIComponent(this.workspaceId)}` +
+      `&agent=${encodeURIComponent(this.agentId)}` +
+      `&port=${port}` +
+      `&channel=${encodeURIComponent(channelId)}`;
     return {
       host: this.relay.host,
       port: this.relay.port ?? (tls ? 443 : 80),
       tls,
-      // The relay route key — `{workspaceId, agentId, port}` plus the channel id
-      // the agent registered. The minted `ogs_` stream token authorizes it.
-      query: `channel=${encodeURIComponent(channelId)}`,
+      // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
+      path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
+      query: routingQuery,
       protocol: kindToProtocol(result.desktopEnsure.channel?.kind),
     };
   }

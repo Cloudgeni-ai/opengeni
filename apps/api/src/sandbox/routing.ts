@@ -33,19 +33,23 @@ export type ChannelARoutingServices = {
   bus?: EventBus;
 };
 
-/** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. */
+/** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape. The
+ *  relay URL (`OPENGENI_SELFHOSTED_RELAY_URL`) may carry a path (the relay's wss
+ *  route); a path-less URL defaults to the relay's `/stream` route (M8b). */
 export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConfig {
   const raw = settings.selfhostedRelayUrl?.trim();
   if (!raw) {
-    return { host: "relay.opengeni.local", port: 443, tls: true };
+    return { host: "relay.opengeni.local", port: 443, tls: true, path: "/stream" };
   }
   try {
     const url = new URL(raw.includes("://") ? raw : `wss://${raw}`);
     const tls = url.protocol === "wss:" || url.protocol === "https:";
     const port = url.port ? Number(url.port) : tls ? 443 : 80;
-    return { host: url.hostname, port, tls };
+    // Honor an explicit path in the configured URL; default the relay's /stream.
+    const path = url.pathname && url.pathname !== "/" ? url.pathname : "/stream";
+    return { host: url.hostname, port, tls, path };
   } catch {
-    return { host: raw, port: 443, tls: true };
+    return { host: raw, port: 443, tls: true, path: "/stream" };
   }
 }
 

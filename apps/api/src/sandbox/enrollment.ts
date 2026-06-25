@@ -31,11 +31,13 @@
 import { randomBytes } from "node:crypto";
 import {
   resolveEnrollmentSigningSecret,
+  resolveRelayTokenSecret,
   type Settings,
 } from "@opengeni/config";
 import {
   DeviceEnrollmentState,
   signEnrollmentBearer,
+  signRelayToken,
   type DeviceEnrollmentPollResponse,
   type DeviceEnrollmentStartResponse,
   type EnrollmentCredentialsResponse,
@@ -60,6 +62,14 @@ export const DEVICE_POLL_INTERVAL_SECONDS = 5;
 // The bearer the agent presents to the control plane is valid for the same horizon
 // as an agent token's hour-long life (dossier "Agent token lifecycle"): 1 hour.
 export const ENROLLMENT_BEARER_TTL_SECONDS = 3600;
+// The relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5) is ENROLLMENT-scoped,
+// NOT per-stream: the agent presents it on every channel registration for the life
+// of its run, and the producer side has no per-viewer epoch fence (that is the
+// VIEWER's `ogs_` token's job). So it is long-lived — 30 days — re-minted on every
+// poll/re-enroll. The relay re-verifies it (authenticity + the channel-key ws+agent
+// scope) on every StreamOpen; a revoked enrollment's machine goes offline at the
+// control plane regardless, so a long-lived relay token cannot reach a dead agent.
+export const RELAY_TOKEN_TTL_SECONDS = 30 * 24 * 3600;
 
 export type EnrollmentServices = {
   db: Database;
@@ -276,7 +286,8 @@ async function buildEnrollmentCredentials(
   const { settings } = services;
   // The control-plane subject prefix the agent subscribes to: agent.<ws>.<id>.
   const subjectPrefix = `agent.${input.workspaceId}.${input.agentId}`;
-  const exp = Math.floor(Date.now() / 1000) + ENROLLMENT_BEARER_TTL_SECONDS;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const exp = nowSeconds + ENROLLMENT_BEARER_TTL_SECONDS;
   const bearer = await signEnrollmentBearer(input.secret, {
     workspaceId: input.workspaceId,
     agentId: input.agentId,
@@ -285,6 +296,19 @@ async function buildEnrollmentCredentials(
     exp,
   });
   const natsUrls = settings.selfhostedNatsUrl ? [settings.selfhostedNatsUrl] : [];
+  // Mint the agent's relay PRODUCER token (M8b) when the relay-token plane is
+  // configured. The relay verifies it (the `ogr_` envelope) and pairs the producer
+  // with the viewer. Absent secret → empty token (graceful degrade; the stream plane
+  // is unavailable until the secret is provisioned via ops-repo IaC). The token binds
+  // (workspaceId, agentId) so the agent can only register ITS OWN channels.
+  const relayTokenSecret = resolveRelayTokenSecret(settings);
+  const relayToken = relayTokenSecret
+    ? await signRelayToken(relayTokenSecret, {
+        workspaceId: input.workspaceId,
+        agentId: input.agentId,
+        exp: nowSeconds + RELAY_TOKEN_TTL_SECONDS,
+      })
+    : "";
   return {
     agentId: input.agentId,
     workspaceId: input.workspaceId,
@@ -292,6 +316,7 @@ async function buildEnrollmentCredentials(
     subjectPrefix,
     natsUrls,
     relayUrl: settings.selfhostedRelayUrl ?? "",
+    relayToken,
     // INFRA-DEFERRED: the per-workspace NATS Account creds binding (M4/relay). Empty
     // until the Account-export config lands; the agent dials with the bearer +
     // subject prefix in the meantime.

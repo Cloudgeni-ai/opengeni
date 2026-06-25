@@ -185,6 +185,7 @@ export {
   SelfhostedSandboxClient,
   isSelfhostedProviderNotFoundError,
   SELFHOSTED_DEFAULT_TIMEOUT_MS,
+  SELFHOSTED_RELAY_STREAM_PATH,
   type SelfhostedSessionState,
   type SelfhostedSessionDeps,
   type SelfhostedRelayConfig,

@@ -27,16 +27,27 @@ import {
 import type { ProviderRegistration } from "./types";
 
 /**
- * Resolve the relay-URL shape config from settings. M3 has NO dedicated relay
- * config field yet (the relay tier + its config land in M8 via ops-repo IaC), so
- * this defaults to a stub host — the session returns the relay URL SHAPE, which
- * is all M3 needs (`resolveExposedPort` returns `{host, port, tls, query}`). M8
- * threads the real relay host behind this seam with NO session change.
+ * Resolve the relay-URL shape config from settings. M8b threads the real relay
+ * deployment URL (`OPENGENI_SELFHOSTED_RELAY_URL`, ops-repo IaC) behind this seam:
+ * `resolveExposedPort` returns `{host, port, tls, path, query}` so `buildStreamUrl`
+ * assembles the relay dial URL. A path-less URL defaults to the relay's `/stream`
+ * route; an unconfigured deployment falls back to a placeholder host (the URL shape
+ * is still well-formed; the relay is simply unreachable until configured).
  */
-function resolveRelayConfig(_settings: Settings): SelfhostedRelayConfig {
-  // The relay host is a future ops-repo-provisioned value. Until M8 wires it into
-  // Settings, M3 uses a stable placeholder so the URL shape is well-formed.
-  return { host: "relay.opengeni.local", port: 443, tls: true };
+function resolveRelayConfig(settings: Settings): SelfhostedRelayConfig {
+  const raw = settings.selfhostedRelayUrl?.trim();
+  if (!raw) {
+    return { host: "relay.opengeni.local", port: 443, tls: true, path: "/stream" };
+  }
+  try {
+    const url = new URL(raw.includes("://") ? raw : `wss://${raw}`);
+    const tls = url.protocol === "wss:" || url.protocol === "https:";
+    const port = url.port ? Number(url.port) : tls ? 443 : 80;
+    const path = url.pathname && url.pathname !== "/" ? url.pathname : "/stream";
+    return { host: url.hostname, port, tls, path };
+  } catch {
+    return { host: raw, port: 443, tls: true, path: "/stream" };
+  }
 }
 
 /**

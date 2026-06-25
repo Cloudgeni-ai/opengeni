@@ -363,6 +363,12 @@ mod wire {
         pub nats_urls: Vec<String>,
         #[serde(default)]
         pub relay_url: String,
+        /// The agent's relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5),
+        /// presented on a `StreamOpen` when the agent registers a pty/desktop relay
+        /// channel. Empty when the relay-token plane is unconfigured for the
+        /// deployment (the agent then presents an empty token the relay rejects).
+        #[serde(default)]
+        pub relay_token: String,
         #[serde(default)]
         pub update_pubkey: String,
         #[serde(default)]
@@ -381,6 +387,7 @@ mod wire {
                 nats_credentials: self.nats_credentials,
                 nats_urls: self.nats_urls,
                 relay_url: self.relay_url,
+                relay_token: self.relay_token,
                 update_pubkey: self.update_pubkey,
                 consented_whole_machine: self.consented_whole_machine,
                 consented_screen_control: self.consented_screen_control,

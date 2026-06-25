@@ -739,6 +739,83 @@ export async function verifyStreamToken(secret: string, token: string, nowSecond
   return payload.data;
 }
 
+// --- Relay PRODUCER token (bring-your-own-compute M8b, dossier §10.5) ---
+//
+// The token the AGENT presents to the relay edge when it registers a pty/desktop
+// stream channel (role=AGENT) — distinct from the viewer's `ogs_` token. It is
+// minted by the control plane at enrollment and threaded into EnrollmentCredentials
+// (proto field `relay_token`); the relay verifies it on its own merits, then pairs
+// the producer with the consumer by the shared channel key.
+//
+// REUSES the EXACT SAME HMAC envelope as the `ogs_`/`ogd_`/`oge_` tokens
+// (base64Url JSON payload + hmacSha256Base64Url) — NOT a second crypto — with a
+// distinct `ogr_` prefix so it can never be confused with the others. The claim
+// set binds (workspaceId, agentId): the relay reads the channel-key's ws+agent
+// from the StreamOpen and asserts the producer token claims the SAME pair, so a
+// producer token for workspace A can never register a channel for workspace B.
+// Signed with resolveRelayTokenSecret (the relay-token HMAC secret); the value is
+// NEVER logged. Long-lived by design (it is enrollment-scoped, not per-stream —
+// the agent presents it on every channel registration for the life of the
+// enrollment); the relay additionally validates the channel key + (for the
+// viewer's `ogs_`) the lease/active-epoch fence.
+//
+// The Rust relay re-implements this verify (the same base64url(JSON) + HMAC-SHA256
+// + prefix split) so TS-mint and Rust-verify provably agree — see the cross-stack
+// fixture in agent/crates/opengeni-relay/tests and the relay's `token` module doc.
+export const RelayTokenPayload = z.object({
+  // The workspace the agent (and its channels) belong to — the relay asserts this
+  // equals the channel-key's ws so a producer can only register its own channels.
+  workspaceId: z.string().uuid(),
+  // The agent (machine) id — the relay asserts this equals the channel-key's agent.
+  agentId: z.string().uuid(),
+  // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
+  exp: z.number().int().positive(),
+});
+export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
+
+export async function signRelayToken(secret: string, payload: RelayTokenPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(RelayTokenPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `ogr_${encodedPayload}.${signature}`;
+}
+
+/**
+ * Verify a relay producer token: rejects (returns null) on a bad prefix, malformed
+ * envelope, bad HMAC signature (constant-time), schema-invalid claims, or expiry.
+ * Mirrors verifyStreamToken exactly. The relay (Rust) re-implements this verify;
+ * the TS verify here proves the format for the cross-stack fixture + any TS caller.
+ *
+ * The channel-key scope (claim.workspaceId/agentId vs the StreamOpen channel key)
+ * is enforced by the relay at USE — verify proves authenticity + freshness only.
+ */
+export async function verifyRelayToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<RelayTokenPayload | null> {
+  if (!token.startsWith("ogr_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("ogr_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = RelayTokenPayload.safeParse(decoded);
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
 export const CreateWorkspaceRequest = z.object({
   accountId: z.string().uuid().optional(),
   name: z.string().min(1),
@@ -2804,6 +2881,13 @@ export const EnrollmentCredentialsResponse = z.object({
   // configured for this deployment — the agent surfaces "control plane unconfigured").
   natsUrls: z.array(z.string()),
   relayUrl: z.string(),
+  // The agent's PRODUCER token for the relay edge (the `ogr_` token; M8b). Presented
+  // as StreamOpen.token when the agent registers a pty/desktop channel; the relay
+  // verifies it then pairs the producer with the viewer (whose `ogs_` token the
+  // relay also verifies). Empty when the relay-token plane is unconfigured for this
+  // deployment (graceful degrade — the agent then presents an empty token the relay
+  // rejects, surfacing the gap loudly rather than silently producing a dead stream).
+  relayToken: z.string(),
   // PLACEHOLDER for the per-workspace NATS Account creds (infra-deferred binding).
   natsAccountCreds: z.string(),
   // The minisign public key the agent pins for self-update verification.

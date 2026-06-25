@@ -733,6 +733,95 @@ export async function mintTerminalStream(
   }
 }
 
+// ============================================================================
+// M8b — the SELFHOSTED relay stream cell.
+//
+// When the session's ACTIVE sandbox is a selfhosted machine (a swap target, or the
+// session's own selfhosted group box), the desktop/terminal stream does NOT ride a
+// Modal provider tunnel — it rides the `opengeni-relay` edge. The selfhosted
+// session's `resolveExposedPort(port)` returns the relay URL SHAPE (host/port/tls/
+// path + the `ws=&agent=&port=&channel=` routing query), and exposeStreamPort mints
+// the scoped `ogs_` token. The CRITICAL M8b seam: the token is fenced by the swap
+// `active_epoch` (NOT the Modal lease epoch), so the relay's stale-viewer fence
+// rejects a viewer whose token predates a swap-away — it cannot reach a machine the
+// session swapped off of. control ops are already active-epoch-fenced (the routing
+// proxy); this closes the STREAM side.
+// ============================================================================
+
+/** The structural slice of a selfhosted session the relay stream mint needs. */
+type RelayResolvableSession = {
+  resolveExposedPort?: (port: number) => Promise<unknown>;
+};
+
+export type MintSelfhostedStreamInput = {
+  workspaceId: string;
+  sessionId: string;
+  /** The viewer holder / principal id the scoped token is minted for. */
+  viewerId: string;
+  /** The swap fence: the session's `active_epoch`. The minted `ogs_` token carries
+   *  THIS as its leaseEpoch claim so the relay rejects a stale-epoch (swapped-away)
+   *  viewer. */
+  activeEpoch: number;
+  /** The exposed stream port (6080 desktop / 7681 terminal). */
+  port: number;
+  /** The resolvable selfhosted session (the routing proxy resolves the active
+   *  selfhosted backend; its `resolveExposedPort` returns the relay endpoint). */
+  session: RelayResolvableSession;
+};
+
+/**
+ * Mint the selfhosted relay stream cell for a viewer against the session's ACTIVE
+ * selfhosted machine, IN-PROCESS. Resolves the relay endpoint via the selfhosted
+ * session's `resolveExposedPort` and mints the scoped `ogs_` token FENCED BY THE
+ * SWAP `active_epoch`. Returns null when the stream tier degrades (no stream-token
+ * secret, the agent is offline / cannot ensure a channel) — the caller surfaces
+ * transport:null, never an exception.
+ *
+ * The token is RECORDED against the viewer holder by the caller and is NEVER a URL
+ * query param (the relay validates the in-band token); the relay's stale-viewer
+ * fence uses the token's leaseEpoch claim (== activeEpoch here).
+ */
+export async function mintSelfhostedStream(
+  services: ViewerServices,
+  input: MintSelfhostedStreamInput,
+): Promise<TerminalStreamMint | null> {
+  const { settings } = services;
+  const secret = resolveStreamTokenSecret(settings);
+  if (!secret) {
+    return null;
+  }
+  const viewerId = viewerIdAsUuid(input.viewerId);
+  if (typeof input.session?.resolveExposedPort !== "function") {
+    return null;
+  }
+  try {
+    // exposeStreamPort threads the epoch we pass into the `ogs_` token's leaseEpoch
+    // claim. For selfhosted we pass the swap active_epoch — THE fence the relay
+    // enforces so a swapped-away viewer is rejected.
+    const exposed = await exposeStreamPort(input.session, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      viewerId,
+      leaseEpoch: input.activeEpoch,
+      streamTokenSecret: secret,
+      port: input.port,
+    });
+    return {
+      url: exposed.url,
+      token: exposed.token,
+      expiresAt: exposed.expiresAt,
+      leaseEpoch: input.activeEpoch,
+    };
+  } catch (error) {
+    // A headless / offline / channel-ensure failure degrades the cell to
+    // transport:null rather than throwing (mirrors the Modal mint paths).
+    if (error instanceof StreamPortUnavailableError) {
+      return null;
+    }
+    return null;
+  }
+}
+
 // The framebuffer geometry from settings (streamResolutionWidth/Height; default
 // 1280x800, the spike's proven geometry).
 function defaultResolution(settings: Settings): [number, number] {

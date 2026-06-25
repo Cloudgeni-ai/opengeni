@@ -235,6 +235,16 @@ message EnrollmentCredentials {
   bool consented_whole_machine = 7;
   // Whether the user consented to screen capture + synthetic input.
   bool consented_screen_control = 8;
+  // The agent's PRODUCER token for the relay edge (dossier §10.5 / the relay-dial
+  // protocol). Presented as `StreamOpen.token` when the agent registers a
+  // pty/desktop channel (role=AGENT). It is a control-plane-minted, workspace+agent
+  // -scoped `ogr_` HMAC token the relay verifies on its own merits — DISTINCT from
+  // the viewer's `ogs_` stream token (which the control plane mints per viewer and
+  // the relay also verifies). The relay pairs the producer and consumer by the
+  // channel key once BOTH tokens pass. Additive proto3 field; empty for an
+  // enrollment minted before the relay-token plane is configured (the agent then
+  // presents an empty token the relay rejects, surfacing the gap loudly).
+  string relay_token = 9;
 }
 
 // =============================================================================

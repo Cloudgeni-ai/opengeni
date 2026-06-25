@@ -76,12 +76,19 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(isSelfhostedProviderNotFoundError(err)).toBe(false);
   });
 
-  test("resolveExposedPort returns the relay URL shape", async () => {
+  test("resolveExposedPort returns the relay URL shape + the M8b channel-key routing query", async () => {
     const mock = new MockAgentResponder();
     const endpoint = await sessionWith(mock).resolveExposedPort(6080);
     expect(endpoint.host).toBe("relay.test");
     expect(endpoint.port).toBe(443);
     expect(endpoint.tls).toBe(true);
+    // The relay's wss route path (M8b).
+    expect(endpoint.path).toBe("/stream");
+    // The relay routes by `{ws, agent, port}` (the agent's ChannelKey::query) +
+    // the agent-registered channel-id correlation hint.
+    expect(endpoint.query).toContain(`ws=${WS}`);
+    expect(endpoint.query).toContain(`agent=${AGENT}`);
+    expect(endpoint.query).toContain("port=6080");
     expect(endpoint.query).toContain("channel=");
   });
 

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   Permission,
+  RelayTokenPayload,
+  type RelayTokenPayload as RelayTokenPayloadType,
   StreamTokenPayload,
   type StreamTokenPayload as StreamTokenPayloadType,
+  signRelayToken,
   signStreamToken,
+  verifyRelayToken,
   verifyStreamToken,
 } from "../src/index";
 
@@ -83,6 +87,42 @@ describe("StreamTokenPayload sign/verify", () => {
     expect(verified?.workspaceId).toBe(aWorkspace);
     // The caller's scope check: claims.workspaceId !== routeWorkspaceId -> reject.
     expect(verified?.workspaceId === bWorkspace).toBe(false);
+  });
+});
+
+function relayPayload(overrides: Partial<RelayTokenPayloadType> = {}): RelayTokenPayloadType {
+  return RelayTokenPayload.parse({
+    workspaceId: WORKSPACE_A,
+    agentId: "55555555-5555-4555-8555-555555555555",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+    ...overrides,
+  });
+}
+
+describe("RelayTokenPayload sign/verify (the agent producer token, M8b)", () => {
+  test("mint -> verify round-trip recovers the exact claims with the ogr_ prefix", async () => {
+    const claims = relayPayload();
+    const token = await signRelayToken(SECRET, claims);
+    // The `ogr_` prefix keeps the producer token distinct from the viewer's `ogs_`
+    // token and the `ogd_`/`oge_` planes at the verify boundary.
+    expect(token.startsWith("ogr_")).toBe(true);
+    expect(await verifyRelayToken(SECRET, token)).toEqual(claims);
+  });
+
+  test("the ogr_ and ogs_ planes do NOT cross-verify (prefix discipline)", async () => {
+    const relayToken = await signRelayToken(SECRET, relayPayload());
+    const streamToken = await signStreamToken(SECRET, payload());
+    // A producer token is not a valid viewer token and vice-versa.
+    expect(await verifyStreamToken(SECRET, relayToken)).toBeNull();
+    expect(await verifyRelayToken(SECRET, streamToken)).toBeNull();
+  });
+
+  test("verify rejects a wrong secret + an expired relay token", async () => {
+    const token = await signRelayToken(SECRET, relayPayload());
+    expect(await verifyRelayToken("other-secret", token)).toBeNull();
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const expired = await signRelayToken(SECRET, relayPayload({ exp: nowSeconds - 1 }));
+    expect(await verifyRelayToken(SECRET, expired, nowSeconds)).toBeNull();
   });
 });
 

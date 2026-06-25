@@ -6,6 +6,7 @@ members = [
     "crates/opengeni-agent-platform",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
+    "crates/opengeni-relay",
 ]
 
 # Shared metadata + lint posture for every crate in the agent workspace.
@@ -72,6 +73,19 @@ x11rb = { version = "0.13", features = ["xtest", "randr", "image"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 # Stream byte buffers (prost re-exports bytes, but the stream pumps use it directly).
 bytes = "1"
+
+# --- Relay tier (opengeni-relay) ------------------------------------------------
+# The HTTP/WebSocket server framework for the relay's wss listener + health/metrics
+# endpoints. rustls (no system OpenSSL) keeps the static-musl release build clean.
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "ws", "query"] }
+tower = { version = "0.5", default-features = false }
+# HMAC-SHA256 verify of the `ogs_` viewer token + the `ogr_` producer token (the
+# Rust mirror of the TS mint — the single-source token-verify contract, §10.5). A
+# pure-Rust impl so the musl static build needs no libsodium/OpenSSL.
+hmac = "0.12"
+sha2 = "0.10"
+# Constant-time signature comparison (mirrors the TS constantTimeEqual).
+subtle = "2"
 
 # Test-only helpers.
 tempfile = "3"

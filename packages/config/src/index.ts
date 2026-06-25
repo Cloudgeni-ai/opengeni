@@ -412,6 +412,14 @@ const SettingsSchema = z.object({
   // milestone) — the poll returns these endpoints + a placeholder creds field.
   selfhostedNatsUrl: z.string().optional(),
   selfhostedRelayUrl: z.string().optional(),
+  // The HMAC secret the control plane signs the agent's relay PRODUCER token with
+  // (the `ogr_` envelope threaded into EnrollmentCredentials.relayToken; M8b/dossier
+  // §10.5). The relay verifies the producer token with the SAME secret. Optional:
+  // when ABSENT the poll returns an empty relayToken (graceful degrade — the stream
+  // plane is simply unavailable until configured). Falls back to streamTokenSecret /
+  // delegationSecret (same HMAC family) so a deployment with a stream-token secret
+  // needs no second one. NEVER logged. Lives in the opengeni-runtime secret.
+  selfhostedRelayTokenSecret: z.string().optional(),
   // The minisign PUBLIC key the agent pins for self-update verification (handed to
   // the agent in EnrollmentCredentials; the SECRET key lives only in CI).
   agentUpdatePublicKey: z.string().optional(),
@@ -878,6 +886,7 @@ export function getSettings(): Settings {
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
+    selfhostedRelayTokenSecret: optional("OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET"),
     agentUpdatePublicKey: optional("OPENGENI_AGENT_UPDATE_PUBLIC_KEY"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
@@ -1868,6 +1877,29 @@ export function resolveEnrollmentSigningSecret(settings: Settings): string | und
   const explicit = settings.enrollmentSigningSecret?.trim();
   if (explicit) {
     return explicit;
+  }
+  const delegation = settings.delegationSecret?.trim();
+  return delegation ? delegation : undefined;
+}
+
+/**
+ * Resolve the HMAC secret the control plane signs the agent's relay PRODUCER token
+ * with (the `ogr_` envelope; M8b/dossier §10.5). The RELAY verifies the producer
+ * token with the SAME secret (injected into the relay via env). Prefers an explicit
+ * `selfhostedRelayTokenSecret`, then the `streamTokenSecret` (the relay already
+ * needs that one to verify the viewer's `ogs_` token, so a single secret can back
+ * both planes), then `delegationSecret` (same HMAC family). Returns undefined when
+ * none is set — the enrollment poll then returns an empty relayToken (graceful
+ * degrade; the stream plane is unavailable until configured). NEVER log the value.
+ */
+export function resolveRelayTokenSecret(settings: Settings): string | undefined {
+  const explicit = settings.selfhostedRelayTokenSecret?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const stream = settings.streamTokenSecret?.trim();
+  if (stream) {
+    return stream;
   }
   const delegation = settings.delegationSecret?.trim();
   return delegation ? delegation : undefined;

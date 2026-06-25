@@ -821,6 +821,18 @@ export interface EnrollmentCredentials {
   consentedWholeMachine: boolean;
   /** Whether the user consented to screen capture + synthetic input. */
   consentedScreenControl: boolean;
+  /**
+   * The agent's PRODUCER token for the relay edge (dossier §10.5 / the relay-dial
+   * protocol). Presented as `StreamOpen.token` when the agent registers a
+   * pty/desktop channel (role=AGENT). It is a control-plane-minted, workspace+agent
+   * -scoped `ogr_` HMAC token the relay verifies on its own merits — DISTINCT from
+   * the viewer's `ogs_` stream token (which the control plane mints per viewer and
+   * the relay also verifies). The relay pairs the producer and consumer by the
+   * channel key once BOTH tokens pass. Additive proto3 field; empty for an
+   * enrollment minted before the relay-token plane is configured (the agent then
+   * presents an empty token the relay rejects, surfacing the gap loudly).
+   */
+  relayToken: string;
 }
 
 export interface ExecRequest {
@@ -2629,6 +2641,7 @@ function createBaseEnrollmentCredentials(): EnrollmentCredentials {
     updatePubkey: "",
     consentedWholeMachine: false,
     consentedScreenControl: false,
+    relayToken: "",
   };
 }
 
@@ -2657,6 +2670,9 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     }
     if (message.consentedScreenControl !== false) {
       writer.uint32(64).bool(message.consentedScreenControl);
+    }
+    if (message.relayToken !== "") {
+      writer.uint32(74).string(message.relayToken);
     }
     return writer;
   },
@@ -2732,6 +2748,14 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
           message.consentedScreenControl = reader.bool();
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.relayToken = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2783,6 +2807,11 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
         : isSet(object.consented_screen_control)
         ? globalThis.Boolean(object.consented_screen_control)
         : false,
+      relayToken: isSet(object.relayToken)
+        ? globalThis.String(object.relayToken)
+        : isSet(object.relay_token)
+        ? globalThis.String(object.relay_token)
+        : "",
     };
   },
 
@@ -2812,6 +2841,9 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     if (message.consentedScreenControl !== false) {
       obj.consentedScreenControl = message.consentedScreenControl;
     }
+    if (message.relayToken !== "") {
+      obj.relayToken = message.relayToken;
+    }
     return obj;
   },
 
@@ -2828,6 +2860,7 @@ export const EnrollmentCredentials: MessageFns<EnrollmentCredentials> = {
     message.updatePubkey = object.updatePubkey ?? "";
     message.consentedWholeMachine = object.consentedWholeMachine ?? false;
     message.consentedScreenControl = object.consentedScreenControl ?? false;
+    message.relayToken = object.relayToken ?? "";
     return message;
   },
 };

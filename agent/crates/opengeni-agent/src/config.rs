@@ -153,9 +153,10 @@ impl StoredCredentials {
             nats_credentials: proto.nats_credentials,
             nats_urls: proto.nats_urls,
             relay_url: proto.relay_url,
-            // The proto EnrollmentCredentials has no relay producer-token field yet
-            // (the relay-dial protocol seam M8b reconciles); starts empty.
-            relay_token: String::new(),
+            // The proto EnrollmentCredentials now carries the relay producer token
+            // (M8b reconciled the relay-dial seam): thread it straight through so a
+            // freshly-enrolled agent presents it on its first channel registration.
+            relay_token: proto.relay_token,
             update_pubkey: proto.update_pubkey,
             consented_whole_machine: proto.consented_whole_machine,
             consented_screen_control: proto.consented_screen_control,
@@ -333,6 +334,7 @@ mod tests {
             nats_credentials: "creds".to_string(),
             nats_urls: vec!["tls://x:4222".to_string()],
             relay_url: "https://r".to_string(),
+            relay_token: "ogr_producer".to_string(),
             update_pubkey: "k".to_string(),
             consented_whole_machine: true,
             consented_screen_control: true,
@@ -341,5 +343,7 @@ mod tests {
         assert_eq!(stored.update_channel, "beta");
         assert!(stored.resume_token.is_empty());
         assert!(stored.consented_screen_control);
+        // The proto relay producer token now threads straight through (M8b).
+        assert_eq!(stored.relay_token, "ogr_producer");
     }
 }
