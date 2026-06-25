@@ -27,6 +27,9 @@ function baseSession() {
     sandboxBackend: "modal" as const,
     sandboxOs: "linux" as const,
     sandboxGroupId: id,
+    // M2 swappable-sandbox pointer (null == use the group sandbox; epoch 0 default).
+    activeSandboxId: null,
+    activeEpoch: 0,
     environmentId: null,
     firstPartyMcpPermissions: null,
     parentSessionId: null,

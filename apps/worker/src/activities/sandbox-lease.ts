@@ -441,6 +441,23 @@ export async function terminateProviderBox(
     return true;
   }
 
+  // CRITICAL SAFETY (bring-your-own-compute, dossier §19/§21): NEVER provider-stop
+  // a selfhosted box. The "box" is a user's PHYSICAL machine — you cannot kill it,
+  // and a delete()/kill() reaching the agent would be catastrophic. The reaper
+  // DRAINS the lease to cold only (refcount→0 → draining → this returns true so
+  // the caller's confirmDrainCold flips draining→cold) but issues NO provider stop:
+  // no client is built, no resume, no persistWorkspace (the machine IS the
+  // persistence — nothing to snapshot), no delete/kill. The session simply detaches;
+  // the machine stays up under the agent's own process lifetime (§23.0). Checked on
+  // BOTH the lease backend and the resume envelope's backend so neither path leaks.
+  if (backend === "selfhosted" || lease.backend === "selfhosted" || lease.resumeBackendId === "selfhosted") {
+    observability.info("sandbox reaper: selfhosted lease drained to cold (NEVER provider-stopped — it is the user's machine)", {
+      sandboxGroupId: lease.sandboxGroupId,
+      backend,
+    });
+    return true;
+  }
+
   // resume_state is the folded group box-envelope (the provider sessionState the
   // box was last persisted as). No envelope -> no live box to stop.
   if (!lease.resumeState) {

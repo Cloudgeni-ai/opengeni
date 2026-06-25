@@ -1785,6 +1785,13 @@ export const Session = z.object({
   // own id for a singleton group (today's 1:1 default); equals the parent's
   // group when spawned shared (both sessions run in ONE box).
   sandboxGroupId: z.string().uuid(),
+  // The first-class swappable-sandbox POINTER (bring-your-own-compute M2). NULL
+  // resolves to the session's own group sandbox (the backward-compat default);
+  // a swap sets it to the target sandbox row. active_epoch is the second epoch
+  // ABOVE the lease epoch, bumped on every swap so the routing proxy can fence a
+  // stale in-flight op and retry against the new active sandbox.
+  activeSandboxId: z.string().uuid().nullable(),
+  activeEpoch: z.number().int().nonnegative(),
   environmentId: z.string().uuid().nullable(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
