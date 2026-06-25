@@ -3,8 +3,14 @@ import {
   computerCallNormalizingFetch,
   normalizeComputerCallActions,
   rewriteComputerCallsToActionsOnly,
+  rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
 } from "../src/history-sanitizer";
+
+// The exact 1×1 transparent PNG placeholder used by the SDK (agents-core
+// toolExecution.mjs) and now also by our wire-level backstop.
+const PLACEHOLDER =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
 // Item shapes mirror the SDK's canonical history representation
 // (`type` discriminator, camelCase `callId`) that is persisted verbatim into
@@ -301,5 +307,211 @@ describe("computerCallNormalizingFetch", () => {
     const init = { method: "GET" };
     await wrapped("https://aoai/openai/v1/responses", init);
     expect(seenInit).toBe(init);
+  });
+});
+
+describe("rewriteEmptyComputerCallOutputImageUrls", () => {
+  // ROOT CAUSE: when an action (click/type/scroll/drag) times out at the 15 s
+  // yield window, SandboxComputer.x() throws ComputerActionError; agents-core
+  // toolExecution.mjs catch sets output='' and builds the wire item:
+  //   {type:"computer_call_output",output:{type:"computer_screenshot",image_url:""}}
+  // Azure rejects the whole request: "400 Invalid input[N].output.image_url".
+  // This rewriter is the wire-level backstop that replaces empty/missing
+  // image_urls with the 1×1 transparent PNG placeholder before Azure sees them.
+
+  test("replaces an empty image_url on a computer_call_output with the placeholder", () => {
+    // The exact wire shape the SDK produces on action-timeout: image_url is "".
+    const body = {
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "click the button" }] },
+        {
+          type: "computer_call_output",
+          call_id: "cu_1",
+          output: { type: "computer_screenshot", image_url: "" },
+        },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(true);
+    const out = (body.input[1] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(out.image_url).toBe(PLACEHOLDER);
+    // Sibling fields and non-computer items are untouched.
+    expect(out.type).toBe("computer_screenshot");
+    expect((body.input[1] as Record<string, unknown>).call_id).toBe("cu_1");
+    expect(body.input[0]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "click the button" }],
+    });
+  });
+
+  test("replaces a missing image_url (undefined) with the placeholder", () => {
+    const body = {
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_2",
+          output: { type: "computer_screenshot" },
+        },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(true);
+    const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(out.image_url).toBe(PLACEHOLDER);
+  });
+
+  test("replaces a null image_url with the placeholder", () => {
+    const body = {
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_3",
+          output: { type: "computer_screenshot", image_url: null },
+        },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(true);
+    const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(out.image_url).toBe(PLACEHOLDER);
+  });
+
+  test("leaves a valid non-empty data-URI image_url untouched (no change)", () => {
+    // A real screenshot — must never be overwritten by the backstop.
+    const realDataUri = "data:image/png;base64,abc123def456";
+    const body = {
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_4",
+          output: { type: "computer_screenshot", image_url: realDataUri },
+        },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(false);
+    const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(out.image_url).toBe(realDataUri);
+  });
+
+  test("leaves the placeholder itself untouched when already present (idempotent)", () => {
+    // If the item was already patched (e.g. replayed history from a prior turn)
+    // it must not be double-replaced.
+    const body = {
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_5",
+          output: { type: "computer_screenshot", image_url: PLACEHOLDER },
+        },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(false);
+    const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(out.image_url).toBe(PLACEHOLDER);
+  });
+
+  test("handles multiple items: patches empty, leaves valid, skips non-computer items", () => {
+    const realDataUri = "data:image/png;base64,validdata";
+    const body = {
+      input: [
+        { type: "message", role: "user", content: "go" },
+        { type: "computer_call_output", call_id: "cu_a", output: { type: "computer_screenshot", image_url: "" } },
+        { type: "function_call_result", call_id: "fn_1", output: { type: "text", text: "ok" } },
+        { type: "computer_call_output", call_id: "cu_b", output: { type: "computer_screenshot", image_url: realDataUri } },
+        { type: "computer_call_output", call_id: "cu_c", output: { type: "computer_screenshot", image_url: null } },
+      ],
+    };
+    const changed = rewriteEmptyComputerCallOutputImageUrls(body);
+    expect(changed).toBe(true);
+    // cu_a (empty "")  → replaced
+    const outA = (body.input[1] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(outA.image_url).toBe(PLACEHOLDER);
+    // function_call_result → untouched
+    expect((body.input[2] as Record<string, unknown>).call_id).toBe("fn_1");
+    // cu_b (valid) → untouched
+    const outB = (body.input[3] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(outB.image_url).toBe(realDataUri);
+    // cu_c (null) → replaced
+    const outC = (body.input[4] as Record<string, unknown>).output as Record<string, unknown>;
+    expect(outC.image_url).toBe(PLACEHOLDER);
+  });
+
+  test("returns false and is a no-op for non-array input, null, and non-object bodies", () => {
+    expect(rewriteEmptyComputerCallOutputImageUrls({ input: [{ type: "message" }] })).toBe(false);
+    expect(rewriteEmptyComputerCallOutputImageUrls({ input: "nope" })).toBe(false);
+    expect(rewriteEmptyComputerCallOutputImageUrls(null)).toBe(false);
+    expect(rewriteEmptyComputerCallOutputImageUrls("string")).toBe(false);
+  });
+});
+
+describe("computerCallNormalizingFetch — empty image_url backstop (action-timeout 400)", () => {
+  test("patches an empty image_url on a computer_call_output before sending to provider", async () => {
+    // The exact scenario: action timed out → SDK set image_url:"" → Azure would 400.
+    // The wrapping fetch must replace it with the placeholder so Azure accepts it.
+    let seenBody: string | undefined;
+    const base = (async (_url: unknown, init?: { body?: unknown }) => {
+      seenBody = init?.body as string;
+      return new Response("{}");
+    }) as unknown as typeof fetch;
+
+    const wrapped = computerCallNormalizingFetch(base);
+    const originalBody = JSON.stringify({
+      input: [
+        {
+          type: "computer_call_output",
+          call_id: "cu_timeout",
+          output: { type: "computer_screenshot", image_url: "" },
+        },
+      ],
+    });
+    await wrapped("https://aoai/openai/v1/responses", { method: "POST", body: originalBody });
+
+    expect(seenBody).toBeDefined();
+    const sent = JSON.parse(seenBody as string);
+    const out = sent.input[0].output;
+    expect(out.image_url).toBe(PLACEHOLDER);
+    // The type field is preserved.
+    expect(out.type).toBe("computer_screenshot");
+  });
+
+  test("applies both rewrites in one pass: actions-only + empty image_url fix", async () => {
+    // A body that has both problems: a computer_call with both fields AND a
+    // computer_call_output with an empty image_url. Both are fixed in one parse.
+    let seenBody: string | undefined;
+    const base = (async (_url: unknown, init?: { body?: unknown }) => {
+      seenBody = init?.body as string;
+      return new Response("{}");
+    }) as unknown as typeof fetch;
+
+    const wrapped = computerCallNormalizingFetch(base);
+    const originalBody = JSON.stringify({
+      input: [
+        {
+          type: "computer_call",
+          call_id: "cu_act",
+          action: { type: "click", x: 10, y: 20 },
+          actions: [{ type: "click", x: 10, y: 20 }],
+        },
+        {
+          type: "computer_call_output",
+          call_id: "cu_act",
+          output: { type: "computer_screenshot", image_url: "" },
+        },
+      ],
+    });
+    await wrapped("https://aoai/openai/v1/responses", { method: "POST", body: originalBody });
+
+    expect(seenBody).toBeDefined();
+    const sent = JSON.parse(seenBody as string);
+    // computer_call → actions-only
+    const cc = sent.input[0];
+    expect("action" in cc).toBe(false);
+    expect(cc.actions).toEqual([{ type: "click", x: 10, y: 20 }]);
+    // computer_call_output → placeholder
+    const out = sent.input[1].output;
+    expect(out.image_url).toBe(PLACEHOLDER);
   });
 });

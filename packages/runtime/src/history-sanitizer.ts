@@ -325,19 +325,97 @@ export function rewriteComputerCallsToActionsOnly(body: unknown): boolean {
 }
 
 /**
+ * The 1×1 transparent PNG placeholder used by the SDK for tool-approval-rejection
+ * screenshots (`TOOL_APPROVAL_REJECTION_SCREENSHOT_DATA_URL` in agents-core
+ * `toolExecution.mjs`). We reuse the exact same constant as a backstop for the
+ * action-timeout 400: when an action times out the SDK's catch sets output='' and
+ * builds `{type:"computer_call_output",output:{type:"computer_screenshot",image_url:""}}`.
+ * Azure rejects `image_url:""` with "400 Invalid input[N].output.image_url". This
+ * placeholder is a valid data URI the provider accepts, so the turn continues and
+ * the model receives the next real screenshot on its following step.
+ */
+const EMPTY_IMAGE_URL_PLACEHOLDER =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+
+/**
+ * Backstop for the action-timeout 400: walk the `input` array of a serialized
+ * Responses request body and replace any `computer_call_output` item whose
+ * `output.image_url` is an empty string, null, undefined, or otherwise not a
+ * non-empty string with the 1×1 transparent PNG placeholder data URI.
+ *
+ * WHY THIS IS NEEDED. When a computer ACTION (click/type/scroll/drag) times out
+ * at the 15-second yield window `SandboxComputer.x()` throws `ComputerActionError`.
+ * The agents-core SDK `toolExecution.mjs` catch block sets `output = ''` and then
+ * builds the wire item:
+ *
+ *   `{type:"computer_call_output", output:{type:"computer_screenshot", image_url:""}}`
+ *
+ * Azure rejects the whole request with:
+ *
+ *   `400 Invalid 'input[N].output.image_url'. Expected a valid URL, but got a
+ *    value with an invalid format.`
+ *
+ * Our screenshot() fail-loud guard (which throws on empty frames) only runs when
+ * the SDK calls screenshot() on a SUCCESS path — not on this action-error catch
+ * path that sets output='' directly. This wire-level rewrite is the only seam that
+ * catches both paths regardless of how the empty image_url was produced. It runs
+ * in the same `computerCallNormalizingFetch` wrapper, so a single parse/rewrite
+ * pass covers both the action/actions-only rewrite and this placeholder injection.
+ *
+ * Mutates `body` in place (the caller has already JSON.parsed a private copy).
+ * Returns `true` iff at least one image_url was replaced.
+ */
+export function rewriteEmptyComputerCallOutputImageUrls(body: unknown): boolean {
+  if (!body || typeof body !== "object") {
+    return false;
+  }
+  const input = (body as Record<string, unknown>).input;
+  if (!Array.isArray(input)) {
+    return false;
+  }
+  let changed = false;
+  for (const item of input) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const record = item as Record<string, unknown>;
+    if (record.type !== "computer_call_output") {
+      continue;
+    }
+    const output = record.output;
+    if (!output || typeof output !== "object") {
+      continue;
+    }
+    const out = output as Record<string, unknown>;
+    const imageUrl = out.image_url;
+    // Replace the image_url when it is not a non-empty string (covers: "", null, undefined, missing).
+    if (typeof imageUrl !== "string" || imageUrl.length === 0) {
+      out.image_url = EMPTY_IMAGE_URL_PLACEHOLDER;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/**
  * Wrap a `fetch` so every outbound OpenAI Responses request body that contains a
  * `computer_call` is rewritten to the ACTIONS-ONLY shape (see
- * {@link rewriteComputerCallsToActionsOnly}) before it reaches the network.
+ * {@link rewriteComputerCallsToActionsOnly}) before it reaches the network, AND
+ * any `computer_call_output` item with an empty/missing `output.image_url` is
+ * patched with the 1×1 transparent PNG placeholder (see
+ * {@link rewriteEmptyComputerCallOutputImageUrls}).
  *
  * Installed as the `fetch:` option on the Azure OpenAI client, this is the
  * lowest reachable seam — below the agents-core input filter and below the SDK's
  * responses converter — so it neutralizes the converter's both-fields synthesis
- * regardless of what the input item carried.
+ * regardless of what the input item carried, and backstops the action-timeout
+ * empty image_url regardless of how it was produced.
  *
  * Surgical and cheap: it only parses the body when it is a string that contains
- * the literal `"computer_call"` (every other request — non-computer-use turns,
- * streaming SSE responses, non-string bodies — forwards untouched, the SAME
- * `init` reference, so streaming and other providers are unaffected). A JSON
+ * the prefix `"computer_call` (matching both `"computer_call"` action items and
+ * `"computer_call_output"` result items). Every other request — non-computer-use
+ * turns, streaming SSE responses, non-string bodies — forwards untouched, the
+ * SAME `init` reference, so streaming and other providers are unaffected. A JSON
  * parse failure or a no-op rewrite also forwards the original `init` unchanged.
  *
  * Typed structurally (the `(input, init) => Promise<Response>` call signature)
@@ -352,10 +430,15 @@ type FetchLike = (
 
 export function computerCallNormalizingFetch(base: FetchLike): FetchLike {
   return (input, init) => {
-    if (init && typeof init.body === "string" && init.body.includes("\"computer_call\"")) {
+    // Match any request that mentions either `computer_call` (the action call) or
+    // `computer_call_output` (the output/result item). Both strings begin with
+    // `"computer_call` so a single prefix-substring check covers both.
+    if (init && typeof init.body === "string" && init.body.includes("\"computer_call")) {
       try {
         const parsed = JSON.parse(init.body) as unknown;
-        if (rewriteComputerCallsToActionsOnly(parsed)) {
+        const changed1 = rewriteComputerCallsToActionsOnly(parsed);
+        const changed2 = rewriteEmptyComputerCallOutputImageUrls(parsed);
+        if (changed1 || changed2) {
           return base(input, { ...init, body: JSON.stringify(parsed) });
         }
       } catch {

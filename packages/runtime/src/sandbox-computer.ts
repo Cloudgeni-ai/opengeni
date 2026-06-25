@@ -179,8 +179,20 @@ export class SandboxComputer implements Computer {
     }
     const output = sandboxCommandOutput(result);
     if (sandboxCommandStillRunning(result)) {
-      // F3: the command exceeded the yield window — surface, don't treat as success.
-      throw new ComputerActionError(cmd, -1, `command did not finish before the yield window:\n${output}`);
+      // F3: the command exceeded the yield window. WARN AND RETURN rather than
+      // throw. Throwing here causes the SDK's catch in `_runComputerActionAndScreenshot`
+      // to set output='' and build `{image_url:""}` → Azure 400. By returning
+      // instead, the SDK proceeds past the action loop and calls computer.screenshot()
+      // so the model gets the REAL current frame for its next step.
+      //
+      // screenshot()'s FAIL-LOUD + retry contract is preserved: if scrot itself
+      // times out (very unlikely at 15 s), x() returns here, readScreenshotBytes
+      // produces empty bytes, and the retry loop eventually throws. The wire-level
+      // backstop in computerCallNormalizingFetch is also in place as a second net.
+      console.warn(
+        `[SandboxComputer] action command did not finish before the ${ACTION_YIELD_MS}ms yield window — proceeding to screenshot: ${cmd}`,
+      );
+      return output;
     }
     const exitCode = sandboxCommandExitCode(result);
     if (exitCode !== null && exitCode !== 0) {

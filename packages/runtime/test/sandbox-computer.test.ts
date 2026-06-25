@@ -158,10 +158,20 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     await expect(c.click(1, 1, "left")).rejects.toBeInstanceOf(ComputerActionError);
   });
 
-  test("F3: a 'still running' yield is a retriable failure, not a success", async () => {
+  test("F3: a 'still running' action yield WARNS and resolves (does not throw) so screenshot() runs", async () => {
+    // CHANGED from throw to warn+return: if a click/move/type times out at the
+    // yield window and we throw, the SDK catch (toolExecution.mjs) sets output=''
+    // and builds `{image_url:""}` → Azure 400. By returning instead, the SDK
+    // proceeds to call computer.screenshot() after the action loop, and the model
+    // gets the real current frame. The wire-level backstop in
+    // computerCallNormalizingFetch is also in place as a second net. Non-zero exit
+    // codes (true command errors) still throw — only the still-running case is
+    // silenced. screenshot()'s fail-loud + retry contract is preserved.
     const { session } = makeMockSession({ stillRunning: true });
     const c = new SandboxComputer(session as never);
-    await expect(c.move(5, 5)).rejects.toBeInstanceOf(ComputerActionError);
+    // move() must RESOLVE (not reject) so the SDK action loop exits cleanly and
+    // screenshot() is called afterward.
+    await expect(c.move(5, 5)).resolves.toBeUndefined();
   });
 
   test("F5: scroll converts model pixel deltas to clamped wheel notches (not literal repeat counts)", async () => {
