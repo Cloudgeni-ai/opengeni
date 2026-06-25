@@ -118,6 +118,7 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  updateSessionTitle: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   deleteWorkspace: (workspaceId: string) => Promise<boolean>;
   refreshGitHub: (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
@@ -343,6 +344,21 @@ export function RootRouteComponent() {
       return updated;
     } catch (error) {
       toast.error("Failed to rename workspace", { description: error instanceof Error ? error.message : String(error) });
+      return null;
+    }
+  }
+
+  // Manual session rename: writes a permanent (source='user') title via the
+  // PATCH route, then patches the open session in-place so the header reflects
+  // it at once. The rail list (its own polled hook) and any cross-client view
+  // pick the change up via the session.title_set SSE event / next poll.
+  async function updateSessionTitle(workspaceId: string, sessionId: string, title: string): Promise<Session | null> {
+    try {
+      const updated = await client.updateSession(workspaceId, sessionId, { title });
+      setSession((current) => (current && current.id === updated.id ? { ...current, title: updated.title, titleSource: updated.titleSource } : current));
+      return updated;
+    } catch (error) {
+      toast.error("Failed to rename session", { description: error instanceof Error ? error.message : String(error) });
       return null;
     }
   }
@@ -603,6 +619,7 @@ export function RootRouteComponent() {
     handleManagedSignOut,
     createWorkspace,
     renameWorkspace,
+    updateSessionTitle,
     deleteWorkspace,
     refreshGitHub,
     refreshWorkspaceMcpServers,

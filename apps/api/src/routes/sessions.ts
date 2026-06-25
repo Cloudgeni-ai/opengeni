@@ -21,6 +21,7 @@ import {
   ReorderSessionTurnsRequest,
   TerminalExecRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionRequest,
   UpdateSessionTurnRequest,
   ViewerHeartbeatRequest,
   type SandboxBackend,
@@ -73,6 +74,7 @@ import {
   assertConfiguredModel,
   createSessionForRequest,
   requireQueuedTurnForApi,
+  updateSessionTitle,
   workflowIdForSession,
 } from "../domain/sessions";
 import { assertSessionExists, boundedLimit } from "../http/common";
@@ -98,6 +100,23 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const session = await getSession(db, workspaceId, c.req.param("sessionId"));
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(session);
+  });
+
+  // Manual rename. A user-set title is permanent: the db write is
+  // unconditional (source='user'), so it always pins the session over later
+  // agent writes. Returns the refreshed session, mirroring GET detail.
+  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = UpdateSessionRequest.parse(await c.req.json());
+    await updateSessionTitle({ db, bus }, workspaceId, sessionId, payload.title, "user");
+    const session = await getSession(db, workspaceId, sessionId);
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }

@@ -46,6 +46,7 @@ import type {
   StreamSessionEventsOptions,
   UploadFileInput,
   UpdateSessionGoalRequest,
+  UpdateSessionRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest,
@@ -142,6 +143,11 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async getSession(_workspaceId: string, sessionId: string): Promise<Session> {
     return this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
+  }
+
+  async updateSession(_workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
+    const session = this.fabricateSession(sessionId, this.bus(sessionId).status, "Ops channel — manager session");
+    return { ...session, title: request.title, titleSource: "user" };
   }
 
   async listSessions(): Promise<Session[]> {
@@ -719,6 +725,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       accountId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       status,
       initialMessage: title,
+      title: null,
+      titleSource: null,
       resources: [],
       tools: [],
       metadata: { title },

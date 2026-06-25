@@ -236,6 +236,8 @@ export type Session = {
   accountId: string;
   status: SessionStatus;
   initialMessage: string;
+  title: string | null;
+  titleSource: "user" | "agent" | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   metadata: Record<string, unknown>;
@@ -333,6 +335,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.started",
   "terminal.pty.output.delta",
   "terminal.pty.exited",
+  "session.title_set",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
@@ -827,6 +830,10 @@ export type SessionGoal = {
 export type UpdateSessionGoalRequest = {
   status: "paused" | "active";
   rationale?: string | undefined;
+};
+
+export type UpdateSessionRequest = {
+  title: string;
 };
 
 // --- Operator context controls (/clear, /compact) ----------------------------

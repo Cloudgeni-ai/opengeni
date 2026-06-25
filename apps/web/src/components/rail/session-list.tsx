@@ -189,7 +189,7 @@ function SessionRow(props: {
   focused: boolean;
   onSelect: (sessionId: string) => void;
 }) {
-  const title = props.session.initialMessage?.trim() || "Untitled session";
+  const title = props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
   return (
     <button
       type="button"

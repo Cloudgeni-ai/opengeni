@@ -4394,6 +4394,35 @@ export async function updateSessionGoal(db: Database, workspaceId: string, sessi
 }
 
 /**
+ * Sets a session's display title. The clobber guard lives entirely in this
+ * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
+ * carry an `AND title_source IS DISTINCT FROM 'user'` guard (NULL-safe in
+ * Postgres) while user writes are unconditional. Never read-modify-write.
+ * Returns `{ updated, title }`: `updated` is false when an agent write was
+ * skipped because a user title already pinned the session, true otherwise;
+ * `title` is the resulting title (null when skipped).
+ */
+export async function updateSessionTitle(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  title: string;
+  source: "user" | "agent";
+}): Promise<{ updated: boolean; title: string | null }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.update(schema.sessions).set({
+      title: input.title,
+      titleSource: input.source,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(schema.sessions.workspaceId, input.workspaceId),
+      eq(schema.sessions.id, input.sessionId),
+      ...(input.source === "agent" ? [sql`${schema.sessions.titleSource} is distinct from 'user'`] : []),
+    )).returning({ title: schema.sessions.title });
+    return { updated: Boolean(row), title: row?.title ?? null };
+  });
+}
+
+/**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
  * is terminal for transitions; only `upsertSessionGoal` can replace a
@@ -5166,6 +5195,8 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     workspaceId: row.workspaceId,
     status: row.status as SessionStatus,
     initialMessage: row.initialMessage,
+    title: row.title ?? null,
+    titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     metadata: row.metadata,

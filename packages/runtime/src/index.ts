@@ -1192,7 +1192,36 @@ export type RunAgentStreamOptions = {
     session: unknown;         // SandboxSessionLike — the live, NON-OWNED handle (never reaped)
     sessionState?: unknown;   // SandboxSessionState the box was resumed from
   };
+  // A per-turn model-input filter chained AFTER the provider-item-id strip.
+  // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
+  // directive: a callModelInputFilter mutates only `modelData.input` for each
+  // model call and never touches `state.history`/`originalInput`, so the
+  // reconcile dual-write never sees it.
+  callModelInputFilter?: CallModelInputFilter;
 };
+
+// The hidden genesis-title directive. Appended only to what the model sees on
+// the genesis turn (via a callModelInputFilter), never persisted into stored
+// history and never shown in the UI. Kept OUT of the white-label-overridable
+// instructions template on purpose — it is a one-shot model-input note, not
+// part of the agent persona.
+export const GENESIS_TITLE_DIRECTIVE =
+  "Before responding, call the set_session_title tool with a concise 3-7 word title summarizing this session, then continue with the user's request.";
+
+/**
+ * A callModelInputFilter that prepends the genesis-title directive as a
+ * `system` (developer-note) message to every model call of the genesis turn. It
+ * mutates only the per-call model input (`modelData.input`); the SDK's run
+ * state / history — the source the conversation-truth reconcile persists — is
+ * untouched, so the directive is hidden and non-persisted exactly as required.
+ */
+export const genesisTitleDirectiveFilter: CallModelInputFilter = ({ modelData }) => ({
+  ...modelData,
+  input: [
+    { role: "system", content: GENESIS_TITLE_DIRECTIVE } as AgentInputItem,
+    ...modelData.input,
+  ],
+});
 
 /**
  * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
@@ -1299,11 +1328,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
     });
-    const ownedFilter = callModelInputFilterForSettings(settings);
+    const ownedFilter = composeCallModelInputFilters(
+      [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
+        (f): f is CallModelInputFilter => Boolean(f),
+      ),
+    );
     const ownedRunOptions: Parameters<typeof run>[2] = {
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
-      ...(ownedFilter ? { callModelInputFilter: ownedFilter } : {}),
+      callModelInputFilter: ownedFilter,
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
@@ -1339,7 +1372,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     ?? (prepared.serializedRunStateForSandbox && client
       ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
       : undefined);
-  const callModelInputFilter = callModelInputFilterForSettings(settings);
+  // Strip provider item ids first, then apply any per-turn filter (genesis
+  // title directive). Composed left-to-right so the directive lands on the
+  // already-id-stripped input. A callModelInputFilter only shapes the per-call
+  // model input, never the persisted run-state history.
+  const callModelInputFilter = composeCallModelInputFilters(
+    [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
+      (f): f is CallModelInputFilter => Boolean(f),
+    ),
+  );
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
@@ -1348,7 +1389,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // provider's server-side response store. A stored response can vanish
     // between two calls of the same turn, failing the run with 400 "Item with
     // id 'rs_…' not found"; with the ids gone the request is self-contained.
-    ...(callModelInputFilter ? { callModelInputFilter } : {}),
+    callModelInputFilter,
   };
   void settings.disableOpenaiTracing;
   if (client) {

@@ -63,7 +63,7 @@ import {
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
-import { acceptSessionUserMessage, createSessionForRequest } from "../domain/sessions";
+import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle } from "../domain/sessions";
 import { capEventPage, capSessionDetail } from "./session-view";
 
 export type McpServerOptions = {
@@ -379,6 +379,14 @@ function registerGoalTools(
     return json(goal);
   });
 
+  server.registerTool("set_session_title", {
+    description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
+    inputSchema: { title: z4.string().min(1).max(200) },
+  }, async ({ title }) => {
+    const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+    return json({ ok: true, updated: result.updated, title: result.title ?? title });
+  });
+
   server.registerTool("goal_update", {
     description: "Revise the session goal's text or success criteria, or record a progress note. Counts as progress for the no-progress detector; the goal stays active.",
     inputSchema: {
@@ -566,6 +574,18 @@ function registerWorkspaceOrchestrationTools(
         toolsProvided: false,
       });
       return json({ event: accepted, turnId: turn.id });
+    });
+
+    server.registerTool("set_other_session_title", {
+      description: "Set another session's display title to a concise 3-7 word summary. The target session must belong to this workspace. Replaces an existing title unless a human has manually set it.",
+      inputSchema: {
+        session_id: z4.string().uuid(),
+        title: z4.string().min(1).max(200),
+      },
+    }, async ({ session_id, title }) => {
+      await requireSession(deps.db, grant.workspaceId, session_id);
+      const result = await updateSessionTitle(deps, grant.workspaceId, session_id, title, "agent");
+      return json({ ok: true, updated: result.updated, title: result.title ?? title });
     });
   }
 }
