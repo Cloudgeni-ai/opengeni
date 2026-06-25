@@ -24,6 +24,8 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "github:manage": "GitHub",
   "github:use": "GitHub",
   "goals:manage": "Goals",
+  "enrollments:read": "Machines",
+  "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
   "api_keys:manage": "Admin & account",
   "members:manage": "Admin & account",

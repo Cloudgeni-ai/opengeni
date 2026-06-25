@@ -630,6 +630,8 @@ export const KNOWN_PERMISSIONS = [
   "environments:manage",
   "environments:use",
   "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];

@@ -487,6 +487,13 @@ export const Permission = z.enum([
   "environments:manage",
   "environments:use",
   "goals:manage",
+  // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
+  // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
+  // consent) + revokes a machine. Distinct from sessions/stream perms because an
+  // enrollment grants WHOLE-MACHINE access to a user's own hardware — a high-trust,
+  // admin-shaped action. workspace:admin is the super-wildcard over both.
+  "enrollments:read",
+  "enrollments:manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -599,6 +606,55 @@ export async function verifyDelegatedAccessToken(secret: string, token: string, 
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
+// --- Enrollment bearer credential (bring-your-own-compute M5, dossier §10.2) ---
+//
+// The signed bearer the agent presents to the control plane after enrollment (the
+// EnrollmentCredentials.bearer the poll returns). REUSES the SAME HMAC envelope as
+// the delegated/stream tokens (base64Url payload + hmacSha256Base64Url) with a
+// distinct `oge_` prefix so it can never be confused with an `ogd_` access token or
+// an `ogs_` stream token. It binds (workspaceId, agentId, enrollmentId) so the
+// control plane can verify the agent owns the subject `agent.<ws>.<id>` it
+// subscribes to. Signed with resolveEnrollmentSigningSecret; the secret value is
+// NEVER logged. The real per-workspace NATS Account creds binding is infra-deferred
+// (M4/relay) — this bearer is the application-tier identity proof.
+export const EnrollmentBearerPayload = z.object({
+  workspaceId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  enrollmentId: z.string().uuid(),
+  // The Account-scoped control-plane subject prefix the agent subscribes to.
+  subjectPrefix: z.string().min(1),
+  exp: z.number().int().positive(),
+});
+export type EnrollmentBearerPayload = z.infer<typeof EnrollmentBearerPayload>;
+
+export async function signEnrollmentBearer(secret: string, payload: EnrollmentBearerPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(EnrollmentBearerPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `oge_${encodedPayload}.${signature}`;
+}
+
+export async function verifyEnrollmentBearer(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<EnrollmentBearerPayload | null> {
+  if (!token.startsWith("oge_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("oge_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -2651,6 +2707,144 @@ export const ViewerHeartbeatResponse = z.object({
   alive: z.boolean(),
 });
 export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
+
+// =============================================================================
+// Bring-your-own-compute (M5) — enrollment device-flow HTTP contract.
+//
+// The HTTP shapes mirror the @opengeni/agent-proto device-flow messages
+// (DeviceAuthStart*, DeviceAuthPoll*, EnrollmentCredentials) so the Rust agent's
+// `enroll` command (which runs the flow over HTTP before it has NATS creds)
+// decodes the SAME field names (the proto's ts-proto JSON is camelCase). The
+// request bodies additionally carry the consent-relevant fields the dossier brief
+// mandates (the agent ed25519 pubkey + can-offer-display + requests-screen-control).
+// =============================================================================
+
+export const EnrollmentOs = z.enum(["linux", "macos", "windows"]);
+export type EnrollmentOs = z.infer<typeof EnrollmentOs>;
+export const EnrollmentArch = z.enum(["x86_64", "aarch64"]);
+export type EnrollmentArch = z.infer<typeof EnrollmentArch>;
+
+// POST /enrollments/device/start (agent-side, unauthenticated-at-the-user-level,
+// rate-limited). The agent presents its ed25519 public key + os/arch + the
+// requested whole-machine exposure + whether it can offer a display + whether it
+// requests screen control.
+export const DeviceEnrollmentStartRequest = z.object({
+  // The agent's ed25519 public key (the machine identity the enrollment binds to).
+  publicKey: z.string().min(1).max(1024),
+  os: EnrollmentOs.default("linux"),
+  arch: EnrollmentArch.default("x86_64"),
+  // Human-friendly machine name (hostname by default).
+  machineName: z.string().min(1).max(256).optional(),
+  // v1 only supports whole-machine; kept explicit so the consent is recorded.
+  exposure: z.literal("whole-machine").default("whole-machine"),
+  // The agent can offer a display (a real screen / Xvfb is available).
+  canOfferDisplay: z.boolean().default(false),
+  // The agent requests screen control (computer-use); the user's allow_screen_control
+  // at approve is the AUTHORITATIVE consent.
+  requestsScreenControl: z.boolean().default(false),
+  // The workspace this machine is enrolling into. The agent is told this at install
+  // (the user picks the workspace, or the install/enroll token carries it). The user
+  // who approves must hold a grant in THIS workspace — that binding is what makes
+  // the (user-unauthenticated) start safe: it cannot grant access to a workspace no
+  // authorized user later approves in.
+  workspaceId: z.string().uuid(),
+});
+export type DeviceEnrollmentStartRequest = z.infer<typeof DeviceEnrollmentStartRequest>;
+
+// The DeviceAuthStart response (field names match the proto's JSON).
+export const DeviceEnrollmentStartResponse = z.object({
+  deviceCode: z.string(),
+  userCode: z.string(),
+  verificationUri: z.string(),
+  verificationUriComplete: z.string(),
+  intervalSeconds: z.number().int().positive(),
+  expiresInSeconds: z.number().int().positive(),
+});
+export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStartResponse>;
+
+// POST /enrollments/device/approve (USER-authenticated, workspace-gated). The
+// LOUD CONSENT step. whole-machine is mandatory (implicit); screen-control is
+// opt-in per allow_screen_control.
+export const DeviceEnrollmentApproveRequest = z.object({
+  userCode: z.string().min(1).max(64),
+  allowScreenControl: z.boolean().default(false),
+});
+export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
+
+export const DeviceEnrollmentApproveResponse = z.object({
+  approved: z.boolean(),
+  enrollmentId: z.string().uuid(),
+  sandboxId: z.string().uuid(),
+  allowScreenControl: z.boolean(),
+});
+export type DeviceEnrollmentApproveResponse = z.infer<typeof DeviceEnrollmentApproveResponse>;
+
+// POST /enrollments/device/poll (agent-side). The poll state machine.
+export const DeviceEnrollmentPollRequest = z.object({
+  deviceCode: z.string().min(1).max(256),
+});
+export type DeviceEnrollmentPollRequest = z.infer<typeof DeviceEnrollmentPollRequest>;
+
+export const DeviceEnrollmentState = z.enum(["pending", "authorized", "denied", "expired", "disabled"]);
+export type DeviceEnrollmentState = z.infer<typeof DeviceEnrollmentState>;
+
+// The EnrollmentCredentials (field names match the proto's JSON). natsAccountCreds
+// is a PLACEHOLDER — the real per-workspace NATS Account creds binding is
+// infra-deferred (M4/relay); the bearer + subjectPrefix are the application-tier
+// identity the agent presents today.
+export const EnrollmentCredentialsResponse = z.object({
+  agentId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  // The signed bearer the agent presents to the control plane (the `oge_` token).
+  bearer: z.string(),
+  // The Account-scoped control-plane subject prefix the agent subscribes to:
+  // agent.<workspaceId>.<agentId>.
+  subjectPrefix: z.string(),
+  // Connect info for the control plane + stream relay (may be empty when not yet
+  // configured for this deployment — the agent surfaces "control plane unconfigured").
+  natsUrls: z.array(z.string()),
+  relayUrl: z.string(),
+  // PLACEHOLDER for the per-workspace NATS Account creds (infra-deferred binding).
+  natsAccountCreds: z.string(),
+  // The minisign public key the agent pins for self-update verification.
+  updatePublicKey: z.string(),
+  consentedWholeMachine: z.boolean(),
+  consentedScreenControl: z.boolean(),
+});
+export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
+
+export const DeviceEnrollmentPollResponse = z.object({
+  state: DeviceEnrollmentState,
+  // Present only when state === "authorized".
+  credentials: EnrollmentCredentialsResponse.optional(),
+});
+export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollResponse>;
+
+// GET /enrollments — a workspace's machines (the Machines dashboard surface).
+export const EnrollmentSummary = z.object({
+  id: z.string().uuid(),
+  pubkey: z.string(),
+  exposure: z.literal("whole-machine"),
+  hasDisplay: z.boolean(),
+  allowScreenControl: z.boolean(),
+  status: z.enum(["active", "revoked"]),
+  os: EnrollmentOs,
+  arch: z.string(),
+  lastSeenAt: z.string().nullable(),
+  createdAt: z.string(),
+  revokedAt: z.string().nullable(),
+});
+export type EnrollmentSummary = z.infer<typeof EnrollmentSummary>;
+
+export const ListEnrollmentsResponse = z.object({
+  enrollments: z.array(EnrollmentSummary),
+});
+export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
+
+export const RevokeEnrollmentResponse = z.object({
+  revoked: z.boolean(),
+});
+export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 
 /**
  * A single host-exposed model + the provider that serves it, as surfaced to

@@ -160,6 +160,8 @@ export const allWorkspacePermissions: Permission[] = [
   "environments:manage",
   "environments:use",
   "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -4033,6 +4035,309 @@ export async function touchEnrollmentLastSeen(db: Database, input: {
         eq(schema.enrollments.workspaceId, input.workspaceId),
         eq(schema.enrollments.id, input.enrollmentId),
       ));
+  });
+}
+
+// ---- device-flow enrollment requests (M5, migration 0025) -----------------
+//
+// The OAuth 2.0 device-authorization (RFC 8628) PENDING request: one short-TTL,
+// single-use row per in-flight enrollment. The agent starts a flow (gets a
+// device_code + user_code), the user approves it (LOUD consent capture +
+// createEnrollment + createSandbox), and the agent polls the device_code for the
+// resulting EnrollmentCredentials. Dossier §10.2 + §18.
+
+export type DeviceEnrollmentStatus = (typeof schema.deviceEnrollmentStatusValues)[number];
+
+export type DeviceEnrollmentRequestRecord = {
+  id: string;
+  deviceCode: string;
+  userCode: string;
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  os: EnrollmentOs;
+  arch: string;
+  machineName: string | null;
+  requestedExposure: EnrollmentExposure;
+  canOfferDisplay: boolean;
+  requestsScreenControl: boolean;
+  status: DeviceEnrollmentStatus;
+  approvedBySubjectId: string | null;
+  approvedBySubjectLabel: string | null;
+  allowScreenControl: boolean;
+  approvedAt: string | null;
+  enrollmentId: string | null;
+  sandboxId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapDeviceEnrollmentRequest(row: typeof schema.deviceEnrollmentRequests.$inferSelect): DeviceEnrollmentRequestRecord {
+  return {
+    id: row.id,
+    deviceCode: row.deviceCode,
+    userCode: row.userCode,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    pubkey: row.pubkey,
+    os: row.os as EnrollmentOs,
+    arch: row.arch,
+    machineName: row.machineName ?? null,
+    requestedExposure: row.requestedExposure as EnrollmentExposure,
+    canOfferDisplay: row.canOfferDisplay,
+    requestsScreenControl: row.requestsScreenControl,
+    status: row.status as DeviceEnrollmentStatus,
+    approvedBySubjectId: row.approvedBySubjectId ?? null,
+    approvedBySubjectLabel: row.approvedBySubjectLabel ?? null,
+    allowScreenControl: row.allowScreenControl,
+    approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
+    enrollmentId: row.enrollmentId ?? null,
+    sandboxId: row.sandboxId ?? null,
+    expiresAt: row.expiresAt.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// Persist a fresh PENDING device-auth request (the agent's POST /start). The
+// caller supplies the unguessable device_code + user_code (minted with a CSPRNG)
+// and the short TTL. RLS-scoped to the workspace the flow binds to.
+export async function createDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  deviceCode: string;
+  userCode: string;
+  pubkey: string;
+  os?: EnrollmentOs;
+  arch?: string;
+  machineName?: string | null;
+  requestedExposure?: EnrollmentExposure;
+  canOfferDisplay?: boolean;
+  requestsScreenControl?: boolean;
+  expiresAt: Date;
+}): Promise<DeviceEnrollmentRequestRecord> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.deviceEnrollmentRequests).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      deviceCode: input.deviceCode,
+      userCode: input.userCode,
+      pubkey: input.pubkey,
+      os: input.os ?? "linux",
+      arch: input.arch ?? "x86_64",
+      machineName: input.machineName ?? null,
+      requestedExposure: input.requestedExposure ?? "whole-machine",
+      canOfferDisplay: input.canOfferDisplay ?? false,
+      requestsScreenControl: input.requestsScreenControl ?? false,
+      status: "pending",
+      expiresAt: input.expiresAt,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create device enrollment request");
+    }
+    return mapDeviceEnrollmentRequest(row);
+  });
+}
+
+// Look up a request by its opaque device_code (the agent's poll key). The
+// device_code IS the capability (unguessable + unique) and the agent has NO
+// workspace context yet, so resolve (account_id, workspace_id) via the SECURITY
+// DEFINER resolver (mirrors the global reaper's cross-workspace read), then re-read
+// the FULL row under that workspace's RLS scope. Returns null when unknown.
+export async function getDeviceEnrollmentRequestByDeviceCode(db: Database, deviceCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
+  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+    select account_id, workspace_id from opengeni_private.resolve_device_enrollment_request(${deviceCode})
+  `);
+  const ctx = resolved[0];
+  if (!ctx) {
+    return null;
+  }
+  return await withRlsContext(db, { accountId: ctx.account_id, workspaceId: ctx.workspace_id }, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(eq(schema.deviceEnrollmentRequests.deviceCode, deviceCode))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
+}
+
+// Look up the PENDING request for a user_code within a workspace (the approve
+// lookup). Workspace-scoped: a user can only approve a request bound to a
+// workspace they hold a grant in. Returns null when no LIVE pending row matches.
+export async function getPendingDeviceEnrollmentRequestByUserCode(db: Database, workspaceId: string, userCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, workspaceId),
+        eq(schema.deviceEnrollmentRequests.userCode, userCode),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
+}
+
+// THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
+//   1. re-read the pending row FOR UPDATE (fence against a double-approve / a
+//      concurrent expiry),
+//   2. createEnrollment (idempotent upsert: pubkey, whole-machine exposure,
+//      has_display from can_offer_display, allow_screen_control per the user's
+//      decision, os/arch) → an enrollments row,
+//   3. createSandbox (kind selfhosted, enrollment_id, a generated name) → a
+//      sandboxes row (acceptance #2),
+//   4. stamp the request approved + the consent record (WHO approved WHEN to WHAT)
+//      + the resulting enrollment_id / sandbox_id.
+// IDEMPOTENT: a re-approve of an ALREADY-approved row (same user_code re-submitted)
+// re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
+// enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
+// no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
+export async function approveDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  requestId: string;
+  allowScreenControl: boolean;
+  approvedBySubjectId: string;
+  approvedBySubjectLabel?: string | null;
+  // A name for the generated sandbox (machine name or a fallback).
+  sandboxName: string;
+  now?: Date;
+}): Promise<{ approved: boolean; enrollment: EnrollmentRecord | null; sandbox: SandboxRecord | null }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
+    const [pending] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!pending) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    // Already terminally approved → idempotent return of the existing rows (re-run
+    // the consent fields in case allow_screen_control changed on re-approve).
+    const expired = pending.expiresAt.getTime() <= now.getTime();
+    if (pending.status === "denied" || pending.status === "consumed") {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    if (pending.status === "pending" && expired) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+
+    // createEnrollment (idempotent upsert) — whole-machine is mandatory; the
+    // display + screen-control consent come from the agent's offer + the user's
+    // decision. RLS already set on scopedDb's session; call the raw insert here so
+    // it shares the transaction (createEnrollment opens its own scope — re-entering
+    // withRlsContext is safe but we inline to keep ONE txn).
+    const [enrollmentRow] = await scopedDb.insert(schema.enrollments).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: pending.pubkey,
+      exposure: "whole-machine",
+      hasDisplay: pending.canOfferDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: pending.os as EnrollmentOs,
+      arch: pending.arch,
+      status: "active",
+    }).onConflictDoUpdate({
+      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+      set: {
+        exposure: "whole-machine",
+        hasDisplay: pending.canOfferDisplay,
+        allowScreenControl: input.allowScreenControl,
+        os: pending.os as EnrollmentOs,
+        arch: pending.arch,
+        status: "active",
+        revokedAt: null,
+        updatedAt: now,
+      },
+    }).returning();
+    if (!enrollmentRow) {
+      throw new Error("Failed to create enrollment during device approve");
+    }
+    const enrollment = mapEnrollment(enrollmentRow);
+
+    // createSandbox (selfhosted, enrollment_id). A re-approve of the SAME machine
+    // reuses the existing selfhosted sandbox for this enrollment rather than
+    // creating a duplicate (idempotent re-enroll, acceptance #2 stays one machine).
+    const [existingSandbox] = await scopedDb.select().from(schema.sandboxes)
+      .where(and(
+        eq(schema.sandboxes.workspaceId, input.workspaceId),
+        eq(schema.sandboxes.enrollmentId, enrollment.id),
+      ))
+      .limit(1);
+    let sandbox: SandboxRecord;
+    if (existingSandbox) {
+      sandbox = mapSandbox(existingSandbox);
+    } else {
+      const [sandboxRow] = await scopedDb.insert(schema.sandboxes).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        kind: "selfhosted",
+        name: input.sandboxName,
+        enrollmentId: enrollment.id,
+      }).returning();
+      if (!sandboxRow) {
+        throw new Error("Failed to create sandbox during device approve");
+      }
+      sandbox = mapSandbox(sandboxRow);
+    }
+
+    // Stamp the request approved + the LOUD CONSENT record (who/when/what).
+    await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({
+        status: "approved",
+        allowScreenControl: input.allowScreenControl,
+        approvedBySubjectId: input.approvedBySubjectId,
+        approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
+        approvedAt: now,
+        enrollmentId: enrollment.id,
+        sandboxId: sandbox.id,
+        updatedAt: now,
+      })
+      .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+
+    return { approved: true, enrollment, sandbox };
+  });
+}
+
+// Mark a pending request DENIED (an explicit user "no" at the approve page).
+// Idempotent: a non-pending row is a no-op (denied:false).
+export async function denyDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ denied: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "denied", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { denied: rows.length > 0 };
+  });
+}
+
+// Flip an APPROVED request to CONSUMED once the agent has polled its credentials
+// (single-use). Fenced on status='approved' so a double-poll consumes exactly once;
+// a second poll then re-reads the consumed row and still returns credentials (the
+// agent may legitimately retry the same poll) — the route decides. Returns whether
+// THIS call performed the consume transition.
+export async function consumeDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ consumed: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "consumed", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "approved"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { consumed: rows.length > 0 };
   });
 }
 

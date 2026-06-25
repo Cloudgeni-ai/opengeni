@@ -20,6 +20,7 @@ import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerDocumentRoutes } from "./routes/documents";
+import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
@@ -220,6 +221,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerWorkspaceRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerEnrollmentRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
@@ -316,6 +318,11 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/, label: "/v1/workspaces/:workspaceId/packs/:id" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/, label: "/v1/workspaces/:workspaceId/social/connections" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/social\/posts$/, label: "/v1/workspaces/:workspaceId/social/posts" },
+  { pattern: /^\/v1\/enrollments\/device\/start$/, label: "/v1/enrollments/device/start" },
+  { pattern: /^\/v1\/enrollments\/device\/poll$/, label: "/v1/enrollments/device/poll" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/, label: "/v1/workspaces/:workspaceId/enrollments/device/approve" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/[^/]+\/revoke$/, label: "/v1/workspaces/:workspaceId/enrollments/:id/revoke" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments$/, label: "/v1/workspaces/:workspaceId/enrollments" },
   { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
   { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
   { pattern: /^\/v1\/github\/install\/callback$/, label: "/v1/github/install/callback" },

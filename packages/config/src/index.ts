@@ -392,6 +392,29 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
+  // --- bring-your-own-compute (selfhosted 11th backend) rollout flag, default OFF ---
+  // The keystone flag for the whole selfhosted feature (the enrollment device-flow,
+  // the NATS control plane, the relay stream tier). When FALSE the enrollment routes
+  // 404 (invisible — the surface does not exist for this deployment) and the
+  // selfhosted backend is inert; boot is unaffected. EnvBoolean (NOT
+  // z.coerce.boolean(), which coerces "false" -> true). Flipped per-environment via
+  // the deploy-staging IaC secret/configmap pattern (dossier §17/§25.1).
+  sandboxSelfhostedEnabled: EnvBoolean.default(false),
+  // The HMAC secret the control plane signs the enrollment bearer credential with
+  // (the `oge_` envelope the agent presents back to the control plane). Optional:
+  // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
+  // credential plane disabled (graceful degrade, mirrors streamTokenSecret). NEVER
+  // logged. Lives in the opengeni-runtime secret (Helm-clobbered configmap avoided).
+  enrollmentSigningSecret: z.string().optional(),
+  // Connect-info the EnrollmentCredentials hand the agent: the NATS server URL(s)
+  // the agent dials for the control plane, and the relay edge base URL for streams.
+  // The per-workspace NATS Account creds binding is infra-deferred (M4/relay
+  // milestone) — the poll returns these endpoints + a placeholder creds field.
+  selfhostedNatsUrl: z.string().optional(),
+  selfhostedRelayUrl: z.string().optional(),
+  // The minisign PUBLIC key the agent pins for self-update verification (handed to
+  // the agent in EnrollmentCredentials; the SECRET key lives only in CI).
+  agentUpdatePublicKey: z.string().optional(),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
@@ -851,6 +874,11 @@ export function getSettings(): Settings {
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
+    sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
+    enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
+    selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
+    selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
+    agentUpdatePublicKey: optional("OPENGENI_AGENT_UPDATE_PUBLIC_KEY"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
@@ -1825,6 +1853,24 @@ export function resolveStreamTokenSecret(settings: Settings): string | undefined
  */
 export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
+}
+
+/**
+ * Resolve the secret the control plane signs the enrollment bearer credential
+ * with (the `oge_` envelope the agent presents back — M5/dossier §10.2). Falls
+ * back to `delegationSecret` (the same HMAC envelope family) so a deployment that
+ * already carries a delegation secret needs no second one. Returns undefined when
+ * neither is set; when selfhosted is enabled but this is undefined, the poll route
+ * reports the credential plane disabled (graceful degrade, never a 500). NEVER log
+ * the returned value.
+ */
+export function resolveEnrollmentSigningSecret(settings: Settings): string | undefined {
+  const explicit = settings.enrollmentSigningSecret?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const delegation = settings.delegationSecret?.trim();
+  return delegation ? delegation : undefined;
 }
 
 function splitCsv(raw: string): string[] {

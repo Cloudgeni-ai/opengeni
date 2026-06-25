@@ -599,6 +599,78 @@ export const enrollments = pgTable("enrollments", {
   workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
 }));
 
+// The OAuth 2.0 device-authorization (RFC 8628) PENDING request (M5, migration
+// 0025 / dossier §10.2 enrollment + §18 LOUD consent). An agent's `enroll` starts
+// a flow (POST /enrollments/device/start) → one short-TTL, single-use row keyed by
+// an opaque `device_code` (the agent polls with) + a short `user_code` (the user
+// types at the approve page). The user (workspace-membership / workspace:admin
+// gated) approves it (POST /enrollments/device/approve), which records WHO
+// (subject + label) consented WHEN (approved_at) to WHAT (whole-machine mandatory +
+// screen-control per allow_screen_control) and stamps the resulting enrollment_id /
+// sandbox_id. The agent then polls (POST /enrollments/device/poll) and the approved
+// row yields the EnrollmentCredentials. State machine: pending → approved | denied;
+// a pending row past expires_at is EXPIRED; once the agent has polled an approved
+// row its credentials, the row flips to consumed (single-use). NOT a long-lived
+// record — a retention sweep prunes terminal rows; the durable identity is the
+// `enrollments` row the approve produced.
+export const deviceEnrollmentStatusValues = ["pending", "approved", "denied", "consumed"] as const;
+
+export const deviceEnrollmentRequests = pgTable("device_enrollment_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  // The opaque code the agent polls with (unguessable, single-use). Unique.
+  deviceCode: text("device_code").notNull(),
+  // The short human-typed code (e.g. "WDJB-MJHT"). Unique among LIVE (pending)
+  // rows via a partial unique index so a recycled code never collides with a
+  // terminal row.
+  userCode: text("user_code").notNull(),
+  // The workspace this request was started for (resolved from the deployment-edge
+  // request context — the agent presents the access key, the flow binds to the
+  // single managed workspace OR a workspace hint). account_id rides along for RLS.
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  // The agent's ed25519 public key (the machine identity the enrollment binds to).
+  pubkey: text("pubkey").notNull(),
+  os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
+  arch: text("arch").notNull().default("x86_64"),
+  machineName: text("machine_name"),
+  // The exposure the agent REQUESTED (whole-machine in v1; loudly consented at
+  // approve). Mirrors the enrollment column domain.
+  requestedExposure: text("requested_exposure", { enum: enrollmentExposureValues }).notNull().default("whole-machine"),
+  // The agent CAN offer a display (a real screen / Xvfb is available) — gates
+  // whether screen-control consent is even meaningful. has_display on the
+  // resulting enrollment is derived from this.
+  canOfferDisplay: boolean("can_offer_display").notNull().default(false),
+  // The agent REQUESTS screen control (computer-use). The user's allow_screen_control
+  // at approve is the AUTHORITATIVE consent; this is only the agent's request.
+  requestsScreenControl: boolean("requests_screen_control").notNull().default(false),
+  status: text("status", { enum: deviceEnrollmentStatusValues }).notNull().default("pending"),
+  // ── LOUD CONSENT capture (who/when/what), stamped at approve ──────────────
+  approvedBySubjectId: text("approved_by_subject_id"),
+  approvedBySubjectLabel: text("approved_by_subject_label"),
+  // The user's screen-control consent decision (whole-machine is mandatory at
+  // approve; screen-control is opt-in per this flag).
+  allowScreenControl: boolean("allow_screen_control").notNull().default(false),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  // The enrollment + sandbox the approve produced (acceptance #2: an enrollment
+  // row AND a sandbox row appear). Null until approved.
+  enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
+  sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
+  // The short-TTL expiry; a pending row past this is EXPIRED on poll.
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  // The device_code is the agent's poll key — globally unique + indexed.
+  deviceCode: uniqueIndex("device_enrollment_requests_device_code_idx").on(table.deviceCode),
+  // The user_code must be unique among LIVE (pending) rows so the approve lookup
+  // is unambiguous; a terminal row's code may be recycled.
+  userCodePending: uniqueIndex("device_enrollment_requests_user_code_pending_idx")
+    .on(table.userCode)
+    .where(sql`${table.status} = 'pending'`),
+  workspaceCreated: index("device_enrollment_requests_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  expires: index("device_enrollment_requests_expires_idx").on(table.expiresAt),
+}));
+
 // The first-class NAMED sandbox a session's active_sandbox_id points AT. kind
 // discriminates the backend the routing proxy resolves to: 'modal' (cloud box,
 // NULL enrollment_id) or 'selfhosted' (a user's machine, enrollment_id -> the
