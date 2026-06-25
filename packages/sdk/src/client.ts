@@ -41,6 +41,11 @@ import type {
   GitHubRepositoriesResponse,
   ListApiKeysResponse,
   ListPacksResponse,
+  // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
+  MachinesResponse,
+  MachineView,
+  MetricSample,
+  MachineMetricsSeriesResponse,
   ListWorkspaceMembersResponse,
   PackInstallation,
   ReasoningEffort,
@@ -180,6 +185,38 @@ export class OpenGeniClient {
     return await this.requestJson<SessionTurn[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns`, undefined, {
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
     });
+  }
+
+  // --- Bring-your-own-compute: Machines dashboard + metrics (M10) ------------
+
+  /**
+   * List the workspace's machines (the Machines dashboard). Each enrolled
+   * selfhosted machine carries its derived state + latest metrics +
+   * sharedSessionCount. Pass `sessionId` for an in-session view, which adds the
+   * session's synthetic Modal group box + the active-sandbox pointer.
+   */
+  async listMachines(workspaceId: string, options: { sessionId?: string } = {}): Promise<MachinesResponse> {
+    return await this.requestJson<MachinesResponse>("GET", `/v1/workspaces/${workspaceId}/machines`, undefined, {
+      ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
+    });
+  }
+
+  /**
+   * Read the downsampled (~1/min) metrics series for ONE machine over a time
+   * window (default 1h). The samples are oldest-first (a left-to-right chart).
+   */
+  async machineMetricsSeries(
+    workspaceId: string,
+    enrollmentId: string,
+    options: { window?: "15m" | "1h" | "6h" | "24h" } = {},
+  ): Promise<MetricSample[]> {
+    const response = await this.requestJson<MachineMetricsSeriesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/machines/${enrollmentId}/metrics/series`,
+      undefined,
+      { ...(options.window !== undefined ? { window: options.window } : {}) },
+    );
+    return response.samples;
   }
 
   // --- Scheduled tasks -------------------------------------------------------

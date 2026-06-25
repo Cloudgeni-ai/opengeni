@@ -6,6 +6,7 @@ import { createObservability, logStartupDependencyRetry } from "@opengeni/observ
 import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { startMetricsIngestion } from "./sandbox/metrics-ingestion";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -181,6 +182,13 @@ export async function startApi() {
     idleTimeout: 255,
     fetch: app.fetch,
   });
+  // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
+  // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
+  let stopMetricsIngestion: (() => void) | undefined;
+  if (settings.sandboxSelfhostedEnabled) {
+    stopMetricsIngestion = startMetricsIngestion({ db: dbClient.db, bus, observability });
+    observability.info("OpenGeni machine-metrics ingestion consumer started", {});
+  }
   observability.info("OpenGeni API listening", {
     host: settings.apiHost,
     port: settings.apiPort,
@@ -189,6 +197,7 @@ export async function startApi() {
     server,
     close: async () => {
       server.stop(true);
+      stopMetricsIngestion?.();
       await Promise.allSettled([
         bus.close(),
         workflowClient.close(),

@@ -4526,6 +4526,173 @@ export async function insertMachineMetricsSeries(db: Database, input: {
   });
 }
 
+// The target spacing between series rows: the agent heartbeats ~every 5s, but we
+// downsample the long-term history to ~1/min (dossier §10.7). A new series row is
+// appended only when >= this much time has elapsed since the last one.
+export const MACHINE_METRICS_SERIES_INTERVAL_MS = 60_000;
+
+/**
+ * Ingest ONE sampled metrics point for an enrollment (the M10 ingestion seam):
+ *   1. UPSERT machine_metrics_latest (the "now" row, one per enrollment) — always.
+ *   2. APPEND a machine_metrics_series row only when >= ~1/min has elapsed since
+ *      the last series row (downsample) — so the 5s heartbeat cadence does not
+ *      flood the history table.
+ * Both happen under the same RLS context. Returns whether a series row was
+ * appended (the downsample decision) so the caller / tests can assert the ~1/min
+ * spacing. A null/absent `sampledAt` on the prior row treats it as "no prior" →
+ * append.
+ */
+export async function ingestMachineMetricsSample(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+  /** Override the downsample interval (tests). Defaults to ~1/min. */
+  seriesIntervalMs?: number;
+}): Promise<{ latestUpserted: true; seriesAppended: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const cols = metricColumns(input.sample);
+    // 1. Latest upsert — always.
+    await scopedDb.insert(schema.machineMetricsLatest).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...cols,
+    }).onConflictDoUpdate({
+      target: schema.machineMetricsLatest.enrollmentId,
+      set: { ...cols, updatedAt: new Date() },
+    });
+
+    // 2. Series append — downsampled. Read the most recent series sampled_at and
+    // only append when the new sample is >= the interval newer (or there is no
+    // prior row). Done in-context so RLS scopes the read to this workspace.
+    const intervalMs = input.seriesIntervalMs ?? MACHINE_METRICS_SERIES_INTERVAL_MS;
+    const [prior] = await scopedDb.select({ sampledAt: schema.machineMetricsSeries.sampledAt })
+      .from(schema.machineMetricsSeries)
+      .where(eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId))
+      .orderBy(desc(schema.machineMetricsSeries.sampledAt))
+      .limit(1);
+    const priorMs = prior?.sampledAt ? prior.sampledAt.getTime() : null;
+    const sampleMs = input.sample.sampledAt.getTime();
+    const seriesAppended = priorMs === null || sampleMs - priorMs >= intervalMs;
+    if (seriesAppended) {
+      await scopedDb.insert(schema.machineMetricsSeries).values({
+        enrollmentId: input.enrollmentId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...cols,
+      });
+    }
+    return { latestUpserted: true, seriesAppended };
+  });
+}
+
+// The mapped read shape of a stored metrics sample (latest or a series point).
+// numeric columns come back as strings from postgres-js; map them to numbers (or
+// null when never reported). The byte columns are bigint(mode:"number").
+export type MachineMetricsRow = {
+  enrollmentId: string;
+  cpuPercent: number | null;
+  load1: number | null;
+  load5: number | null;
+  load15: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  diskUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  gpuUtilPercent: number | null;
+  gpuMemUsedBytes: number | null;
+  gpuMemTotalBytes: number | null;
+  contention: number | null;
+  sampledAt: string;
+};
+
+function numericOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function mapMetricsRow(row: {
+  enrollmentId: string;
+  cpuPercent: number | string | null;
+  load1: number | string | null;
+  load5: number | string | null;
+  load15: number | string | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  diskUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  gpuUtilPercent: number | string | null;
+  gpuMemUsedBytes: number | null;
+  gpuMemTotalBytes: number | null;
+  contention: number | string | null;
+  sampledAt: Date;
+}): MachineMetricsRow {
+  return {
+    enrollmentId: row.enrollmentId,
+    cpuPercent: numericOrNull(row.cpuPercent),
+    load1: numericOrNull(row.load1),
+    load5: numericOrNull(row.load5),
+    load15: numericOrNull(row.load15),
+    memUsedBytes: row.memUsedBytes ?? null,
+    memTotalBytes: row.memTotalBytes ?? null,
+    diskUsedBytes: row.diskUsedBytes ?? null,
+    diskTotalBytes: row.diskTotalBytes ?? null,
+    gpuUtilPercent: numericOrNull(row.gpuUtilPercent),
+    gpuMemUsedBytes: row.gpuMemUsedBytes ?? null,
+    gpuMemTotalBytes: row.gpuMemTotalBytes ?? null,
+    contention: numericOrNull(row.contention),
+    sampledAt: row.sampledAt.toISOString(),
+  };
+}
+
+// Read the latest sample for ONE enrollment (the dashboard "now" read), or null
+// when none has landed (never seen / offline before a first heartbeat).
+export async function readMachineMetricsLatest(db: Database, workspaceId: string, enrollmentId: string): Promise<MachineMetricsRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.machineMetricsLatest)
+      .where(and(
+        eq(schema.machineMetricsLatest.workspaceId, workspaceId),
+        eq(schema.machineMetricsLatest.enrollmentId, enrollmentId),
+      ))
+      .limit(1);
+    return row ? mapMetricsRow(row) : null;
+  });
+}
+
+// Read the latest sample for EVERY enrollment in a workspace, keyed by
+// enrollmentId — the Machines list joins this onto the fleet entries with ONE
+// query rather than N per-machine reads.
+export async function readMachineMetricsLatestForWorkspace(db: Database, workspaceId: string): Promise<Map<string, MachineMetricsRow>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.machineMetricsLatest)
+      .where(eq(schema.machineMetricsLatest.workspaceId, workspaceId));
+    const byEnrollment = new Map<string, MachineMetricsRow>();
+    for (const row of rows) {
+      byEnrollment.set(row.enrollmentId, mapMetricsRow(row));
+    }
+    return byEnrollment;
+  });
+}
+
+// Read the downsampled series for ONE enrollment over a time window (the
+// dashboard time-range read). `sinceMs` bounds the window (e.g. now - 1h);
+// ordered oldest-first for a left-to-right chart. `limit` caps the row count
+// (defensive against an unbounded window).
+export async function readMachineMetricsSeries(db: Database, input: {
+  workspaceId: string; enrollmentId: string; since: Date; limit?: number;
+}): Promise<MachineMetricsRow[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.machineMetricsSeries)
+      .where(and(
+        eq(schema.machineMetricsSeries.workspaceId, input.workspaceId),
+        eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId),
+        gte(schema.machineMetricsSeries.sampledAt, input.since),
+      ))
+      .orderBy(asc(schema.machineMetricsSeries.sampledAt))
+      .limit(input.limit ?? 5_000);
+    return rows.map(mapMetricsRow);
+  });
+}
+
 // ============================================================================
 // P3.2 — the un-redacted-pixel consent gate + viewer revocation.
 //

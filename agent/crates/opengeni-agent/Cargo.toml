@@ -50,6 +50,10 @@ base64 = { workspace = true }
 clap = { workspace = true }
 hostname = { workspace = true }
 
+# The M10 disk metric (statvfs of the workspace root) — unix-only, SAFE binding.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
 tempfile = { workspace = true }

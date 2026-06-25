@@ -9,10 +9,14 @@ import {
   getEnrollment,
   getSandbox,
   getSession,
+  ingestMachineMetricsSample,
   insertMachineMetricsSeries,
   listEnrollments,
   listSandboxes,
   readActiveSandbox,
+  readMachineMetricsLatest,
+  readMachineMetricsLatestForWorkspace,
+  readMachineMetricsSeries,
   revokeEnrollment,
   setActiveSandbox,
   touchEnrollmentLastSeen,
@@ -345,6 +349,99 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     const series = await admin<{ n: string }[]>`
       select count(*)::int as n from machine_metrics_series where enrollment_id = ${enrollment.id}`;
     expect(Number(series[0]!.n)).toBe(2);
+  }, 60_000);
+
+  test("M10 ingestMachineMetricsSample: latest upsert always + series downsampled to ~1/min", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:DOWN" });
+    const t0 = Date.now();
+    const ingest = (cpu: number, atMs: number) =>
+      ingestMachineMetricsSample(db, {
+        accountId, workspaceId, enrollmentId: enrollment.id,
+        sample: { cpuPercent: cpu, memUsedBytes: 100, memTotalBytes: 200, sampledAt: new Date(atMs) },
+      });
+
+    // First sample → latest upserted + series appended (no prior series row).
+    const r1 = await ingest(10, t0);
+    expect(r1.latestUpserted).toBe(true);
+    expect(r1.seriesAppended).toBe(true);
+
+    // A sample only 5s later (the heartbeat cadence) → latest upserted but NOT a
+    // new series row (downsampled: < ~1/min since the last series point).
+    const r2 = await ingest(20, t0 + 5_000);
+    expect(r2.seriesAppended).toBe(false);
+
+    // Another 5s later → still no new series row.
+    const r3 = await ingest(30, t0 + 10_000);
+    expect(r3.seriesAppended).toBe(false);
+
+    // >= 60s after the last series row → a new series point lands.
+    const r4 = await ingest(40, t0 + 61_000);
+    expect(r4.seriesAppended).toBe(true);
+
+    // The series therefore holds exactly 2 downsampled rows (t0 and t0+61s),
+    // while the latest row reflects the MOST RECENT sample (cpu 40).
+    const seriesCount = await admin<{ n: string }[]>`
+      select count(*)::int as n from machine_metrics_series where enrollment_id = ${enrollment.id}`;
+    expect(Number(seriesCount[0]!.n)).toBe(2);
+
+    const latest = await readMachineMetricsLatest(db, workspaceId, enrollment.id);
+    expect(latest).not.toBeNull();
+    expect(latest!.cpuPercent).toBe(40);
+    expect(latest!.memUsedBytes).toBe(100);
+    expect(latest!.memTotalBytes).toBe(200);
+
+    // The read DAOs surface the data the API joins onto the fleet.
+    const byWs = await readMachineMetricsLatestForWorkspace(db, workspaceId);
+    expect(byWs.get(enrollment.id)?.cpuPercent).toBe(40);
+
+    const window = await readMachineMetricsSeries(db, {
+      workspaceId, enrollmentId: enrollment.id, since: new Date(t0 - 1000),
+    });
+    expect(window.length).toBe(2);
+    // Oldest-first ordering (a left-to-right chart).
+    expect(window[0]!.cpuPercent).toBe(10);
+    expect(window[1]!.cpuPercent).toBe(40);
+
+    // A tight window excludes the older point.
+    const recent = await readMachineMetricsSeries(db, {
+      workspaceId, enrollmentId: enrollment.id, since: new Date(t0 + 30_000),
+    });
+    expect(recent.length).toBe(1);
+    expect(recent[0]!.cpuPercent).toBe(40);
+  }, 60_000);
+
+  test("M10 readMachineMetricsLatest: GPU + null-when-absent round-trips through the DAO", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const enrollment = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:GPU" });
+
+    // A sample WITH gpu fields.
+    await ingestMachineMetricsSample(db, {
+      accountId, workspaceId, enrollmentId: enrollment.id,
+      sample: {
+        cpuPercent: 50, gpuUtilPercent: 73, gpuMemUsedBytes: 4096, gpuMemTotalBytes: 40960,
+        sampledAt: new Date(),
+      },
+    });
+    const withGpu = await readMachineMetricsLatest(db, workspaceId, enrollment.id);
+    expect(withGpu!.gpuUtilPercent).toBe(73);
+    expect(withGpu!.gpuMemUsedBytes).toBe(4096);
+
+    // A later sample with NO gpu fields → the latest row's gpu columns are null
+    // (the not-reported contract — an absent GPU is null, never a real zero).
+    await ingestMachineMetricsSample(db, {
+      accountId, workspaceId, enrollmentId: enrollment.id,
+      sample: { cpuPercent: 51, sampledAt: new Date() },
+    });
+    const noGpu = await readMachineMetricsLatest(db, workspaceId, enrollment.id);
+    expect(noGpu!.gpuUtilPercent).toBeNull();
+    expect(noGpu!.gpuMemUsedBytes).toBeNull();
+
+    // An enrollment with no sample → null (offline before a first heartbeat).
+    const fresh = await createEnrollment(db, { accountId, workspaceId, pubkey: "ed25519:NONE" });
+    expect(await readMachineMetricsLatest(db, workspaceId, fresh.id)).toBeNull();
   }, 60_000);
 
   test("RLS isolation: workspace B's scoped connection cannot see workspace A's enrollment/sandbox/metrics", async () => {

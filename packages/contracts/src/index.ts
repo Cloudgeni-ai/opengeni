@@ -2930,6 +2930,101 @@ export const RevokeEnrollmentResponse = z.object({
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
 
+// ── Machines dashboard + per-machine metrics (M10, dossier §10.7) ────────────
+//
+// The SHARED data contract M10 (backend) implements + M9 (UI) renders. THE
+// orchestrator owns this shape; M9 imports these types so the dashboard never
+// drifts from the API. The fields mirror the agent's MetricsSample wire shape
+// (`@opengeni/agent-proto`) projected to the dashboard's JSON, plus the derived
+// machine state matrix (the M3 liveness + the consent/display reasons).
+
+/**
+ * A point-in-time machine metrics sample as the dashboard reads it. `cpuPct` and
+ * the load averages are 0..N doubles; the byte figures are integers; `gpuUtilPct`
+ * / `gpuMemBytes` are null when no GPU was present at sample time (the wire
+ * contract: absence == not-reported, NEVER a real zero). `runQueue` is the
+ * runnable-count contention signal. `sampledAt` is an ISO-8601 instant.
+ */
+export const MetricSample = z.object({
+  cpuPct: z.number(),
+  load1: z.number(),
+  load5: z.number(),
+  load15: z.number(),
+  memUsedBytes: z.number().int(),
+  memTotalBytes: z.number().int(),
+  diskUsedBytes: z.number().int(),
+  diskTotalBytes: z.number().int(),
+  gpuUtilPct: z.number().nullable(),
+  gpuMemBytes: z.number().int().nullable(),
+  runQueue: z.number(),
+  sampledAt: z.string(),
+});
+export type MetricSample = z.infer<typeof MetricSample>;
+
+/** The derived dashboard state of a machine. The M3 liveness
+ *  (online/reconnecting/offline) plus the enrollment-derived consent/display
+ *  reasons (consent_required / display_unavailable) and the in-flight device-flow
+ *  (enrolling). */
+export const MachineState = z.enum([
+  "online",
+  "reconnecting",
+  "offline",
+  "consent_required",
+  "display_unavailable",
+  "enrolling",
+]);
+export type MachineState = z.infer<typeof MachineState>;
+
+export const MachineKind = z.enum(["modal", "selfhosted"]);
+export type MachineKind = z.infer<typeof MachineKind>;
+
+/**
+ * A machine as the Machines dashboard renders it. The workspace's enrolled
+ * selfhosted machines PLUS the session's synthetic Modal group box
+ * (`isSessionGroup: true`). `active` marks the session's currently-active
+ * routing target. `sharedSessionCount` is the lease refcount (how many sessions
+ * share this whole machine). `metrics` is the latest sample, or null when none
+ * has landed yet (just enrolled / offline before a first heartbeat).
+ */
+export const MachineView = z.object({
+  sandboxId: z.string(),
+  enrollmentId: z.string().nullable(),
+  name: z.string(),
+  kind: MachineKind,
+  state: MachineState,
+  active: z.boolean(),
+  isSessionGroup: z.boolean(),
+  os: z.string(),
+  arch: z.string(),
+  hasDisplay: z.boolean(),
+  allowScreenControl: z.boolean(),
+  sharedSessionCount: z.number().int(),
+  lastSeenAt: z.string().nullable(),
+  metrics: MetricSample.nullable(),
+});
+export type MachineView = z.infer<typeof MachineView>;
+
+/**
+ * GET /v1/workspaces/:ws/machines — the dashboard list. `activeSandboxId` /
+ * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
+ * activeSandboxId == the session's own group box is active).
+ */
+export const MachinesResponse = z.object({
+  activeSandboxId: z.string().nullable(),
+  activeEpoch: z.number().int(),
+  machines: z.array(MachineView),
+});
+export type MachinesResponse = z.infer<typeof MachinesResponse>;
+
+/**
+ * GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h — the
+ * downsampled (~1/min) history the dashboard time-range reads.
+ */
+export const MachineMetricsSeriesResponse = z.object({
+  samples: z.array(MetricSample),
+});
+export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
+
 /**
  * A single host-exposed model + the provider that serves it, as surfaced to
  * clients (SDK + React composer) by GET /v1/config/client. The wire `api`

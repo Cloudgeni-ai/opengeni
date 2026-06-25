@@ -59,6 +59,10 @@ clap = { version = "4", features = ["derive", "env"] }
 futures = "0.3"
 futures-util = "0.3"
 hostname = "0.4"
+# SAFE statvfs binding for the M10 disk metric — no FFI of our own, so the
+# workspace `unsafe_code = forbid` holds. Only the `fs` feature (statvfs) is
+# pulled; unix-only (cfg-gated at the call site).
+nix = { version = "0.29", default-features = false, features = ["fs"] }
 
 # M8 stream plane.
 # A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe (dossier §10.4).

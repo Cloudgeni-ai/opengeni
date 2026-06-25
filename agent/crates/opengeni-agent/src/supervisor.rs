@@ -374,13 +374,20 @@ impl<P: Platform + 'static> Supervisor<P> {
         client: &async_nats::Client,
         seq: u64,
     ) -> Result<(), async_nats::PublishError> {
+        // The metrics sample briefly blocks (a /proc/stat CPU delta), so it runs on
+        // the blocking pool — it must never stall the async heartbeat/RPC loop. A
+        // join failure degrades to a default sample rather than failing the
+        // heartbeat (a metrics gap is never fatal, dossier §10.7).
+        let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
+            .await
+            .unwrap_or_default();
         let event = AgentEvent {
             agent_id: self.creds.agent_id.clone(),
             event: Some(Event::Heartbeat(Heartbeat {
                 seq,
                 uptime_ms: millis_u64(self.started.elapsed()),
                 active_sessions: 0,
-                metrics: Some(crate::metrics::sample()),
+                metrics: Some(metrics),
                 draining: false,
             })),
         };

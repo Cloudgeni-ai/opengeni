@@ -21,6 +21,7 @@ import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
+import { registerMachineRoutes } from "./routes/machines";
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
@@ -222,6 +223,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerSocialRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
+  registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
@@ -323,6 +325,8 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/, label: "/v1/workspaces/:workspaceId/enrollments/device/approve" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/[^/]+\/revoke$/, label: "/v1/workspaces/:workspaceId/enrollments/:id/revoke" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments$/, label: "/v1/workspaces/:workspaceId/enrollments" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/machines\/[^/]+\/metrics\/series$/, label: "/v1/workspaces/:workspaceId/machines/:enrollmentId/metrics/series" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/machines$/, label: "/v1/workspaces/:workspaceId/machines" },
   { pattern: /^\/v1\/github\/app-manifest\/callback$/, label: "/v1/github/app-manifest/callback" },
   { pattern: /^\/v1\/github\/setup$/, label: "/v1/github/setup" },
   { pattern: /^\/v1\/github\/install\/callback$/, label: "/v1/github/install/callback" },

@@ -135,7 +135,15 @@ async fn dispatch_future<P: Platform>(
                 agent_monotonic_ms: ctx.monotonic_ms(),
             }),
         ),
-        Op::Metrics(_) => ok(request_id, RespResult::Metrics(crate::metrics::sample())),
+        Op::Metrics(_) => {
+            // The sample briefly blocks (a /proc/stat CPU delta) → the blocking
+            // pool, so the dispatch loop is never stalled. A join failure degrades
+            // to a default sample (a metrics gap is never fatal, §10.7).
+            let metrics = tokio::task::spawn_blocking(crate::metrics::sample)
+                .await
+                .unwrap_or_default();
+            ok(request_id, RespResult::Metrics(metrics))
+        }
         Op::Hello(_) | Op::Resume(_) | Op::UpdateMayProceed(_) => {
             // These are control-plane→agent acknowledgements the agent ORIGINATES
             // (it sends a Hello and receives a HelloAck); receiving one as an

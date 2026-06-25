@@ -15,6 +15,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1044.0",
     "@hono/zod-validator": "^0.7.6",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opengeni/agent-proto": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",

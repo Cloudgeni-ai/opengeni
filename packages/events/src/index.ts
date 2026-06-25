@@ -52,6 +52,19 @@ export type EventBus = {
    */
   subscribeRequests: (subject: string, handler: RequestHandler) => () => void;
   /**
+   * Subscribe to the agent EVENT plane (the one-way fire-and-forget heartbeats +
+   * going-offline the agent PUBLISHES on `agent.<ws>.<id>.events`, NOT a
+   * request/reply). The M10 metrics-ingestion consumer subscribes the wildcard
+   * `agent.*.*.events` and gets each raw payload plus its concrete subject (so it
+   * can extract `<ws>`/`<id>` for the per-enrollment upsert). Returns an
+   * unsubscribe fn. Decoding the AgentEvent is the caller's concern (this leaf
+   * does not depend on `@opengeni/agent-proto`).
+   */
+  subscribeAgentEvents: (
+    subject: string,
+    handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+  ) => () => void;
+  /**
    * The `RequestConnection` accessor the selfhosted `NatsControlRpc` consumes —
    * the SAME managed connection (pub/sub + request/reply share it). The control
    * plane injects this so the transport never opens a second connection.
@@ -76,6 +89,7 @@ export async function createNatsEventBus(natsUrl: string): Promise<EventBus> {
     subscribe: async (workspaceId, sessionId, onEvents) => subscribeSession(nc, workspaceId, sessionId, onEvents),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler),
+    subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
     getRequestConnection: () => requestConnection,
     close: async () => {
       await nc.drain();
@@ -138,6 +152,34 @@ function subscribeRequests(nc: NatsConnection, subject: string, handler: Request
         // Leave the request unanswered: the requester's request times out, which
         // the selfhosted control plane reads as a transient blip (reconnecting),
         // never a malformed reply. The responder stays subscribed for the next op.
+      }
+    }
+  })();
+  return () => {
+    sub.unsubscribe();
+  };
+}
+
+/**
+ * Subscribe to the one-way agent event plane: deliver each published payload (the
+ * agent's `AgentEvent` heartbeat / going-offline, NOT a request/reply) to the
+ * handler with its concrete subject. A plain `nc.subscribe` (no reply); a handler
+ * that throws is swallowed so one bad event never tears down the subscription
+ * (ingestion is best-effort — a metrics gap is never fatal).
+ */
+function subscribeAgentEvents(
+  nc: NatsConnection,
+  subject: string,
+  handler: (payload: Uint8Array, subject: string) => void | Promise<void>,
+): () => void {
+  const sub: Subscription = nc.subscribe(subject);
+  void (async () => {
+    for await (const msg of sub) {
+      try {
+        await handler(msg.data, msg.subject);
+      } catch {
+        // Swallow: best-effort ingestion. The subscription stays live for the
+        // next event.
       }
     }
   })();
