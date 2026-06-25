@@ -1,0 +1,47 @@
+{
+  "name": "@opengeni/agent-proto",
+  "version": "0.1.0",
+  "description": "Generated TypeScript wire-protocol types for the OpenGeni self-hosted agent — the control-plane side of the single-source-of-truth codegen from agent/proto/opengeni_agent.proto.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/agent-proto"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup",
+    "codegen": "bash scripts/codegen.sh",
+    "test": "bun test ./test"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0"
+  },
+  "devDependencies": {
+    "ts-proto": "^2.7.7",
+    "tsup": "^8.5.0",
+    "typescript": "^6.0.3"
+  }
+}

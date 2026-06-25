@@ -1,0 +1,22 @@
+[package]
+name = "opengeni-agent"
+description = "The OpenGeni self-hosted agent binary: enrollment, dial, RPC dispatch, and the resiliency supervisor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "opengeni-agent"
+path = "src/main.rs"
+
+[dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+opengeni-agent-platform = { path = "../opengeni-agent-platform" }
+opengeni-agent-stream = { path = "../opengeni-agent-stream" }
+opengeni-agent-update = { path = "../opengeni-agent-update" }

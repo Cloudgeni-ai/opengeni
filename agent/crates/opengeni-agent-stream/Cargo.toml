@@ -1,0 +1,15 @@
+[package]
+name = "opengeni-agent-stream"
+description = "Relay-edge stream transport (QUIC/WebTransport + wss fallback) and pty/framebuffer pumps for the OpenGeni agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }

@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/opengeni-agent",
+    "crates/opengeni-agent-proto",
+    "crates/opengeni-agent-platform",
+    "crates/opengeni-agent-stream",
+    "crates/opengeni-agent-update",
+]
+
+# Shared metadata + lint posture for every crate in the agent workspace.
+# Idiomatic, well-documented Rust is a first-class requirement (dossier §3/§10.4):
+# we lean on clippy::pedantic at the workspace level and silence only the few
+# lints that fight generated code or add no value here.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/Cloudgeni-ai/opengeni"
+authors = ["OpenGeni"]
+
+[workspace.dependencies]
+# Wire protocol — generated from agent/proto/opengeni_agent.proto.
+prost = "0.13"
+prost-build = "0.13"
+# Pure-Rust protobuf compiler so `cargo build` needs NO `protoc` binary
+# (hermetic on NixOS, where downloaded binaries do not run).
+protox = "0.7"
+thiserror = "2"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Generated prost code triggers these; not worth fighting.
+module_name_repetitions = "allow"
+# Doc-comment first-line punctuation is enforced loosely; allow terse docs.
+doc_markdown = "allow"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

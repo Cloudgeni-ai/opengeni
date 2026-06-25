@@ -1,0 +1,15 @@
+[package]
+name = "opengeni-agent-platform"
+description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the OpenGeni agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
