@@ -830,6 +830,8 @@ function session(patch: Partial<Session> = {}): Session {
     workspaceId: "workspace-1",
     status: "running",
     initialMessage: "Inspect the repo",
+    title: null,
+    titleSource: null,
     resources: [],
     tools: [],
     metadata: {},

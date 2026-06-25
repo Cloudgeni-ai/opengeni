@@ -91,6 +91,7 @@ import type {
   ToolRef,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
@@ -163,6 +164,10 @@ export class OpenGeniClient {
 
   async getSession(workspaceId: string, sessionId: string): Promise<Session> {
     return await this.requestJson<Session>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`);
+  }
+
+  async updateSession(workspaceId: string, sessionId: string, request: UpdateSessionRequest): Promise<Session> {
+    return await this.requestJson<Session>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`, request);
   }
 
   async listSessions(workspaceId: string, options: { limit?: number } = {}): Promise<Session[]> {

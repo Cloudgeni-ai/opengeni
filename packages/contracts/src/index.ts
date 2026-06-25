@@ -1094,6 +1094,11 @@ export const UpdateSessionGoalRequest = z.object({
 });
 export type UpdateSessionGoalRequest = z.infer<typeof UpdateSessionGoalRequest>;
 
+export const UpdateSessionRequest = z.object({
+  title: z.string().min(1).max(200),
+});
+export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
+
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
 // the human↔agent channel stays plain chat. Both require `sessions:control`.
@@ -1717,6 +1722,8 @@ export const Session = z.object({
   accountId: z.string().uuid(),
   status: SessionStatus,
   initialMessage: z.string(),
+  title: z.string().nullable(),
+  titleSource: z.enum(["user", "agent"]).nullable(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
   metadata: z.record(z.string(), z.unknown()),
@@ -1813,6 +1820,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.started", // an interactive PTY session opened (carries ptyId)
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
+  "session.title_set",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 

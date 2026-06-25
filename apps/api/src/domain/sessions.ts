@@ -24,6 +24,7 @@ import {
   getSessionTurn,
   requireSession,
   setTemporalWorkflowId,
+  updateSessionTitle as updateSessionTitleRow,
   type Database,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
@@ -581,6 +582,36 @@ export async function acceptSessionUserMessage(
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
   return { accepted, turn };
+}
+
+/**
+ * Shared title-write path for the manual rename route AND both MCP tools
+ * (set_session_title / set_other_session_title). The clobber guard lives in
+ * the db `updateSessionTitle` UPDATE: an agent write is skipped when a user
+ * title already pinned the session. On a real write we emit `session.title_set`
+ * exactly like goal mutations emit their events; when nothing changed (agent
+ * write blocked by the user lock) we emit nothing. Returns whether a write
+ * happened so callers can avoid double work.
+ */
+export async function updateSessionTitle(
+  deps: { db: Database; bus: EventBus },
+  workspaceId: string,
+  sessionId: string,
+  title: string,
+  source: "user" | "agent",
+): Promise<{ updated: boolean; title: string | null }> {
+  const { db, bus } = deps;
+  const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
+  if (result.updated) {
+    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [{
+      type: "session.title_set",
+      payload: {
+        title: result.title ?? title,
+        source,
+      },
+    }]);
+  }
+  return result;
 }
 
 function withFirstPartyGoalTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {

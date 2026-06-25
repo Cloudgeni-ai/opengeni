@@ -15,6 +15,11 @@ export type FleetTileProps = {
 
 /** Best-effort display title for a session. */
 export function sessionDisplayTitle(session: Session): string {
+  // A set title (agent-generated or user-renamed) wins over metadata + the
+  // initial-message fallback.
+  if (typeof session.title === "string" && session.title.trim().length > 0) {
+    return session.title;
+  }
   for (const key of ["title", "name"] as const) {
     const value = session.metadata[key];
     if (typeof value === "string" && value.trim().length > 0) {

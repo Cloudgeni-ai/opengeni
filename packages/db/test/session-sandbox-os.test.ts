@@ -18,6 +18,8 @@ function baseSession() {
     accountId,
     status: "queued" as const,
     initialMessage: "hi",
+    title: null,
+    titleSource: null,
     resources: [],
     tools: [],
     metadata: {},

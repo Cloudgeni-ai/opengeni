@@ -110,6 +110,8 @@ export const sessions = pgTable("sessions", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   status: text("status").notNull().default("queued"),
   initialMessage: text("initial_message").notNull(),
+  title: text("title"),
+  titleSource: text("title_source"),
   resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
   tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

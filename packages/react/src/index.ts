@@ -9,7 +9,7 @@ export { OpenGeniProvider, useOpenGeni, useOpenGeniClient } from "./provider";
 export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from "./provider";
 
 // Hooks
-export { useSession } from "./hooks/use-session";
+export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type { SessionEventsConnectionState, UseSessionEventsOptions, UseSessionEventsResult } from "./hooks/use-session-events";

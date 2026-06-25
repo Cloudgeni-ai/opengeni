@@ -228,6 +228,7 @@ export type {
   ToolRef,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionRequest,
   UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
