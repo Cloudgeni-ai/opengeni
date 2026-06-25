@@ -55,10 +55,12 @@ import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
+import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import * as schema from "./schema";
 
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
+export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
 
 export type Database = PostgresJsDatabase<typeof schema>;
 
@@ -2212,7 +2214,13 @@ export async function appendSessionHistoryItems(db: Database, input: {
       sessionId: input.sessionId,
       turnId: input.turnId ?? null,
       position: entry.position,
-      item: entry.item,
+      // Mirror the session_events insert path: the durable SDK item JSON is the
+      // SEPARATE jsonb write that turn output (tool/command stdout) reaches, and
+      // it carries the same NUL/lone-surrogate bytes Postgres jsonb rejects.
+      // Sanitize at row-build so a NUL-bearing turn still persists its history
+      // (the insert is on-conflict-do-nothing, so an unsanitized row would 400
+      // and silently lose resumption history while the turn survives).
+      item: sanitizeEventPayload(entry.item),
     }))).onConflictDoNothing({
       target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
     });
@@ -2434,7 +2442,9 @@ export async function applyContextCompaction(db: Database, input: {
         sessionId: input.sessionId,
         turnId: input.turnId ?? null,
         position: input.summaryPosition,
-        item: input.summaryItem,
+        // Same jsonb-safety guarantee as the append path: the compaction summary
+        // item folds prior tool/command output and can carry NUL/lone surrogates.
+        item: sanitizeEventPayload(input.summaryItem),
         active: true,
       }).onConflictDoUpdate({
         target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
@@ -2567,7 +2577,9 @@ export async function clearSessionContext(db: Database, input: {
         sessionId: input.sessionId,
         turnId: null,
         position: markerPosition,
-        item: clearedContextMarkerItem(),
+        // Marker is a static clean literal; sanitize anyway so EVERY history-item
+        // insert path is uniformly jsonb-safe (no untrusted bytes can sneak in).
+        item: sanitizeEventPayload(clearedContextMarkerItem()),
         active: true,
       }).onConflictDoNothing({
         target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
@@ -3251,7 +3263,7 @@ export async function wakeParentSessionForChildCompletion(
       sessionId: parent.id,
       sequence: ++sequence,
       type: event.type,
-      payload: event.payload,
+      payload: sanitizeEventPayload(event.payload),
       clientEventId: event.clientEventId ?? null,
       turnId: null,
       producerId: null,
@@ -3291,7 +3303,7 @@ export async function wakeParentSessionForChildCompletion(
       sessionId: parent.id,
       sequence,
       type: "turn.queued",
-      payload: { turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source },
+      payload: sanitizeEventPayload({ turnId: turn.id, triggerEventId: triggerEvent.id, source: turn.source }),
       clientEventId: null,
       turnId: turn.id,
       producerId: null,
@@ -3476,7 +3488,7 @@ export async function appendSessionEvents(db: Database, workspaceId: string, ses
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
@@ -3516,7 +3528,7 @@ export async function appendSessionEventsAndUpdateSession(db: Database, workspac
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
@@ -3566,7 +3578,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, w
       sessionId,
       sequence: ++sequence,
       type: input.type,
-      payload: input.payload ?? {},
+      payload: sanitizeEventPayload(input.payload ?? {}),
       clientEventId: input.clientEventId ?? null,
       turnId: input.turnId ?? null,
       producerId: input.producerId ?? null,
