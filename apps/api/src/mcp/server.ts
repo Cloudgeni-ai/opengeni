@@ -81,12 +81,24 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
   const can = (permission: Permission) => hasPermission(grant.permissions, permission);
 
-  // Goal tools are session-scoped: they are only registered when the grant
-  // carries the worker-asserted sessionId claim (signed into the delegated
-  // token by the worker, never agent-controlled) plus goals:manage.
-  const goalSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
-  if (goalSessionId !== null && can("goals:manage")) {
-    registerGoalTools(server, deps, grant, goalSessionId, json);
+  // Session-scoped tools key off the worker-asserted sessionId claim (signed
+  // into the delegated token by the worker, never agent-controlled).
+  const sessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  // set_session_title names the agent's OWN session — pure session metadata,
+  // not a goal operation — so it is available on every session, gated only on
+  // the signed sessionId (NOT goals:manage, and NOT on a goal existing).
+  if (sessionId !== null) {
+    server.registerTool("set_session_title", {
+      description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
+      inputSchema: { title: z4.string().min(1).max(200) },
+    }, async ({ title }) => {
+      const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+      return json({ ok: true, updated: result.updated, title: result.title ?? title });
+    });
+  }
+  // Goal tools require goals:manage (in the default first-party permission set).
+  if (sessionId !== null && can("goals:manage")) {
+    registerGoalTools(server, deps, grant, sessionId, json);
   }
 
   // Orchestration, environment, and GitHub-connect tools are permission-gated
@@ -377,14 +389,6 @@ function registerGoalTools(
       },
     }]);
     return json(goal);
-  });
-
-  server.registerTool("set_session_title", {
-    description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
-    inputSchema: { title: z4.string().min(1).max(200) },
-  }, async ({ title }) => {
-    const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
-    return json({ ok: true, updated: result.updated, title: result.title ?? title });
   });
 
   server.registerTool("goal_update", {

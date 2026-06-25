@@ -387,9 +387,13 @@ export async function createSessionForRequest(
   const defaultedTools = hasOwnProperty(rawPayload, "tools")
     ? requestedTools
     : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
-  // Goal-bearing sessions force the first-party MCP server so the goal
-  // tools the continuation prompt references are reachable.
-  const tools = payload.goal ? withFirstPartyGoalTools(defaultedTools, runtimeSettings) : defaultedTools;
+  // The first-party MCP server is attached to EVERY session. It hosts the
+  // session's own metadata tool (set_session_title) + goal tools, and — only
+  // when the grant carries the permission — the orchestration/environment/
+  // github tools. Capability is gated per-tool by permission, never by whether
+  // the server is attached, so a bare chat still gets titling while the
+  // dangerous tools stay off by default.
+  const tools = withFirstPartyTools(defaultedTools, runtimeSettings);
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -614,7 +618,7 @@ export async function updateSessionTitle(
   return result;
 }
 
-function withFirstPartyGoalTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
+function withFirstPartyTools(tools: ToolRef[], runtimeSettings: { mcpServers: Array<{ id: string }> }): ToolRef[] {
   if (!runtimeSettings.mcpServers.some((server) => server.id === "opengeni")) {
     return tools;
   }
