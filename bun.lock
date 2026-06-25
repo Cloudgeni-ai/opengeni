@@ -17,6 +17,7 @@
       },
       "devDependencies": {
         "@changesets/cli": "^2.27.11",
+        "@opengeni/agent-proto": "workspace:*",
         "@opengeni/api": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
