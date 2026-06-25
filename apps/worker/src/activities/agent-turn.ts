@@ -33,7 +33,6 @@ import {
   maxTurnsExceededRunState,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
-  genesisTitleDirectiveFilter,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type SandboxFileDownload,
@@ -48,6 +47,7 @@ import {
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
+import { withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
@@ -409,7 +409,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
-      const turnTools = mergeToolRefs(session.tools, turn.tools);
+      // Attach the first-party MCP server to EVERY turn, regardless of how/when
+      // the session was created (API, scheduled task, or a pre-existing session
+      // whose stored tools predate this) — so set_session_title and the rest are
+      // always reachable. Idempotent: mergeToolRefs dedupes if already present.
+      const turnTools = withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools));
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
       environmentId = workspaceEnvironment?.id ?? "";
       redact = createSecretRedactor(
@@ -537,8 +541,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // for their first-party MCP token; null keeps the fixed default.
         ...(session.firstPartyMcpPermissions?.length ? { firstPartyPermissions: session.firstPartyMcpPermissions } : {}),
       });
+      // Genesis turn = the first user turn (no assistant history reconciled
+      // yet). Durable Postgres state (countSessionHistoryItems includes
+      // superseded rows after compaction), NOT a workflow counter (turnsThisRun
+      // resets on continueAsNew). Drives the one-shot title hint appended to the
+      // agent's instructions; continuation/preemption turns never match (their
+      // trigger is goal.continuation/turn.preempted).
+      const isGenesisTurn = triggerType === "user.message"
+        && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
       const agent = runtime.buildAgent(runSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
+        genesisTitleHint: isGenesisTurn,
         sandboxEnvironment,
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
@@ -653,27 +666,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Actual input tokens of the most recent model response this turn; the
       // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
       let lastInputTokensObserved: number | null = null;
-      // GENESIS DETECTION (durable, survives continueAsNew): the genesis turn is
-      // the very first user turn of a session — no assistant turn has reconciled
-      // any conversation-truth rows yet. We read the TOTAL persisted history row
-      // count (countSessionHistoryItems, which still includes superseded rows
-      // after a compaction), so a later turn never re-reads as genesis even once
-      // its early context has been compacted away. This is Postgres state, NOT a
-      // workflow/in-memory counter (turnsThisRun resets on continueAsNew), so it
-      // is correct across the workflow boundary. Continuation/preemption turns
-      // never match: their trigger type is goal.continuation/turn.preempted, and
-      // by then prior assistant items are persisted. A genesis-turn retry before
-      // any history persisted re-injects harmlessly (the directive is idempotent
-      // and non-persisted). On match we pass a per-turn callModelInputFilter that
-      // prepends the hidden set_session_title directive to the model input only —
-      // it shapes per-call model input, never state.history, so it is never
-      // persisted, never replayed, never shown in the UI.
-      const isGenesisTurn = triggerType === "user.message"
-        && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
       throwIfWorkerShuttingDown();
       stream = await runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
-        ...(isGenesisTurn ? { callModelInputFilter: genesisTitleDirectiveFilter } : {}),
         onRuntimeEvent: async (event) => {
           await publish!([{ type: event.type, payload: event.payload }], true);
         },

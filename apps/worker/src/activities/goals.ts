@@ -98,7 +98,7 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       resources: [],
       // Continuations keep the session tool surface and force the first-party
       // server so the goal_complete/goal_pause escape hatches stay reachable.
-      tools: goalSessionTools(settings, session.tools),
+      tools: withFirstPartyTools(settings, session.tools),
       model: session.model,
       reasoningEffort: reasoningEffortForMetadata(session.metadata, settings.openaiReasoningEffort),
       sandboxBackend: session.sandboxBackend,
@@ -200,11 +200,13 @@ export function goalContinuationPrompt(goal: SessionGoal, autoContinuation: numb
 }
 
 /**
- * Goal-bearing sessions/turns must carry the first-party "opengeni" MCP server
- * so the goal tools are reachable; built-in tool refs are not auto-added to
- * empty tool lists anywhere else in the pipeline.
+ * Ensures a session/turn carries the first-party "opengeni" MCP server, which
+ * hosts set_session_title, the goal tools, and the permission-gated
+ * orchestration/environment/github tools. Attached to EVERY session/turn (not
+ * just goal-bearing ones); built-in tool refs are not auto-added to empty tool
+ * lists anywhere else in the pipeline. No-op when the server is not configured.
  */
-export function goalSessionTools(settings: Settings, tools: ToolRef[]): ToolRef[] {
+export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolRef[] {
   if (!settings.mcpServers.some((server) => server.id === "opengeni")) {
     return tools;
   }

@@ -553,6 +553,12 @@ export type BuildAgentOptions = {
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
+  // Genesis turn only: append a one-shot instruction to the agent's system
+  // prompt telling it to title the session via opengeni__set_session_title
+  // before responding. Delivered through the instructions channel (where the
+  // model actually obeys), appended AFTER the non-bypassable core so a
+  // white-label persona template can't drop it.
+  genesisTitleHint?: boolean;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -677,10 +683,9 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     // ownership + workspace-environment block) at the {{core}} marker, or
     // appends it when the template omits the marker. With the default template
     // and no environment this is byte-identical to the historical preamble.
-    instructions: composeAgentInstructions(
-      options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-      options.workspaceEnvironment,
-    ),
+    instructions: options.genesisTitleHint
+      ? `${composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment)} ${GENESIS_TITLE_DIRECTIVE}`
+      : composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
       // Server-side compaction (OpenAI platform) requires store=false: the
@@ -884,6 +889,16 @@ async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mc
   };
 }
 
+// The first-party MCP permission set signed into a worker's delegated token
+// when the session does not specify its own. POWERFUL BY DEFAULT: it carries
+// every permission that unlocks a first-party tool — session orchestration
+// (sessions:*), workspace environments (environments:*), and GitHub
+// (github:use) — so agents are fully capable out of the box. A user DEMOTES a
+// specific session by setting a narrower session.firstPartyMcpPermissions (the
+// create-session permission picker), which the worker uses instead. Account-
+// level scopes (billing/account/members/api_keys/workspace:admin) are
+// intentionally excluded: they gate no first-party tool and are not agent
+// capabilities. (A finer-grained capability model comes later.)
 const firstPartyMcpPermissions: Permission[] = [
   "workspace:read",
   "files:read",
@@ -891,6 +906,12 @@ const firstPartyMcpPermissions: Permission[] = [
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "environments:use",
+  "environments:manage",
+  "github:use",
 ];
 
 function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"][number]): boolean {
@@ -1200,28 +1221,13 @@ export type RunAgentStreamOptions = {
   callModelInputFilter?: CallModelInputFilter;
 };
 
-// The hidden genesis-title directive. Appended only to what the model sees on
-// the genesis turn (via a callModelInputFilter), never persisted into stored
-// history and never shown in the UI. Kept OUT of the white-label-overridable
-// instructions template on purpose — it is a one-shot model-input note, not
-// part of the agent persona.
+// One-shot directive appended to the agent's system prompt on the genesis turn
+// (see buildOpenGeniAgent's genesisTitleHint). Delivered through the
+// authoritative instructions channel so the model reliably obeys; references
+// the prefixed tool name the agent actually sees (opengeni__set_session_title).
+// Appended after the non-bypassable core so a white-label persona can't drop it.
 export const GENESIS_TITLE_DIRECTIVE =
-  "Before responding, call the set_session_title tool with a concise 3-7 word title summarizing this session, then continue with the user's request.";
-
-/**
- * A callModelInputFilter that prepends the genesis-title directive as a
- * `system` (developer-note) message to every model call of the genesis turn. It
- * mutates only the per-call model input (`modelData.input`); the SDK's run
- * state / history — the source the conversation-truth reconcile persists — is
- * untouched, so the directive is hidden and non-persisted exactly as required.
- */
-export const genesisTitleDirectiveFilter: CallModelInputFilter = ({ modelData }) => ({
-  ...modelData,
-  input: [
-    { role: "system", content: GENESIS_TITLE_DIRECTIVE } as AgentInputItem,
-    ...modelData.input,
-  ],
-});
+  "This is the first turn of a new session. Before responding to the user, call the opengeni__set_session_title tool with a concise 3-7 word title that summarizes what this session is about, then address the user's request normally.";
 
 /**
  * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
