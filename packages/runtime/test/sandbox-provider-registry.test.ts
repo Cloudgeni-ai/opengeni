@@ -29,6 +29,9 @@ const CREDS: Record<SandboxBackendType, Record<string, unknown>> = {
   blaxel: { blaxelApiKey: "k" },
   cloudflare: { cloudflareWorkerUrl: "https://w.example.com" },
   vercel: { vercelToken: "t", vercelProjectId: "p" },
+  // selfhosted needs no per-box creds (the user's own machine over the agent's
+  // enrollment) — validateCredentials is a no-op.
+  selfhosted: {},
 };
 
 describe("provider registry — descriptor invariants + backendId assertion", () => {
@@ -41,7 +44,7 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
     expect(() => assertProviderRegistryInvariants()).not.toThrow();
   });
 
-  test("registry covers exactly the 10 backends, each self-consistent", () => {
+  test("registry covers exactly the 11 backends, each self-consistent", () => {
     expect(Object.keys(PROVIDER_REGISTRY).sort()).toEqual([...SandboxBackend.options].sort());
     for (const backend of SandboxBackend.options) {
       const reg = PROVIDER_REGISTRY[backend];

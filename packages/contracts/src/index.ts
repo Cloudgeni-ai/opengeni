@@ -10,9 +10,11 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 10 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
-// `packages/sdk/test/contract-parity.test.ts`. The existing four keep their
-// positions; the six new backends are additive.
+// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
+// END (the parity test pins positions): the original four, then the six cloud
+// backends, then `selfhosted` (bring-your-own-compute — a user's own machine
+// enrolled as a first-class sandbox).
 export const SandboxBackend = z.enum([
   "docker",
   "modal",
@@ -24,6 +26,7 @@ export const SandboxBackend = z.enum([
   "blaxel",
   "cloudflare",
   "vercel",
+  "selfhosted",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -346,6 +349,53 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "none", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: false,
+    supportsRunAs: false,
+  },
+  // Bring-your-own-compute: the user's OWN machine, enrolled via a Rust agent,
+  // becomes ONE shared whole-machine sandbox (the agent IS the box). It is the
+  // first backend to make macOS/Windows reachable (default linux). Desktop is
+  // capability-PROCLAIMED ("vnc-ws") — the agent serves a native display stack
+  // (Linux X11/Xvfb, macOS CGEvent/ScreenCaptureKit) consent-gated at enroll;
+  // the online/offline/consent/display negotiation lives in select.ts (M3), this
+  // row is the static feasibility ceiling. Always-on (process-lifetime, never
+  // idle-reaped) and NOT persistable — OpenGeni cannot snapshot the user's disk,
+  // so resume = "is the agent's subject live?", never a cold re-create. Ports
+  // surface on-demand through the stateless relay edge, which lands behind the
+  // `resolveExposedPort` swap-seam later; until then it reuses the existing
+  // `provider-tunnel` exposure kind (the relay IS the provider tunnel for the
+  // agent) so no new PortExposureKind literal — and no new switch arms — are
+  // introduced. supportsOnDemandPorts:true: the agent opens a stream channel for
+  // a port on request rather than pre-declaring 6080/7681 at construction.
+  selfhosted: {
+    backend: "selfhosted",
+    backendId: "selfhosted",
+    tier: "desktop",
+    os: { supported: ["linux", "macos", "windows"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "pty-ws", pty: true }, // real PTY over the relay
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" }, // proclaimed; consent-gated at enroll
+      Recording: { available: true }, // boot invariant: == DesktopStream.available
+    },
+    lifetime: {
+      // Whole-machine, always-there: online while the agent process runs, offline
+      // when it stops. The lease is NEVER idle-killed (it's the user's machine,
+      // not a reapable cloud box) and there is nothing to suspend/resume — the
+      // machine simply is or isn't reachable.
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true, // resume = address the live NATS subject; no provider lock
+    },
+    // persistable:false forces snapshot.kind:"none" (the descriptor invariant
+    // `persistable ⇒ snapshot.kind!=="none"`): OpenGeni cannot snapshot the
+    // user's disk — the machine itself is the persistence.
+    snapshot: { kind: "none", hasTarFallback: false },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
     nativeBucketMount: false,
     persistable: false,
     supportsRunAs: false,
@@ -2432,6 +2482,12 @@ export const CapabilityUnavailableReason = z.enum([
   "disabled_by_policy",
   "lease_cold",
   "tier_headless",
+  // Selfhosted (bring-your-own-compute) negotiation states (M1 additive; the
+  // selfhosted negotiation in select.ts wires them in M3):
+  "agent_offline", // the enrolled agent process is not running / unreachable
+  "agent_reconnecting", // a transient blip — the agent is reconnecting (warmable)
+  "consent_required", // whole-machine / screen-control consent not yet acknowledged
+  "display_unavailable", // headless machine with no display stack (no DesktopStream)
 ]);
 export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
 

@@ -11,8 +11,9 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (10 values; existing four keep
-// position). 3-way enum parity is pinned by `test/contract-parity.test.ts`.
+// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// additive at the end). 3-way enum parity is pinned by
+// `test/contract-parity.test.ts`.
 export type SandboxBackend =
   | "docker"
   | "modal"
@@ -23,7 +24,8 @@ export type SandboxBackend =
   | "e2b"
   | "blaxel"
   | "cloudflare"
-  | "vercel";
+  | "vercel"
+  | "selfhosted";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -43,7 +45,12 @@ export type CapabilityUnavailableReason =
   | "not_provisioned"
   | "disabled_by_policy"
   | "lease_cold"
-  | "tier_headless";
+  | "tier_headless"
+  // selfhosted (bring-your-own-compute) negotiation states:
+  | "agent_offline"
+  | "agent_reconnecting"
+  | "consent_required"
+  | "display_unavailable";
 
 // Mirror of `@opengeni/contracts` SessionCapabilities (the negotiated handshake
 // document). The descriptor table itself is NOT mirrored — it lives in

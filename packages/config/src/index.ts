@@ -704,6 +704,11 @@ export const SANDBOX_REQUIRED_ENV: Record<z.infer<typeof SandboxBackend>, readon
     { field: "vercelToken", env: "OPENGENI_VERCEL_TOKEN" },
     { field: "vercelProjectId", env: "OPENGENI_VERCEL_PROJECT_ID" },
   ],
+  // selfhosted needs NO per-box credentials: it is the user's own machine reached
+  // over the agent's own enrollment. The enrollment-signing + relay-token secrets
+  // are deployment-level (a single runtime secret, not per-active-backend creds),
+  // wired in the connectivity/enrollment milestones (M4/M5), not here.
+  selfhosted: [],
 };
 
 /** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
