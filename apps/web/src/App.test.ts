@@ -182,6 +182,7 @@ describe("api key permission options", () => {
       "Files & documents",
       "Scheduled tasks",
       "Environments",
+      "Machines",
       "GitHub",
       "Goals",
       "Admin & account",

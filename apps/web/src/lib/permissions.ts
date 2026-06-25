@@ -41,6 +41,7 @@ const permissionGroupOrder = [
   "Files & documents",
   "Scheduled tasks",
   "Environments",
+  "Machines",
   "GitHub",
   "Goals",
   "Admin & account",

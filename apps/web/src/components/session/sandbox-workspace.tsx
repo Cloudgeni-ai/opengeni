@@ -9,17 +9,21 @@
 // `WorkspaceDock` shell renders (the dock owns resize / collapse / maximize).
 import {
   DesktopViewer,
+  MachineDockBar,
   SandboxFiles,
   SandboxTerminal,
+  SharedMachineDisclosure,
+  useMachines,
   useSandboxFiles,
   useSandboxGit,
   useSandboxTerminal,
   useSessionCapabilities,
   xtermThemeFromTokens,
+  type MachineView,
   type WorkspaceTab,
   type XtermTheme,
 } from "@opengeni/react";
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { useAppContext } from "@/context";
@@ -55,6 +59,17 @@ export function useSandboxWorkspaceTabs({
   // box for the REAL pty-ws terminal — never on mere mount. Shares the SAME viewer
   // attach as the desktop (one warm box serves both planes).
   const [warmTerminal, setWarmTerminal] = useState(false);
+
+  // The session's machine fleet (the synthetic Modal group box + any enrolled
+  // selfhosted machines), with the active-sandbox pointer. Drives the dock bar
+  // (which machine these surfaces are bound to + its connection status) and the
+  // shared "another session is on this machine" disclosure. Polls slowly — the
+  // dock bar is ambient context, not a hot path.
+  const machines = useMachines({ workspaceId, sessionId, pollIntervalMs: 8000 });
+  const activeMachine: MachineView | null =
+    machines.machines.find((m) => m.sandboxId === machines.activeSandboxId) ??
+    machines.machines.find((m) => m.active) ??
+    null;
 
   const caps = useSessionCapabilities(sessionId, {
     events,
@@ -136,6 +151,30 @@ export function useSandboxWorkspaceTabs({
   return useMemo(() => {
     const tabs: WorkspaceTab[] = [];
 
+    // Wrap a surface with the machine dock bar (which machine these surfaces are
+    // bound to + its connection-status pill) and, when shared, the disclosure.
+    // The bar is the ONLY backend-aware chrome — Files/Terminal/Desktop below it
+    // render IDENTICALLY whether the active sandbox is the Modal box or a
+    // selfhosted machine (the dock-parity contract). Omitted only when the fleet
+    // hasn't resolved an active machine yet (graceful, never a crash).
+    const withMachineBar = (surface: ReactNode): ReactNode => {
+      if (!activeMachine) return surface;
+      return (
+        <div className="flex h-full min-h-0 flex-col">
+          <MachineDockBar
+            name={activeMachine.name}
+            kind={activeMachine.kind}
+            state={activeMachine.state}
+            sharedSessionCount={activeMachine.sharedSessionCount}
+          />
+          {activeMachine.sharedSessionCount > 1 ? (
+            <SharedMachineDisclosure sharedSessionCount={activeMachine.sharedSessionCount} />
+          ) : null}
+          <div className="min-h-0 flex-1">{surface}</div>
+        </div>
+      );
+    };
+
     if (fileSystemOn) {
       tabs.push({
         id: "files",
@@ -146,14 +185,14 @@ export function useSandboxWorkspaceTabs({
               {dirtyCount}
             </span>
           ) : undefined,
-        content: (
+        content: withMachineBar(
           <SandboxFiles
             files={files}
             git={git}
             stagedGit={stagedGit}
             fileSystemAvailable={fileSystemOn}
             className="h-full"
-          />
+          />,
         ),
       });
     }
@@ -162,7 +201,7 @@ export function useSandboxWorkspaceTabs({
       tabs.push({
         id: "terminal",
         label: "Terminal",
-        content: (
+        content: withMachineBar(
           <div className="h-full bg-[color:var(--og-color-bg,var(--color-bg))] p-1">
             <SandboxTerminal
               result={terminal}
@@ -172,7 +211,7 @@ export function useSandboxWorkspaceTabs({
               shell={capabilities?.Terminal.shell ?? undefined}
               {...(xtermTheme ? { theme: xtermTheme } : {})}
             />
-          </div>
+          </div>,
         ),
       });
     }
@@ -186,7 +225,7 @@ export function useSandboxWorkspaceTabs({
             live
           </span>
         ) : undefined,
-        content: (
+        content: withMachineBar(
           <DesktopViewer
             capability={capabilities?.DesktopStream ?? null}
             viewerCapReached={caps.viewerCapReached}
@@ -194,7 +233,7 @@ export function useSandboxWorkspaceTabs({
             onAcknowledge={() => void acknowledgeAndWatch()}
             onWarm={rewarmDesktop}
             className="h-full"
-          />
+          />,
         ),
       });
     }
@@ -216,5 +255,6 @@ export function useSandboxWorkspaceTabs({
     xtermTheme,
     capabilities,
     caps.viewerCapReached,
+    activeMachine,
   ]);
 }

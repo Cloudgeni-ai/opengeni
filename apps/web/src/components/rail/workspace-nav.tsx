@@ -7,6 +7,7 @@ import {
   BoxIcon,
   CalendarClockIcon,
   FileSearchIcon,
+  LaptopIcon,
   PlugIcon,
   SettingsIcon,
   type LucideIcon,
@@ -19,6 +20,7 @@ import { cn } from "@/lib/utils";
 
 type NavTarget =
   | "/workspaces/$workspaceId/environments"
+  | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/capabilities"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
@@ -26,6 +28,7 @@ type NavTarget =
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string }> = [
   { to: "/workspaces/$workspaceId/environments", icon: BoxIcon, label: "Environments" },
+  { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines" },
   { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities" },
   { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules" },
   { to: "/workspaces/$workspaceId/documents", icon: FileSearchIcon, label: "Documents" },
