@@ -28,6 +28,7 @@ import type {
 } from "@openai/agents/sandbox";
 import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError } from "./errors";
+import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -159,6 +160,46 @@ export {
   type SandboxChannelAServiceOptions,
   type NumstatEntry,
 } from "./channel-a";
+
+// The selfhosted (bring-your-own-compute) control surface (M3). The NATS-backed
+// `SelfhostedSession` presents the SAME structural exec/fs/git surface as Modal
+// over a `ControlRpc` seam (request/reply on `agent.<ws>.<id>.rpc`, encoded via
+// `@opengeni/agent-proto`). agent-offline is NEVER a NotFound — the lease never
+// cold-creates a rival for a user's real machine. The real NATS transport +
+// Accounts land in M4 behind the SAME `ControlRpc`.
+export {
+  type ControlRpc,
+  NatsControlRpc,
+  SelfhostedControlError,
+  agentErrorToControlError,
+  subjectFor,
+  offlineControlResponse,
+  timeoutControlResponse,
+  offlineAgentError,
+  timeoutAgentError,
+  type NatsRequestConnection,
+  type SelfhostedUnavailableReason,
+} from "./selfhosted/control-rpc";
+export {
+  SelfhostedSession,
+  SelfhostedSandboxClient,
+  isSelfhostedProviderNotFoundError,
+  SELFHOSTED_DEFAULT_TIMEOUT_MS,
+  type SelfhostedSessionState,
+  type SelfhostedSessionDeps,
+  type SelfhostedRelayConfig,
+  type SelfhostedExecArgs,
+  type SelfhostedExecResult,
+} from "./selfhosted/session";
+export {
+  negotiateSelfhostedCapabilities,
+  selfhostedLiveness,
+  SELFHOSTED_RECONNECT_WINDOW_MS,
+  type SelfhostedNegotiationInput,
+  type SelfhostedLivenessState,
+  type SelfhostedEnrollment,
+} from "./selfhosted/capabilities";
+export { MockAgentResponder, type MockAgentResponderOptions, type MockExecHandler } from "./selfhosted/testing";
 
 /**
  * Construct the raw provider SandboxClient for the configured backend. Registry-
@@ -497,6 +538,13 @@ type ResumeCapableClient = {
  * false-positive recreate is the dangerous direction (double-spawn).
  */
 export function isProviderSandboxNotFoundError(backendId: string, error: unknown): boolean {
+  // selfhosted: agent-offline is NEVER a provider NotFound (the user's machine is
+  // not recreatable — a false NotFound would cold-create a RIVAL box). The
+  // selfhosted discriminator ALWAYS returns false; short-circuit so no goneMarker
+  // string match below can ever flip a selfhosted agent-offline error to true.
+  if (backendId === "selfhosted") {
+    return isSelfhostedProviderNotFoundError(error);
+  }
   if (!error) {
     return false;
   }
