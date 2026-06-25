@@ -24,7 +24,7 @@ import {
   scheduledUserMessagePayload,
   workflowIdForSession,
 } from "./common";
-import { goalSessionTools } from "./goals";
+import { withFirstPartyTools } from "./goals";
 import type {
   ActivityServices,
   DispatchScheduledTaskRunInput,
@@ -59,9 +59,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
-        // Goal-bearing dispatches force the first-party MCP server so the goal
-        // tools the continuation prompt references are reachable.
-        const taskTools = goalSpec ? goalSessionTools(settings, task.agentConfig.tools) : task.agentConfig.tools;
+        // Every dispatch carries the first-party MCP server (set_session_title,
+        // goal tools, and the permission-gated tools), matching the API path.
+        const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
         if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
           // The FK on scheduled_tasks.environment_id is ON DELETE RESTRICT, so
           // an attached environment must still exist here; fail closed if not.

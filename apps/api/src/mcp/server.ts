@@ -103,11 +103,13 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
 
   // Orchestration, environment, and GitHub-connect tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
-  // Sandboxed workers reach this server with the fixed first-party delegated
-  // permission set (firstPartyMcpPermissions in @opengeni/runtime), which
-  // carries none of sessions:*, environments:*, or github:use — so agents
-  // cannot spawn or read sessions, touch workspace secrets, or mint GitHub
-  // install links unless the operator hands them a grant that says so.
+  // Sandboxed workers reach this server with the first-party delegated
+  // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
+  // POWERFUL BY DEFAULT — it carries sessions:*, environments:*, and github:use,
+  // so agents can spawn/read sessions, manage workspace environment variables,
+  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // session by setting a narrower session.firstPartyMcpPermissions (capped to
+  // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, json);
   registerEnvironmentTools(server, deps, grant, can, json);
   if (can("github:use")) {

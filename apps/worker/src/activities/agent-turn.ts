@@ -47,6 +47,7 @@ import {
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
+import { withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
@@ -408,7 +409,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
-      const turnTools = mergeToolRefs(session.tools, turn.tools);
+      // Attach the first-party MCP server to EVERY turn, regardless of how/when
+      // the session was created (API, scheduled task, or a pre-existing session
+      // whose stored tools predate this) — so set_session_title and the rest are
+      // always reachable. Idempotent: mergeToolRefs dedupes if already present.
+      const turnTools = withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools));
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
       environmentId = workspaceEnvironment?.id ?? "";
       redact = createSecretRedactor(

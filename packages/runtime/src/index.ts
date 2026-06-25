@@ -889,6 +889,16 @@ async function firstPartyMcpRequestInit(settings: Settings, config: Settings["mc
   };
 }
 
+// The first-party MCP permission set signed into a worker's delegated token
+// when the session does not specify its own. POWERFUL BY DEFAULT: it carries
+// every permission that unlocks a first-party tool — session orchestration
+// (sessions:*), workspace environments (environments:*), and GitHub
+// (github:use) — so agents are fully capable out of the box. A user DEMOTES a
+// specific session by setting a narrower session.firstPartyMcpPermissions (the
+// create-session permission picker), which the worker uses instead. Account-
+// level scopes (billing/account/members/api_keys/workspace:admin) are
+// intentionally excluded: they gate no first-party tool and are not agent
+// capabilities. (A finer-grained capability model comes later.)
 const firstPartyMcpPermissions: Permission[] = [
   "workspace:read",
   "files:read",
@@ -896,6 +906,12 @@ const firstPartyMcpPermissions: Permission[] = [
   "scheduled_tasks:manage",
   "scheduled_tasks:run",
   "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "environments:use",
+  "environments:manage",
+  "github:use",
 ];
 
 function isFirstPartyMcpServer(settings: Settings, config: Settings["mcpServers"][number]): boolean {
