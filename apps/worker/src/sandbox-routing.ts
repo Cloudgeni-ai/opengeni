@@ -112,6 +112,17 @@ export function wrapTurnBoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    // Seed the DEFAULT backend (the established group box) at construction so
+    // `session.state` is the real backend's state object BEFORE the first op. The
+    // SDK reads `session.state.manifest` at turn START (and writes it back); an
+    // empty `{}` there crashes serializeManifestEnvironment /
+    // validateProvidedSessionManifestUpdate. This is byte-identical to what the
+    // resolver returns for the default pointer (`activeSandboxId === null`).
+    defaultResolved: {
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+    },
     readPointer: async () => {
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };

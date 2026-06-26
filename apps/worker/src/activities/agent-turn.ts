@@ -65,7 +65,7 @@ import type {
 } from "./types";
 import { resumeBoxForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
 import { wrapTurnBoxWithRouting, routingEnabled } from "../sandbox-routing";
-import { beginRecording, finalizeRecording, type ActiveRecording } from "./recording";
+import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
 import { CAPABILITY_DESCRIPTORS, type ResourceRef } from "@opengeni/contracts";
@@ -219,6 +219,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // computer-use drives, finalized to storage in this activity's `finally`
     // (read+PUT in-process — never a Temporal payload, F10). null otherwise.
     let activeRecording: ActiveRecording | null = null;
+    // P4.3 recording gate: flips true the first time a computer-use/desktop tool
+    // ACTUALLY executes this turn (an SDK `computer_call` item streams through). A
+    // plain text turn ("hey"/"continue") never flips it, so finalize discards the
+    // recording with NO storage PUT and NO recording.failed — a clean no-op (a
+    // static frame of an untouched desktop is not worth uploading).
+    let didComputerUse = false;
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
@@ -756,6 +762,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               );
             }
           }
+          // Recording gate: a computer-use tool actually ran when an SDK
+          // `tool_call_item` whose rawItem.type is "computer_call" streams through
+          // (screenshot/click/type/scroll/etc. — the first computer action proves
+          // the desktop was driven). Match the raw SDK event (ground truth) BEFORE
+          // normalization. Only meaningful when a recording is live.
+          if (activeRecording && !didComputerUse && isComputerCallStreamEvent(next.value)) {
+            didComputerUse = true;
+          }
           const normalized = normalizeSdkEvent(next.value);
           for (const event of normalized) {
             await batcher.push(event);
@@ -1131,21 +1145,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // never become a Temporal payload — read+PUT happen here in-process).
       if (activeRecording && resolvedSandbox) {
         try {
-          const outcome = await finalizeRecording({
-            settings,
-            db,
-            objectStorage,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            active: activeRecording,
-            session: resolvedSandbox.established.session,
-            runAs: sandboxRunAs(settings),
-          });
-          if (publish) {
-            await publish(outcome.ok
-              ? [{ type: "recording.available", payload: outcome.available }]
-              : [{ type: "recording.failed", payload: { recordingId: activeRecording.recordingId, turnId: activeRecording.turnId, reason: outcome.reason, detail: outcome.detail } }]);
+          if (!didComputerUse) {
+            // Recording gate (P4.3): the turn never drove the desktop (a plain text
+            // turn), so the film is a static frame of an untouched screen. DISCARD
+            // it — stop ffmpeg, delete the box artifact, drop the row — with NO
+            // storage PUT and NO recording.failed (a clean no-op, not a failure).
+            await discardRecording({
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              active: activeRecording,
+              session: resolvedSandbox.established.session,
+            });
+          } else {
+            const outcome = await finalizeRecording({
+              settings,
+              db,
+              objectStorage,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              active: activeRecording,
+              session: resolvedSandbox.established.session,
+              runAs: sandboxRunAs(settings),
+            });
+            if (publish) {
+              await publish(outcome.ok
+                ? [{ type: "recording.available", payload: outcome.available }]
+                : [{ type: "recording.failed", payload: { recordingId: activeRecording.recordingId, turnId: activeRecording.turnId, reason: outcome.reason, detail: outcome.detail } }]);
+            }
           }
         } catch (finalizeError) {
           console.error("recording finalize failed (turn outcome unaffected)", finalizeError);
@@ -1180,6 +1208,29 @@ export function agentRunFailurePayload(error: unknown): { error: string; code?: 
     };
   }
   return { error: message };
+}
+
+/**
+ * Recognize an SDK stream event that represents a COMPUTER-USE tool call actually
+ * executing — a `run_item_stream_event` carrying a `tool_call_item` whose
+ * underlying raw item is a `computer_call` (the @openai/agents computer tool's
+ * action: screenshot/click/type/scroll/drag/keypress/move/wait/…). This is the
+ * same shape `normalizeSdkEvent` reads (`event.item.rawItem`), matched here against
+ * the raw SDK type rather than a tool NAME so it is robust to the computer tool's
+ * configured name. Drives the on-turn recording gate (no computer-use → discard).
+ */
+function isComputerCallStreamEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object") {
+    return false;
+  }
+  if ((event as { type?: unknown }).type !== "run_item_stream_event") {
+    return false;
+  }
+  const item = (event as { item?: { type?: unknown; rawItem?: { type?: unknown } } }).item;
+  if (!item || item.type !== "tool_call_item") {
+    return false;
+  }
+  return item.rawItem?.type === "computer_call";
 }
 
 /**

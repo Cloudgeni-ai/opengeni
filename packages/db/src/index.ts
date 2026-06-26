@@ -2906,6 +2906,27 @@ export async function updateRecording(db: Database, input: {
   });
 }
 
+/**
+ * Hard-delete a recording row. Used to DISCARD an on-turn recording that captured
+ * NO computer-use activity (a plain text turn): the row was inserted at
+ * `beginRecording` (state "recording") but the turn never drove the desktop, so it
+ * is removed entirely rather than surfaced as a phantom recording or a failure. No
+ * other table FK-references session_recordings, so the delete is self-contained.
+ */
+export async function deleteRecording(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.delete(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+        eq(schema.sessionRecordings.id, input.recordingId),
+      ));
+  });
+}
+
 export async function getRecording(db: Database, workspaceId: string, recordingId: string): Promise<SessionRecordingRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.sessionRecordings)

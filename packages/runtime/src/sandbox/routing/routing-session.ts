@@ -72,6 +72,18 @@ export interface ResolvedActiveBackend {
 }
 
 export interface RoutingSandboxSessionDeps {
+  /**
+   * The DEFAULT backend resolved at construction time (the same shape `resolve()`
+   * caches as `lastResolved`). This seeds `session.state` BEFORE the first op so a
+   * consumer that reads `session.state.manifest` at turn START — the @openai/agents
+   * SDK does, before any tool runs — sees the real default backend's state object
+   * (and writes to `session.state.manifest = …` land on it by reference), instead
+   * of an empty `{}` that crashes serializeManifestEnvironment /
+   * validateProvidedSessionManifestUpdate. The default-pointer case
+   * (`activeSandboxId === null`) resolves synchronously to this same backend, so
+   * seeding it here is byte-identical to what the first `resolve()` would produce.
+   */
+  defaultResolved?: ResolvedActiveBackend;
   /** Re-read the per-session active pointer. Called on EVERY op (the per-call
    *  re-resolve that makes a mid-turn swap visible to the next tool call). */
   readPointer(): Promise<ActivePointer>;
@@ -157,11 +169,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
   }
 
-  /** A method-free read of the active backend's `state` (best-effort: the last
-   *  resolved backend; an op forces a fresh resolve). Consumers that read
-   *  `session.state` (instanceId/decoration) get the active backend's state. */
+  /**
+   * A method-free read of the active backend's `state` (best-effort: the last
+   * resolved backend, falling back to the default backend resolved at construction
+   * so this is non-empty BEFORE the first op). Consumers that read `session.state`
+   * (instanceId/decoration) get the active backend's state.
+   *
+   * CRITICAL: this returns the underlying backend's `state` OBJECT BY REFERENCE
+   * (never a fresh `{}` when a backend exists). The @openai/agents SDK both READS
+   * `session.state.manifest` and WRITES `session.state.manifest = nextManifest`
+   * (providedSessionManifest); returning the live object by reference means those
+   * property writes land on the real backend state and persist. Only when NO
+   * backend has been resolved yet (no default seeded, no op dispatched) do we
+   * return an empty object — and that path no longer occurs in the turn wiring,
+   * which always seeds `defaultResolved`.
+   */
   get state(): unknown {
-    return this.lastResolved?.session.state ?? {};
+    const backendState = (this.lastResolved ?? this.deps.defaultResolved)?.session.state;
+    return backendState ?? {};
   }
 
   /**
@@ -333,15 +358,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    *  the resolve the surrounding op already performed. Defaults false before the
    *  first resolve. */
   supportsPty(): boolean {
-    const s = this.lastResolved?.session;
+    const s = (this.lastResolved ?? this.deps.defaultResolved)?.session;
     return Boolean(s?.supportsPty?.());
   }
 
   /** createEditor is a synchronous factory in the SDK surface; it binds to the
-   *  last-resolved backend's editor. Returns undefined when the active backend has
-   *  no editor (channel-a falls back to its exec-based write path). */
+   *  last-resolved backend's editor (or the default backend before the first op).
+   *  Returns undefined when the active backend has no editor (channel-a falls back
+   *  to its exec-based write path). */
   createEditor(runAs?: string): unknown {
-    return this.lastResolved?.session.createEditor?.(runAs);
+    return (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
   }
 
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {
