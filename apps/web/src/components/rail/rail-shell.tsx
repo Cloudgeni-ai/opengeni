@@ -5,8 +5,8 @@
 // from the brand, switcher, workspace nav, session list, and footer sections.
 import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LockIcon, MenuIcon, PanelRightIcon, SparkleIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon, SparkleIcon } from "lucide-react";
+import { useEffect, type ReactNode } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { RailFooter } from "@/components/rail/rail-footer";
@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { SESSION_TITLE_MAX_LENGTH, sessionDisplayTitle, useInlineRename } from "@/lib/session-rename";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
@@ -199,86 +200,40 @@ function CanvasTopStrip() {
 }
 
 /**
- * The session header title — display by default, click to rename inline. Prefers
- * the durable session.title (agent- or user-set), falling back to the initial
- * message / "Untitled session" exactly like the rail list. Enter saves, Esc
- * cancels, blur saves; an empty/unchanged value is a no-op cancel. The live
- * title (context.session) flows in through the session.title_set SSE event the
- * react useSession hook applies, so cross-client renames and agent titling
- * reflect here without a reload.
+ * The session header title — display by default, click the title (or the
+ * always-visible pencil) to rename inline. Prefers the durable session.title
+ * (agent- or user-set), falling back to the initial message / "Untitled
+ * session" exactly like the rail list. Enter saves, Esc cancels, blur saves; an
+ * empty/unchanged value is a no-op cancel. The live title (context.session)
+ * flows in through the session.title_set SSE event the react useSession hook
+ * applies, so cross-client renames and agent titling reflect here without a
+ * reload. The shared `useInlineRename` hook keeps this behaviour identical to
+ * the rail row's rename.
  */
-function sessionDisplayTitle(session: Session): string {
-  return session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
-}
-
 function SessionTitleEditor(props: {
   session: Session;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
 }) {
   const display = sessionDisplayTitle(props.session);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(display);
-  const [saving, setSaving] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const rename = useInlineRename(props.session, props.onRename);
 
-  // Reset the draft whenever the displayed title changes (e.g. an agent or
-  // cross-client rename arrives) and we are not mid-edit, so opening the editor
-  // always seeds from the current title.
-  useEffect(() => {
-    if (!editing) {
-      setDraft(display);
-    }
-  }, [display, editing]);
-
-  function startEditing() {
-    setDraft(props.session.title?.trim() || props.session.initialMessage?.trim() || "");
-    setEditing(true);
-    // Focus + select once the input mounts.
-    requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    });
-  }
-
-  async function commit() {
-    if (saving) {
-      return;
-    }
-    const next = draft.trim();
-    setEditing(false);
-    if (!next || next === display) {
-      return;
-    }
-    setSaving(true);
-    try {
-      await props.onRename(props.session.workspaceId, props.session.id, next);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function cancel() {
-    setEditing(false);
-    setDraft(display);
-  }
-
-  if (editing) {
+  if (rename.editing) {
     return (
       <input
-        ref={inputRef}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => void commit()}
+        ref={rename.inputRef}
+        value={rename.draft}
+        onChange={(event) => rename.setDraft(event.target.value)}
+        onBlur={() => void rename.commit()}
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();
-            void commit();
+            void rename.commit();
           } else if (event.key === "Escape") {
             event.preventDefault();
-            cancel();
+            rename.cancel();
           }
         }}
-        maxLength={200}
+        maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
         className="w-full truncate rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-[color:var(--color-ring)]/40 focus-visible:ring-[color:var(--color-ring)]"
       />
@@ -286,13 +241,25 @@ function SessionTitleEditor(props: {
   }
 
   return (
-    <button
-      type="button"
-      onClick={startEditing}
-      title={`${display} · click to rename`}
-      className="block w-full truncate rounded-sm text-left text-sm font-medium hover:text-[color:var(--color-fg)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
-    >
-      {display}
-    </button>
+    <div className="flex min-w-0 items-center gap-1">
+      <button
+        type="button"
+        onClick={rename.startEditing}
+        title={`${display} · click to rename`}
+        className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium hover:text-[color:var(--color-fg)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
+      >
+        {display}
+      </button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        onClick={rename.startEditing}
+        aria-label="Rename session"
+        className="shrink-0 text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg)]"
+      >
+        <PencilIcon className="size-3.5" />
+      </Button>
+    </div>
   );
 }

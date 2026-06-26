@@ -5,18 +5,35 @@
 // session (from the URL) is highlighted with an accent bar.
 import { useWorkspaceSessions } from "@opengeni/react";
 import { useRouterState } from "@tanstack/react-router";
-import { MessagesSquareIcon, PlusIcon } from "lucide-react";
+import { EllipsisIcon, MessagesSquareIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
 import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useAppContext } from "@/context";
+import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
+type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
+
 export function SessionList() {
   const rail = useRail();
+  const context = useAppContext();
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const { sessions, loading, error, refresh } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
@@ -128,6 +145,7 @@ export function SessionList() {
                 activeSessionId={activeSessionId}
                 focusIndex={focusIndex}
                 onSelect={rail.openSession}
+                onRename={context.updateSessionTitle}
                 running
               />
             ) : null}
@@ -140,6 +158,7 @@ export function SessionList() {
                 activeSessionId={activeSessionId}
                 focusIndex={focusIndex}
                 onSelect={rail.openSession}
+                onRename={context.updateSessionTitle}
               />
             ))}
           </>
@@ -156,6 +175,7 @@ function SessionGroup(props: {
   activeSessionId: string | null;
   focusIndex: number;
   onSelect: (sessionId: string) => void;
+  onRename: RenameFn;
   running?: boolean;
 }) {
   return (
@@ -174,6 +194,7 @@ function SessionGroup(props: {
               active={session.id === props.activeSessionId}
               focused={index === props.focusIndex}
               onSelect={props.onSelect}
+              onRename={props.onRename}
             />
           );
         })}
@@ -188,38 +209,135 @@ function SessionRow(props: {
   active: boolean;
   focused: boolean;
   onSelect: (sessionId: string) => void;
+  onRename: RenameFn;
 }) {
   const title = props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
+  const rename = useInlineRename(props.session, props.onRename);
+
+  const rowClassName = cn(
+    "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors",
+    "hover:bg-[color:var(--color-surface-2)]",
+    props.active
+      ? "bg-[color:var(--color-surface-3)] font-medium text-[color:var(--color-fg)]"
+      : "text-[color:var(--color-fg-muted)]",
+    props.focused && !props.active ? "bg-[color:var(--color-surface-2)]/60" : "",
+  );
+
+  // While renaming, the row body becomes an inline input. Keep it as a
+  // listitem so the surrounding list semantics and the active accent bar hold.
+  if (rename.editing) {
+    return (
+      <div role="listitem" data-session-index={props.index} className={rowClassName}>
+        <ActiveAccent active={props.active} />
+        <RailStatusDot status={props.session.status} />
+        <input
+          ref={rename.inputRef}
+          value={rename.draft}
+          onChange={(event) => rename.setDraft(event.target.value)}
+          onBlur={() => void rename.commit()}
+          onKeyDown={(event) => {
+            // Keep keystrokes (incl. Arrow/Enter/Esc) inside the field, away
+            // from the list's keyboard navigation.
+            event.stopPropagation();
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void rename.commit();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              rename.cancel();
+            }
+          }}
+          maxLength={SESSION_TITLE_MAX_LENGTH}
+          aria-label="Session title"
+          className="min-w-0 flex-1 truncate rounded-sm bg-transparent text-sm outline-none ring-1 ring-[color:var(--color-ring)]/40 focus-visible:ring-[color:var(--color-ring)]"
+        />
+      </div>
+    );
+  }
+
   return (
-    <button
-      type="button"
-      role="listitem"
-      data-session-index={props.index}
-      onClick={() => props.onSelect(props.session.id)}
-      title={title}
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div
+          role="listitem"
+          data-session-index={props.index}
+          onClick={() => props.onSelect(props.session.id)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              props.onSelect(props.session.id);
+            }
+          }}
+          tabIndex={-1}
+          title={title}
+          className={cn(rowClassName, "cursor-pointer")}
+        >
+          <ActiveAccent active={props.active} />
+          <RailStatusDot status={props.session.status} />
+          {/* min-w-0 + truncate: the title must always ellipsis, never butt the
+              rail border. */}
+          <span className="min-w-0 flex-1 truncate pr-1">{title}</span>
+          <span className="shrink-0 text-[10px] tabular-nums text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-0">
+            {relativeTimeLabel(props.session.updatedAt)}
+          </span>
+          <RowRenameMenu onRename={rename.startEditing} />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="min-w-40">
+        <ContextMenuItem onSelect={rename.startEditing}>
+          <PencilIcon className="size-4" />
+          Rename
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+/** The active-session accent bar shared by the row's display and edit modes. */
+function ActiveAccent({ active }: { active: boolean }) {
+  return (
+    <span
       className={cn(
-        "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-3 text-left text-sm transition-colors",
-        "hover:bg-[color:var(--color-surface-2)]",
-        props.active
-          ? "bg-[color:var(--color-surface-3)] font-medium text-[color:var(--color-fg)]"
-          : "text-[color:var(--color-fg-muted)]",
-        props.focused && !props.active ? "bg-[color:var(--color-surface-2)]/60" : "",
+        "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] transition-opacity",
+        active ? "opacity-100" : "opacity-0",
       )}
-    >
-      <span
-        className={cn(
-          "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] transition-opacity",
-          props.active ? "opacity-100" : "opacity-0",
-        )}
-      />
-      <RailStatusDot status={props.session.status} />
-      {/* min-w-0 + truncate: the title must always ellipsis, never butt the rail
-          border. The pr-1 keeps a gap before the hover time / right edge. */}
-      <span className="min-w-0 flex-1 truncate pr-1">{title}</span>
-      <span className="shrink-0 text-[10px] tabular-nums text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity group-hover:opacity-100">
-        {relativeTimeLabel(props.session.updatedAt)}
-      </span>
-    </button>
+    />
+  );
+}
+
+/**
+ * The hover/focus rename affordance: a small overflow button revealed on row
+ * hover (and always visible while keyboard-focused, for a11y) that opens a
+ * minimal menu whose primary action is Rename. The button stops click
+ * propagation so opening the menu never opens the session.
+ */
+function RowRenameMenu({ onRename }: { onRename: () => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Session actions"
+          onClick={(event) => event.stopPropagation()}
+          className="shrink-0 text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity hover:text-[color:var(--color-fg)] focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
+        >
+          <EllipsisIcon className="size-3.5" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-40" onClick={(event) => event.stopPropagation()}>
+        <DropdownMenuItem
+          onSelect={onRename}
+          // The menu item lives inside the row; stop the synthetic click from
+          // bubbling to the row's onSelect (open-session).
+          onClick={(event) => event.stopPropagation()}
+        >
+          <PencilIcon className="size-4" />
+          Rename
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
