@@ -90,12 +90,24 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
   const can = (permission: Permission) => hasPermission(grant.permissions, permission);
 
-  // Goal tools are session-scoped: they are only registered when the grant
-  // carries the worker-asserted sessionId claim (signed into the delegated
-  // token by the worker, never agent-controlled) plus goals:manage.
-  const goalSessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
-  if (goalSessionId !== null && can("goals:manage")) {
-    registerGoalTools(server, deps, grant, goalSessionId, json);
+  // Session-scoped tools key off the worker-asserted sessionId claim (signed
+  // into the delegated token by the worker, never agent-controlled).
+  const sessionId = typeof grant.metadata?.["sessionId"] === "string" ? grant.metadata["sessionId"] as string : null;
+  // set_session_title names the agent's OWN session — pure session metadata,
+  // not a goal operation — so it is available on every session, gated only on
+  // the signed sessionId (NOT goals:manage, and NOT on a goal existing).
+  if (sessionId !== null) {
+    server.registerTool("set_session_title", {
+      description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
+      inputSchema: { title: z4.string().min(1).max(200) },
+    }, async ({ title }) => {
+      const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+      return json({ ok: true, updated: result.updated, title: result.title ?? title });
+    });
+  }
+  // Goal tools require goals:manage (in the default first-party permission set).
+  if (sessionId !== null && can("goals:manage")) {
+    registerGoalTools(server, deps, grant, sessionId, json);
   }
 
   // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
@@ -110,11 +122,13 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
 
   // Orchestration, environment, and GitHub-connect tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
-  // Sandboxed workers reach this server with the fixed first-party delegated
-  // permission set (firstPartyMcpPermissions in @opengeni/runtime), which
-  // carries none of sessions:*, environments:*, or github:use — so agents
-  // cannot spawn or read sessions, touch workspace secrets, or mint GitHub
-  // install links unless the operator hands them a grant that says so.
+  // Sandboxed workers reach this server with the first-party delegated
+  // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
+  // POWERFUL BY DEFAULT — it carries sessions:*, environments:*, and github:use,
+  // so agents can spawn/read sessions, manage workspace environment variables,
+  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // session by setting a narrower session.firstPartyMcpPermissions (capped to
+  // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, json);
   registerEnvironmentTools(server, deps, grant, can, json);
   if (can("github:use")) {
@@ -396,14 +410,6 @@ function registerGoalTools(
       },
     }]);
     return json(goal);
-  });
-
-  server.registerTool("set_session_title", {
-    description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
-    inputSchema: { title: z4.string().min(1).max(200) },
-  }, async ({ title }) => {
-    const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
-    return json({ ok: true, updated: result.updated, title: result.title ?? title });
   });
 
   server.registerTool("goal_update", {
