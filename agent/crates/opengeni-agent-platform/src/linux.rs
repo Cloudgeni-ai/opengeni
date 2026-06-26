@@ -262,6 +262,12 @@ fn inject_key(
     Ok(())
 }
 
+/// The maximum number of synthetic wheel clicks one scroll event may emit per
+/// axis. A real wheel gesture is a handful of clicks; this bound only exists to
+/// keep a malformed/hostile delta (e.g. `i32::MIN`) from spinning the blocking
+/// inject for ~2^31 round-tripped `FakeInput` events.
+const MAX_SCROLL_CLICKS: u32 = 32;
+
 /// Maps a [`ScrollEvent`](v1::ScrollEvent) to XTEST button 4/5 (vertical) and 6/7
 /// (horizontal) clicks — the X11 convention for wheel scrolling.
 fn inject_scroll(
@@ -278,11 +284,17 @@ fn inject_scroll(
     // Vertical: button 4 = up, 5 = down. Horizontal: 6 = left, 7 = right.
     let v_button = if s.delta_y < 0 { 4 } else { 5 };
     let h_button = if s.delta_x < 0 { 6 } else { 7 };
-    for _ in 0..s.delta_y.unsigned_abs() {
+    // Each unit of delta is one synthetic wheel click. Clamp the per-axis repeat
+    // so a hostile/huge magnitude (up to i32::MIN.unsigned_abs() == 2^31) cannot
+    // spin the inject for billions of round-tripped FakeInput events and wedge the
+    // blocking pool. MAX_SCROLL_CLICKS is well past any real wheel gesture.
+    let v_clicks = s.delta_y.unsigned_abs().min(MAX_SCROLL_CLICKS);
+    let h_clicks = s.delta_x.unsigned_abs().min(MAX_SCROLL_CLICKS);
+    for _ in 0..v_clicks {
         press(conn, v_button)?;
         release(conn, v_button)?;
     }
-    for _ in 0..s.delta_x.unsigned_abs() {
+    for _ in 0..h_clicks {
         press(conn, h_button)?;
         release(conn, h_button)?;
     }
@@ -432,30 +444,61 @@ fn is_virtual_display(display_name: &str) -> bool {
 /// Converts a server `ZPixmap` image buffer to tightly-packed RGBA8.
 ///
 /// X servers commonly deliver 24/32-bit pixels as little-endian BGRX; we read each
-/// 4-byte (or 3-byte) pixel and emit `R,G,B,255`. A row may be padded to a 4-byte
-/// boundary, which `GetImage` already accounts for in `data.len()`; we index by
-/// the bytes-per-pixel and clamp so a short buffer never panics.
+/// 4-byte (or 3-byte) pixel and emit `R,G,B,255`.
+///
+/// # Row padding (stride)
+///
+/// A `ZPixmap` scanline is padded up to the server's `bitmap_format_scanline_pad`
+/// (commonly 32 bits), so a row occupies `bytes_per_line >= width * bpp` bytes —
+/// the padding bytes at the end of each row must be SKIPPED, not consumed as
+/// pixels, or every row after the first is shifted and the frame shears. The
+/// `GetImage` reply does not carry `bytes_per_line`, but `data.len()` is exactly
+/// `bytes_per_line * height`, so we recover the true stride as `data.len() /
+/// height` and walk each pixel at `row * stride + col * bpp`. A short/garbled
+/// buffer falls back to the tight `width * bpp` stride and is clamped so a read
+/// never panics.
 fn zpixmap_to_rgba(data: &[u8], width: u32, height: u32, depth: u8) -> Vec<u8> {
-    let bpp = if depth <= 24 && data.len() == (width as usize * height as usize * 3) {
-        3usize
+    let w = width as usize;
+    let h = height as usize;
+    let bpp = zpixmap_bytes_per_pixel(data.len(), width, height, depth);
+    let tight = w * bpp;
+    // True (possibly padded) bytes-per-line, recovered from the buffer length.
+    // Fall back to the tight row when height is 0 or the buffer is shorter than a
+    // single un-padded frame (we then clamp per-pixel below).
+    let stride = if h > 0 && data.len() >= tight * h {
+        data.len() / h
     } else {
-        4usize
+        tight
     };
-    let px_count = width as usize * height as usize;
-    let mut rgba = Vec::with_capacity(px_count * 4);
-    for i in 0..px_count {
-        let off = i * bpp;
-        if off + 2 < data.len() {
-            // BGRX byte order: byte0=B, byte1=G, byte2=R.
-            rgba.push(data[off + 2]);
-            rgba.push(data[off + 1]);
-            rgba.push(data[off]);
-            rgba.push(0xff);
-        } else {
-            rgba.extend_from_slice(&[0, 0, 0, 0xff]);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for row in 0..h {
+        let row_start = row * stride;
+        for col in 0..w {
+            let off = row_start + col * bpp;
+            if off + 2 < data.len() {
+                // BGRX byte order: byte0=B, byte1=G, byte2=R.
+                rgba.push(data[off + 2]);
+                rgba.push(data[off + 1]);
+                rgba.push(data[off]);
+                rgba.push(0xff);
+            } else {
+                rgba.extend_from_slice(&[0, 0, 0, 0xff]);
+            }
         }
     }
     rgba
+}
+
+/// Picks the bytes-per-pixel for a `ZPixmap` buffer of `depth`. A depth <= 24
+/// image whose buffer is exactly `width*height*3` is tightly-packed 24bpp;
+/// otherwise the server delivered 4 bytes per pixel (the common 32bpp BGRX case),
+/// possibly with row padding the caller accounts for via the stride.
+fn zpixmap_bytes_per_pixel(data_len: usize, width: u32, height: u32, depth: u8) -> usize {
+    if depth <= 24 && data_len == (width as usize * height as usize * 3) {
+        3
+    } else {
+        4
+    }
 }
 
 /// PNG-encodes a tightly-packed RGBA8 buffer.
@@ -512,6 +555,39 @@ mod tests {
         let data = [1u8, 2, 3, 0, 4, 5, 6, 0];
         let rgba = zpixmap_to_rgba(&data, 2, 1, 24);
         assert_eq!(rgba, vec![3, 2, 1, 0xff, 6, 5, 4, 0xff]);
+    }
+
+    #[test]
+    fn zpixmap_honors_row_padding_stride() {
+        // A 1px-wide, 2-row image where each scanline is padded from the tight
+        // 4 bytes (1px * 4bpp) to an 8-byte stride. If the converter ignored the
+        // padding it would read row 1 from the padding bytes of row 0 and shear.
+        //   row0: pixel (B=1,G=2,R=3,X) + 4 pad bytes
+        //   row1: pixel (B=4,G=5,R=6,X) + 4 pad bytes
+        let data = [
+            1u8, 2, 3, 0, 0xAA, 0xBB, 0xCC, 0xDD, // row 0: pixel + padding
+            4, 5, 6, 0, 0xAA, 0xBB, 0xCC, 0xDD, // row 1: pixel + padding
+        ];
+        let rgba = zpixmap_to_rgba(&data, 1, 2, 32);
+        // Expect the two REAL pixels (RGBA), not the padding.
+        assert_eq!(rgba, vec![3, 2, 1, 0xff, 6, 5, 4, 0xff]);
+    }
+
+    #[test]
+    fn zpixmap_tight_32bpp_has_no_padding() {
+        // A 2x2 tight 32bpp buffer: stride == width*bpp, so no rows are skipped.
+        let data = [
+            1u8, 2, 3, 0, 4, 5, 6, 0, // row 0: px(B1G2R3) px(B4G5R6)
+            7, 8, 9, 0, 10, 11, 12, 0, // row 1: px(B7G8R9) px(B10G11R12)
+        ];
+        let rgba = zpixmap_to_rgba(&data, 2, 2, 24);
+        assert_eq!(
+            rgba,
+            vec![
+                3, 2, 1, 0xff, 6, 5, 4, 0xff, // row 0
+                9, 8, 7, 0xff, 12, 11, 10, 0xff, // row 1
+            ]
+        );
     }
 
     #[test]

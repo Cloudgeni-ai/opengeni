@@ -154,15 +154,35 @@ jobs:
           cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
           cp "target/${{ matrix.target }}/release/opengeni-agent.exe" "../${{ matrix.asset }}"
 
+      # ---- Detect signing creds in a PRIOR step (so the gates can read them). ----
+      # GitHub Actions does NOT expose a step's own `env:` to that step's `if:`, so a
+      # signing step cannot gate on an env var it assigns from a secret in the same
+      # step — the `if` always sees an empty string and the step silently skips. We
+      # therefore evaluate secret presence ONCE here and publish booleans as step
+      # outputs the downstream `if:` conditions read via `steps.creds.outputs.*`.
+      - name: Detect signing creds
+        id: creds
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        run: |
+          set -euo pipefail
+          # `[ -n "$X" ]` is the env-side presence check; secrets are masked, so this
+          # never leaks the value, only its presence as a boolean output.
+          if [ -n "${APPLE_DEVELOPER_ID:-}" ]; then echo "has_macos=true" >> "$GITHUB_OUTPUT"; else echo "has_macos=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${AZURE_KEY_VAULT_URL:-}" ]; then echo "has_windows=true" >> "$GITHUB_OUTPUT"; else echo "has_windows=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -n "${MINISIGN_KEY:-}" ]; then echo "has_minisign=true" >> "$GITHUB_OUTPUT"; else echo "has_minisign=false" >> "$GITHUB_OUTPUT"; fi
+
       # ---- macOS Developer ID codesign + notarize (CATEGORY-4, guarded). ----
       # Skips cleanly when the cert/ASC creds are absent; until they land, macOS
       # binaries ship unsigned-but-minisign-attested (a Gatekeeper warning on a
       # fresh download, documented). Drop the secrets in → this lights up, no code
       # change.
       - name: macOS codesign + notarize (if creds present)
-        if: matrix.kind == 'macos' && env.APPLE_DEVELOPER_ID != ''
+        if: matrix.kind == 'macos' && steps.creds.outputs.has_macos == 'true'
         env:
-          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
           APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
           APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
@@ -175,20 +195,18 @@ jobs:
           cargo install --locked apple-codesign || true
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           rcodesign sign --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime "../${{ matrix.asset }}"
+            --code-signature-flags runtime "${{ matrix.asset }}"
           echo "$APPLE_ASC_KEY" > /tmp/asc.json
-          rcodesign notary-submit --api-key-path /tmp/asc.json --wait "../${{ matrix.asset }}" || \
+          rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}" || \
             echo "::warning::notarization submit failed; binary is codesigned but not notarized"
 
       - name: macOS unsigned note (no creds)
-        if: matrix.kind == 'macos' && env.APPLE_DEVELOPER_ID == ''
-        env:
-          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        if: matrix.kind == 'macos' && steps.creds.outputs.has_macos != 'true'
         run: echo "::notice::macOS binary is UNSIGNED (no Apple Developer ID secret) — minisign-attested only. Gatekeeper warns on a fresh download (category-4, see dossier §24.3)."
 
       # ---- Windows Authenticode (POLISH, guarded). ----
       - name: Windows Authenticode (if cert present)
-        if: matrix.kind == 'windows' && env.AZURE_KEY_VAULT_URL != ''
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
         env:
           AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
           AZURE_KEY_VAULT_CERT: ${{ secrets.AZURE_KEY_VAULT_CERT }}
@@ -207,17 +225,15 @@ jobs:
             --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
             --timestamp-rfc3161 "http://timestamp.digicert.com" `
             --file-digest sha256 `
-            "../${{ matrix.asset }}"
+            "${{ matrix.asset }}"
 
       - name: Windows unsigned note (no cert)
-        if: matrix.kind == 'windows' && env.AZURE_KEY_VAULT_URL == ''
-        env:
-          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+        if: matrix.kind == 'windows' && steps.creds.outputs.has_windows != 'true'
         run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download (optional polish, see dossier §24.3)."
 
       # ---- minisign signature + sha256 (ALWAYS-ON; the trust root for self-update). ----
       - name: minisign-sign + sha256 the artifact
-        if: env.MINISIGN_KEY != ''
+        if: steps.creds.outputs.has_minisign == 'true'
         env:
           MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         shell: bash
@@ -240,9 +256,7 @@ jobs:
           rm -f /tmp/minisign.key
 
       - name: minisign missing note
-        if: env.MINISIGN_KEY == ''
-        env:
-          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        if: steps.creds.outputs.has_minisign != 'true'
         shell: bash
         run: |
           # Linux minisign is NOT optional (it is the install + self-update trust root).
@@ -255,11 +269,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
+          # The `.minisig` is only produced when the minisign key is present; the
+          # binary + `.sha256` are always written. `if-no-files-found: warn` keeps a
+          # key-absent run from hard-failing the upload while still flagging the
+          # missing signature (the `minisign missing note` step warns loudly too).
           path: |
             ${{ matrix.asset }}
             ${{ matrix.asset }}.sha256
             ${{ matrix.asset }}.minisig
-          if-no-files-found: error
+          if-no-files-found: warn
 
   # The publish job needs ALL builds, so NO partial release. It assembles the
   # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
@@ -288,8 +306,20 @@ jobs:
           cat ./*.sha256 > SHA256SUMS || true
           ls -l
 
+      # Same step-local-env-in-`if` constraint as the build job: detect the minisign
+      # key ONCE here and gate the signing/manifest steps on the published output, not
+      # on an env var assigned from a secret in the gated step itself.
+      - name: Detect signing creds
+        id: creds
+        shell: bash
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${MINISIGN_KEY:-}" ]; then echo "has_minisign=true" >> "$GITHUB_OUTPUT"; else echo "has_minisign=false" >> "$GITHUB_OUTPUT"; fi
+
       - name: Sign SHA256SUMS (if the key is present)
-        if: env.MINISIGN_KEY != ''
+        if: steps.creds.outputs.has_minisign == 'true'
         env:
           MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         shell: bash
@@ -329,7 +359,7 @@ jobs:
       # promote a build). Promotion (5→25→50→100) + kill-switch are a re-run of this
       # step with new params — NO rebuild (dossier §23.2/§23.3).
       - name: Publish the signed channel manifest
-        if: env.MINISIGN_KEY != '' && vars.AGENT_MANIFEST_PUBLISH == 'true'
+        if: steps.creds.outputs.has_minisign == 'true' && vars.AGENT_MANIFEST_PUBLISH == 'true'
         env:
           MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
         shell: bash

@@ -204,7 +204,16 @@ pub trait Platform: Send + Sync {
         req: &v1::DesktopEnsureRequest,
     ) -> PlatformResult<v1::DesktopEnsureResponse> {
         let desktop = self.desktop();
-        let display = desktop.probe().ok_or_else(|| {
+        // `probe()` does a synchronous x11rb connect + geometry round-trip; run it on
+        // the blocking pool so a wedged/slow X server cannot stall this NATS-RPC task
+        // (the desktop capture/inject calls already do the same, §10.6).
+        let probed = {
+            let desktop = Arc::clone(&desktop);
+            tokio::task::spawn_blocking(move || desktop.probe())
+                .await
+                .map_err(|e| PlatformError::os(format!("desktop probe task join: {e}")))?
+        };
+        let display = probed.ok_or_else(|| {
             PlatformError::Unsupported(
                 "no desktop display available on this host (display_unavailable)".to_string(),
             )

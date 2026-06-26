@@ -329,7 +329,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             arch: identity.arch as i32,
             machine_name: hostname_or_default(),
             workspace_root: self.platform.workspace_root(),
-            capabilities: Some(self.capabilities()),
+            capabilities: Some(self.capabilities().await),
             update_channel: self.creds.update_channel.clone(),
             resume_token: self.creds.resume_token.clone(),
         };
@@ -361,8 +361,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// screen or an Xvfb virtual framebuffer) — otherwise the control plane degrades
     /// the desktop cell to `display_unavailable`. The probed [`Display`] detail
     /// rides along so the UI can size the viewer + show the virtual flag.
-    fn capabilities(&self) -> v1::Capabilities {
-        let display = self.platform.desktop().probe();
+    async fn capabilities(&self) -> v1::Capabilities {
+        // `probe()` does a synchronous x11rb connect; run it on the blocking pool so
+        // a wedged X server cannot stall this async connect task (mirrors
+        // `Platform::desktop_ensure`).
+        let desktop = self.platform.desktop();
+        let display = tokio::task::spawn_blocking(move || desktop.probe())
+            .await
+            .unwrap_or(None);
         let has_relay = self.platform.stream_registry().is_some();
         v1::Capabilities {
             exec: true,
