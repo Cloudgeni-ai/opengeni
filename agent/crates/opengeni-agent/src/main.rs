@@ -135,6 +135,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         info!("no enrollment found; starting device-flow enrollment");
         let enroll_args = EnrollArgs {
             channel: args.channel.clone(),
+            workspace_id: args.workspace_id.clone(),
             machine_name: args.machine_name.clone(),
             force: false,
             // A foreground `run` that needs to enroll honors a CI token if present
@@ -242,6 +243,18 @@ async fn enroll_command(
         return enroll_with_token(&args, api_url, &token);
     }
 
+    // The device flow binds to a workspace the API requires at start. The user
+    // supplies it via --workspace-id / $OPENGENI_WORKSPACE_ID; without it we cannot
+    // enroll, so fail loudly rather than POST an invalid (workspace-less) start.
+    let workspace_id = args.workspace_id.clone().ok_or_else(|| {
+        string_err(
+            "enrollment requires a workspace id: pass --workspace-id <UUID> (or set \
+             $OPENGENI_WORKSPACE_ID). The user who approves this machine must hold a \
+             grant in that workspace."
+                .to_string(),
+        )
+    })?;
+
     let platform = NativePlatform::new();
     let identity = platform.host_identity();
     let machine_name = args
@@ -251,14 +264,17 @@ async fn enroll_command(
 
     let request = EnrollmentRequest {
         api_base_url: api_url.to_string(),
+        workspace_id,
         machine_name,
-        update_channel: args.channel.clone(),
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
             // M6 has no live display surface yet (that is M8); offer false so the
             // consent page does not promise screen-control we cannot serve.
             offers_display: false,
+            // The agent does not request screen control by default (the user's
+            // approve-time allow_screen_control is the authoritative consent anyway).
+            requests_screen_control: false,
         },
     };
 

@@ -67,6 +67,12 @@ pub struct RunArgs {
     #[arg(long, default_value = "stable")]
     pub channel: String,
 
+    /// The workspace (UUID) this machine enrolls into. Required by the control
+    /// plane's device/start when `run` needs to enroll (no existing credentials).
+    /// Falls back to `$OPENGENI_WORKSPACE_ID`.
+    #[arg(long, env = "OPENGENI_WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
+
     /// Override the machine name advertised to the control plane (defaults to the
     /// hostname).
     #[arg(long)]
@@ -93,6 +99,12 @@ pub struct EnrollArgs {
     /// The update channel to follow (`stable` or `beta`).
     #[arg(long, default_value = "stable")]
     pub channel: String,
+
+    /// The workspace (UUID) this machine enrolls into. REQUIRED by the control
+    /// plane's device/start (the user who approves must hold a grant in this
+    /// workspace). Falls back to `$OPENGENI_WORKSPACE_ID`.
+    #[arg(long, env = "OPENGENI_WORKSPACE_ID")]
+    pub workspace_id: Option<String>,
 
     /// Override the machine name advertised to the control plane.
     #[arg(long)]
@@ -221,13 +233,42 @@ mod tests {
 
     #[test]
     fn enroll_parses_flags() {
-        let cli = Cli::parse_from(["opengeni-agent", "enroll", "--channel", "beta", "--force"]);
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "enroll",
+            "--channel",
+            "beta",
+            "--workspace-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--force",
+        ]);
         match cli.command {
             Some(Command::Enroll(args)) => {
                 assert_eq!(args.channel, "beta");
+                assert_eq!(
+                    args.workspace_id.as_deref(),
+                    Some("11111111-1111-1111-1111-111111111111")
+                );
                 assert!(args.force);
             }
             other => panic!("expected enroll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_parses_workspace_id() {
+        let cli = Cli::parse_from([
+            "opengeni-agent",
+            "run",
+            "--workspace-id",
+            "22222222-2222-2222-2222-222222222222",
+        ]);
+        match cli.command {
+            Some(Command::Run(args)) => assert_eq!(
+                args.workspace_id.as_deref(),
+                Some("22222222-2222-2222-2222-222222222222")
+            ),
+            other => panic!("expected run, got {other:?}"),
         }
     }
 

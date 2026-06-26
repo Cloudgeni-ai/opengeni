@@ -1,25 +1,25 @@
 //! Device-flow enrollment client (OAuth 2.0 device authorization, RFC 8628).
 //!
 //! This is the **single module that owns the enrollment HTTP wire shape** — the
-//! one-file reconciliation seam with the M5 control-plane work (dossier §M6 task,
-//! item 2). M5 is finalizing the exact JSON field names of the
-//! `/enrollments/device/{start,poll}` endpoints concurrently against the SAME
-//! contract; everything here is coded against the proto messages
-//! ([`EnrollmentCredentials`](opengeni_agent_proto::v1::EnrollmentCredentials),
-//! [`DeviceAuthState`](opengeni_agent_proto::v1::DeviceAuthState)) and these
-//! paths, with the HTTP request/response structs ([`wire`]) isolated here so a
-//! field-name delta at integration is a change to this file alone.
+//! reconciliation seam with the deployed M5 control-plane device-flow routes
+//! (`apps/api/src/routes/enrollments.ts` + `apps/api/src/sandbox/enrollment.ts`).
+//! The HTTP request/response structs ([`wire`]) are isolated here and match the
+//! API's `@opengeni/contracts` Zod shapes EXACTLY: camelCase JSON keys, the
+//! `/v1/...` paths, and the STRING poll-state enum the API returns. The structs
+//! convert to/from the proto [`EnrollmentCredentials`](opengeni_agent_proto::v1::EnrollmentCredentials)
+//! at their edges so the rest of the agent only ever sees proto types.
 //!
 //! ## Flow (dossier §10.1 / §23.1)
 //!
-//! 1. The agent generates an ed25519 install keypair locally (the fingerprint
-//!    binds the issued credentials to this install — they are non-transferable).
-//! 2. `POST /enrollments/device/start` with the pubkey fingerprint + os/arch +
-//!    machine name + the display/screen-control offer → a `user_code` +
-//!    `verification_uri` the human visits to consent + authorize.
-//! 3. The agent prints the code/URL and polls `POST /enrollments/device/poll`
-//!    until the state is AUTHORIZED (carrying [`EnrollmentCredentials`]), DENIED,
-//!    or EXPIRED, honoring the server's poll interval + SLOW_DOWN backoff.
+//! 1. The agent generates an ed25519 install keypair locally; the FULL public key
+//!    (base64) is the `publicKey` the enrollment binds to (non-transferable).
+//! 2. `POST /v1/enrollments/device/start` with `{ workspaceId, publicKey, os, arch,
+//!    machineName?, canOfferDisplay, requestsScreenControl }` (camelCase) → a
+//!    `userCode` + `verificationUri` the human visits to consent + authorize.
+//! 3. The agent prints the code/URL and polls `POST /v1/enrollments/device/poll`
+//!    with `{ deviceCode }` until the state is `authorized` (carrying
+//!    [`EnrollmentCredentials`]), `denied`, `expired`, or `disabled`, honoring the
+//!    server's poll interval (the API rate-limits via HTTP 429, not `slow_down`).
 //! 4. The caller persists the returned credentials `0600` (see
 //!    [`crate::config::save_credentials`]).
 
@@ -29,15 +29,15 @@ use base64::Engine as _;
 #[cfg(test)]
 use ed25519_dalek::Signer as _;
 use ed25519_dalek::SigningKey;
-use opengeni_agent_proto::v1::{Arch, DeviceAuthState, EnrollmentCredentials, Os};
+use opengeni_agent_proto::v1::{Arch, EnrollmentCredentials, Os};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The endpoint paths, appended to the configured API base URL. Kept as
 /// constants beside the wire structs so a path rename is also a one-file change.
-const START_PATH: &str = "/enrollments/device/start";
-const POLL_PATH: &str = "/enrollments/device/poll";
+const START_PATH: &str = "/v1/enrollments/device/start";
+const POLL_PATH: &str = "/v1/enrollments/device/poll";
 
 /// What the user offered at install time, sent in the start request so the
 /// consent page can present the right toggles.
@@ -47,9 +47,13 @@ pub struct EnrollmentOffer {
     pub os: Os,
     /// The host CPU architecture.
     pub arch: Arch,
-    /// Whether this machine can offer a graphical display (drives the
-    /// screen-control consent toggle on the page).
+    /// Whether this machine can offer a graphical display (the API's
+    /// `canOfferDisplay`; drives the screen-control consent toggle on the page).
     pub offers_display: bool,
+    /// Whether the agent requests screen control / computer-use (the API's
+    /// `requestsScreenControl`). The user's `allowScreenControl` at approve is the
+    /// AUTHORITATIVE consent; this is only the agent's request. Default false.
+    pub requests_screen_control: bool,
 }
 
 /// Inputs to a device-flow enrollment.
@@ -57,10 +61,12 @@ pub struct EnrollmentOffer {
 pub struct EnrollmentRequest {
     /// The control-plane API base URL (e.g. `https://api.opengeni.ai`).
     pub api_base_url: String,
+    /// The workspace (UUID) this machine enrolls into. REQUIRED by the API's
+    /// device/start: the user who approves must hold a grant in THIS workspace, and
+    /// that binding is what makes the (user-unauthenticated) start safe.
+    pub workspace_id: String,
     /// A human-friendly machine name (hostname by default).
     pub machine_name: String,
-    /// The update channel selected at install (`stable`|`beta`).
-    pub update_channel: String,
     /// The OS/arch/display offer.
     pub offer: EnrollmentOffer,
 }
@@ -91,9 +97,11 @@ pub enum EnrollmentError {
     /// The server reported AUTHORIZED but omitted the credentials.
     #[error("server reported authorized but returned no credentials")]
     MissingCredentials,
-    /// The server returned a state value the agent does not understand.
-    #[error("server returned an unknown device-auth state: {0}")]
-    UnknownState(i32),
+    /// The credential plane is disabled for this deployment (the API returns the
+    /// `disabled` state when it has no signing secret to mint a bearer) — the agent
+    /// cannot complete enrollment until the deployment provisions it.
+    #[error("the control plane's credential issuance is disabled for this deployment")]
+    Disabled,
 }
 
 /// A consent-printable summary the caller shows the human before polling.
@@ -108,8 +116,8 @@ pub struct PendingAuthorization {
 }
 
 /// An ed25519 install identity. The private key never leaves the machine; its
-/// public-key fingerprint is sent to the control plane to bind the credentials
-/// to this install.
+/// full public key (base64) is sent to the control plane as the enrollment
+/// `publicKey` — the machine identity the enrollment binds to.
 pub struct InstallIdentity {
     signing_key: SigningKey,
 }
@@ -123,10 +131,11 @@ impl InstallIdentity {
         }
     }
 
-    /// The base64 (standard, no-pad) encoding of the 32-byte ed25519 public key —
-    /// the install fingerprint sent to the control plane.
+    /// The base64 (standard, no-pad) encoding of the FULL 32-byte ed25519 public
+    /// key — the `publicKey` the API's device/start binds the enrollment to. This
+    /// is the complete public key (not a hash/fingerprint of it).
     #[must_use]
-    pub fn fingerprint(&self) -> String {
+    pub fn public_key_base64(&self) -> String {
         base64::engine::general_purpose::STANDARD_NO_PAD
             .encode(self.signing_key.verifying_key().to_bytes())
     }
@@ -184,26 +193,28 @@ async fn start_device_auth(
 ) -> Result<wire::StartResponse, EnrollmentError> {
     let url = join_url(&req.api_base_url, START_PATH);
     let body = wire::StartRequest {
-        install_fingerprint: identity.fingerprint(),
+        workspace_id: req.workspace_id.clone(),
+        public_key: identity.public_key_base64(),
         os: os_str(req.offer.os),
         arch: arch_str(req.offer.arch),
-        machine_name: req.machine_name.clone(),
-        update_channel: req.update_channel.clone(),
-        offers_display: req.offer.offers_display,
+        machine_name: Some(req.machine_name.clone()),
+        can_offer_display: req.offer.offers_display,
+        requests_screen_control: req.offer.requests_screen_control,
     };
     let resp = client.post(&url).json(&body).send().await?;
     parse_json::<wire::StartResponse>(resp, START_PATH).await
 }
 
 /// Polls `POST /enrollments/device/poll` until the flow resolves, honoring the
-/// server's poll interval and SLOW_DOWN throttling.
+/// server's poll interval. (The API rate-limits at the HTTP layer rather than
+/// returning an RFC 8628 `slow_down` state, so there is no in-loop backoff bump.)
 async fn poll_until_resolved(
     client: &reqwest::Client,
     req: &EnrollmentRequest,
     start: &wire::StartResponse,
 ) -> Result<EnrollmentCredentials, EnrollmentError> {
     let url = join_url(&req.api_base_url, POLL_PATH);
-    let mut interval = Duration::from_secs(u64::from(start.poll_interval_seconds.max(1)));
+    let interval = Duration::from_secs(u64::from(start.poll_interval_seconds.max(1)));
     tracing::debug!(
         expires_in_seconds = start.expires_in_seconds,
         poll_interval_seconds = start.poll_interval_seconds,
@@ -219,21 +230,21 @@ async fn poll_until_resolved(
         let resp = client.post(&url).json(&body).send().await?;
         let poll = parse_json::<wire::PollResponse>(resp, POLL_PATH).await?;
 
-        match DeviceAuthState::try_from(poll.state).unwrap_or(DeviceAuthState::Unspecified) {
-            DeviceAuthState::Authorized => {
+        // The API returns a STRING state enum (`pending`/`authorized`/`denied`/
+        // `expired`/`disabled`), NOT the proto's integer. We map it here; the API
+        // has no `slow_down` state (it rate-limits at the HTTP layer → 429, which
+        // surfaces as EnrollmentError::Status before we get here).
+        match poll.state {
+            wire::PollState::Authorized => {
                 return poll
                     .credentials
                     .map(wire::Credentials::into_proto)
                     .ok_or(EnrollmentError::MissingCredentials);
             }
-            DeviceAuthState::Pending => { /* keep polling at the current interval */ }
-            DeviceAuthState::SlowDown => {
-                // RFC 8628: increase the interval by 5s on SLOW_DOWN.
-                interval += Duration::from_secs(5);
-            }
-            DeviceAuthState::Denied => return Err(EnrollmentError::Denied),
-            DeviceAuthState::Expired => return Err(EnrollmentError::Expired),
-            DeviceAuthState::Unspecified => return Err(EnrollmentError::UnknownState(poll.state)),
+            wire::PollState::Pending => { /* keep polling at the current interval */ }
+            wire::PollState::Denied => return Err(EnrollmentError::Denied),
+            wire::PollState::Expired => return Err(EnrollmentError::Expired),
+            wire::PollState::Disabled => return Err(EnrollmentError::Disabled),
         }
     }
 }
@@ -286,35 +297,46 @@ fn arch_str(arch: Arch) -> String {
     .to_string()
 }
 
-/// The HTTP wire shapes — **the single reconciliation point with M5**.
+/// The HTTP wire shapes — **the reconciliation point with the deployed M5 API**.
 ///
-/// Every JSON field name the agent sends/receives lives here. M5 is finalizing
-/// the exact endpoint payloads concurrently; if a field is renamed at
-/// integration, the change is a `#[serde(rename = "...")]` (or a field rename) in
-/// THIS module and nothing else. The structs convert to/from the proto messages
+/// Every JSON field name the agent sends/receives lives here and matches the API's
+/// `@opengeni/contracts` Zod shapes EXACTLY: camelCase keys (the structs carry Rust
+/// snake_case fields with `#[serde(rename_all = "camelCase")]`), and the STRING
+/// poll-state enum the API returns. The structs convert to/from the proto messages
 /// at their edges so the rest of the agent only ever sees proto types.
 mod wire {
     use super::{Deserialize, EnrollmentCredentials, Serialize};
 
-    /// Body of `POST /enrollments/device/start`.
+    /// Body of `POST /v1/enrollments/device/start`. Matches the API's
+    /// `DeviceEnrollmentStartRequest`. `exposure` defaults to `whole-machine`
+    /// server-side (v1 only supports that), so we omit it.
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub(super) struct StartRequest {
-        /// The ed25519 install public-key fingerprint (base64).
-        pub install_fingerprint: String,
+        /// The workspace (UUID) this machine enrolls into (REQUIRED by the API).
+        pub workspace_id: String,
+        /// The agent's FULL ed25519 public key (base64) — the machine identity the
+        /// enrollment binds to (the API's `publicKey`; NOT a fingerprint/hash).
+        pub public_key: String,
         /// OS family (`linux`/`macos`/`windows`).
         pub os: String,
         /// CPU arch (`x86_64`/`aarch64`).
         pub arch: String,
-        /// Human-friendly machine name.
-        pub machine_name: String,
-        /// Update channel (`stable`/`beta`).
-        pub update_channel: String,
-        /// Whether this machine can offer a display (screen-control consent).
-        pub offers_display: bool,
+        /// Human-friendly machine name (optional; serialized as `machineName`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub machine_name: Option<String>,
+        /// Whether this machine can offer a display (the API's `canOfferDisplay`).
+        pub can_offer_display: bool,
+        /// Whether the agent requests screen control (the API's
+        /// `requestsScreenControl`; the user's approve is the authoritative consent).
+        pub requests_screen_control: bool,
     }
 
-    /// Response of `POST /enrollments/device/start`.
+    /// Response of `POST /v1/enrollments/device/start`. Matches the API's
+    /// `DeviceEnrollmentStartResponse` (camelCase). `intervalSeconds` is the poll
+    /// cadence; `expiresInSeconds` is the device-code TTL.
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub(super) struct StartResponse {
         pub user_code: String,
         pub device_code: String,
@@ -323,7 +345,7 @@ mod wire {
         pub verification_uri_complete: String,
         #[serde(default)]
         pub expires_in_seconds: u32,
-        #[serde(default = "default_poll_interval")]
+        #[serde(default = "default_poll_interval", rename = "intervalSeconds")]
         pub poll_interval_seconds: u32,
     }
 
@@ -331,34 +353,49 @@ mod wire {
         5
     }
 
-    /// Body of `POST /enrollments/device/poll`.
+    /// Body of `POST /v1/enrollments/device/poll`. Matches the API's
+    /// `DeviceEnrollmentPollRequest` (`deviceCode`).
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub(super) struct PollRequest {
         pub device_code: String,
     }
 
-    /// Response of `POST /enrollments/device/poll`. `state` is the integer value
-    /// of the proto `DeviceAuthState` enum; `credentials` is present only when
-    /// authorized.
+    /// The poll state the API returns — a STRING enum (the API's
+    /// `DeviceEnrollmentState`), NOT the proto's integer. The API has no `slow_down`
+    /// state (it rate-limits at the HTTP layer → 429).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum PollState {
+        Pending,
+        Authorized,
+        Denied,
+        Expired,
+        /// The deployment's credential-issuance plane is off (no signing secret).
+        Disabled,
+    }
+
+    /// Response of `POST /v1/enrollments/device/poll`. Matches the API's
+    /// `DeviceEnrollmentPollResponse`; `credentials` is present only when authorized.
     #[derive(Debug, Deserialize)]
     pub(super) struct PollResponse {
-        pub state: i32,
+        pub state: PollState,
         #[serde(default)]
         pub credentials: Option<Credentials>,
     }
 
-    /// The credentials sub-object on an authorized poll. Mirrors the proto
-    /// [`EnrollmentCredentials`] field-for-field; [`Credentials::into_proto`] is
-    /// the single conversion site.
-    // `nats_credentials` ends with the struct name, but the field name is the
-    // load-bearing JSON wire key (the M5 contract) — renaming it would break the
-    // single reconciliation point this module exists to be. Allow is correct.
-    #[allow(clippy::struct_field_names)]
+    /// The credentials sub-object on an authorized poll. Matches the API's
+    /// `EnrollmentCredentialsResponse` (camelCase). [`Credentials::into_proto`] is
+    /// the single conversion site into the proto the agent consumes.
     #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
     pub(super) struct Credentials {
         pub agent_id: String,
         pub workspace_id: String,
-        pub nats_credentials: String,
+        /// The signed `oge_` bearer the agent presents as the NATS connect
+        /// auth-token (the API's `bearer`). This IS the credential — there is no
+        /// per-machine creds file (the API's `natsAccountCreds` merely echoes it).
+        pub bearer: String,
         #[serde(default)]
         pub nats_urls: Vec<String>,
         #[serde(default)]
@@ -369,7 +406,9 @@ mod wire {
         /// deployment (the agent then presents an empty token the relay rejects).
         #[serde(default)]
         pub relay_token: String,
-        #[serde(default)]
+        /// The minisign public key pinned for self-update verification (the API's
+        /// `updatePublicKey`).
+        #[serde(default, rename = "updatePublicKey")]
         pub update_pubkey: String,
         #[serde(default)]
         pub consented_whole_machine: bool,
@@ -379,12 +418,13 @@ mod wire {
 
     impl Credentials {
         /// Converts the wire credentials into the proto message the rest of the
-        /// agent consumes.
+        /// agent consumes. The proto's `nats_credentials` field carries the connect
+        /// bearer (M-AUTH), so the API's `bearer` maps straight into it.
         pub(super) fn into_proto(self) -> EnrollmentCredentials {
             EnrollmentCredentials {
                 agent_id: self.agent_id,
                 workspace_id: self.workspace_id,
-                nats_credentials: self.nats_credentials,
+                nats_credentials: self.bearer,
                 nats_urls: self.nats_urls,
                 relay_url: self.relay_url,
                 relay_token: self.relay_token,
@@ -401,18 +441,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn install_fingerprint_is_stable_per_identity() {
+    fn install_public_key_is_stable_per_identity() {
         let id = InstallIdentity::generate();
-        assert_eq!(id.fingerprint(), id.fingerprint());
+        assert_eq!(id.public_key_base64(), id.public_key_base64());
         // 32-byte ed25519 pubkey -> 43 base64 (no-pad) chars.
-        assert_eq!(id.fingerprint().len(), 43);
+        assert_eq!(id.public_key_base64().len(), 43);
     }
 
     #[test]
-    fn distinct_identities_have_distinct_fingerprints() {
+    fn distinct_identities_have_distinct_public_keys() {
         assert_ne!(
-            InstallIdentity::generate().fingerprint(),
-            InstallIdentity::generate().fingerprint()
+            InstallIdentity::generate().public_key_base64(),
+            InstallIdentity::generate().public_key_base64()
         );
     }
 
@@ -447,42 +487,121 @@ mod tests {
 
     #[test]
     fn wire_credentials_convert_to_proto() {
+        // The API's EnrollmentCredentialsResponse JSON (camelCase): `bearer` is the
+        // connect token, `updatePublicKey` is the pinned self-update key.
         let json = r#"{
-            "agent_id": "a", "workspace_id": "w",
-            "nats_credentials": "creds", "nats_urls": ["tls://x:4222"],
-            "relay_url": "https://r", "update_pubkey": "k",
-            "consented_whole_machine": true, "consented_screen_control": false
+            "agentId": "a", "workspaceId": "w",
+            "bearer": "oge_bearer", "subjectPrefix": "agent.w.a",
+            "natsUrls": ["tls://x:4222"], "relayUrl": "https://r",
+            "relayToken": "ogr_x", "natsAccountCreds": "oge_bearer",
+            "updatePublicKey": "k",
+            "consentedWholeMachine": true, "consentedScreenControl": false
         }"#;
         let wire: wire::Credentials = serde_json::from_str(json).expect("parse");
         let proto = wire.into_proto();
         assert_eq!(proto.agent_id, "a");
+        // The API's `bearer` maps into the proto's `nats_credentials` (the connect
+        // auth-token under M-AUTH).
+        assert_eq!(proto.nats_credentials, "oge_bearer");
         assert_eq!(proto.nats_urls, vec!["tls://x:4222".to_string()]);
+        assert_eq!(proto.relay_token, "ogr_x");
+        assert_eq!(proto.update_pubkey, "k");
         assert!(proto.consented_whole_machine);
         assert!(!proto.consented_screen_control);
     }
 
     #[test]
     fn poll_response_parses_authorized_with_credentials() {
+        // The API returns a STRING state and a camelCase credentials object.
         let json = r#"{
-            "state": 2,
+            "state": "authorized",
             "credentials": {
-                "agent_id": "a", "workspace_id": "w", "nats_credentials": "c"
+                "agentId": "a", "workspaceId": "w", "bearer": "c",
+                "subjectPrefix": "agent.w.a", "natsUrls": [], "relayUrl": "",
+                "relayToken": "", "natsAccountCreds": "c", "updatePublicKey": "",
+                "consentedWholeMachine": true, "consentedScreenControl": false
             }
         }"#;
         let poll: wire::PollResponse = serde_json::from_str(json).expect("parse");
-        assert_eq!(poll.state, DeviceAuthState::Authorized as i32);
+        assert_eq!(poll.state, wire::PollState::Authorized);
         assert!(poll.credentials.is_some());
     }
 
     #[test]
+    fn poll_response_parses_each_string_state() {
+        for (raw, expected) in [
+            ("pending", wire::PollState::Pending),
+            ("authorized", wire::PollState::Authorized),
+            ("denied", wire::PollState::Denied),
+            ("expired", wire::PollState::Expired),
+            ("disabled", wire::PollState::Disabled),
+        ] {
+            let json = format!(r#"{{ "state": "{raw}" }}"#);
+            let poll: wire::PollResponse = serde_json::from_str(&json).expect("parse");
+            assert_eq!(poll.state, expected, "state {raw}");
+        }
+    }
+
+    #[test]
     fn start_response_uses_default_poll_interval_when_absent() {
+        // The API's start response is camelCase; `intervalSeconds` is the poll
+        // cadence, but the agent defaults to 5s if it is somehow absent.
         let json = r#"{
-            "user_code": "ABCD-1234",
-            "device_code": "dev",
-            "verification_uri": "https://get.opengeni.ai/device"
+            "userCode": "ABCD-1234",
+            "deviceCode": "dev",
+            "verificationUri": "https://get.opengeni.ai/device"
         }"#;
         let start: wire::StartResponse = serde_json::from_str(json).expect("parse");
         assert_eq!(start.poll_interval_seconds, 5);
+        assert_eq!(start.user_code, "ABCD-1234");
+        assert_eq!(start.device_code, "dev");
+    }
+
+    #[test]
+    fn start_response_reads_camelcase_interval_seconds() {
+        let json = r#"{
+            "userCode": "ABCD-1234", "deviceCode": "dev",
+            "verificationUri": "https://x/device",
+            "verificationUriComplete": "https://x/device?user_code=ABCD-1234",
+            "intervalSeconds": 7, "expiresInSeconds": 600
+        }"#;
+        let start: wire::StartResponse = serde_json::from_str(json).expect("parse");
+        assert_eq!(start.poll_interval_seconds, 7);
+        assert_eq!(start.expires_in_seconds, 600);
+    }
+
+    #[test]
+    fn start_request_serializes_camelcase_for_the_api() {
+        let body = wire::StartRequest {
+            workspace_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            public_key: "pubkey-b64".to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            machine_name: Some("my-box".to_string()),
+            can_offer_display: false,
+            requests_screen_control: false,
+        };
+        let value: serde_json::Value = serde_json::to_value(&body).expect("serialize");
+        // The API reads camelCase keys; assert the exact wire shape.
+        assert_eq!(value["workspaceId"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(value["publicKey"], "pubkey-b64");
+        assert_eq!(value["machineName"], "my-box");
+        assert_eq!(value["canOfferDisplay"], false);
+        assert_eq!(value["requestsScreenControl"], false);
+        // Dropped fields the API does not read must NOT appear.
+        assert!(value.get("installFingerprint").is_none());
+        assert!(value.get("updateChannel").is_none());
+        assert!(value.get("offersDisplay").is_none());
+    }
+
+    #[test]
+    fn poll_request_serializes_camelcase_device_code() {
+        let body = wire::PollRequest {
+            device_code: "dev-123".to_string(),
+        };
+        let value: serde_json::Value = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(value["deviceCode"], "dev-123");
+        assert!(value.get("device_code").is_none());
     }
 
     #[test]
