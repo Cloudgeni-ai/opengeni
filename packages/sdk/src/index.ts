@@ -251,4 +251,7 @@ export type {
   MachineView,
   MachinesResponse,
   MachineMetricsSeriesResponse,
+  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
+  SwapActiveSandboxRequest,
+  SwapActiveSandboxResponse,
 } from "./types";

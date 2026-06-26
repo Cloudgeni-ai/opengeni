@@ -59,27 +59,70 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
-  test("attach swaps the active sandbox + refetches", async () => {
-    const attachedTo: string[] = [];
+  test("attach swaps via the default swapActiveSandbox path (session-scoped) + refetches", async () => {
+    const swappedTo: Array<{ sessionId: string; target: string }> = [];
     let current = response;
     const machinesClient: MachinesClientLike = {
       listMachines: async () => current,
-      attachMachine: async (_ws, sandboxId) => {
-        attachedTo.push(sandboxId);
-        current = { ...response, activeSandboxId: sandboxId, activeEpoch: 4 };
-        return { activeSandboxId: sandboxId, activeEpoch: 4 };
+      swapActiveSandbox: async (_ws, sessionId, request) => {
+        swappedTo.push({ sessionId, target: request.target });
+        current = { ...response, activeSandboxId: request.target, activeEpoch: 4 };
+        return { swapped: true, activeSandboxId: request.target, activeEpoch: 4 };
       },
     };
     const hook = await renderHook(
-      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient, sessionId: "sess-1" }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canAttach).toBe(true);
+    const ok = await hook.result.current.attach("sh-1");
+    await flush();
+    expect(ok).toBe(true);
+    expect(swappedTo).toEqual([{ sessionId: "sess-1", target: "sh-1" }]);
+    expect(hook.result.current.activeSandboxId).toBe("sh-1");
+    await hook.unmount();
+  });
+
+  test("a host-supplied attachMachine adapter wins over swapActiveSandbox", async () => {
+    const attachedTo: Array<{ sessionId: string; sandboxId: string }> = [];
+    let current = response;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => current,
+      attachMachine: async (_ws, sessionId, sandboxId) => {
+        attachedTo.push({ sessionId, sandboxId });
+        current = { ...response, activeSandboxId: sandboxId, activeEpoch: 5 };
+        return { activeSandboxId: sandboxId, activeEpoch: 5 };
+      },
+      swapActiveSandbox: async () => {
+        throw new Error("should not be called when an adapter is supplied");
+      },
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient, sessionId: "sess-2" }),
       undefined,
     );
     await flush();
     const ok = await hook.result.current.attach("sh-1");
     await flush();
     expect(ok).toBe(true);
-    expect(attachedTo).toEqual(["sh-1"]);
-    expect(hook.result.current.activeSandboxId).toBe("sh-1");
+    expect(attachedTo).toEqual([{ sessionId: "sess-2", sandboxId: "sh-1" }]);
+    await hook.unmount();
+  });
+
+  test("canAttach is false without a sessionId (the swap is session-scoped)", async () => {
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      swapActiveSandbox: async () => ({ swapped: true, activeSandboxId: "sh-1", activeEpoch: 4 }),
+    };
+    const hook = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.canAttach).toBe(false);
+    const ok = await hook.result.current.attach("sh-1");
+    expect(ok).toBe(false);
     await hook.unmount();
   });
 

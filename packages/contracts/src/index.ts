@@ -2496,6 +2496,11 @@ export const CreateSessionRequest = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
+  // The enrolled machine (a sandbox id) to run this session on; seeds the
+  // active-sandbox pointer at creation so the FIRST turn routes to the chosen
+  // machine (race-free: the pointer is committed before the worker turn
+  // workflow can read it). An invalid/unowned/offline target fails the create.
+  targetSandboxId: z.string().uuid().optional(),
   // Workspace environment attachment is fixed at session creation; follow-up
   // user.message events cannot switch or add one.
   environmentId: z.string().uuid().optional(),
@@ -3019,6 +3024,31 @@ export const MachinesResponse = z.object({
   machines: z.array(MachineView),
 });
 export type MachinesResponse = z.infer<typeof MachinesResponse>;
+
+/**
+ * POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — the user-
+ * authenticated swap of a session's active sandbox (the same epoch-fenced
+ * mechanic the M7 `sandbox_swap` MCP tool exposes to the agent). `target` is a
+ * `MachinesResponse` machine's `sandboxId`, or "session"/"default" to swap back
+ * to the session's own group box.
+ */
+export const SwapActiveSandboxRequest = z.object({
+  target: z.string().min(1),
+});
+export type SwapActiveSandboxRequest = z.infer<typeof SwapActiveSandboxRequest>;
+
+/**
+ * The swap outcome (mirrors the server `FleetSwapResult`). `swapped` is true on a
+ * successful repoint OR a no-op (already pointed there); `reason` carries the
+ * failure detail (unowned/offline target, or a lost epoch fence) when false.
+ */
+export const SwapActiveSandboxResponse = z.object({
+  swapped: z.boolean(),
+  activeSandboxId: z.string().nullable(),
+  activeEpoch: z.number().int(),
+  reason: z.string().optional(),
+});
+export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
 
 /**
  * GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h — the

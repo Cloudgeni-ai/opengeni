@@ -2,9 +2,9 @@
 // create surface (model, effort, sandbox backend, environment, repositories,
 // tools, goal, first-party MCP permissions). The session list itself now lives
 // in the left rail, not on this page.
-import { useEnvironments, type ComposerState } from "@opengeni/react";
+import { useEnvironments, useMachines, type ComposerState } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
-import { BoxIcon, ChevronDownIcon, FlagIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import { BoxIcon, ChevronDownIcon, FlagIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
@@ -22,6 +22,7 @@ import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import {
   emptyAdvancedSessionDraft,
   submissionExtrasFromAdvancedSessionDraft,
+  targetSandboxIdFromAdvancedSessionDraft,
   type AdvancedSessionDraft,
 } from "@/lib/session-create";
 import { cn } from "@/lib/utils";
@@ -73,11 +74,15 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
       if (!text || context.busy || attachments.uploading) {
         return false;
       }
-      const created = await context.startSession(workspaceId, {
-        text,
-        resources: attachments.readyResources,
-        ...submissionExtrasFromAdvancedSessionDraft(advanced),
-      });
+      const created = await context.startSession(
+        workspaceId,
+        {
+          text,
+          resources: attachments.readyResources,
+          ...submissionExtrasFromAdvancedSessionDraft(advanced),
+        },
+        { targetSandboxId: targetSandboxIdFromAdvancedSessionDraft(advanced) },
+      );
       if (!created) {
         return false;
       }
@@ -197,9 +202,18 @@ function AdvancedSessionOptions(props: {
   disabled: boolean;
 }) {
   const environments = useEnvironments();
+  // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
+  // gracefully: if selfhosted is disabled the API 404s → `machines` is empty and
+  // we render only "Cloud sandbox", never blocking session creation.
+  const fleet = useMachines({ pollIntervalMs: 10000 });
+  const selfhostedMachines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const { draft } = props;
   const update = (patch: Partial<AdvancedSessionDraft>) => props.onChange({ ...draft, ...patch });
+  const pickedMachine = draft.targetSandboxId
+    ? selfhostedMachines.find((machine) => machine.sandboxId === draft.targetSandboxId)
+    : null;
   const activeSummary = [
+    draft.targetSandboxId ? `machine: ${pickedMachine?.name ?? draft.targetSandboxId}` : null,
     draft.sandboxBackend ? `sandbox: ${draft.sandboxBackend}` : null,
     draft.environmentId ? `env: ${environments.environments.find((environment) => environment.id === draft.environmentId)?.name ?? draft.environmentId}` : null,
     draft.goalText.trim() ? "goal set" : null,
@@ -216,7 +230,7 @@ function AdvancedSessionOptions(props: {
           <SlidersHorizontalIcon className="size-3.5 shrink-0" />
           <span className="font-medium">Session setup</span>
           <span className="min-w-0 flex-1 truncate text-[11px] text-[color:var(--color-fg-subtle)]">
-            {activeSummary.length > 0 ? activeSummary.join(" · ") : "sandbox backend, environment, goal, OpenGeni tool permissions"}
+            {activeSummary.length > 0 ? activeSummary.join(" · ") : "machine, environment, goal, OpenGeni tool permissions"}
           </span>
           <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")} />
         </button>
@@ -225,17 +239,27 @@ function AdvancedSessionOptions(props: {
         <div className="mt-2 grid gap-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 p-3">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1.5">
-              <Label className="text-xs">Sandbox backend</Label>
+              <Label className="flex items-center gap-1.5 text-xs">
+                <ServerIcon className="size-3" />
+                Machine
+              </Label>
               <select
                 className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
-                value={draft.sandboxBackend}
+                value={draft.targetSandboxId ?? ""}
                 disabled={props.disabled}
-                onChange={(event) => update({ sandboxBackend: event.target.value as AdvancedSessionDraft["sandboxBackend"] })}
+                onChange={(event) => update({ targetSandboxId: event.target.value || null })}
               >
-                {sandboxBackendOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                <option value="">Cloud sandbox</option>
+                {selfhostedMachines.map((machine) => (
+                  <option key={machine.sandboxId} value={machine.sandboxId} disabled={machine.state !== "online"}>
+                    {machine.name}
+                    {machine.state !== "online" ? ` (${machine.state})` : ""}
+                  </option>
                 ))}
               </select>
+              <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                Run on one of your enrolled machines, or the default cloud sandbox.
+              </p>
             </div>
             <div className="grid gap-1.5">
               <Label className="flex items-center gap-1.5 text-xs">
@@ -260,6 +284,35 @@ function AdvancedSessionOptions(props: {
               </p>
             </div>
           </div>
+
+          {/* Low-level sandbox backend override — secondary to the Machine picker,
+              tucked behind a disclosure so it stays out of the primary flow. */}
+          <details className="group rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/30">
+            <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11px] text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg-muted)]">
+              <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+              Advanced: sandbox backend override
+              {draft.sandboxBackend ? (
+                <span className="ml-1 rounded bg-[color:var(--color-surface-2)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-muted)]">
+                  {draft.sandboxBackend}
+                </span>
+              ) : null}
+            </summary>
+            <div className="grid gap-1.5 px-3 pb-3">
+              <select
+                className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
+                value={draft.sandboxBackend}
+                disabled={props.disabled}
+                onChange={(event) => update({ sandboxBackend: event.target.value as AdvancedSessionDraft["sandboxBackend"] })}
+              >
+                {sandboxBackendOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                Forces the underlying sandbox type. Leave on the deployment default unless you know you need a specific backend.
+              </p>
+            </div>
+          </details>
 
           <div className="grid gap-2">
             <Label className="flex items-center gap-1.5 text-xs">

@@ -13,7 +13,9 @@ import {
 import { LaptopIcon } from "lucide-react";
 import { useState } from "react";
 
+import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
+import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
   Dialog,
   DialogContent,
@@ -26,6 +28,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
   const [enrollOpen, setEnrollOpen] = useState(false);
   void workspaceId;
+
+  // The install/approve URLs are deployment-relative: same origin as the API
+  // (falling back to the page origin), never a hardcoded marketing domain.
+  const origin = apiBaseUrl || (typeof window !== "undefined" ? window.location.origin : "");
+  const installCommand = installOneLiner(origin);
+  const verificationUri = deviceVerificationUri(origin);
 
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
@@ -63,9 +71,10 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             // user runs the one-liner this panel shows the install step + where to
             // approve. (A live code arrives once the agent calls /enrollments/start.)
             userCode="——————"
-            verificationUri="https://get.opengeni.ai/device"
-            installCommand="curl -fsSL https://get.opengeni.ai/install.sh | sh"
+            verificationUri={verificationUri}
+            installCommand={installCommand}
             phase={"pending" satisfies DeviceFlowPhase}
+            onCopyInstall={() => void navigator.clipboard.writeText(installCommand)}
             className="border-0 shadow-none"
           />
         </DialogContent>

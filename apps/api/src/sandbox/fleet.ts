@@ -18,6 +18,7 @@ import {
   listEnrollments,
   listSandboxes,
   readActiveSandbox,
+  requireSession,
   setActiveSandbox,
   type Database,
   type EnrollmentRecord,
@@ -31,6 +32,7 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
+import { HTTPException } from "hono/http-exception";
 import { relayConfigFromSettings } from "./routing";
 
 export type FleetServices = {
@@ -50,6 +52,34 @@ export type FleetContext = {
   /** The session's own group sandbox id (the lease group). */
   sessionGroupId: string;
 };
+
+/**
+ * Build a session-scoped {@link FleetContext}: load the session (workspace-
+ * scoped), reject a session with no box (backend:none — the fleet is only
+ * meaningful for a sandboxed session), and project its group backend/id. Shared
+ * by the worker-signed MCP fleet tools and the user-authenticated swap REST
+ * route so both resolve the SAME context (no drift). The `accountId`/`workspaceId`/
+ * `sessionId` come from the trusted grant/route; the backend + group id come from
+ * the session row.
+ */
+export async function buildFleetContextForSession(
+  deps: { db: Database },
+  ctx: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<FleetContext> {
+  const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
+  if (session.sandboxBackend === "none") {
+    throw new HTTPException(422, {
+      message: "this session has no sandbox (backend: none); the fleet is unavailable",
+    });
+  }
+  return {
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: ctx.sessionId,
+    sessionBackend: session.sandboxBackend,
+    sessionGroupId: session.sandboxGroupId,
+  };
+}
 
 /** The dominant liveness of a fleet member, surfaced to the dock + the agent. */
 export type FleetLiveness = "online" | "reconnecting" | "offline";

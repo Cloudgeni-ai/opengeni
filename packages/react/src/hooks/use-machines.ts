@@ -11,11 +11,13 @@ import type { MachinesResponse, MachineView, MetricSample } from "../types/machi
  * so a test/demo/Geni-frontend client can stand in, keeping the hook dual-consumer
  * safe (works in apps/web AND the separate Geni frontend).
  *
- * SEAM (surfaced to the orchestrator): there is no `attachMachine` REST method on
- * the M10 client — the active-sandbox SWAP is the M7 `sandbox_swap` MCP tool, not
- * a typed SDK call. So `attachMachine` is OPTIONAL here; the dashboard wires the
- * attach affordance to whatever swap path the host app exposes (an adapter or a
- * tool call). When absent, attach is a no-op and the card hides the button.
+ * The active-sandbox SWAP is now a typed SDK call (`swapActiveSandbox`, the M7
+ * user-authenticated REST equivalent of the `sandbox_swap` MCP tool). The real
+ * SDK client satisfies it structurally, so the default attach path is wired
+ * WHENEVER a sessionId is in scope (the swap is session-scoped). `attachMachine`
+ * stays an OPTIONAL escape hatch for a host that wants to supply its own swap
+ * adapter; when neither it nor a sessionId is present, attach is a no-op and the
+ * card hides the button.
  */
 export type MachinesClientLike = {
   /** GET /v1/workspaces/:ws/machines — the dashboard list + active pointer. */
@@ -26,8 +28,20 @@ export type MachinesClientLike = {
     enrollmentId: string,
     options?: { window?: "15m" | "1h" | "6h" | "24h" },
   ) => Promise<MetricSample[]>;
-  /** Swap the session's active sandbox to a machine. Optional (see SEAM above). */
-  attachMachine?: (workspaceId: string, sandboxId: string) => Promise<unknown>;
+  /**
+   * POST .../sessions/:sessionId/active-sandbox — swap the session's active
+   * sandbox to a machine. The default swap path; the real SDK client provides it.
+   */
+  swapActiveSandbox?: (
+    workspaceId: string,
+    sessionId: string,
+    request: { target: string },
+  ) => Promise<unknown>;
+  /**
+   * Host-supplied swap adapter (an escape hatch). When present it wins over the
+   * default `swapActiveSandbox` path. Session-scoped, like the swap it backs.
+   */
+  attachMachine?: (workspaceId: string, sessionId: string, sandboxId: string) => Promise<unknown>;
 };
 
 export type UseMachinesOptions = ClientOverride & {
@@ -88,21 +102,33 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   const [attachingSandboxId, setAttachingSandboxId] = useState<string | null>(null);
 
   const data = state.data ?? EMPTY;
-  const canAttach = typeof machinesClient.attachMachine === "function";
+  // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
+  // the default `swapActiveSandbox` path is wired whenever a sessionId is in
+  // scope. Either way attach needs a sessionId to point at.
+  const canAttach =
+    sessionId !== undefined &&
+    (typeof machinesClient.attachMachine === "function" ||
+      typeof machinesClient.swapActiveSandbox === "function");
 
   const attach = useCallback(
     async (sandboxId: string): Promise<boolean> => {
-      if (!machinesClient.attachMachine) return false;
+      if (sessionId === undefined) return false;
+      const runSwap = machinesClient.attachMachine
+        ? () => machinesClient.attachMachine!(workspaceId, sessionId, sandboxId)
+        : machinesClient.swapActiveSandbox
+          ? () => machinesClient.swapActiveSandbox!(workspaceId, sessionId, { target: sandboxId })
+          : null;
+      if (!runSwap) return false;
       setAttachingSandboxId(sandboxId);
       const result = await mutation.run(async () => {
-        await machinesClient.attachMachine!(workspaceId, sandboxId);
+        await runSwap();
         return true;
       });
       setAttachingSandboxId(null);
       if (result) await state.refresh();
       return result === true;
     },
-    [machinesClient, workspaceId, mutation.run, state.refresh],
+    [machinesClient, workspaceId, sessionId, mutation.run, state.refresh],
   );
 
   const fetchSeries = useCallback(

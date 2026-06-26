@@ -65,6 +65,7 @@ import {
 } from "../domain/scheduled-tasks";
 import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle } from "../domain/sessions";
 import {
+  buildFleetContextForSession,
   listFleet,
   provisionSandbox,
   runOnSandbox,
@@ -518,21 +519,15 @@ function registerFleetTools(
   const services: FleetServices = { db: deps.db, settings: deps.settings, bus: deps.bus };
 
   // Resolve the session's group sandbox (the default/home fleet member) at
-  // call-time. Throws when the session has no box (backend:none) — the fleet is
-  // only meaningful for a session that runs in a sandbox.
-  const fleetContext = async (): Promise<FleetContext> => {
-    const session = await requireSession(deps.db, grant.workspaceId, sessionId);
-    if (session.sandboxBackend === "none") {
-      throw new Error("this session has no sandbox (backend: none); the fleet is unavailable");
-    }
-    return {
+  // call-time via the shared helper (same context the user-authenticated swap
+  // REST route builds). Throws when the session has no box (backend:none) — the
+  // fleet is only meaningful for a session that runs in a sandbox.
+  const fleetContext = async (): Promise<FleetContext> =>
+    await buildFleetContextForSession(deps, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
-      sessionBackend: session.sandboxBackend,
-      sessionGroupId: session.sandboxGroupId,
-    };
-  };
+    });
 
   server.registerTool("sandboxes_list", {
     description:

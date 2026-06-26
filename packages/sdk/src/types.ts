@@ -585,6 +585,9 @@ export type CreateSessionRequest = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  // The enrolled machine (a sandbox id) to run this session on; seeds the
+  // active-sandbox pointer at creation so the first turn lands on it.
+  targetSandboxId?: string | undefined;
   environmentId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
@@ -1548,4 +1551,21 @@ export type MachinesResponse = {
  *  (~1/min) history the dashboard time-range reads. */
 export type MachineMetricsSeriesResponse = {
   samples: MetricSample[];
+};
+
+/** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's
+ *  active sandbox. `target` is a `MachineView.sandboxId`, or "session"/"default"
+ *  to swap back to the session's own group box. */
+export type SwapActiveSandboxRequest = {
+  target: string;
+};
+
+/** The swap outcome (mirrors the server `FleetSwapResult`). `swapped` is true on a
+ *  successful repoint OR a no-op (already there); `reason` carries the failure
+ *  detail (unowned/offline target, or a lost epoch fence) when false. */
+export type SwapActiveSandboxResponse = {
+  swapped: boolean;
+  activeSandboxId: string | null;
+  activeEpoch: number;
+  reason?: string;
 };

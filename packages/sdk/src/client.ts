@@ -46,6 +46,9 @@ import type {
   MachineView,
   MetricSample,
   MachineMetricsSeriesResponse,
+  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
+  SwapActiveSandboxRequest,
+  SwapActiveSandboxResponse,
   ListWorkspaceMembersResponse,
   PackInstallation,
   ReasoningEffort,
@@ -217,6 +220,26 @@ export class OpenGeniClient {
       { ...(options.window !== undefined ? { window: options.window } : {}) },
     );
     return response.samples;
+  }
+
+  /**
+   * Swap a session's active sandbox (the user-authenticated equivalent of the
+   * M7 `sandbox_swap` MCP tool). `target` is a `MachineView.sandboxId` from
+   * `listMachines`, or "session"/"default" to swap back to the session's own
+   * group box. Validation (ownership/liveness/epoch fence) is server-side; the
+   * result echoes the resulting pointer (`swapped: false` + `reason` on a
+   * rejected target or a lost epoch fence).
+   */
+  async swapActiveSandbox(
+    workspaceId: string,
+    sessionId: string,
+    request: SwapActiveSandboxRequest,
+  ): Promise<SwapActiveSandboxResponse> {
+    return await this.requestJson<SwapActiveSandboxResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/active-sandbox`,
+      request,
+    );
   }
 
   // --- Scheduled tasks -------------------------------------------------------

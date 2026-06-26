@@ -16,6 +16,8 @@
 import {
   MachineMetricsSeriesResponse,
   MachinesResponse,
+  SwapActiveSandboxRequest,
+  SwapActiveSandboxResponse,
 } from "@opengeni/contracts";
 import {
   getEnrollment,
@@ -25,6 +27,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
+import { buildFleetContextForSession, swapActiveSandbox } from "../sandbox/fleet";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
@@ -79,5 +82,26 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(MachineMetricsSeriesResponse.parse({
       samples: rows.map(metricRowToSample),
     }));
+  });
+
+  // ── POST /workspaces/:ws/sessions/:sessionId/active-sandbox (swap) ───────────
+  // The user-authenticated equivalent of the M7 `sandbox_swap` MCP tool: repoint
+  // a session's active sandbox under the epoch fence. Same perm as PATCH session
+  // (sessions:control); gated behind sandboxSelfhostedEnabled (404 when off, the
+  // surface is invisible). All ownership/liveness/epoch validation lives inside
+  // swapActiveSandbox — the route only builds the session-scoped FleetContext.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/active-sandbox", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    assertSelfhostedEnabled();
+    const sessionId = c.req.param("sessionId");
+    const body = SwapActiveSandboxRequest.parse(await c.req.json());
+    const ctx = await buildFleetContextForSession(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+    });
+    const result = await swapActiveSandbox({ db, settings, bus }, ctx, body.target);
+    return c.json(SwapActiveSandboxResponse.parse(result));
   });
 }
