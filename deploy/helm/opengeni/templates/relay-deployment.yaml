@@ -71,16 +71,19 @@ spec:
                   key: {{ .Values.relay.relayTokenSecretKey | quote }}
                   optional: true
             # Tuning knobs (non-secret) — defaults match the relay's own defaults.
+            # `int64` forces integer rendering: Helm coalesces numeric values through
+            # float64, so large ints (e.g. 16777216) would otherwise render as
+            # "1.6777216e+07" and the relay's integer arg parser rejects them.
             - name: OPENGENI_RELAY_RING_FRAMES
-              value: {{ .Values.relay.tuning.ringFrames | quote }}
+              value: {{ .Values.relay.tuning.ringFrames | int64 | quote }}
             - name: OPENGENI_RELAY_SPLICE_BUFFER
-              value: {{ .Values.relay.tuning.spliceBuffer | quote }}
+              value: {{ .Values.relay.tuning.spliceBuffer | int64 | quote }}
             - name: OPENGENI_RELAY_RATE_BURST_BYTES
-              value: {{ .Values.relay.tuning.rateBurstBytes | quote }}
+              value: {{ .Values.relay.tuning.rateBurstBytes | int64 | quote }}
             - name: OPENGENI_RELAY_RATE_BYTES_PER_SEC
-              value: {{ .Values.relay.tuning.rateBytesPerSec | quote }}
+              value: {{ .Values.relay.tuning.rateBytesPerSec | int64 | quote }}
             - name: OPENGENI_RELAY_PAIR_TIMEOUT_SECS
-              value: {{ .Values.relay.tuning.pairTimeoutSecs | quote }}
+              value: {{ .Values.relay.tuning.pairTimeoutSecs | int64 | quote }}
             {{- with .Values.relay.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
