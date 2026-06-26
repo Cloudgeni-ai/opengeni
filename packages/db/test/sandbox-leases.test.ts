@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   acquireLease,
@@ -14,7 +14,6 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { migrate } from "../src/migrate";
 
 // The 0017 lease state machine driven through the REAL packages/db query fns
 // (acquireLease/commit/release/heartbeat/reap) against a THROWAWAY postgres,
@@ -39,47 +38,8 @@ import { migrate } from "../src/migrate";
 // because 0000_initial does CREATE EXTENSION vector. Container torn down in
 // afterAll regardless of outcome.
 
-const CONTAINER = "ogtest-pg-leases";
-const PORT = 55455;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -111,38 +71,15 @@ async function readRow(workspaceId: string, groupId: string) {
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("sandbox-leases");
+  if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
-    console.warn(`[sandbox-leases] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[sandbox-leases] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
-
-  // Apply the full migration chain as the superuser.
-  await migrate(ADMIN_URL);
-
-  // Provision the opengeni_app login role AFTER migrating, then run the same
-  // grant blocks the migrations would have (they were IF EXISTS-skipped because
-  // the role didn't exist yet). This is the role the package fns connect as so
-  // FORCE RLS is genuinely enforced.
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(`
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-      END IF;
-    END $$;
-    GRANT USAGE ON SCHEMA public TO opengeni_app;
-    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-  `);
-
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
@@ -150,10 +87,7 @@ afterAll(async () => {
   try {
     await client?.close();
   } catch { /* noop */ }
-  try {
-    await admin?.end();
-  } catch { /* noop */ }
-  removeContainer();
+  await shared?.release();
 });
 
 describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {

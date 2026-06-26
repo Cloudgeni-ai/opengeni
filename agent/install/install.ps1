@@ -73,7 +73,15 @@ function Get-AssetUrl($name) {
 
 function Invoke-Download($url, $out) {
   try {
-    Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+    # Support file:// (used by the install smoke test + air-gapped mirrors); the
+    # built-in Invoke-WebRequest rejects the file scheme, unlike curl on Unix.
+    if ($url -like 'file://*') {
+      $local = ([uri]$url).LocalPath
+      if (-not (Test-Path -LiteralPath $local)) { Fail 3 "file not found: $local" }
+      Copy-Item -LiteralPath $local -Destination $out -Force
+    } else {
+      Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
+    }
   } catch {
     Fail 3 "failed to download $url : $($_.Exception.Message)"
   }

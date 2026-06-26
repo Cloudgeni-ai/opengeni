@@ -65,6 +65,7 @@
         "zod": "^4.2.1",
       },
       "devDependencies": {
+        "@opengeni/testing": "workspace:*",
         "@types/pg": "^8.20.0",
         "postgres": "^3.4.7",
         "typescript": "^6.0.3",
@@ -175,6 +176,7 @@
         "postgres": "^3.4.7",
       },
       "devDependencies": {
+        "@opengeni/testing": "workspace:*",
         "drizzle-kit": "^0.31.8",
         "typescript": "^6.0.3",
       },

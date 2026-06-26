@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   createDb,
@@ -24,58 +24,20 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { migrate } from "../src/migrate";
 
 // M2 (bring-your-own-compute): the 0024 sandboxes/enrollments/metrics DAOs +
 // the per-session epoch-fenced active-sandbox pointer + the mapSession round-trip
 // (active_sandbox_id/active_epoch), driven through the REAL packages/db query fns
-// against a THROWAWAY postgres (same harness as sandbox-leases.test.ts). The
-// package fns connect as opengeni_app (a NON-superuser, so FORCE RLS genuinely
-// applies); accounts/workspaces are seeded as the postgres superuser (bypasses
-// RLS). pgvector/pgvector:pg16 because 0000_initial does CREATE EXTENSION vector.
-// Container torn down in afterAll regardless of outcome.
-
-const CONTAINER = "ogtest-pg-byoc";
-const PORT = 55456;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
+// against a THROWAWAY postgres database (acquired from the SHARED test container —
+// see packages/testing/src/shared-pg.ts — so the full parallel `bun test` run does
+// not spin up one container per file). The package fns connect as opengeni_app (a
+// NON-superuser, so FORCE RLS genuinely applies); accounts/workspaces are seeded as
+// the postgres superuser (bypasses RLS). pgvector image because 0000_initial does
+// CREATE EXTENSION vector. The database is dropped + the shared refcount released
+// in afterAll regardless of outcome.
 
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -90,36 +52,15 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("sandboxes-enrollments");
+  if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
-    console.warn(`[sandboxes-enrollments] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[sandboxes-enrollments] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
-
-  // Apply the full migration chain as the superuser.
-  await migrate(ADMIN_URL);
-
-  // Provision the opengeni_app login role AFTER migrating, then run the same grant
-  // blocks the migrations would have (IF EXISTS-skipped while the role was absent).
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(`
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-      END IF;
-    END $$;
-    GRANT USAGE ON SCHEMA public TO opengeni_app;
-    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-  `);
-
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
@@ -127,10 +68,7 @@ afterAll(async () => {
   try {
     await client?.close();
   } catch { /* noop */ }
-  try {
-    await admin?.end();
-  } catch { /* noop */ }
-  removeContainer();
+  await shared?.release();
 });
 
 describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer", () => {

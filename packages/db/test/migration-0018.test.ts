@@ -1,86 +1,50 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-// Migration 0018 (sandbox_os + sandbox_group_id) applied against a THROWAWAY
-// postgres. Proves: the columns/CHECK/index exist after the full chain, the
-// backfill is correct (a pre-0018 row gets sandbox_os='linux' and
-// sandbox_group_id == id), the CHECK rejects an out-of-enum OS, and the
-// migration is rollback-safe (re-applying the whole chain is an idempotent
-// no-op). The container is torn down in afterAll regardless of outcome.
+// Migration 0018 (sandbox_os + sandbox_group_id) applied against a THROWAWAY,
+// PRISTINE postgres database (acquired from the SHARED test container — see
+// packages/testing/src/shared-pg.ts — so the full parallel `bun test` run does
+// not spin up one container per file). Proves: the columns/CHECK/index exist
+// after the full chain, the backfill is correct (a pre-0018 row gets
+// sandbox_os='linux' and sandbox_group_id == id), the CHECK rejects an
+// out-of-enum OS, and the migration is rollback-safe (re-applying the whole
+// chain is an idempotent no-op). The database is dropped + the shared refcount
+// released in afterAll regardless of outcome.
 //
-// pgvector/pgvector:pg16 (not vanilla postgres:16) because 0000_initial does
-// CREATE EXTENSION vector. The opengeni_app GRANT blocks are all IF EXISTS-
-// guarded, so no role provisioning is needed for the schema to apply.
-
-const CONTAINER = "ogbuild-pg";
-const PORT = 55433;
-const PASSWORD = "x";
-const DB_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
+// The pgvector image is used because 0000_initial does CREATE EXTENSION vector.
+// The opengeni_app GRANT blocks are all IF EXISTS-guarded, so no role
+// provisioning is needed for the schema to apply.
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
 
 async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
   const text = await readFile(join(migrationsDir, file), "utf8");
   await sql.unsafe(text);
 }
 
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      const probe = postgres(DB_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 let available = true;
+let blank: BlankTestDatabase | null = null;
+let DB_URL = "";
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  blank = await acquireBlankTestDatabase("migration-0018");
+  if (!blank) {
     available = false;
     // Surface a clear skip reason rather than a cryptic connection error.
     // eslint-disable-next-line no-console
-    console.warn(`[migration-0018] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[migration-0018] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
+  DB_URL = blank.databaseUrl;
 }, 120_000);
 
-afterAll(() => {
-  removeContainer();
+afterAll(async () => {
+  await blank?.release();
 });
 
 describe("migration 0018 (sandbox_os + sandbox_group_id)", () => {

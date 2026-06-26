@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import { resolveStreamTokenSecret } from "@opengeni/config";
-import { testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
 import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
@@ -19,7 +18,6 @@ import {
 import { join } from "node:path";
 import { createRequire } from "node:module";
 import { buildStreamUrl, verifyStreamToken, type EstablishedSandboxSession } from "@opengeni/runtime/sandbox";
-import { migrate } from "../../../packages/db/src/migrate";
 import { mintDesktopStream } from "../src/sandbox/viewer";
 
 // P4.2 — the pixel DATA PLANE against a REAL lease (pgvector throwaway DB). Drives
@@ -42,45 +40,8 @@ import { mintDesktopStream } from "../src/sandbox/viewer";
 // epoch yields a fresh host) — no live cloud box. The lease/RLS/fence machinery
 // is REAL. The live-Modal RFB proof lives in the gated test below.
 
-const CONTAINER = "ogtest-pg-p42";
-const PORT = 55461;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    /* already gone */
-  }
-}
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -157,36 +118,23 @@ async function seedWarmModalBox(accountId: string, workspaceId: string): Promise
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("sandbox-desktop-stream");
+  if (!shared) {
     available = false;
-    console.warn(`[p42] docker unavailable, skipping: ${String(err)}`);
+    // eslint-disable-next-line no-console
+    console.warn("[sandbox-desktop-stream] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
-  await migrate(ADMIN_URL);
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(`
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-      END IF;
-    END $$;
-    GRANT USAGE ON SCHEMA public TO opengeni_app;
-    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-  `);
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
-  try { await admin?.end(); } catch { /* noop */ }
-  removeContainer();
+  try {
+    await client?.close();
+  } catch { /* noop */ }
+  await shared?.release();
 });
 
 describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
   accrueWarmSeconds,
@@ -11,7 +11,6 @@ import {
   type Database,
   type DbClient,
 } from "../src/index";
-import { migrate } from "../src/migrate";
 
 // P2.1 warm-time metering driven through the REAL packages/db query fns
 // (accrueWarmSeconds / forceDrainOverLimitViewerOnlyBoxes / listMeterableWarmLeases)
@@ -36,47 +35,8 @@ import { migrate } from "../src/migrate";
 // read rides the SECURITY-DEFINER list_meterable_warm_leases fn). Container torn
 // down in afterAll regardless of outcome.
 
-const CONTAINER = "ogtest-pg-warm-meter";
-const PORT = 55459;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -154,37 +114,23 @@ async function seedBalance(accountId: string, micros: number): Promise<void> {
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("warm-meter-db");
+  if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
-    console.warn(`[warm-meter] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[warm-meter-db] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
-  await migrate(ADMIN_URL);
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(`
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-      END IF;
-    END $$;
-    GRANT USAGE ON SCHEMA public TO opengeni_app;
-    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-  `);
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
-  try { await admin?.end(); } catch { /* noop */ }
-  removeContainer();
+  try {
+    await client?.close();
+  } catch { /* noop */ }
+  await shared?.release();
 });
 
 describe("P2.1 warm-time metering (real packages/db + RLS)", () => {

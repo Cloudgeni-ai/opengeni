@@ -1,80 +1,43 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-// Migration 0019 (session_stream_acknowledgments) applied against a THROWAWAY
-// postgres via the full migrate() chain. Proves: the consent-gate table exists
-// with the right columns + the unique (workspace, group, subject) index + RLS
-// enabled, the upsert (re-ack) is a no-duplicate ON CONFLICT DO UPDATE that ORs
-// the consent bits monotonically, and the migration is rollback-safe (re-running
-// the whole chain is an idempotent no-op). Container torn down in afterAll.
+// Migration 0019 (session_stream_acknowledgments) applied against a THROWAWAY,
+// PRISTINE postgres database (acquired from the SHARED test container — see
+// packages/testing/src/shared-pg.ts) via the full migrate() chain. Proves: the
+// consent-gate table exists with the right columns + the unique (workspace,
+// group, subject) index + RLS enabled, the upsert (re-ack) is a no-duplicate ON
+// CONFLICT DO UPDATE that ORs the consent bits monotonically, and the migration
+// is rollback-safe (re-running the whole chain is an idempotent no-op). The
+// database is dropped + the shared refcount released in afterAll.
 //
-// pgvector/pgvector:pg16 (0000_initial does CREATE EXTENSION vector). The
+// The pgvector image is used (0000_initial does CREATE EXTENSION vector). The
 // opengeni_app GRANT block is IF EXISTS-guarded, so no role provisioning is
 // needed for the schema to apply (the table-level assertions run as superuser).
 
-const CONTAINER = "ogbuild-pg-0019";
-const PORT = 55434;
-const PASSWORD = "x";
-const DB_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      const probe = postgres(DB_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 let available = true;
+let blank: BlankTestDatabase | null = null;
+let DB_URL = "";
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  blank = await acquireBlankTestDatabase("migration-0019");
+  if (!blank) {
     available = false;
     // eslint-disable-next-line no-console
-    console.warn(`[migration-0019] docker unavailable, skipping: ${String(err)}`);
+    console.warn("[migration-0019] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
+  DB_URL = blank.databaseUrl;
 }, 120_000);
 
-afterAll(() => {
-  removeContainer();
+afterAll(async () => {
+  await blank?.release();
 });
 
 describe("migration 0019 (session_stream_acknowledgments)", () => {

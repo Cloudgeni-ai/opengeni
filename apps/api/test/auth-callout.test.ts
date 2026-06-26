@@ -5,7 +5,7 @@
 // PURE decision: a valid+active bearer grants a workspace-scoped user JWT, every
 // failure mode produces a SIGNED denial (never a throw, never a grant).
 
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 import { signEnrollmentBearer } from "@opengeni/contracts";
 import { decodeAuthRequest, mintAuthResponse, nkeys } from "@opengeni/events";
 
@@ -15,11 +15,39 @@ const AGENT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 // The active-enrollment registry the mocked getEnrollment resolves against.
 const active = new Set<string>([`${WS}:${AGENT}`]);
+
+// `bun test` runs EVERY test file in ONE shared process, and a top-level
+// `mock.module` replaces a module process-globally for the WHOLE run — it is
+// installed during the collection phase, so it is live even while OTHER files'
+// tests execute (regardless of file order), and `mock.restore()` in afterAll
+// only helps files that run strictly after this one finishes. `@opengeni/db` is
+// imported by nearly every test file (the BYO sandbox tests read enrollments
+// through the real DAOs), so a naive whole-module replacement poisons them.
+//
+// To stay a good citizen this mock therefore: (a) spreads every real export so
+// nothing becomes `undefined`, and (b) makes `getEnrollment` override ONLY this
+// file's synthetic test workspace (`WS`) — any other workspace falls through to
+// the REAL getEnrollment against that caller's real DB. That keeps the BYO
+// tests correct even while this mock is installed. afterAll still restores the
+// module for cleanliness.
+const realDb = await import("@opengeni/db");
+// Capture the REAL getEnrollment into a stable local BEFORE installing the mock.
+// The `realDb` namespace is a live binding, so after mock.module replaces the
+// module `realDb.getEnrollment` would resolve back to the stub — capturing it
+// here avoids infinite self-delegation.
+const realGetEnrollment = realDb.getEnrollment;
 mock.module("@opengeni/db", () => ({
-  getEnrollment: async (_db: unknown, workspaceId: string, enrollmentId: string) =>
-    active.has(`${workspaceId}:${enrollmentId}`)
-      ? { id: enrollmentId, workspaceId, status: "active" }
-      : null,
+  ...realDb,
+  getEnrollment: async (db: never, workspaceId: string, enrollmentId: string) => {
+    // Only intercept this test's synthetic workspace; everyone else gets the
+    // real DAO so unrelated, process-shared test files are unaffected.
+    if (workspaceId !== WS) {
+      return realGetEnrollment(db, workspaceId, enrollmentId);
+    }
+    return active.has(`${workspaceId}:${enrollmentId}`)
+      ? ({ id: enrollmentId, workspaceId, status: "active" } as never)
+      : null;
+  },
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
@@ -61,6 +89,13 @@ function readResponse(bytes: Uint8Array): { granted: boolean; error?: string; us
 afterEach(() => {
   active.clear();
   active.add(`${WS}:${AGENT}`);
+});
+
+// Restore the REAL @opengeni/db so other files in this shared `bun test` process
+// (notably the BYO sandbox tests that read enrollments through the real DAOs)
+// are not poisoned by the getEnrollment stub above.
+afterAll(() => {
+  mock.restore();
 });
 
 describe("handleAuthorizationRequest", () => {
