@@ -9,7 +9,7 @@ name: Agent Release
 #
 # Build matrix → native runners → correct platform binaries + real cargo test:
 #   x86_64/aarch64-unknown-linux-musl  (ubuntu-latest, static via cargo-zigbuild)
-#   universal-apple-darwin             (macos-14 lipo of x86_64 + arm64)
+#   universal-apple-darwin             (macos-26 lipo of x86_64 + arm64)
 #   x86_64/aarch64-pc-windows-msvc     (windows-latest)
 #
 # Every artifact is minisign-signed (the SAME pinned key the install scripts embed)
@@ -82,7 +82,7 @@ jobs:
             asset: opengeni-agent-aarch64-unknown-linux-musl
             kind: linux
           - target: universal-apple-darwin
-            runner: macos-14
+            runner: macos-26
             asset: opengeni-agent-universal-apple-darwin
             kind: macos
           - target: x86_64-pc-windows-msvc
