@@ -91,6 +91,22 @@ sha2 = "0.10"
 # Constant-time signature comparison (mirrors the TS constantTimeEqual).
 subtle = "2"
 
+# --- Self-update (opengeni-agent-update) ----------------------------------------
+# Pure-Rust minisign (ed25519) signature verify — NO libsodium, keeps the static
+# musl build clean and the workspace `unsafe_code = forbid` intact. The SAME
+# pinned key the install scripts embed verifies every self-update artifact.
+minisign-verify = "0.2"
+# The genuinely-hard atomic self-replace primitive (current→backup, verified-new→
+# current; the Windows rename-self-aside). By the cargo-dist/Astral authors. We own
+# discovery/verify/rollback; we delegate ONLY the atomic replace.
+self-replace = "1"
+# Deterministic staged-rollout cohorting: blake3(agentId + cohort_salt) % 100.
+blake3 = "1"
+# Semantic-version comparison for version-monotonicity + min_supported gating.
+semver = "1"
+# Hex encode/decode for the sha256 compare.
+hex = "0.4"
+
 # Test-only helpers.
 tempfile = "3"
 

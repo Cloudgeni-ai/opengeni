@@ -19,7 +19,10 @@
 //! * [`metrics`] — the heartbeat metrics sample (deepened in M10).
 //! * [`supervisor`] — dial → serve → reconnect, forever, with heartbeats + the
 //!   clean going-offline.
-//! * [`cli`] — the `run` / `enroll` / `service` (stub) surface.
+//! * [`cli`] — the `run` / `enroll` / `service` / `update` / `uninstall` surface.
+//! * [`service`] — the opt-in always-on service install/uninstall/status glue.
+//! * [`update`] — the `update` subcommand wiring the self-update crate.
+//! * [`uninstall`] — the `uninstall` subcommand (remove binary/creds/enrollment).
 //!
 //! The DESKTOP + terminal/framebuffer STREAMS are M8: the
 //! [`Platform`](opengeni_agent_platform::Platform) trait declares them and the
@@ -34,7 +37,10 @@ mod config;
 mod dispatch;
 mod enrollment;
 mod metrics;
+mod service;
 mod supervisor;
+mod uninstall;
+mod update;
 
 use std::sync::Arc;
 
@@ -44,7 +50,7 @@ use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use cli::{Cli, Command, EnrollArgs, RunArgs, ServiceArgs};
+use cli::{Cli, Command, EnrollArgs, RunArgs};
 use config::StoredCredentials;
 use enrollment::{EnrollmentOffer, EnrollmentRequest, InstallIdentity};
 use supervisor::Supervisor;
@@ -100,11 +106,22 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
     match cli.command.unwrap_or_default() {
         Command::Run(args) => run(args, &api_url).await,
         Command::Enroll(args) => enroll_command(args, &api_url).await.map(|_| ()),
-        Command::Service(args) => {
-            service_command(&args);
-            Ok(())
+        Command::Service(args) => service::run(&args).map_err(string_err),
+        Command::Update(args) => {
+            // The updater is synchronous (download → verify → swap); run it on a
+            // blocking thread so it never stalls the async runtime.
+            tokio::task::spawn_blocking(move || update::run(&args))
+                .await
+                .map_err(to_boxed)?
+                .map_err(string_err)
         }
+        Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
     }
+}
+
+/// Wraps a human-facing error string into the boxed handler error.
+fn string_err(message: String) -> anyhow_lite::BoxError {
+    Box::<dyn std::error::Error + Send + Sync>::from(message)
 }
 
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
@@ -120,6 +137,10 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             channel: args.channel.clone(),
             machine_name: args.machine_name.clone(),
             force: false,
+            // A foreground `run` that needs to enroll honors a CI token if present
+            // (so `OPENGENI_ENROLL_TOKEN … run` works), else the device flow.
+            token: std::env::var("OPENGENI_ENROLL_TOKEN").ok(),
+            non_interactive: false,
         };
         enroll_command(enroll_args, api_url).await?
     };
@@ -210,6 +231,17 @@ async fn enroll_command(
         }
     }
 
+    // Non-interactive (CI/automation) enroll: a workspace-scoped token short-circuits
+    // the device flow (dossier §23.1). The token→credentials exchange is the M5
+    // enrollment endpoint; until that endpoint accepts a token here we refuse loudly
+    // rather than fall back to a device flow that would hang an unattended install.
+    if args.non_interactive || args.token.is_some() {
+        let token = args.token.clone().ok_or_else(|| {
+            string_err("--non-interactive requires --token (or $OPENGENI_ENROLL_TOKEN)".to_string())
+        })?;
+        return enroll_with_token(&args, api_url, &token);
+    }
+
     let platform = NativePlatform::new();
     let identity = platform.host_identity();
     let machine_name = args
@@ -257,19 +289,29 @@ async fn enroll_command(
     Ok(stored)
 }
 
-/// The `service` command — a structured stub until the per-OS `ServiceManager`
-/// lands in M11 (dossier §23.1). It parses + prints an honest message and exits
-/// non-fatally so scripts can probe the surface.
-fn service_command(args: &ServiceArgs) {
-    let action = args.action.label();
+/// Non-interactive token enrollment (the CI/automation path, dossier §23.1). The
+/// token→credentials EXCHANGE is the M5 enrollment endpoint; the install scripts
+/// pass `OPENGENI_ENROLL_TOKEN` and the CLI surface is stable, but the agent does
+/// not fabricate credentials — until the token-exchange endpoint is wired it
+/// returns a precise error so an unattended install fails loudly (never silently
+/// falling back to a device flow that would hang). The `_api_url`/`_token` are
+/// threaded so the reconciliation against the M5 endpoint is a one-function change.
+fn enroll_with_token(
+    args: &EnrollArgs,
+    _api_url: &str,
+    _token: &str,
+) -> anyhow_lite::ResultOf<StoredCredentials> {
     warn!(
-        action,
-        "`service` is an opt-in daemon path not yet implemented (M11)"
+        channel = %args.channel,
+        "non-interactive token enrollment requested; the token-exchange endpoint is the M5 enrollment seam"
     );
-    println!(
-        "opengeni-agent service {action}: the opt-in always-on service is not yet implemented (M11).\n\
-         The default, supported run model is FOREGROUND: `opengeni-agent run`."
-    );
+    Err(string_err(
+        "non-interactive token enrollment is not yet wired to the control-plane \
+         token-exchange endpoint (the M5 enrollment seam). Use the interactive \
+         `opengeni-agent enroll` device flow, or set OPENGENI_API_URL to a control \
+         plane exposing the token exchange."
+            .to_string(),
+    ))
 }
 
 /// Spawns a task that triggers a clean shutdown on SIGINT or (unix) SIGTERM.

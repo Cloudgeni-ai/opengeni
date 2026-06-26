@@ -1,0 +1,13 @@
+{
+  "channel": "stable",
+  "version": "1.0.1",
+  "min_supported": "1.0.0",
+  "rollout_percent": 100,
+  "cohort_salt": "fixture",
+  "artifacts": [
+    {"target":"x86_64-unknown-linux-musl","url":"agent/stable/agent-v1.0.1","size":44,"sha256":"ab12058bbf409cd1949e5d0c4bec7ff3fdfbeaf9d8da13b4db9a362a647c66c9","minisig_url":"agent/stable/agent-v1.0.1.minisig"}
+  ],
+  "notes_url":"https://x/notes",
+  "signed_at_ms": 1700000000000,
+  "force": false
+}

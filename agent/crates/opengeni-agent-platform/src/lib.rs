@@ -34,6 +34,7 @@ mod desktop;
 mod error;
 mod native;
 mod pty;
+pub mod service;
 
 #[cfg(target_os = "linux")]
 mod linux;

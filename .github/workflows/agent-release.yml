@@ -1,0 +1,338 @@
+name: Agent Release
+
+# Cross-platform signed release of the opengeni-agent binary (dossier §23.3/§24.1).
+# Triggered on a pushed `agent-v*` tag (decoupled from the npm changesets release so
+# the Rust binary versions independently) or a manual dispatch. Reuses release.yml's
+# conventions: actions/checkout@v6, the built-in GITHUB_TOKEN, version-as-source-of-
+# truth, and a dormant-until-opted-in guard (RELEASE_ENABLED) so it never red-fails
+# on an accidental tag.
+#
+# Build matrix → native runners → correct platform binaries + real cargo test:
+#   x86_64/aarch64-unknown-linux-musl  (ubuntu-latest, static via cargo-zigbuild)
+#   universal-apple-darwin             (macos-14 lipo of x86_64 + arm64)
+#   x86_64/aarch64-pc-windows-msvc     (windows-latest)
+#
+# Every artifact is minisign-signed (the SAME pinned key the install scripts embed)
+# + sha256'd. The macOS notarize + Windows Authenticode steps are GUARDED to skip
+# cleanly when their creds are absent (category-4 deferred) — the pipeline ships
+# unsigned-for-those-OSes-but-minisign-attested with a clear note, never failing.
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without the agent-v prefix), e.g. 1.2.3"
+        required: true
+
+concurrency:
+  group: agent-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A fast, cheap guard: opted-in + the tag matches the crate version, so a
+  # fat-fingered tag fails in seconds rather than after a 20-min macOS build.
+  guard:
+    name: Guard
+    runs-on: ubuntu-latest
+    if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve + verify the version
+        id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#agent-v}"
+          fi
+          crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag/input version: $version ; crate version: $crate_version"
+          if [ "$version" != "$crate_version" ]; then
+            echo "::error::version mismatch — tag $version != agent/Cargo.toml $crate_version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: guard
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset: opengeni-agent-x86_64-unknown-linux-musl
+            kind: linux
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset: opengeni-agent-aarch64-unknown-linux-musl
+            kind: linux
+          - target: universal-apple-darwin
+            runner: macos-14
+            asset: opengeni-agent-universal-apple-darwin
+            kind: macos
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            asset: opengeni-agent-x86_64-pc-windows-msvc.exe
+            kind: windows
+          - target: aarch64-pc-windows-msvc
+            runner: windows-latest
+            asset: opengeni-agent-aarch64-pc-windows-msvc.exe
+            kind: windows
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: ${{ matrix.target }}
+
+      # ---- Linux: static musl via cargo-zigbuild (robust ring+musl cross-link). ----
+      - name: Build (Linux musl static)
+        if: matrix.kind == 'linux'
+        shell: bash
+        working-directory: agent
+        run: |
+          set -euo pipefail
+          pip install ziglang
+          cargo install --locked cargo-zigbuild
+          rustup target add "${{ matrix.target }}"
+          cargo zigbuild --release --target "${{ matrix.target }}" -p opengeni-agent
+          cp "target/${{ matrix.target }}/release/opengeni-agent" "../${{ matrix.asset }}"
+          file "../${{ matrix.asset }}"
+
+      # ---- macOS: build both arches natively, lipo into ONE universal binary. ----
+      - name: Build (macOS universal)
+        if: matrix.kind == 'macos'
+        shell: bash
+        working-directory: agent
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin -p opengeni-agent
+          cargo build --release --target aarch64-apple-darwin -p opengeni-agent
+          lipo -create \
+            "target/x86_64-apple-darwin/release/opengeni-agent" \
+            "target/aarch64-apple-darwin/release/opengeni-agent" \
+            -output "../${{ matrix.asset }}"
+          lipo -info "../${{ matrix.asset }}"
+
+      # macos-13 (Intel) also runs the Intel-arch unit tests, so an Intel-only break
+      # is caught even though the shipped binary is the universal one built above.
+      - name: Intel cargo test (macOS coverage)
+        if: matrix.kind == 'macos'
+        working-directory: agent
+        run: cargo test --workspace
+
+      # ---- Windows: native MSVC build. ----
+      - name: Build (Windows MSVC)
+        if: matrix.kind == 'windows'
+        shell: bash
+        working-directory: agent
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.target }}"
+          cargo build --release --target "${{ matrix.target }}" -p opengeni-agent
+          cp "target/${{ matrix.target }}/release/opengeni-agent.exe" "../${{ matrix.asset }}"
+
+      # ---- macOS Developer ID codesign + notarize (CATEGORY-4, guarded). ----
+      # Skips cleanly when the cert/ASC creds are absent; until they land, macOS
+      # binaries ship unsigned-but-minisign-attested (a Gatekeeper warning on a
+      # fresh download, documented). Drop the secrets in → this lights up, no code
+      # change.
+      - name: macOS codesign + notarize (if creds present)
+        if: matrix.kind == 'macos' && env.APPLE_DEVELOPER_ID != ''
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Apple Developer ID present — signing + notarizing ${{ matrix.asset }}"
+          # rcodesign (pure-Rust apple-codesign) signs + notarizes from a .p12 + ASC
+          # key without a Mac keychain. Authored as the creds-drop-in.
+          cargo install --locked apple-codesign || true
+          echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
+          rcodesign sign --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
+            --code-signature-flags runtime "../${{ matrix.asset }}"
+          echo "$APPLE_ASC_KEY" > /tmp/asc.json
+          rcodesign notary-submit --api-key-path /tmp/asc.json --wait "../${{ matrix.asset }}" || \
+            echo "::warning::notarization submit failed; binary is codesigned but not notarized"
+
+      - name: macOS unsigned note (no creds)
+        if: matrix.kind == 'macos' && env.APPLE_DEVELOPER_ID == ''
+        env:
+          APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+        run: echo "::notice::macOS binary is UNSIGNED (no Apple Developer ID secret) — minisign-attested only. Gatekeeper warns on a fresh download (category-4, see dossier §24.3)."
+
+      # ---- Windows Authenticode (POLISH, guarded). ----
+      - name: Windows Authenticode (if cert present)
+        if: matrix.kind == 'windows' && env.AZURE_KEY_VAULT_URL != ''
+        env:
+          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+          AZURE_KEY_VAULT_CERT: ${{ secrets.AZURE_KEY_VAULT_CERT }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        shell: pwsh
+        run: |
+          Write-Host "Azure Key Vault cert present — Authenticode-signing ${{ matrix.asset }}"
+          dotnet tool install --global AzureSignTool
+          AzureSignTool sign `
+            --azure-key-vault-url "$env:AZURE_KEY_VAULT_URL" `
+            --azure-key-vault-certificate "$env:AZURE_KEY_VAULT_CERT" `
+            --azure-key-vault-client-id "$env:AZURE_CLIENT_ID" `
+            --azure-key-vault-client-secret "$env:AZURE_CLIENT_SECRET" `
+            --azure-key-vault-tenant-id "$env:AZURE_TENANT_ID" `
+            --timestamp-rfc3161 "http://timestamp.digicert.com" `
+            --file-digest sha256 `
+            "../${{ matrix.asset }}"
+
+      - name: Windows unsigned note (no cert)
+        if: matrix.kind == 'windows' && env.AZURE_KEY_VAULT_URL == ''
+        env:
+          AZURE_KEY_VAULT_URL: ${{ secrets.AZURE_KEY_VAULT_URL }}
+        run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download (optional polish, see dossier §24.3)."
+
+      # ---- minisign signature + sha256 (ALWAYS-ON; the trust root for self-update). ----
+      - name: minisign-sign + sha256 the artifact
+        if: env.MINISIGN_KEY != ''
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install rsign2 (pure-Rust minisign-compatible signer) so the runner needs
+          # no system minisign. It signs in the SAME prehashed-ED form the installer
+          # + self-update verify expects.
+          cargo install --locked rsign2 || true
+          printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
+          # rsign signs with an empty password (key generated with -W). The detached
+          # signature is <asset>.minisig.
+          echo "" | rsign sign -s /tmp/minisign.key -x "${{ matrix.asset }}.minisig" "${{ matrix.asset }}"
+          # sha256 sidecar.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+          rm -f /tmp/minisign.key
+
+      - name: minisign missing note
+        if: env.MINISIGN_KEY == ''
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          # Linux minisign is NOT optional (it is the install + self-update trust root).
+          # If the key is absent the release is unsafe to publish, so still emit the
+          # sha256 but flag loudly that the run cannot produce a verifiable release.
+          echo "::warning::OPENGENI_AGENT_MINISIGN_KEY secret is absent — artifacts are NOT signed. Set it before promoting (dossier §25.1)."
+          if command -v sha256sum >/dev/null 2>&1; then sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; else shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; fi
+
+      - name: Upload artifact bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+            ${{ matrix.asset }}.minisig
+          if-no-files-found: error
+
+  # The publish job needs ALL builds, so NO partial release. It assembles the
+  # combined SHA256SUMS, signs the channel manifest, and creates the GH Release with
+  # the binaries + the install scripts attached.
+  publish:
+    name: Publish release
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS || true
+          ls -l
+
+      - name: Sign SHA256SUMS (if the key is present)
+        if: env.MINISIGN_KEY != ''
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked rsign2 || true
+          printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
+          echo "" | rsign sign -s /tmp/minisign.key -x dist/SHA256SUMS.minisig dist/SHA256SUMS
+          rm -f /tmp/minisign.key
+
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: agent-v${{ needs.guard.outputs.version }}
+          name: opengeni-agent v${{ needs.guard.outputs.version }}
+          body: |
+            opengeni-agent v${{ needs.guard.outputs.version }} — cross-platform signed release.
+
+            Install (read the script first — it is short, POSIX, contains no secrets):
+              Linux/macOS: `curl -fsSL https://get.opengeni.ai/install.sh | sh`
+              Windows:     `irm https://get.opengeni.ai/install.ps1 | iex`
+
+            Every binary is minisign-signed (verify against the pinned key) + sha256'd.
+            macOS/Windows OS-native code-signing is a creds-drop-in (see release notes
+            banner); the minisign trust root is independent of the OS cert.
+          files: |
+            dist/*
+            agent/install/install.sh
+            agent/install/install.ps1
+            agent/install/uninstall.sh
+            agent/install/opengeni-agent-minisign.pub
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the signed channel manifest (the CONTROL surface OpenGeni flips to
+      # promote a build). Promotion (5→25→50→100) + kill-switch are a re-run of this
+      # step with new params — NO rebuild (dossier §23.2/§23.3).
+      - name: Publish the signed channel manifest
+        if: env.MINISIGN_KEY != '' && vars.AGENT_MANIFEST_PUBLISH == 'true'
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          echo "manifest publish is wired via scripts/publish-agent-manifest.ts (TS side, M11d);"
+          echo "this step is gated on AGENT_MANIFEST_PUBLISH so the binary release stands alone."

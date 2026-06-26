@@ -13,3 +13,30 @@ workspace = true
 
 [dependencies]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+
+# Verify: the SAME pinned minisign key the install scripts embed (one key, one
+# routine) + the sha256 gate + semantic version monotonicity.
+minisign-verify = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+semver = { workspace = true }
+# Deterministic staged-rollout cohorting (blake3(agentId + salt) % 100).
+blake3 = { workspace = true }
+
+# The atomic self-replace primitive (write-temp + rename; Windows rename-self-aside).
+self-replace = { workspace = true }
+
+# Manifest + artifact download over the same rustls stack the agent already uses.
+# The updater runs in a synchronous flow (download → verify → swap → restart), so
+# we enable reqwest's blocking client on top of the workspace rustls config.
+reqwest = { workspace = true, features = ["blocking"] }
+# Manifest decode (the channel manifest is JSON on the wire; the proto
+# UpdateManifest is the in-memory shape the updater reasons over).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

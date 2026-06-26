@@ -1,0 +1,144 @@
+name: Agent CI
+
+# PR gate for the Rust agent workspace (agent/**), purely additive to the bun CI.
+# The FULL OS matrix here IS the cross-platform proof: a macOS/Windows compile or
+# test break is caught per-PR, not at tag time — and since these legs cannot run on
+# the Linux dev box, the green run on hosted macos-14 + windows-latest runners is
+# the only evidence the agent builds + tests on those OSes (dossier §23.3 / §24.1).
+#
+# The Cloudgeni-ai org is on the Team plan, so hosted ubuntu/macos-14/windows-latest
+# runners are available; the path-filter keeps docs-only PRs off the (10×-billed)
+# macOS leg.
+
+on:
+  pull_request:
+    paths:
+      - "agent/**"
+      - ".github/workflows/agent-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "agent/**"
+      - ".github/workflows/agent-ci.yml"
+
+concurrency:
+  group: agent-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: agent
+
+jobs:
+  # fmt + clippy run once on ubuntu (they are platform-independent); -D warnings
+  # makes a lint a hard failure (dossier §3 idiomatic-Rust requirement).
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # test + build across the FULL OS matrix. macos-14 (Apple Silicon) + macos-13
+  # (Intel) + windows-latest each prove the platform compiles AND its unit tests
+  # pass — the cross-platform guarantee for the per-OS code (platform/service/
+  # update) that cannot run on the Linux dev box.
+  test:
+    name: test + build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, macos-13, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-features
+
+      - name: cargo build --release --workspace
+        run: cargo build --release --workspace
+
+  # install-smoke proves the install scripts PARSE + VERIFY + INSTALL on every OS,
+  # in CI (non-interactive) mode against a locally-built + minisign-signed mock
+  # release — so the curl|sh / irm|iex contract is exercised per-PR on all three OSes
+  # (dossier §23.3). It needs no network release and no production key: it generates
+  # a throwaway minisign key, signs the freshly-built binary, and runs the REAL
+  # script with OPENGENI_INSTALL_BASE_URL pointed at the mock dir.
+  install-smoke:
+    name: install-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+
+      - name: Build the agent binary
+        run: cargo build --release -p opengeni-agent
+
+      - name: Install minisign (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            brew install minisign
+          else
+            sudo apt-get update && sudo apt-get install -y minisign
+          fi
+
+      - name: Install minisign (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install minisign -y
+
+      - name: Smoke the install script (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: agent
+        run: bash install/test/ci-install-smoke.sh
+
+      - name: Smoke the install script (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: agent
+        run: pwsh -File install/test/ci-install-smoke.ps1
