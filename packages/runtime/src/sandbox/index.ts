@@ -184,6 +184,7 @@ export {
   SelfhostedSession,
   SelfhostedSandboxClient,
   isSelfhostedProviderNotFoundError,
+  setSelfhostedApplyDiff,
   SELFHOSTED_DEFAULT_TIMEOUT_MS,
   SELFHOSTED_RELAY_STREAM_PATH,
   type SelfhostedSessionState,
@@ -191,6 +192,9 @@ export {
   type SelfhostedRelayConfig,
   type SelfhostedExecArgs,
   type SelfhostedExecResult,
+  type SelfhostedApplyDiff,
+  type SelfhostedEditor,
+  type SelfhostedImageOutput,
 } from "./selfhosted/session";
 export {
   negotiateSelfhostedCapabilities,

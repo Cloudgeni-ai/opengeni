@@ -18,6 +18,7 @@
 import {
   ControlRequest,
   ControlResponse,
+  FsEntryKind,
   StreamKind,
   type ExecRequest,
   type ExecResponse,
@@ -38,6 +39,45 @@ import {
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
+
+// ── The agent-turn provided-session contract (@openai/agents-core) ──────────
+// When the routing proxy resolves a selfhosted ACTIVE backend, the @openai/agents
+// agent loop binds its filesystem/shell/skills capabilities to THIS session and
+// calls a richer method set than the Channel-A structural surface: `createEditor`
+// + `viewImage` (filesystem), `execCommand` + `supportsPty` (shell), `pathExists`
+// + `listDir` + `materializeEntry` + `readFile` (skills). The session must present
+// all of them or the turn crashes (e.g. "Filesystem sandbox sessions must provide
+// createEditor()"). These run over the SAME NATS exec/fs primitives; the machine
+// owns its filesystem so source materialization is a no-op.
+
+/** The V4A-diff applier the SDK's apply_patch editor uses. The leaf cannot import
+ *  `@openai/agents`'s `applyDiff` (the agent-loop root the leaf forbids), so the
+ *  runtime barrel (`packages/runtime/src/index.ts`, which DOES import that root)
+ *  injects it via `setSelfhostedApplyDiff` at module load. Until injected,
+ *  `createEditor()` surfaces a clear error rather than a silent wrong-edit. */
+export type SelfhostedApplyDiff = (input: string, diff: string, mode?: "default" | "create") => string;
+let injectedApplyDiff: SelfhostedApplyDiff | undefined;
+
+/** Register the SDK's `applyDiff` so `SelfhostedSession.createEditor()` can apply
+ *  V4A diffs over the NATS fs ops. Called once by the runtime barrel. */
+export function setSelfhostedApplyDiff(fn: SelfhostedApplyDiff): void {
+  injectedApplyDiff = fn;
+}
+
+/** The structural Editor surface the SDK's filesystem capability consumes (the
+ *  three apply_patch operations). Mirrors `@openai/agents-core`'s `Editor`. */
+export interface SelfhostedEditor {
+  createFile(operation: { path: string; diff: string }, context?: unknown): Promise<{ output?: string } | void>;
+  updateFile(operation: { path: string; diff: string; moveTo?: string }, context?: unknown): Promise<{ output?: string } | void>;
+  deleteFile(operation: { path: string }, context?: unknown): Promise<{ output?: string } | void>;
+}
+
+/** The image tool-output shape the SDK's view_image tool expects (mirror of
+ *  `ToolOutputImage` — not re-exported by `@openai/agents/sandbox`, so structural). */
+export interface SelfhostedImageOutput {
+  type: "image";
+  image: { data: Uint8Array; mediaType: string };
+}
 
 /** Default control-op timeout. A transient miss surfaces as `agent_reconnecting`
  *  (the turn pauses + retries); it is NOT a hard failure. */
@@ -213,6 +253,116 @@ export class SelfhostedSession {
       throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
     }
     return execResultToChannelA(result.exec);
+  }
+
+  // ── The agent-turn provided-session contract (over the SAME NATS primitives) ──
+  // These are what the @openai/agents shell/filesystem/skills capabilities call on
+  // the ACTIVE session once the routing proxy resolves selfhosted. They reuse the
+  // exec/fs ops above; the machine owns its filesystem (materialization is a no-op).
+
+  /** SDK shell capability `execCommand`: run a command and return its stdout (the
+   *  `exec_command` tool). Selfhosted exec is non-interactive (no PTY) — `tty` is
+   *  ignored; `supportsPty()` is false so the SDK never offers a stdin session. */
+  async execCommand(args: { cmd: string; workdir?: string; runAs?: string }): Promise<string> {
+    const result = await this.exec({ cmd: args.cmd, workdir: args.workdir, runAs: args.runAs });
+    return result.output;
+  }
+
+  /** SDK shell capability never calls this (gated on `supportsPty()` which is
+   *  false), but the surface advertises it. Selfhosted exec has no interactive PTY
+   *  session over the structured RPC, so a stdin write is unsupported. */
+  supportsPty(): boolean {
+    return false;
+  }
+
+  /** SDK filesystem capability `view_image`: read the image bytes off the machine
+   *  and wrap them in the tool-output image shape (magic-byte sniff + path fallback,
+   *  mirroring the SDK's `imageOutputFromBytes`). */
+  async viewImage(args: { path: string; runAs?: string }): Promise<SelfhostedImageOutput> {
+    const bytes = await this.readFile({ path: args.path, ...(args.runAs ? { runAs: args.runAs } : {}) });
+    const mediaType = sniffImageMediaType(bytes, args.path);
+    if (!mediaType) {
+      throw new Error(`selfhosted view_image: unsupported image format for ${args.path}`);
+    }
+    return { type: "image", image: { data: Uint8Array.from(bytes), mediaType } };
+  }
+
+  /** SDK skills/filesystem `pathExists`: whether a path exists on the machine. */
+  async pathExists(path: string, _runAs?: string): Promise<boolean> {
+    const { exists } = await this.statFile({ path });
+    return exists;
+  }
+
+  /** SDK skills `listDir`: list a directory as `{name, path, type}[]`. */
+  async listDir(args: { path: string; runAs?: string }): Promise<Array<{ name: string; path: string; type: "file" | "dir" | "other" }>> {
+    const result = await this.listFiles({ path: args.path });
+    return result.fsList.entries.map((entry) => ({
+      name: entry.name,
+      path: entry.path,
+      type:
+        entry.kind === FsEntryKind.FS_ENTRY_KIND_DIRECTORY
+          ? ("dir" as const)
+          : entry.kind === FsEntryKind.FS_ENTRY_KIND_FILE
+            ? ("file" as const)
+            : ("other" as const),
+    }));
+  }
+
+  /** SDK manifest-delta `materializeEntry`: a NO-OP for selfhosted. Source
+   *  materialization (cloning repos / staging files into the box) is how cloud
+   *  providers prepare a fresh box; a bring-your-own machine already owns its
+   *  filesystem and is prepared by the agent itself, so there is nothing to stage.
+   *  Present (not absent) so the SDK's provided-session manifest apply path — which
+   *  requires `applyManifest()` OR `materializeEntry()` when the agent declares
+   *  entries — is satisfied without error. The selfhosted manifest declares no
+   *  entries, so in practice this is never invoked with a real entry. */
+  async materializeEntry(_args: { path: string; entry: unknown; runAs?: string }): Promise<void> {
+    return;
+  }
+
+  /** SDK filesystem capability `createEditor`: the apply_patch host. Applies V4A
+   *  diffs over the NATS fs ops (read → applyDiff → write). `applyDiff` is the SDK's
+   *  own parser, injected by the runtime barrel (the leaf cannot import it). */
+  createEditor(runAs?: string): SelfhostedEditor {
+    const applyDiff = injectedApplyDiff;
+    if (!applyDiff) {
+      throw new Error(
+        "selfhosted createEditor: applyDiff not injected (the runtime barrel must call setSelfhostedApplyDiff before an agent turn binds the filesystem capability)",
+      );
+    }
+    const pathExists = (path: string): Promise<boolean> => this.pathExists(path, runAs);
+    const readText = async (path: string): Promise<string> =>
+      decoder.decode(await this.readFile({ path, ...(runAs ? { runAs } : {}) }));
+    const writeText = async (path: string, content: string): Promise<void> => {
+      await this.writeFile({ path, content, createParents: true });
+    };
+    const deletePath = async (path: string): Promise<void> => {
+      // No fs-delete op in the proto; remove via the shell (the machine's own rm).
+      await this.exec({ cmd: `rm -rf -- ${shellQuote(path)}`, ...(runAs ? { runAs } : {}) });
+    };
+    return {
+      async createFile(operation) {
+        if (await pathExists(operation.path)) {
+          throw new Error(`selfhosted createFile: file already exists: ${operation.path}`);
+        }
+        await writeText(operation.path, applyDiff("", operation.diff, "create"));
+        return {};
+      },
+      async updateFile(operation) {
+        const current = await readText(operation.path);
+        const next = applyDiff(current, operation.diff);
+        const destination = operation.moveTo ?? operation.path;
+        await writeText(destination, next);
+        if (operation.moveTo && destination !== operation.path) {
+          await deletePath(operation.path);
+        }
+        return {};
+      },
+      async deleteFile(operation) {
+        await deletePath(operation.path);
+        return {};
+      },
+    };
   }
 
   /** Channel-A `readFile`: read a file off the machine (binary-safe). */
@@ -469,6 +619,49 @@ function execResultToChannelA(res: ExecResponse): SelfhostedExecResult {
 
 function channelKey(workspaceId: string, agentId: string, port: number): string {
   return `${workspaceId}:${agentId}:${port}`;
+}
+
+/** Single-quote a string for POSIX shell (the editor's delete uses the machine's
+ *  own `rm`). Mirrors the standard `'…'` quoting with `'\''` escaping. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Detect an image media type from magic bytes (with a path-extension fallback),
+ *  mirroring @openai/agents-core's `sniffImageMediaType` so `viewImage` returns the
+ *  SAME media types the SDK would. Returns undefined for an unrecognized format. */
+function sniffImageMediaType(bytes: Uint8Array, path: string): string | undefined {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return "image/gif";
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return "image/webp";
+  if (bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (
+    (bytes[0] === 0x49 && bytes[1] === 0x49 && bytes[2] === 0x2a && bytes[3] === 0x00) ||
+    (bytes[0] === 0x4d && bytes[1] === 0x4d && bytes[2] === 0x00 && bytes[3] === 0x2a)
+  ) return "image/tiff";
+  if (looksLikeSvg(bytes)) return "image/svg+xml";
+  return mediaTypeFromPath(path);
+}
+
+function looksLikeSvg(bytes: Uint8Array): boolean {
+  const prefix = decoder.decode(bytes.subarray(0, Math.min(bytes.byteLength, 512))).trimStart().toLowerCase();
+  return prefix.startsWith("<svg") || /^<\?xml[\s\S]*<svg/u.test(prefix);
+}
+
+function mediaTypeFromPath(path: string): string | undefined {
+  const p = path?.trim().toLowerCase() ?? "";
+  if (p.endsWith(".png")) return "image/png";
+  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+  if (p.endsWith(".gif")) return "image/gif";
+  if (p.endsWith(".webp")) return "image/webp";
+  if (p.endsWith(".bmp")) return "image/bmp";
+  if (p.endsWith(".tif") || p.endsWith(".tiff")) return "image/tiff";
+  if (p.endsWith(".svg") || p.endsWith(".svgz")) return "image/svg+xml";
+  return undefined;
 }
 
 /** A random uint64-safe numeric nonce (the wire `PingRequest.nonce` is a uint64,

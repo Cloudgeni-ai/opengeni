@@ -31,6 +31,13 @@ import {
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
   // descriptor the OpenAI Responses model serializes into request.tools[].
   webSearchTool,
+  // The SDK's V4A-diff applier — the apply_patch host the filesystem capability's
+  // editor uses. The agent-loop-free sandbox leaf cannot import it (it lives behind
+  // the `@openai/agents` root the leaf forbids), so the barrel imports it here and
+  // injects it into the selfhosted session's `createEditor` via setSelfhostedApplyDiff
+  // (below, right after the leaf re-export). This lets a selfhosted active backend
+  // apply file edits over its NATS fs ops using the SDK's exact diff semantics.
+  applyDiff,
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
@@ -79,6 +86,7 @@ import {
   deserializeSandboxSessionStateEnvelope,
   desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
+  setSelfhostedApplyDiff,
 } from "./sandbox";
 import { computerUse } from "./sandbox-computer";
 
@@ -102,6 +110,14 @@ export {
 // barrel surface is unchanged for apps/worker while @opengeni/runtime/sandbox
 // stays importable by the API without the agent loop.
 export * from "./sandbox";
+
+// Inject the SDK's V4A `applyDiff` into the selfhosted session's apply_patch editor
+// at module load. The leaf can't import `applyDiff` (agent-loop root), so the
+// barrel — which already imports `@openai/agents` — wires it once. A selfhosted
+// active backend can now apply file edits over its NATS fs ops with the SDK's exact
+// diff semantics; without this, `createEditor()` throws a clear "not injected" error
+// rather than mis-editing. Runs at import time, before any turn binds a capability.
+setSelfhostedApplyDiff(applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string);
 
 export { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
