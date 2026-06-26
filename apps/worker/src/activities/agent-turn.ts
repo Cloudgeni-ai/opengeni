@@ -478,7 +478,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...resolvedSandbox,
             established: wrapTurnBoxWithRouting(
               { db, settings, bus },
-              { workspaceId: input.workspaceId, sessionId: input.sessionId },
+              // Thread the SAME declared environment the group box was created with
+              // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
+              // carries it too — the SDK's per-turn manifest-env delta stays empty
+              // (no "cannot change manifest environment variables" throw).
+              { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
               resolvedSandbox.established,
             ),
           };

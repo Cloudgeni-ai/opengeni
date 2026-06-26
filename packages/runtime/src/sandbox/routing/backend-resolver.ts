@@ -62,6 +62,16 @@ export interface ActiveBackendResolverDeps {
   establishModalTarget?: (sandbox: RoutableSandbox) => Promise<RoutableBackendSession>;
   /** Override the selfhosted control-op timeout (tests). */
   selfhostedTimeoutMs?: number;
+  /**
+   * The run's declared sandbox environment — the SAME `Record<string,string>` the
+   * worker turn threads into the agent's TARGET manifest (and into the group box at
+   * create). Threaded into a selfhosted swap target's session so its
+   * `state.manifest.environment` EQUALS the turn's, making the SDK's per-turn
+   * provided-session manifest-env delta empty (validateNoEnvironmentDelta).
+   * WITHOUT this a pin-to-vm turn throws "Live sandbox sessions cannot change
+   * manifest environment variables". Omitted → `{}` (the test/negotiation path).
+   */
+  environment?: Record<string, string>;
 }
 
 /** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
@@ -121,6 +131,10 @@ export function makeActiveBackendResolver(
         agentId: sandbox.enrollmentId,
         epoch: pointer.activeEpoch,
         ...(deps.selfhostedTimeoutMs !== undefined ? { timeoutMs: deps.selfhostedTimeoutMs } : {}),
+        // The turn's declared environment → the session's manifest.environment, so
+        // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
+        // environment variables" throw on a pin-to-vm turn).
+        ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
       });
       const session = (await client.resume({ agentId: sandbox.enrollmentId })) as RoutableBackendSession;
       return { session, sandboxId: sandbox.id, kind: "selfhosted" };

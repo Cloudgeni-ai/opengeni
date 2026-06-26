@@ -268,6 +268,28 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(mock.requests[0]?.subject).toBe(`agent.${WS}.enroll-1.rpc`);
   });
 
+  test("the resolver threads the run environment into the selfhosted target's manifest (env-parity → no manifest-env delta throw)", async () => {
+    // Regression for the pin-to-vm env-delta bug: a selfhosted swap target resolved
+    // WITHOUT the run environment gets an empty manifest.environment, and the SDK's
+    // per-turn provided-session manifest apply throws "Live sandbox sessions cannot
+    // change manifest environment variables." The resolver must thread its
+    // `environment` into the SelfhostedSession's manifest so it equals the turn's.
+    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: new FakeBackend("group-modal"),
+      defaultKind: "modal",
+      getSandbox: async (id) => sandboxes[id] ?? null,
+      controlRpcFactory: () => new MockAgentResponder({ hostname: "the-laptop" }),
+      relay: RELAY,
+      environment: env,
+    });
+    const r = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
+    const manifest = (r.session as { state: { manifest: { resolveEnvironment(): Promise<Record<string, string>>; root: string } } }).state.manifest;
+    expect(await manifest.resolveEnvironment()).toEqual(env);
+    expect(manifest.root).toBe("/workspace");
+  });
+
   test("modal swap target with no establisher -> unresolvable (caller 409s)", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,

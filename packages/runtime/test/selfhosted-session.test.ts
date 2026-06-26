@@ -128,6 +128,48 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     session.state.manifest = next;
     expect(session.state.manifest).toBe(next);
   });
+
+  test("state.manifest.environment carries the threaded run environment (env-parity → no validateNoEnvironmentDelta throw)", async () => {
+    // The pin-to-vm env-delta bug: the SDK injects the selfhosted session NON-OWNED
+    // and applies the agent's TARGET manifest as a provided-session delta;
+    // validateNoEnvironmentDelta throws "Live sandbox sessions cannot change manifest
+    // environment variables" unless the session manifest's environment EQUALS the
+    // turn's. The session must carry the run's declared environment for parity.
+    const env = { GIT_AUTHOR_NAME: "OpenGeni Bot", HOME: "/workspace", DEPLOY_TARGET: "vm2" };
+    const session = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: AGENT,
+      controlRpc: new MockAgentResponder(),
+      relay: RELAY,
+      environment: env,
+    });
+    // The manifest resolves the SAME values the turn declares (the parity the SDK
+    // delta-check requires). Manifest.resolveEnvironment() is the public surface
+    // over the per-key Environment wrappers serializeManifestEnvironment compares.
+    const resolved = await session.state.manifest.resolveEnvironment();
+    expect(resolved).toEqual(env);
+    // root stays /workspace to match buildManifest's declared root (root-delta guard).
+    expect(session.state.manifest.root).toBe("/workspace");
+  });
+
+  test("the SelfhostedSandboxClient threads its environment into bound sessions' manifests", async () => {
+    const env = { API_KEY: "wsval-123", HOME: "/workspace" };
+    const rpc: ControlRpc = new MockAgentResponder();
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS,
+      relay: RELAY,
+      controlRpcFactory: () => rpc,
+      agentId: AGENT,
+      environment: env,
+    });
+    // Both create() and resume() bind a session whose manifest carries the env.
+    const created = await client.create();
+    expect(await created.state.manifest.resolveEnvironment()).toEqual(env);
+    const resumed = await client.resume({ agentId: "other-agent" });
+    expect(await resumed.state.manifest.resolveEnvironment()).toEqual(env);
+    // The persistable state is STILL {agentId} only — env lives only on the live slice.
+    expect(await created.serializeSessionState()).toEqual({ agentId: AGENT });
+  });
 });
 
 describe("AgentError → runtime reason mapping (the M3 ruling)", () => {

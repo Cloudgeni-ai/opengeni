@@ -41,6 +41,16 @@ export type RoutingWiringServices = {
 export type RoutingWiringIds = {
   workspaceId: string;
   sessionId: string;
+  /**
+   * The run's declared sandbox environment — the SAME object the turn passes to
+   * `runtime.buildAgent`'s `sandboxEnvironment` and to `resumeBoxForTurn` (so the
+   * group box's manifest carries it too). Threaded into a selfhosted swap target's
+   * manifest so its `environment` EQUALS the turn's, making the SDK's per-turn
+   * provided-session manifest-env delta empty (validateNoEnvironmentDelta).
+   * WITHOUT this a pin-to-vm turn throws "Live sandbox sessions cannot change
+   * manifest environment variables." Optional → the resolver defaults to `{}`.
+   */
+  environment?: Record<string, string>;
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -104,6 +114,11 @@ export function wrapTurnBoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    // The turn's declared environment → a selfhosted swap target's manifest, so the
+    // SDK's per-turn manifest-env delta is empty (no "cannot change manifest
+    // environment variables" throw when the turn pins to a vm). Mirrors the group
+    // box, which is created WITH this same environment (resumeBoxForTurn).
+    ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
     // A modal swap target in the turn path would need its own lease resume-by-id;
     // that is a future cross-group-box concern. Until then a modal swap target is
     // unresolvable (the swap tool validates liveness, so this only triggers if a

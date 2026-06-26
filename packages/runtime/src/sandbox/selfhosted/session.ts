@@ -72,6 +72,19 @@ export interface SelfhostedSessionDeps {
   epoch?: number;
   /** Override the control-op timeout (tests). */
   timeoutMs?: number;
+  /**
+   * The run's declared sandbox environment — the SAME `Record<string,string>` the
+   * worker turn passes to `runtime.buildAgent`'s `sandboxEnvironment` (and that the
+   * agent's TARGET manifest, `buildManifest`, carries). The SDK injects this
+   * selfhosted session NON-OWNED and applies the agent's manifest as a provided-
+   * session delta; `validateNoEnvironmentDelta` throws "Live sandbox sessions cannot
+   * change manifest environment variables" on ANY env mismatch. So `state.manifest`'s
+   * `environment` MUST EQUAL the turn's environment for the delta to be empty. The
+   * selfhosted exec routes over NATS and does NOT consume the env, but the manifest
+   * must carry it for parity. Omitted → `{}` (the negotiation-only / test path,
+   * which never applies a turn manifest, so there is no delta to validate).
+   */
+  environment?: Record<string, string>;
 }
 
 /** The Channel-A `exec` result shape (a structural superset of the SDK's). */
@@ -142,25 +155,20 @@ export class SelfhostedSession {
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
-    // An EMPTY-but-valid Manifest mirroring the Modal create-manifest shape
-    // (sandbox/index.ts `createManifest`: a bare `new Manifest({...})` defaults
-    // `root` to "/workspace" and `environment` to `{}`, matching buildManifest's
-    // declared root). The SDK reads `manifest.root` (defined) and iterates
-    // `manifest.environment` (an object) per turn; both hold for the empty Manifest.
-    //
-    // TODO(selfhosted-env): thread the workspace environment (the agent's declared
-    // env vars) into `environment` here. It is NOT readily available on
-    // SelfhostedSessionDeps today (create()/resume()/bind() carry only
-    // {workspaceId, agentId, controlRpc, relay, epoch, timeoutMs}; create() even
-    // ignores the passed manifest), so applying the workspace env to selfhosted
-    // exec is follow-up. `{}` is correct for now: selfhosted exec routes over NATS
-    // and does NOT consume the manifest's environment, and an empty environment
-    // means the SDK's per-turn provided-session manifest delta has no env mismatch
-    // to validate against this empty baseline.
+    // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
+    // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
+    // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
+    // in validateProvidedSessionManifestUpdate). `environment` is the run's declared
+    // sandbox environment — the SAME object the worker turn threads into the agent's
+    // TARGET manifest — so the SDK's per-turn provided-session delta
+    // (validateNoEnvironmentDelta) finds NO mismatch. `entries: {}` because the
+    // selfhosted machine already owns its filesystem (no SDK materialization; exec
+    // routes over NATS). Omitted env (the negotiation-only / test path) defaults to
+    // `{}` — no turn manifest is applied there, so there is no delta to validate.
     this.state = {
       agentId: deps.agentId,
       instanceId: deps.agentId,
-      manifest: new Manifest({ root: "/workspace", entries: {}, environment: {} }),
+      manifest: new Manifest({ root: "/workspace", entries: {}, environment: deps.environment ?? {} }),
     };
   }
 
@@ -352,6 +360,7 @@ export class SelfhostedSandboxClient {
   private readonly defaultAgentId: string | undefined;
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
+  private readonly environment: Record<string, string> | undefined;
   private controlRpcMemo: ControlRpc | undefined;
 
   constructor(opts: {
@@ -364,6 +373,11 @@ export class SelfhostedSandboxClient {
     agentId?: string;
     epoch?: number;
     timeoutMs?: number;
+    /** The run's declared sandbox environment, threaded into every bound session's
+     *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
+     *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
+     *  Omitted → `{}` (the negotiation-only path; no turn manifest is applied). */
+    environment?: Record<string, string>;
   }) {
     this.workspaceId = opts.workspaceId;
     this.relay = opts.relay;
@@ -371,6 +385,7 @@ export class SelfhostedSandboxClient {
     this.defaultAgentId = opts.agentId;
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
+    this.environment = opts.environment;
   }
 
   private controlRpc(): ControlRpc {
@@ -388,6 +403,7 @@ export class SelfhostedSandboxClient {
       relay: this.relay,
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
+      ...(this.environment !== undefined ? { environment: this.environment } : {}),
     });
   }
 
