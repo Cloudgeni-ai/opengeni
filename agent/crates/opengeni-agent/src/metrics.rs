@@ -247,6 +247,7 @@ fn parse_meminfo(text: &str) -> (u64, u64) {
 /// `root` via the SAFE `nix` `statvfs` binding. "Used" is `total - available`
 /// (available-to-unprivileged, matching `df`'s used column for the non-root
 /// user). Returns `(0, 0)` on any failure (non-unix or a statvfs error).
+#[allow(clippy::unnecessary_cast, clippy::cast_lossless)] // statvfs counts are u64 on Linux, u32 on macOS
 fn read_disk(root: &str) -> (u64, u64) {
     #[cfg(unix)]
     {
@@ -254,12 +255,13 @@ fn read_disk(root: &str) -> (u64, u64) {
         let Ok(stat) = statvfs(root.as_bytes()) else {
             return (0, 0);
         };
-        // On Linux + macOS (our cargo targets) the statvfs block size + counts are
-        // u64, so the byte arithmetic is done directly in u64 (the wire type).
-        // saturating_* never overflows.
+        // statvfs widths are platform-dependent: the block size is `c_ulong` (u64 on
+        // both targets) but the block COUNTS are `fsblkcnt_t` — u64 on Linux (glibc),
+        // u32 on macOS. Cast the counts to the u64 wire type (a no-op on Linux,
+        // widening on macOS) before the saturating arithmetic (which never overflows).
         let block: u64 = stat.fragment_size().max(stat.block_size());
-        let total: u64 = stat.blocks().saturating_mul(block);
-        let avail: u64 = stat.blocks_available().saturating_mul(block);
+        let total: u64 = (stat.blocks() as u64).saturating_mul(block);
+        let avail: u64 = (stat.blocks_available() as u64).saturating_mul(block);
         let used: u64 = total.saturating_sub(avail);
         (used, total)
     }

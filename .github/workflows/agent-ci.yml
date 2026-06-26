@@ -129,7 +129,19 @@ jobs:
       - name: Install minisign (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: choco install minisign -y
+        # choco's minisign is 0.8, which predates the `-W` (no-password keygen) flag
+        # the smoke script uses. Download a current release (matches brew/apt on Unix).
+        run: |
+          $ver = "0.12"
+          $url = "https://github.com/jedisct1/minisign/releases/download/$ver/minisign-$ver-win64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "minisign.zip"
+          $dest = Join-Path $env:RUNNER_TEMP "minisign"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $bin = (Get-ChildItem -Path $dest -Recurse -Filter minisign.exe | Select-Object -First 1).DirectoryName
+          if (-not $bin) { throw "minisign.exe not found in $dest" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & (Join-Path $bin "minisign.exe") -v
 
       - name: Smoke the install script (Unix)
         if: runner.os != 'Windows'
