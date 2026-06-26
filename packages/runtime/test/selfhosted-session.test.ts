@@ -105,6 +105,29 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     await session.exec({ cmd: "true" });
     expect(mock.requests[0]?.req.epoch).toBe(7);
   });
+
+  test("state.manifest is a valid empty Manifest the @openai/agents SDK can read (defined root + object environment)", () => {
+    // The per-turn crash root cause: when the routing proxy resolves a selfhosted
+    // ACTIVE backend, the SDK reads `session.state.manifest` (validateProvided-
+    // SessionManifestUpdate reads `current.root`; serializeManifestEnvironment
+    // iterates `current.environment`). Both must be present/well-formed, else the
+    // turn crashes with `undefined is not an object (evaluating 'current.root')`.
+    const session = sessionWith(new MockAgentResponder());
+    const manifest = session.state.manifest;
+    expect(manifest).toBeDefined();
+    // `current.root` is a defined string (no root-delta crash).
+    expect(typeof manifest.root).toBe("string");
+    expect(manifest.root.length).toBeGreaterThan(0);
+    // `Object.entries(manifest.environment)` works (an object, empty is fine).
+    expect(typeof manifest.environment).toBe("object");
+    expect(manifest.environment).not.toBeNull();
+    expect(Object.entries(manifest.environment)).toEqual([]);
+    // The slice is a mutable field so the SDK's `state.manifest = next` write lands
+    // on the real backend state (the proxy returns `state` by reference).
+    const next = manifest;
+    session.state.manifest = next;
+    expect(session.state.manifest).toBe(next);
+  });
 });
 
 describe("AgentError → runtime reason mapping (the M3 ruling)", () => {

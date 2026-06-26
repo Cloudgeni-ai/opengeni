@@ -22,6 +22,13 @@ import {
   type ExecRequest,
   type ExecResponse,
 } from "@opengeni/agent-proto";
+// `Manifest` from the ALLOWED sandbox-leaf entrypoint (`@openai/agents/sandbox`
+// re-exports `@openai/agents-core/sandbox`, which exports the Manifest class) —
+// NOT the agent-loop `@openai/agents` root the sandbox leaf forbids. The live
+// `state.manifest` slice the @openai/agents SDK reads per turn must be a real
+// Manifest (see the `state` field below); selfhosted exec routes over NATS and
+// does not use the manifest, but the SDK requires it present + well-formed.
+import { Manifest } from "@openai/agents/sandbox";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   agentErrorToControlError,
@@ -109,9 +116,23 @@ export class SelfhostedSession {
   private readonly timeoutMs: number;
   private readonly subject: string;
 
-  /** The structural `state` slice consumers read for an instance id (channel-a
-   *  `readInstanceId`, docker-network decoration). The agentId IS the identity. */
-  readonly state: { agentId: string; instanceId: string };
+  /**
+   * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
+   * channel-a `readInstanceId` + docker-network decoration (the agentId IS the
+   * identity). `manifest` is the slice the @openai/agents SDK reads AND writes per
+   * turn (serializeManifestEnvironment / validateProvidedSessionManifestUpdate read
+   * `manifest.root` + iterate `manifest.environment`; providedSessionManifest WRITES
+   * `state.manifest = next`). It must be a real, MUTABLE Manifest field — when the
+   * RoutingSandboxSession proxy resolves THIS as the active backend it returns
+   * `session.state` BY REFERENCE, so the SDK's read and write must both land on a
+   * well-formed Manifest here (defined `root`, object `environment`). Without it the
+   * SDK crashes with `undefined is not an object (evaluating 'current.root')`.
+   *
+   * `manifest` is intentionally a plain mutable field (not `readonly`) so the SDK's
+   * `state.manifest = next` write succeeds. It is NOT part of the persistable state
+   * (`serializeSessionState` round-trips `{agentId}` only).
+   */
+  readonly state: { agentId: string; instanceId: string; manifest: Manifest };
 
   constructor(deps: SelfhostedSessionDeps) {
     this.workspaceId = deps.workspaceId;
@@ -121,7 +142,26 @@ export class SelfhostedSession {
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
-    this.state = { agentId: deps.agentId, instanceId: deps.agentId };
+    // An EMPTY-but-valid Manifest mirroring the Modal create-manifest shape
+    // (sandbox/index.ts `createManifest`: a bare `new Manifest({...})` defaults
+    // `root` to "/workspace" and `environment` to `{}`, matching buildManifest's
+    // declared root). The SDK reads `manifest.root` (defined) and iterates
+    // `manifest.environment` (an object) per turn; both hold for the empty Manifest.
+    //
+    // TODO(selfhosted-env): thread the workspace environment (the agent's declared
+    // env vars) into `environment` here. It is NOT readily available on
+    // SelfhostedSessionDeps today (create()/resume()/bind() carry only
+    // {workspaceId, agentId, controlRpc, relay, epoch, timeoutMs}; create() even
+    // ignores the passed manifest), so applying the workspace env to selfhosted
+    // exec is follow-up. `{}` is correct for now: selfhosted exec routes over NATS
+    // and does NOT consume the manifest's environment, and an empty environment
+    // means the SDK's per-turn provided-session manifest delta has no env mismatch
+    // to validate against this empty baseline.
+    this.state = {
+      agentId: deps.agentId,
+      instanceId: deps.agentId,
+      manifest: new Manifest({ root: "/workspace", entries: {}, environment: {} }),
+    };
   }
 
   /** Issue a control op, decoding the agent's reply or throwing the mapped
