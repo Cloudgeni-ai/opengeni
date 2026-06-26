@@ -17,6 +17,12 @@ spec:
       targetPort: monitor
       protocol: TCP
       name: monitor
+    {{- if .Values.nats.authCallout.enabled }}
+    - port: {{ .Values.nats.authCallout.websocketPort }}
+      targetPort: websocket
+      protocol: TCP
+      name: websocket
+    {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: nats

@@ -1,0 +1,139 @@
+{{- if .Values.relay.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-relay
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  replicas: {{ .Values.relay.replicaCount }}
+  {{- with .Values.relay.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: relay
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: relay
+      annotations:
+        {{- if .Values.secret.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.relay.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.relay.terminationGracePeriodSeconds }}
+      {{- if .Values.relay.priorityClassName }}
+      priorityClassName: {{ .Values.relay.priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.relay.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: relay
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.relay.image) | quote }}
+          imagePullPolicy: {{ .Values.relay.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.relay.securityContext | nindent 12 }}
+          ports:
+            - name: wss
+              containerPort: {{ .Values.relay.containerPort }}
+          env:
+            # The wss listener bind. The container port is the single source of truth.
+            - name: OPENGENI_RELAY_BIND
+              value: {{ printf "0.0.0.0:%d" (int .Values.relay.containerPort) | quote }}
+            # The viewer (ogs_) + producer (ogr_) HMAC token secrets the relay
+            # verifies connections with. Sourced from the runtime secret (never the
+            # Helm-clobbered configmap); a missing key resolves to "" and the relay
+            # rejects every connection (fail-closed) — see relay config.rs.
+            - name: OPENGENI_STREAM_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.secretName" . }}
+                  key: {{ .Values.relay.streamTokenSecretKey | quote }}
+                  optional: true
+            - name: OPENGENI_RELAY_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.secretName" . }}
+                  key: {{ .Values.relay.relayTokenSecretKey | quote }}
+                  optional: true
+            # Tuning knobs (non-secret) — defaults match the relay's own defaults.
+            - name: OPENGENI_RELAY_RING_FRAMES
+              value: {{ .Values.relay.tuning.ringFrames | quote }}
+            - name: OPENGENI_RELAY_SPLICE_BUFFER
+              value: {{ .Values.relay.tuning.spliceBuffer | quote }}
+            - name: OPENGENI_RELAY_RATE_BURST_BYTES
+              value: {{ .Values.relay.tuning.rateBurstBytes | quote }}
+            - name: OPENGENI_RELAY_RATE_BYTES_PER_SEC
+              value: {{ .Values.relay.tuning.rateBytesPerSec | quote }}
+            - name: OPENGENI_RELAY_PAIR_TIMEOUT_SECS
+              value: {{ .Values.relay.tuning.pairTimeoutSecs | quote }}
+            {{- with .Values.relay.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.relay.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.relay.probes.readiness.path | quote }}
+              port: wss
+            initialDelaySeconds: {{ .Values.relay.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.relay.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.relay.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.relay.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.relay.probes.liveness.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.relay.probes.liveness.path | quote }}
+              port: wss
+            initialDelaySeconds: {{ .Values.relay.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.relay.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.relay.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.relay.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.relay.preStopDrainSeconds }}
+          lifecycle:
+            preStop:
+              # Graceful drain: on SIGTERM the relay's own handler stops the listener
+              # (no new dials accepted) and drains in-flight splices until the long
+              # terminationGracePeriodSeconds elapses. This preStop hook is the
+              # belt-and-suspenders pause that lets the endpoints controller pull the
+              # pod from the Service before the process exits, so the ingress stops
+              # routing new dials to a draining pod. The distroless image has no shell,
+              # so this uses the native `sleep` lifecycle action (k8s >= 1.30 GA;
+              # set relay.preStopDrainSeconds to 0 to omit the hook on older clusters).
+              sleep:
+                seconds: {{ .Values.relay.preStopDrainSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+      {{- if .Values.relay.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "relay" "values" .Values.relay) | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.relay.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

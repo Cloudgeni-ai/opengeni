@@ -19,5 +19,31 @@ data:
   {{- if .Values.observability.otel.enabled }}
   OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) .Values.observability.otel.endpoint | quote }}
   {{- end }}
+  {{- if .Values.selfhosted.enabled }}
+  # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring. The
+  # SECRET keys (enrollment signing secret, relay/stream token secrets, the NATS
+  # callout account seed + control/auth passwords) live in the opengeni-runtime
+  # secret and thread into the api/worker via `envFrom: secretRef` — they are NOT
+  # in this Helm-clobbered configmap. Only the public URLs + the on/off flag live
+  # here. The wss URLs are the public ingress hosts the agent dials (symmetric
+  # with the relay); set selfhosted.natsUrl / selfhosted.relayUrl to the ingress
+  # hosts (e.g. wss://nats.<domain> / wss://relay.<domain>).
+  OPENGENI_SANDBOX_SELFHOSTED_ENABLED: {{ .Values.selfhosted.enabled | quote }}
+  {{- if .Values.selfhosted.natsUrl }}
+  OPENGENI_SELFHOSTED_NATS_URL: {{ .Values.selfhosted.natsUrl | quote }}
+  {{- end }}
+  {{- if .Values.selfhosted.relayUrl }}
+  OPENGENI_SELFHOSTED_RELAY_URL: {{ .Values.selfhosted.relayUrl | quote }}
+  {{- end }}
+  {{- if .Values.selfhosted.natsCalloutAccountName }}
+  OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME: {{ .Values.selfhosted.natsCalloutAccountName | quote }}
+  {{- end }}
+  {{- if .Values.selfhosted.natsControlUser }}
+  OPENGENI_SELFHOSTED_NATS_CONTROL_USER: {{ .Values.selfhosted.natsControlUser | quote }}
+  {{- end }}
+  {{- if .Values.selfhosted.natsCalloutUser }}
+  OPENGENI_SELFHOSTED_NATS_CALLOUT_USER: {{ .Values.selfhosted.natsCalloutUser | quote }}
+  {{- end }}
+  {{- end }}
   OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: {{ .Values.observability.structuredLogs | quote }}
   OPENGENI_OBSERVABILITY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}

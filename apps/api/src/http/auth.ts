@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type { Context, MiddlewareHandler } from "hono";
+import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 
@@ -43,6 +44,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // that holds no API credentials, like the callbacks above. The route itself
   // verifies the signed workspace-bound state before doing anything.
   if (githubConnectPathPattern.test(path)) {
+    return true;
+  }
+  // The get.<domain> install-serving routes (install.sh/.ps1/uninstall.sh/
+  // minisign pub + the release-binary redirects). Reached by a fresh machine
+  // with no credentials; the bodies carry no secrets (dossier §23.1).
+  if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }
   if (settings.authAllowHealth && path === "/healthz") {

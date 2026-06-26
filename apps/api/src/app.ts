@@ -27,6 +27,7 @@ import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerGitHubRoutes } from "./routes/github";
+import { registerInstallRoutes } from "./routes/install";
 import { registerPackRoutes } from "./routes/packs";
 import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
@@ -219,6 +220,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerBillingRoutes(app, routeDeps);
   registerDocumentRoutes(app, routeDeps);
   registerGitHubRoutes(app, routeDeps);
+  registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);

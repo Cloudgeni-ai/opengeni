@@ -187,3 +187,25 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.version }}
             ghcr.io/cloudgeni-ai/opengeni-web:sha-${{ steps.meta.outputs.sha }}
             ghcr.io/cloudgeni-ai/opengeni-web:latest
+
+      # The bring-your-own-compute stream relay (dossier §17). A single-stage
+      # distroless image built from the Rust agent workspace — its build context is
+      # agent/ (NOT the repo root) because the relay shares the agent-stream codec
+      # and the Dockerfile COPYs the whole `agent/` Cargo workspace. The digest is
+      # surfaced as a step output so the deploy workflow can pin the relay by digest
+      # (the ops-repo deploy passes it as the `relay_digest` input).
+      - name: Build and push relay image
+        id: build-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: agent
+          file: agent/crates/opengeni-relay/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.version }}
+            ghcr.io/cloudgeni-ai/opengeni-relay:sha-${{ steps.meta.outputs.sha }}
+            ghcr.io/cloudgeni-ai/opengeni-relay:latest
+
+      - name: Surface relay image digest
+        run: echo "relay image digest = ${{ steps.build-relay.outputs.digest }}"

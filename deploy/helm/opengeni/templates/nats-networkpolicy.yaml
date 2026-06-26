@@ -14,6 +14,8 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # The control plane (api = callout responder + control RPC, worker = event
+    # bus + control RPC) reaches NATS in-cluster on the client + monitor ports.
     - from:
         - podSelector:
             matchLabels:
@@ -28,4 +30,17 @@ spec:
           port: {{ .Values.nats.clientPort }}
         - protocol: TCP
           port: {{ .Values.nats.monitorPort }}
+    {{- if .Values.nats.authCallout.enabled }}
+    # The enrolled agents dial the websocket listener over wss through the ingress
+    # controller (symmetric with the relay) — the per-workspace tenancy boundary
+    # is the callout-minted user JWT subject scope, not network reachability.
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.authCallout.websocketPort }}
+    {{- end }}
 {{- end }}

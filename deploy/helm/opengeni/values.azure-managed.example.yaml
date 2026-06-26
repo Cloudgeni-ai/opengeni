@@ -45,6 +45,34 @@ nats:
   # Set true only for local/preview/cloud smoke fixtures.
   enabled: false
   url: "nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222"
+  # When the bring-your-own-compute feature is enabled and NATS runs OUTSIDE this
+  # chart (enabled:false above), the auth-callout config (deploy/nats/auth-callout.conf)
+  # is folded into the platform NATS StatefulSet by the stack wrapper / ops-repo —
+  # NOT toggled here. Set authCallout.enabled=true only when this chart manages the
+  # NATS fixture (preview/smoke). The control-plane env + the relay/ingress wiring
+  # below stand regardless of which NATS the agents dial.
+  authCallout:
+    enabled: false
+
+# Bring-your-own-compute (selfhosted) — the relay tier + the control-plane wiring.
+# Enabling needs the runtime-secret keys (see deploy/helm/opengeni/values.yaml
+# secret: comment) and the ingress relay.<domain> / nats.<domain> hosts below.
+# Flip selfhosted.enabled + relay.enabled together at deploy time (e.g. via a
+# deploy-workflow --set overlay) once the relay image + secrets are provisioned.
+selfhosted:
+  enabled: true
+  natsUrl: "wss://nats.opengeni.example.com"
+  relayUrl: "wss://relay.opengeni.example.com"
+
+relay:
+  enabled: true
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:RELAY_IMAGE_DIGEST"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
 
 minio:
   enabled: false
@@ -105,6 +133,55 @@ ingress:
         - path: /metrics
           pathType: Exact
           service: api
+        # get.<domain> install-script + device-enrollment routes served by the
+        # API (same origin / single trust root; dossier §23.1). These ride the
+        # SAME app host here; point the get.<domain> DNS record at this ingress —
+        # OR add a dedicated `get.opengeni.example.com` host block routing the
+        # same /install.sh|/install.ps1|/uninstall.sh|/opengeni-agent-minisign.pub|
+        # /device|/v/ paths to the api service.
+        - path: /install.sh
+          pathType: Exact
+          service: api
+        - path: /install.ps1
+          pathType: Exact
+          service: api
+        - path: /uninstall.sh
+          pathType: Exact
+          service: api
+        - path: /opengeni-agent-minisign.pub
+          pathType: Exact
+          service: api
+    # The bring-your-own-compute stream relay — wss long-lived sockets. The
+    # global proxy-read/send-timeout:3600 + proxy-buffering:off annotations above
+    # already make these websocket-friendly (nginx upgrades Connection/Upgrade
+    # automatically). Point relay.<domain> DNS at this ingress; TLS is the
+    # existing cert-manager pattern (add the host to ingress.tls below).
+    - host: relay.opengeni.example.com
+      paths:
+        - path: /stream
+          pathType: Prefix
+          service: relay
+          portName: wss
+        - path: /healthz
+          pathType: Exact
+          service: relay
+          portName: wss
+    # The control-plane NATS websocket the agents dial over wss (symmetric with
+    # the relay). Only present when the chart manages NATS (nats.enabled +
+    # nats.authCallout.enabled); when NATS runs outside the chart, route this host
+    # to the external NATS websocket service instead.
+    - host: nats.opengeni.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: nats
+          portName: websocket
+  # tls:
+  #   - secretName: opengeni-tls
+  #     hosts:
+  #       - opengeni.example.com
+  #       - relay.opengeni.example.com
+  #       - nats.opengeni.example.com
 
 observability:
   structuredLogs: true
