@@ -116,8 +116,8 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // so they register only when the grant carries the worker-signed sessionId claim
   // (never agent-controlled). Gated on the selfhosted feature flag: the active
   // pointer + swap are only meaningful when bring-your-own-compute is enabled.
-  if (goalSessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
-    registerFleetTools(server, deps, grant, goalSessionId, json);
+  if (sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
+    registerFleetTools(server, deps, grant, sessionId, json);
   }
 
   // Orchestration, environment, and GitHub-connect tools are permission-gated

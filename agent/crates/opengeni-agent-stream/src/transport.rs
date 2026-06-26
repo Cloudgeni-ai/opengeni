@@ -163,6 +163,12 @@ pub mod wss {
 /// out by default so the day-1 build needs only the `wss` dependency.
 #[cfg(feature = "quic")]
 pub mod quic {
+    // Feature-gated QUIC stub: `dial` + the `RelayTransport` impl return errors until
+    // the QUIC endpoint is wired. They are intentionally `async fn -> Result` for
+    // signature parity with the `wss` path and the `async_trait` `RelayTransport`
+    // contract, so they trip `unused_async` / `missing_errors_doc` until the real
+    // implementation (with real awaits + failure modes) lands.
+    #![allow(clippy::unused_async, clippy::missing_errors_doc)]
     use async_trait::async_trait;
 
     use crate::codec::RelayMessage;
@@ -180,6 +186,7 @@ pub mod quic {
     impl QuicTransport {
         /// Dials the relay over QUIC. Returns an error today so [`super::dial`]
         /// falls back to `wss` until M8b wires the QUIC endpoint.
+        #[allow(clippy::unused_async)] // stub: async for parity with WssTransport::dial; real impl awaits
         pub async fn dial(_url: &str) -> StreamResult<Self> {
             Err(StreamError::Transport(
                 "QUIC relay transport is not yet implemented (M8b)".to_string(),
@@ -189,9 +196,11 @@ pub mod quic {
 
     #[async_trait]
     impl RelayTransport for QuicTransport {
+        #[allow(clippy::unused_async)] // stub: async required by the trait; real impl awaits
         async fn send(&mut self, _msg: &RelayMessage) -> StreamResult<()> {
             Err(StreamError::Transport("QUIC transport stub".to_string()))
         }
+        #[allow(clippy::unused_async)] // stub: async required by the trait; real impl awaits
         async fn recv(&mut self) -> StreamResult<Option<RelayMessage>> {
             Err(StreamError::Transport("QUIC transport stub".to_string()))
         }

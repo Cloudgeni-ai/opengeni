@@ -262,7 +262,7 @@ mod tests {
             &desktop,
             &mut channel,
             InputPolicy { allow_input: false },
-            Duration::from_millis(1000), // long interval: no capture noise
+            Duration::from_secs(1), // long interval: no capture noise
         );
         let _ = tokio::time::timeout(Duration::from_secs(2), pump).await;
         let _ = relay.await;
