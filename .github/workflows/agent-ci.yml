@@ -138,7 +138,12 @@ jobs:
           $dest = Join-Path $env:RUNNER_TEMP "minisign"
           Invoke-WebRequest -Uri $url -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $dest -Force
-          $bin = (Get-ChildItem -Path $dest -Recurse -Filter minisign.exe | Select-Object -First 1).DirectoryName
+          # The win64 zip ships per-arch subdirs (x86_64/, aarch64/); pick the
+          # x86_64 binary for the (x86_64) GitHub Windows runner.
+          $exe = Get-ChildItem -Path $dest -Recurse -Filter minisign.exe
+          $pick = ($exe | Where-Object { $_.FullName -match 'x86_64|amd64' } | Select-Object -First 1)
+          if (-not $pick) { $pick = $exe | Select-Object -First 1 }
+          $bin = $pick.DirectoryName
           if (-not $bin) { throw "minisign.exe not found in $dest" }
           Add-Content -Path $env:GITHUB_PATH -Value $bin
           & (Join-Path $bin "minisign.exe") -v
