@@ -1,8 +1,27 @@
 import type { SessionBusMessage, SessionEvent } from "@opengeni/contracts";
 import { appendSessionEvents, sessionSubject, type AppendEventInput, type Database } from "@opengeni/db";
-import { connect, JSONCodec, type Msg, type NatsConnection, type Subscription } from "nats";
+import { connect, JSONCodec, type ConnectionOptions, type Msg, type NatsConnection, type Subscription } from "nats";
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
+
+export {
+  decodeAuthRequest,
+  mintAuthResponse,
+  mintUserJwt,
+  workspaceAgentPermissions,
+  type DecodedAuthRequest,
+  type MintAuthResponseInput,
+  type MintUserJwtInput,
+  type NatsPermission,
+  type NatsPermissions,
+} from "./nats-jwt";
+
+// Re-export the raw NATS primitives a consumer needs to open a direct connection or
+// generate nkeys (the auth-callout responder's standalone connection, the
+// agent-simulating integration tests). This keeps `nats` an internal dependency of
+// this leaf — callers in the bun workspace reach it through @opengeni/events rather
+// than depending on `nats` directly.
+export { connect, nkeys, type NatsConnection } from "nats";
 
 /**
  * A raw request/reply reply — just the response bytes. Mirrors the subset of the
@@ -73,8 +92,24 @@ export type EventBus = {
   close: () => Promise<void>;
 };
 
-export async function createNatsEventBus(natsUrl: string): Promise<EventBus> {
-  const nc = await connect({ servers: natsUrl });
+/**
+ * Connect the event bus + control-plane request/reply over ONE managed NATS
+ * connection. `auth` is the PRIVILEGED control-plane login (M-AUTH): when the
+ * server runs with auth_callout, the api/worker authenticates as a static account
+ * user permitted to request `agent.*.rpc` + receive its inbox replies. When `auth`
+ * is omitted the connection is anonymous (local dev / a NATS without auth_callout)
+ * — the existing behavior, unchanged.
+ */
+export async function createNatsEventBus(
+  natsUrl: string,
+  auth?: { user: string; pass: string },
+): Promise<EventBus> {
+  const connectOptions: ConnectionOptions = { servers: natsUrl };
+  if (auth) {
+    connectOptions.user = auth.user;
+    connectOptions.pass = auth.pass;
+  }
+  const nc = await connect(connectOptions);
   const requestConnection: RequestConnection = {
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
   };
@@ -92,6 +127,80 @@ export async function createNatsEventBus(natsUrl: string): Promise<EventBus> {
     subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
     getRequestConnection: () => requestConnection,
     close: async () => {
+      await nc.drain();
+    },
+  };
+}
+
+/**
+ * A standalone NATS connection answering request/reply on ONE subject — the
+ * transport primitive the auth-callout responder uses. It is DELIBERATELY a
+ * SEPARATE connection from the event bus: the callout responder authenticates as
+ * the callout account's `auth_users` user (a username/password or token in the
+ * `AUTH` account), which is a DIFFERENT identity from the control-plane's
+ * privileged account that the event bus + `NatsControlRpc` ride. One connection
+ * per identity; never multiplex the two.
+ *
+ * `request`/`reply` here is the RAW NATS request/reply (`$SYS.REQ.USER.AUTH`): the
+ * server publishes an authorization request with a reply inbox; the handler returns
+ * the signed authorization-response bytes which we `respond` on that inbox.
+ */
+export interface ResponderConnection {
+  /** Subscribe-and-reply on `subject`; returns an async close that drains. */
+  close: () => Promise<void>;
+}
+
+/** Connection auth for a standalone NATS connection (the callout responder). */
+export type NatsConnectAuth =
+  | { kind: "user-password"; user: string; pass: string }
+  | { kind: "token"; token: string }
+  | { kind: "anonymous" };
+
+/**
+ * Open a standalone NATS connection and subscribe `subject`, replying to every
+ * request with `handler(requestBytes, subject)`. Used by the auth-callout
+ * responder to serve `$SYS.REQ.USER.AUTH` as the callout auth user. Returns a
+ * handle whose `close()` drains the connection. A handler that throws leaves the
+ * request UNANSWERED — for auth-callout that means the server denies the
+ * connection on its own timeout, which is the correct fail-closed behavior (a
+ * responder bug must never accidentally grant access).
+ */
+export async function createResponderConnection(
+  natsUrl: string,
+  auth: NatsConnectAuth,
+  subject: string,
+  handler: RequestHandler,
+  options: { name?: string } = {},
+): Promise<ResponderConnection> {
+  const connectOptions: ConnectionOptions = { servers: natsUrl };
+  if (options.name) {
+    connectOptions.name = options.name;
+  }
+  if (auth.kind === "user-password") {
+    connectOptions.user = auth.user;
+    connectOptions.pass = auth.pass;
+  } else if (auth.kind === "token") {
+    connectOptions.token = auth.token;
+  }
+  const nc = await connect(connectOptions);
+  const sub: Subscription = nc.subscribe(subject);
+  void (async () => {
+    for await (const msg of sub) {
+      if (!msg.reply) {
+        continue;
+      }
+      try {
+        const reply = await handler(msg.data, msg.subject);
+        msg.respond(reply);
+      } catch {
+        // Leave UNANSWERED — fail-closed. The server denies the connect attempt
+        // on its callout timeout; a responder error never grants access.
+      }
+    }
+  })();
+  return {
+    close: async () => {
+      sub.unsubscribe();
       await nc.drain();
     },
   };

@@ -50,17 +50,41 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(5);
 const SLOW_OP_WARN: Duration = Duration::from_secs(30);
 
 /// Errors that abort the supervisor's *current connection* (it then backs off and
-/// retries) or, for [`SupervisorError::Fatal`], the whole run.
+/// retries). Both variants are transient — a deliberate stop is a clean shutdown,
+/// not an error (dossier §23.0).
 #[derive(Debug, Error)]
 pub enum SupervisorError {
     /// The NATS connection could not be established or was lost. Transient — the
     /// supervisor backs off and reconnects.
     #[error("nats connection error: {0}")]
     Connect(String),
-    /// A non-recoverable error (e.g. malformed persisted creds) that should stop
-    /// the run rather than spin reconnecting.
-    #[error("fatal: {0}")]
-    Fatal(String),
+    /// The control plane REJECTED the enrollment bearer at connect (the auth-callout
+    /// responder denied it: a revoked/expired enrollment, or an unconfigured
+    /// credential plane). A CLEAR, typed authentication failure — NOT a panic. It is
+    /// still treated as a (slow) retry by the supervise loop because a re-enroll can
+    /// rotate the bearer in place (dossier M-AUTH: "a rotated bearer on re-enroll
+    /// works"); the agent loudly logs the auth denial each attempt so the operator
+    /// knows to re-enroll rather than wait on a transient blip.
+    #[error("control plane rejected the enrollment bearer (re-enroll may be required): {0}")]
+    Authentication(String),
+}
+
+/// Heuristically classify a NATS connect error as an AUTHENTICATION denial (the
+/// callout rejected the bearer) vs a generic transport disconnect. async-nats
+/// surfaces an auth failure as an error whose message names "authorization"
+/// /"authentication"; we match on that so the agent can log the auth denial clearly
+/// instead of treating a deny as an indistinguishable blip.
+fn is_authentication_error(err: &async_nats::ConnectError) -> bool {
+    message_is_authentication_denial(&err.to_string())
+}
+
+/// The string predicate behind [`is_authentication_error`], split out so it is
+/// unit-testable without constructing an `async_nats::ConnectError`.
+fn message_is_authentication_denial(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("authorization")
+        || lower.contains("authentication")
+        || lower.contains("auth violation")
 }
 
 /// A shared, atomically-updated epoch the dispatcher reads to fence stale ops.
@@ -122,8 +146,10 @@ impl<P: Platform + 'static> Supervisor<P> {
     ///
     /// # Errors
     ///
-    /// Returns [`SupervisorError::Fatal`] only for non-recoverable conditions;
-    /// transient connection errors are handled internally by backing off.
+    /// Never returns an error in practice: every connection failure (transport drop
+    /// or an auth denial) is handled internally by backing off + retrying, and a
+    /// clean shutdown returns `Ok(())`. The `Result` is kept so a future
+    /// non-recoverable condition can surface without a signature change.
     pub async fn run(&self) -> Result<(), SupervisorError> {
         let mut backoff = Backoff::standard();
         info!(
@@ -169,6 +195,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     async fn serve_one_connection(&self, backoff: &mut Backoff) -> ConnectionOutcome {
         let client = match self.connect().await {
             Ok(client) => client,
+            Err(e @ SupervisorError::Authentication(_)) => {
+                // A CLEAR auth denial (not a panic): log it loudly so the operator
+                // knows a re-enroll may be needed, then treat it as a (slow) retry —
+                // a re-enroll can rotate the bearer in place and the next attempt
+                // re-presents it (dossier M-AUTH).
+                error!(error = %e, "control plane rejected the enrollment bearer; will keep retrying — re-enroll if this persists");
+                return ConnectionOutcome::Disconnected(e.to_string());
+            }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
         info!(agent_id = %self.creds.agent_id, "connected to control plane");
@@ -224,16 +258,37 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
-    /// Dials NATS with the workspace-scoped Account credentials. Per §10.6 we run
-    /// our OWN supervised reconnect (full-jitter), so we minimize the client's
-    /// internal retry and treat a drop as a return to the outer loop where the
-    /// backoff lives. NOTE: async-nats treats `max_reconnects(Some(0))` as `None`
-    /// (= UNLIMITED internal retry, the opposite of what we want), so we pass
+    /// Dials NATS presenting the enrollment BEARER as the connect auth-token (the
+    /// AUTH-CALLOUT model, dossier §10.1 / M-AUTH): the server delegates to the
+    /// control-plane callout responder, which validates the bearer and returns a
+    /// workspace-scoped user JWT — so this connection can pub/sub ONLY
+    /// `agent.<ws>.>` (+ `_INBOX.>`). The URL(s) are `wss://` (the relay-symmetric
+    /// TLS ingress); async-nats's default features include the websocket transport,
+    /// so a `wss://` server URL rides the same TLS endpoint as the relay with no
+    /// separate TCP load balancer.
+    ///
+    /// Per §10.6 we run our OWN supervised reconnect (full-jitter), so we minimize
+    /// the client's internal retry and treat a drop as a return to the outer loop
+    /// where the backoff lives. NOTE: async-nats treats `max_reconnects(Some(0))` as
+    /// `None` (= UNLIMITED internal retry, the opposite of what we want), so we pass
     /// `Some(1)` — the minimal value that still surfaces a sustained outage to our
     /// supervised loop rather than letting the client silently retry forever.
+    ///
+    /// A rejected bearer (revoked/expired enrollment, or a callout denial) surfaces
+    /// as a connect error → [`SupervisorError::Connect`], which the supervise loop
+    /// treats as a transient disconnect and backs off + retries with the SAME
+    /// (possibly rotated, on re-enroll) bearer — never a panic.
     async fn connect(&self) -> Result<async_nats::Client, SupervisorError> {
-        let opts = async_nats::ConnectOptions::with_credentials(&self.creds.nats_credentials)
-            .map_err(|e| SupervisorError::Fatal(format!("invalid nats credentials: {e}")))?
+        if self.creds.nats_bearer.is_empty() {
+            // No bearer means the control plane never minted one (an enrollment from
+            // before the credential plane was configured). Surface a clear, typed
+            // disconnect rather than dial with an empty token the callout will deny.
+            return Err(SupervisorError::Connect(
+                "no enrollment bearer; re-enroll to obtain a control-plane credential".to_string(),
+            ));
+        }
+        let opts = async_nats::ConnectOptions::new()
+            .token(self.creds.nats_bearer.clone())
             .name(format!("opengeni-agent/{}", self.creds.agent_id))
             // See the note above: Some(1), NOT 0 (which means unlimited).
             .max_reconnects(Some(1))
@@ -249,7 +304,13 @@ impl<P: Platform + 'static> Supervisor<P> {
 
         async_nats::connect_with_options(self.creds.nats_urls.clone(), opts)
             .await
-            .map_err(|e| SupervisorError::Connect(e.to_string()))
+            .map_err(|e| {
+                if is_authentication_error(&e) {
+                    SupervisorError::Authentication(e.to_string())
+                } else {
+                    SupervisorError::Connect(e.to_string())
+                }
+            })
     }
 
     /// Publishes the connect [`Hello`] on the events subject and folds the
@@ -479,6 +540,20 @@ mod tests {
         assert_eq!(cell.load(), 0);
         cell.store(42);
         assert_eq!(cell.load(), 42);
+    }
+
+    #[test]
+    fn classifies_auth_denials_vs_transport_blips() {
+        // The callout-deny messages async-nats surfaces are classified as auth
+        // denials (the agent then logs "re-enroll" rather than a generic blip).
+        assert!(message_is_authentication_denial("Authorization Violation"));
+        assert!(message_is_authentication_denial(
+            "user authentication expired"
+        ));
+        assert!(message_is_authentication_denial("AUTH VIOLATION"));
+        // A plain transport drop is NOT an auth denial.
+        assert!(!message_is_authentication_denial("connection refused"));
+        assert!(!message_is_authentication_denial("broken pipe"));
     }
 
     #[test]

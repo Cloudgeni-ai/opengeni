@@ -103,9 +103,17 @@ pub struct StoredCredentials {
     pub agent_id: String,
     /// The workspace this agent is scoped to.
     pub workspace_id: String,
-    /// The NATS Account creds-file body for the control-plane connection.
-    pub nats_credentials: String,
-    /// NATS server URL(s) to dial.
+    /// The NATS CONNECT AUTH-TOKEN (the signed `oge_` enrollment bearer). The agent
+    /// presents this as the connect token; the server's auth-callout responder
+    /// validates it and mints a workspace-scoped user JWT (dossier §10.1 / M-AUTH).
+    /// There is NO operator creds-file — the bearer IS the credential. NEVER logged.
+    ///
+    /// (Deserialized from the legacy `nats_credentials` key too, so a credentials
+    /// file written by an older agent build still loads — the value is the same
+    /// token, only the field's meaning was clarified.)
+    #[serde(alias = "nats_credentials")]
+    pub nats_bearer: String,
+    /// NATS server URL(s) to dial — `wss://` for the relay-symmetric TLS ingress.
     pub nats_urls: Vec<String>,
     /// The relay edge base URL for stream channels (M8).
     pub relay_url: String,
@@ -150,7 +158,8 @@ impl StoredCredentials {
         Self {
             agent_id: proto.agent_id,
             workspace_id: proto.workspace_id,
-            nats_credentials: proto.nats_credentials,
+            // The proto `nats_credentials` field now carries the connect bearer.
+            nats_bearer: proto.nats_credentials,
             nats_urls: proto.nats_urls,
             relay_url: proto.relay_url,
             // The proto EnrollmentCredentials now carries the relay producer token
@@ -266,8 +275,8 @@ mod tests {
         StoredCredentials {
             agent_id: "agent-123".to_string(),
             workspace_id: "ws-abc".to_string(),
-            nats_credentials: "-----BEGIN NATS USER JWT-----\nx\n------END------".to_string(),
-            nats_urls: vec!["tls://nats.example:4222".to_string()],
+            nats_bearer: "oge_example.bearer".to_string(),
+            nats_urls: vec!["wss://nats.example:443".to_string()],
             relay_url: "https://relay.example".to_string(),
             relay_token: "agent-relay-token".to_string(),
             update_pubkey: "RWQ...".to_string(),
@@ -317,6 +326,22 @@ mod tests {
         let loaded = load_credentials().expect("load").expect("present");
         assert_eq!(loaded.resume_token, "resume-deadbeef");
         assert_eq!(loaded.last_known_epoch, 7);
+    }
+
+    #[test]
+    fn legacy_nats_credentials_key_still_deserializes_as_the_bearer() {
+        // A credentials file written by an older agent build used the field name
+        // `nats_credentials`; the `#[serde(alias)]` keeps it loadable as the bearer
+        // (the value is the same connect token, only the meaning was clarified).
+        let legacy = r#"{
+            "agent_id": "a", "workspace_id": "w",
+            "nats_credentials": "oge_legacy.bearer",
+            "nats_urls": ["wss://nats.example:443"],
+            "relay_url": "", "update_pubkey": "",
+            "consented_whole_machine": true, "consented_screen_control": false
+        }"#;
+        let creds: StoredCredentials = serde_json::from_str(legacy).expect("parse legacy");
+        assert_eq!(creds.nats_bearer, "oge_legacy.bearer");
     }
 
     #[test]

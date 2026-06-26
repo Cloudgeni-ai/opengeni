@@ -423,6 +423,39 @@ const SettingsSchema = z.object({
   // The minisign PUBLIC key the agent pins for self-update verification (handed to
   // the agent in EnrollmentCredentials; the SECRET key lives only in CI).
   agentUpdatePublicKey: z.string().optional(),
+  // --- NATS auth-callout tenancy boundary (bring-your-own-compute M-AUTH; dossier
+  //     §10.1 NATS Accounts per workspace + §17 the isolation smoke) -------------
+  // nats-server is configured with AUTH CALLOUT: an external agent connects
+  // presenting its `oge_` enrollment bearer as the connect auth-token; the server
+  // issues an authorization request on $SYS.REQ.USER.AUTH to our responder, which
+  // validates the bearer and returns a SIGNED NATS user JWT scoped to pub/sub ONLY
+  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
+  // isolation. These are deployment-level secrets in the opengeni-runtime secret
+  // (Helm-clobbered configmap avoided), all OPTIONAL: when the callout plane is not
+  // configured the responder simply does not start (selfhosted agents cannot
+  // connect — graceful, never a boot-fail).
+  //
+  // The callout account SIGNING SEED (`SA...`). Both the user JWT and the
+  // authorization-response JWT are signed by this account key; its public key
+  // (`A...`) is the `auth_callout.issuer` in the server config. NEVER logged.
+  selfhostedNatsCalloutAccountSeed: z.string().optional(),
+  // The TARGET ACCOUNT NAME the minted user is placed into (the server-config-mode
+  // `auth_callout.account`, e.g. "APP"). The responder writes it as the minted user
+  // JWT `aud` so nats-server binds the agent to this account — the SAME account the
+  // privileged control plane connects into, so `agent.<ws>.<id>.rpc` request/reply
+  // routes. Optional; resolveNatsCalloutConfig defaults it to "APP".
+  selfhostedNatsCalloutAccountName: z.string().optional(),
+  // The callout RESPONDER's own NATS login (one of the `auth_callout.auth_users`
+  // in the AUTH account) — the responder connects with this to subscribe
+  // $SYS.REQ.USER.AUTH. Username/password.
+  selfhostedNatsCalloutUser: z.string().optional(),
+  selfhostedNatsCalloutPassword: z.string().optional(),
+  // The PRIVILEGED control-plane login (api/worker): a static account user that may
+  // request `agent.*.rpc` + receive its inbox replies. The event bus + the
+  // selfhosted control RPC ride THIS connection. Username/password; when unset the
+  // bus connects anonymously (local dev / a NATS with no auth_callout).
+  selfhostedNatsControlUser: z.string().optional(),
+  selfhostedNatsControlPassword: z.string().optional(),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
@@ -888,6 +921,12 @@ export function getSettings(): Settings {
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
     selfhostedRelayTokenSecret: optional("OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET"),
     agentUpdatePublicKey: optional("OPENGENI_AGENT_UPDATE_PUBLIC_KEY"),
+    selfhostedNatsCalloutAccountSeed: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED"),
+    selfhostedNatsCalloutAccountName: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME"),
+    selfhostedNatsCalloutUser: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_USER"),
+    selfhostedNatsCalloutPassword: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD"),
+    selfhostedNatsControlUser: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_USER"),
+    selfhostedNatsControlPassword: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
@@ -1903,6 +1942,54 @@ export function resolveRelayTokenSecret(settings: Settings): string | undefined 
   }
   const delegation = settings.delegationSecret?.trim();
   return delegation ? delegation : undefined;
+}
+
+/**
+ * The resolved NATS auth-callout responder config (M-AUTH). Present only when the
+ * callout plane is FULLY configured: the account signing seed + the responder's own
+ * login. When any piece is missing this returns null and the responder does not
+ * start (selfhosted agents cannot connect — a graceful disabled state, never a boot
+ * crash). The returned `accountSeed` is a secret; NEVER log it.
+ */
+export interface NatsCalloutConfig {
+  /** The callout account SIGNING seed (`SA...`) — signs the user + response JWTs. */
+  accountSeed: string;
+  /** The target account NAME the user is placed into (the response `aud`). */
+  accountName: string;
+  /** The responder's NATS login (an `auth_callout.auth_users` user). */
+  user: string;
+  password: string;
+}
+
+export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig | null {
+  const accountSeed = settings.selfhostedNatsCalloutAccountSeed?.trim();
+  const accountName = settings.selfhostedNatsCalloutAccountName?.trim() || "APP";
+  const user = settings.selfhostedNatsCalloutUser?.trim();
+  const password = settings.selfhostedNatsCalloutPassword?.trim();
+  if (!accountSeed || !user || !password) {
+    return null;
+  }
+  return { accountSeed, accountName, user, password };
+}
+
+/**
+ * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
+ * user and password are set; otherwise null and the bus connects anonymously (local
+ * dev / a NATS without auth_callout). When the callout plane is on, this is the
+ * static account user permitted to request `agent.*.rpc`.
+ */
+export interface NatsControlPlaneAuth {
+  user: string;
+  password: string;
+}
+
+export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlaneAuth | null {
+  const user = settings.selfhostedNatsControlUser?.trim();
+  const password = settings.selfhostedNatsControlPassword?.trim();
+  if (!user || !password) {
+    return null;
+  }
+  return { user, password };
 }
 
 function splitCsv(raw: string): string[] {

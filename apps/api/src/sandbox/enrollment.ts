@@ -276,9 +276,12 @@ export async function pollDeviceEnrollment(
 }
 
 /** Build the EnrollmentCredentials the poll returns: the signed `oge_` bearer +
- *  the Account-scoped subject prefix + the (possibly-empty) connect info. The real
- *  per-workspace NATS Account creds binding is INFRA-DEFERRED (M4/relay); we return
- *  a placeholder for that field and the bearer is the application-tier identity. */
+ *  the Account-scoped subject prefix + the connect info. The bearer-as-NATS-token
+ *  model (M-AUTH) closes the M5 placeholder: the agent presents the bearer as the
+ *  connect AUTH TOKEN, nats-server's auth-callout responder validates it and mints a
+ *  workspace-scoped user JWT, so there is NO per-machine NATS creds file to ship.
+ *  `natsAccountCreds` is therefore vestigial — kept (proto-additive) and set to the
+ *  bearer so an agent using it as the connect-token credential works uniformly. */
 async function buildEnrollmentCredentials(
   services: EnrollmentServices,
   input: { secret: string; workspaceId: string; agentId: string; consentedScreenControl: boolean },
@@ -317,10 +320,12 @@ async function buildEnrollmentCredentials(
     natsUrls,
     relayUrl: settings.selfhostedRelayUrl ?? "",
     relayToken,
-    // INFRA-DEFERRED: the per-workspace NATS Account creds binding (M4/relay). Empty
-    // until the Account-export config lands; the agent dials with the bearer +
-    // subject prefix in the meantime.
-    natsAccountCreds: "",
+    // M-AUTH closes the placeholder: there is NO per-machine NATS Account creds
+    // file. The agent presents the BEARER as the NATS connect auth-token; the
+    // server's auth-callout responder validates it and mints a workspace-scoped
+    // user JWT. We echo the bearer here so a consumer reading this (vestigial) field
+    // as the connect credential still works — the value IS the bearer.
+    natsAccountCreds: bearer,
     updatePublicKey: settings.agentUpdatePublicKey ?? "",
     consentedWholeMachine: true,
     consentedScreenControl: input.consentedScreenControl,

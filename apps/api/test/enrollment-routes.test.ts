@@ -202,7 +202,10 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(creds.subjectPrefix).toBe(`agent.${workspaceId}.${approve.enrollmentId}`);
     expect(creds.natsUrls).toEqual(["nats://control.example:4222"]);
     expect(creds.relayUrl).toBe("wss://relay.example");
-    expect(creds.natsAccountCreds).toBe(""); // infra-deferred placeholder
+    // M-AUTH closed the placeholder: the agent presents the bearer as the NATS
+    // connect auth-token (auth-callout), so natsAccountCreds is vestigial and
+    // echoes the bearer (NOT the empty placeholder it used to be).
+    expect(creds.natsAccountCreds).toBe(creds.bearer);
     expect(creds.consentedWholeMachine).toBe(true);
     expect(creds.consentedScreenControl).toBe(true);
     // The signed bearer verifies against the signing secret + binds the identity.

@@ -2888,7 +2888,11 @@ export const EnrollmentCredentialsResponse = z.object({
   // deployment (graceful degrade — the agent then presents an empty token the relay
   // rejects, surfacing the gap loudly rather than silently producing a dead stream).
   relayToken: z.string(),
-  // PLACEHOLDER for the per-workspace NATS Account creds (infra-deferred binding).
+  // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
+  // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
+  // auth-callout responder validates it and mints a workspace-scoped user JWT. This
+  // field echoes the bearer so a consumer reading it as the connect credential still
+  // works; new consumers should read `bearer` directly.
   natsAccountCreds: z.string(),
   // The minisign public key the agent pins for self-update verification.
   updatePublicKey: z.string(),

@@ -222,10 +222,18 @@ enum DeviceAuthState {
 message EnrollmentCredentials {
   string agent_id = 1;
   string workspace_id = 2;
-  // NATS Account credentials (creds-file body) for the control plane connection.
-  // Account isolation is the tenancy boundary.
+  // The NATS CONNECT AUTH-TOKEN the agent presents (the signed `oge_` enrollment
+  // bearer). The server runs with AUTH CALLOUT (dossier §10.1 / M-AUTH): on connect
+  // the agent passes this as the auth-token; nats-server issues an authorization
+  // request to the control-plane's callout responder, which validates the bearer
+  // and returns a SIGNED user JWT scoping the connection to pub/sub ONLY
+  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
+  // tenancy boundary — there is NO per-machine creds file to ship. (Field name kept
+  // for proto stability; it now carries the bearer, not an operator creds-file body.)
   string nats_credentials = 3;
-  // The NATS server URL(s) to dial.
+  // The NATS server URL(s) to dial. For the control plane these are `wss://` URLs
+  // (the relay-symmetric TLS ingress) so the agent rides the same TLS endpoint as
+  // the stream relay — no separate public TCP load balancer (dossier M-AUTH).
   repeated string nats_urls = 4;
   // The relay edge base URL for opening stream channels.
   string relay_url = 5;

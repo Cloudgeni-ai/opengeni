@@ -1,11 +1,12 @@
-import { getSettings, retryStartupDependency, startupRetryOptions } from "@opengeni/config";
+import { getSettings, resolveNatsCalloutConfig, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions } from "@opengeni/config";
 import type { ScheduledTask, ScheduledTaskOverlapPolicy, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import { createDb } from "@opengeni/db";
-import { createNatsEventBus } from "@opengeni/events";
+import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
 import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startMetricsIngestion } from "./sandbox/metrics-ingestion";
 
 /**
@@ -147,11 +148,23 @@ export async function startApi() {
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
   const retryOptions = startupRetryOptions(settings);
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) => logStartupDependencyRetry(observability, event);
+  // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
+  // auth_callout, api/worker authenticate as a static account user permitted to
+  // request `agent.*.rpc`. Null in local dev (anonymous connect — the bus default).
+  const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   try {
-    bus = await retryStartupDependency("NATS", () => createNatsEventBus(settings.natsUrl), {
-      ...retryOptions,
-      onRetry,
-    });
+    bus = await retryStartupDependency(
+      "NATS",
+      () =>
+        createNatsEventBus(
+          settings.natsUrl,
+          controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+        ),
+      {
+        ...retryOptions,
+        onRetry,
+      },
+    );
     workflowClient = await retryStartupDependency("Temporal", () => createTemporalWorkflowClient(settings), {
       ...retryOptions,
       onRetry,
@@ -185,9 +198,37 @@ export async function startApi() {
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
+  // M-AUTH — start the NATS auth-callout responder (the tenancy boundary): it
+  // validates an agent's enrollment bearer presented at NATS connect and mints a
+  // workspace-scoped user JWT. Gated on the selfhosted flag + a resolvable callout
+  // config; without the callout plane it never starts (selfhosted agents simply
+  // cannot connect — graceful). It runs on its OWN connection (the callout auth
+  // user), separate from the privileged control-plane bus.
+  let authCalloutResponder: ResponderConnection | undefined;
   if (settings.sandboxSelfhostedEnabled) {
     stopMetricsIngestion = startMetricsIngestion({ db: dbClient.db, bus, observability });
     observability.info("OpenGeni machine-metrics ingestion consumer started", {});
+
+    const callout = resolveNatsCalloutConfig(settings);
+    if (callout) {
+      try {
+        authCalloutResponder = await startAuthCalloutResponder(
+          { db: dbClient.db, settings, callout, observability },
+          settings.natsUrl,
+        );
+      } catch (error) {
+        // A responder start failure must not crash the API (other planes work); log
+        // loudly — selfhosted agents will fail to connect until it is up.
+        observability.error("OpenGeni NATS auth-callout responder failed to start", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } else {
+      observability.warn(
+        "OpenGeni selfhosted enabled but the NATS auth-callout plane is not configured; selfhosted agents cannot connect",
+        {},
+      );
+    }
   }
   observability.info("OpenGeni API listening", {
     host: settings.apiHost,
@@ -199,6 +240,7 @@ export async function startApi() {
       server.stop(true);
       stopMetricsIngestion?.();
       await Promise.allSettled([
+        authCalloutResponder?.close(),
         bus.close(),
         workflowClient.close(),
         dbClient.close(),
