@@ -59,9 +59,16 @@ import {
 // DeviceAuthStartResponse interval/expiry fields.
 export const DEVICE_CODE_TTL_SECONDS = 600; // 10 minutes
 export const DEVICE_POLL_INTERVAL_SECONDS = 5;
-// The bearer the agent presents to the control plane is valid for the same horizon
-// as an agent token's hour-long life (dossier "Agent token lifecycle"): 1 hour.
-export const ENROLLMENT_BEARER_TTL_SECONDS = 3600;
+// The bearer the agent presents to the NATS auth-callout. A bring-your-own-compute
+// machine is PERSISTENT (unlike an ephemeral Modal box, whose lifetime ~= an agent
+// token's hour), so this is long-lived — 30 days, matching the relay token below —
+// and re-minted on every poll/re-enroll. The old 1-hour value (sized for a Modal
+// box) caused a self-hosted agent to drop PERMANENTLY one hour after connecting: the
+// bearer expired and the auth-callout rejected every reconnect ("re-enroll may be
+// required"). A long-lived bearer is safe because the auth-callout RE-CHECKS the
+// enrollment status on every (re)connect (auth-callout.ts) — a revoked machine is
+// denied regardless of bearer life — exactly as the long-lived relay token relies on.
+export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
 // The relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5) is ENROLLMENT-scoped,
 // NOT per-stream: the agent presents it on every channel registration for the life
 // of its run, and the producer side has no per-viewer epoch fence (that is the
