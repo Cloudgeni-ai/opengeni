@@ -4,6 +4,95 @@ import { connect, JSONCodec, type ConnectionOptions, type Msg, type NatsConnecti
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
 
+/**
+ * Reconnect + keepalive defaults applied to EVERY long-lived NATS connection
+ * this package opens (the event bus AND the standalone auth-callout responder).
+ *
+ * The production outage these guard against: an in-cluster NATS broker pod
+ * restart. nats.js's stock policy gives up after ~10 attempts (~20s) and the
+ * client goes permanently CONNECTION_CLOSED — which takes the whole control
+ * plane down with it: every session-create publishes events to NATS, and the
+ * API-hosted auth-callout responder dies so BYO agents get "authorization
+ * violation". Recovery then required a MANUAL api+worker restart. With these
+ * options the client retries forever and auto-recovers the moment the broker
+ * returns. Factored into one source of truth so the call sites never drift.
+ *
+ *  - `reconnect` + `maxReconnectAttempts: -1` — never give up (infinite retry).
+ *  - `reconnectTimeWait` (2s base) + `reconnectJitter`/`reconnectJitterTLS`
+ *    (up to 1s) — a fleet of api/worker pods doesn't thundering-herd the broker
+ *    on recovery.
+ *  - `waitOnFirstConnect` — a broker briefly unavailable at boot must not
+ *    hard-fail the process; the client keeps trying instead of throwing.
+ *  - `pingInterval`/`maxPingOut` — promptly detect a silently-dead socket so the
+ *    reconnect machinery actually engages instead of hanging on a zombie.
+ */
+const RECONNECT_OPTIONS = {
+  reconnect: true,
+  maxReconnectAttempts: -1,
+  reconnectTimeWait: 2_000,
+  reconnectJitter: 1_000,
+  reconnectJitterTLS: 1_000,
+  waitOnFirstConnect: true,
+  pingInterval: 20_000,
+  maxPingOut: 3,
+} satisfies ConnectionOptions;
+
+/**
+ * The single source of truth for a long-lived connection's resilience: merge the
+ * reconnect/keepalive defaults UNDER the caller's connection options (servers +
+ * optional auth/name). Every long-lived `connect()` in this package goes through
+ * here so the two call sites can never diverge.
+ */
+function withReconnectDefaults(options: ConnectionOptions): ConnectionOptions {
+  return { ...RECONNECT_OPTIONS, ...options };
+}
+
+/** How long a best-effort publish waits on `flush()` before giving up (see `publish`). */
+const PUBLISH_FLUSH_TIMEOUT_MS = 2_000;
+
+/**
+ * Await `nc.flush()` but never longer than `timeoutMs`. With infinite reconnect a
+ * `flush()` issued while the broker is down does NOT reject — it pends until the
+ * broker returns, which can be minutes. Racing it against a timer keeps a long
+ * outage from stalling an in-flight turn; the published message stays buffered
+ * and is delivered on reconnect regardless. A flush rejection (connection fully
+ * CLOSED) is swallowed here so the timeout race never leaks an unhandled
+ * rejection — the caller's publish path is what logs the drop.
+ */
+async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  try {
+    await Promise.race([nc.flush().catch(() => undefined), timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
+ * Drain a long-lived connection's status async-iterator to the log so a future
+ * broker outage is OBSERVABLE (disconnect → reconnecting → reconnect → update).
+ * Fire-and-forget for the connection's lifetime; the loop ends when the
+ * connection closes. `label` distinguishes the event-bus connection from the
+ * auth-callout responder in the logs.
+ */
+function logConnectionStatus(nc: NatsConnection, label: string): void {
+  void (async () => {
+    try {
+      for await (const status of nc.status()) {
+        console.warn(`[nats:${label}] ${status.type}`, status.data);
+      }
+    } catch {
+      // The status iterator simply ends when the connection closes; never let it
+      // throw out of this background loop.
+    }
+  })();
+}
+
 export {
   decodeAuthRequest,
   mintAuthResponse,
@@ -109,7 +198,8 @@ export async function createNatsEventBus(
     connectOptions.user = auth.user;
     connectOptions.pass = auth.pass;
   }
-  const nc = await connect(connectOptions);
+  const nc = await connect(withReconnectDefaults(connectOptions));
+  logConnectionStatus(nc, "event-bus");
   const requestConnection: RequestConnection = {
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
   };
@@ -118,8 +208,26 @@ export async function createNatsEventBus(
       if (events.length === 0) {
         return;
       }
-      nc.publish(sessionSubject(workspaceId, sessionId), codec.encode({ workspaceId, sessionId, events }));
-      await nc.flush();
+      // Best-effort LIVE fan-out. These events are ALREADY durably appended to
+      // the DB before we get here (they carry a DB-assigned `sequence`), and
+      // every consumer reconciles from that durable log — the server SSE stream
+      // replays + gap-backfills via `listSessionEvents`, and the SDK client
+      // reconnects and replays from the durable events endpoint. So a publish
+      // that fails during a broker blip only delays LIVE delivery (healed by the
+      // next successful publish's gap-backfill, or a stream reconnect); it must
+      // never throw the in-flight turn to death.
+      try {
+        nc.publish(sessionSubject(workspaceId, sessionId), codec.encode({ workspaceId, sessionId, events }));
+      } catch (error) {
+        // `publish()` throws synchronously only when the connection is fully
+        // CLOSED (with infinite reconnect, effectively never outside shutdown).
+        console.warn(
+          `[nats:event-bus] dropped live publish for ${workspaceId}/${sessionId}; events are durable in the DB and reconcile on stream replay`,
+          error,
+        );
+        return;
+      }
+      await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
     subscribe: async (workspaceId, sessionId, onEvents) => subscribeSession(nc, workspaceId, sessionId, onEvents),
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeoutMs),
@@ -182,7 +290,8 @@ export async function createResponderConnection(
   } else if (auth.kind === "token") {
     connectOptions.token = auth.token;
   }
-  const nc = await connect(connectOptions);
+  const nc = await connect(withReconnectDefaults(connectOptions));
+  logConnectionStatus(nc, options.name ? `auth-callout:${options.name}` : "auth-callout");
   const sub: Subscription = nc.subscribe(subject);
   void (async () => {
     for await (const msg of sub) {
@@ -208,7 +317,21 @@ export async function createResponderConnection(
 
 export async function appendAndPublishEvents(db: Database, bus: EventBus, workspaceId: string, sessionId: string, events: AppendEventInput[]): Promise<SessionEvent[]> {
   const appended = await appendSessionEvents(db, workspaceId, sessionId, events);
-  await bus.publish(workspaceId, sessionId, appended);
+  // The DB append above is the durable system of record; the publish is only a
+  // best-effort LIVE fan-out. Guard it so NO EventBus implementation can throw an
+  // in-flight agent turn to death on a transient NATS disconnect — consumers
+  // reconcile any missed live events from the durable log via the events/stream
+  // endpoint (DB replay + gap-backfill). The managed `createNatsEventBus` bus
+  // already swallows internally, so this catch is the belt-and-suspenders guard
+  // for any other bus impl (and a fully CLOSED connection during shutdown).
+  try {
+    await bus.publish(workspaceId, sessionId, appended);
+  } catch (error) {
+    console.warn(
+      `[events] live publish failed for ${workspaceId}/${sessionId}; ${appended.length} event(s) are durable and reconcile on stream replay`,
+      error,
+    );
+  }
   return appended;
 }
 
