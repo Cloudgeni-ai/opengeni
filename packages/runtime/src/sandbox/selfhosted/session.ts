@@ -184,8 +184,19 @@ export class SelfhostedSession {
    * `manifest` is intentionally a plain mutable field (not `readonly`) so the SDK's
    * `state.manifest = next` write succeeds. It is NOT part of the persistable state
    * (`serializeSessionState` round-trips `{agentId}` only).
+   *
+   * `environment` is the SDK `SandboxSessionState.environment` (a `Record<string,
+   * string>`). It MUST be present because the GROUP box's client serializes THIS
+   * (the active backend's) state at end-of-turn — the non-owned injected session is
+   * serialized via the CONFIGURED client (modal in prod), NOT the selfhosted client.
+   * Modal's `serializeRemoteSandboxSessionState` does `Object.entries(state.environment)`;
+   * an absent field crashes the post-turn RunState serialize with "Object.entries
+   * requires that input parameter not be null or undefined". It carries the run's
+   * threaded environment (or `{}`). The resulting modal-tagged envelope is inert for
+   * selfhosted (resume re-addresses the machine by agentId via the lease pointer,
+   * never from this SDK envelope), so its only job is to not crash the serialize.
    */
-  readonly state: { agentId: string; instanceId: string; manifest: Manifest };
+  readonly state: { agentId: string; instanceId: string; manifest: Manifest; environment: Record<string, string> };
 
   constructor(deps: SelfhostedSessionDeps) {
     this.workspaceId = deps.workspaceId;
@@ -209,6 +220,10 @@ export class SelfhostedSession {
       agentId: deps.agentId,
       instanceId: deps.agentId,
       manifest: new Manifest({ root: "/workspace", entries: {}, environment: deps.environment ?? {} }),
+      // The SDK `SandboxSessionState.environment` — the run's threaded env (or `{}`).
+      // The group client's end-of-turn serialize reads `state.environment` directly
+      // (Object.entries), so it must be a defined object, not absent.
+      environment: deps.environment ?? {},
     };
   }
 

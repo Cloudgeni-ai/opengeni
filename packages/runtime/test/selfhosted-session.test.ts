@@ -129,6 +129,20 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(session.state.manifest).toBe(next);
   });
 
+  test("state.environment is a defined object (the GROUP client's end-of-turn serialize reads it)", () => {
+    // The post-turn cross-backend serialize bug: the non-owned injected session is
+    // serialized via the CONFIGURED (modal) client, whose serializeRemoteSandboxSessionState
+    // does `Object.entries(state.environment)`. An absent field crashes the post-turn
+    // RunState serialize with "Object.entries requires that input parameter not be
+    // null or undefined". So `state.environment` must always be a defined object.
+    const threaded = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: new MockAgentResponder(), relay: RELAY, environment: { HOME: "/workspace", FOO: "bar" } });
+    expect(threaded.state.environment).toEqual({ HOME: "/workspace", FOO: "bar" });
+    // The negotiation/test path (no env) defaults to `{}` — still a defined object.
+    const bare = sessionWith(new MockAgentResponder());
+    expect(bare.state.environment).toEqual({});
+    expect(Object.entries(bare.state.environment)).toEqual([]);
+  });
+
   test("state.manifest.environment carries the threaded run environment (env-parity → no validateNoEnvironmentDelta throw)", async () => {
     // The pin-to-vm env-delta bug: the SDK injects the selfhosted session NON-OWNED
     // and applies the agent's TARGET manifest as a provided-session delta;
