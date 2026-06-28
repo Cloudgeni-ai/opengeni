@@ -7,11 +7,13 @@ export default defineConfig({
   plugins: [viteReact(), tailwindcss()],
   build: {
     rollupOptions: {
-      // Two pages: the full component harness (index.html) and the dedicated
-      // timeline tool-call renderer harness (timeline.html), both static.
+      // Pages: the full component harness (index.html), the timeline tool-call
+      // renderer harness (timeline.html), and the Machines / enrollment UI
+      // screenshot harness (machines.html — M9 / V12), all static.
       input: {
         main: resolve(__dirname, "index.html"),
         timeline: resolve(__dirname, "timeline.html"),
+        machines: resolve(__dirname, "machines.html"),
       },
     },
   },

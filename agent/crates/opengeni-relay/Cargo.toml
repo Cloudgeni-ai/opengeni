@@ -1,0 +1,65 @@
+[package]
+name = "opengeni-relay"
+description = "The stateless stream-relay edge: a dumb byte-pump that pairs a self-hosted agent (producer) with a viewer (consumer) by channel key and splices pty/desktop frames bidirectionally with bounded buffers, backpressure, and per-token rate limits (dossier §10.5)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The preferred QUIC/WebTransport relay transport. Structured behind the SAME
+# feature flag the agent's stream crate uses (`opengeni-agent-stream/quic`); the
+# wss listener is the always-on day-1 path. Off by default.
+quic = ["opengeni-agent-stream/quic"]
+
+[[bin]]
+name = "opengeni-relay"
+path = "src/main.rs"
+
+[dependencies]
+# Share the agent's stream codec + channel-key + proto types VERBATIM so the two
+# ends of the relay-dial protocol can never drift (the §10.5 single-source rule).
+opengeni-agent-stream = { path = "../opengeni-agent-stream", features = ["test-support"] }
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "signal",
+] }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# The wss listener + health/metrics HTTP endpoints.
+axum = { workspace = true }
+tower = { workspace = true }
+
+# Token verify (the Rust mirror of the TS `ogs_`/`ogr_` HMAC mint).
+hmac = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+# CLI / env config.
+clap = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = { workspace = true }

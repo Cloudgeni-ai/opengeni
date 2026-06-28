@@ -33,5 +33,32 @@ spec:
             severity: warning
           annotations:
             summary: OpenGeni API p95 request latency is above 5 seconds
+        {{- if .Values.relay.enabled }}
+        # Bring-your-own-compute stream relay (dossier §18). The relay is a net-new
+        # byte path; these alerts surface a relay that is shedding load (rate
+        # limits / full ring buffers) or rejecting connections (bad tokens / stale
+        # epochs), and a relay tier that has lost all replicas.
+        - alert: OpenGeniRelayDown
+          expr: sum(up{job=~".*relay.*"}) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: All OpenGeni stream-relay replicas are down (selfhosted streaming unavailable)
+        - alert: OpenGeniRelayHighRejectRate
+          expr: sum(rate(opengeni_relay_opens_rejected_total[5m])) / clamp_min(sum(rate(opengeni_relay_opens_accepted_total[5m])) + sum(rate(opengeni_relay_opens_rejected_total[5m])), 1) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni relay is rejecting over 50% of channel opens (token/scope/epoch failures)
+        - alert: OpenGeniRelaySheddingLoad
+          expr: sum(rate(opengeni_relay_rate_limit_drops_total[5m])) + sum(rate(opengeni_relay_buffer_drops_total[5m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni relay is shedding frames (rate-limit or buffer-full backpressure)
+        {{- end }}
         {{- end }}
 {{- end }}

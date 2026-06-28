@@ -244,4 +244,14 @@ export type {
   WorkspaceEnvironmentVariableMetadata,
   WorkspaceMember,
   WorkspaceRegisteredPack,
+  // Bring-your-own-compute: Machines dashboard + per-machine metrics (M10).
+  MetricSample,
+  MachineState,
+  MachineKind,
+  MachineView,
+  MachinesResponse,
+  MachineMetricsSeriesResponse,
+  // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
+  SwapActiveSandboxRequest,
+  SwapActiveSandboxResponse,
 } from "./types";

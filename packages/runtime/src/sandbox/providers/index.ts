@@ -17,6 +17,7 @@ import { localProvider } from "./local";
 import { modalProvider } from "./modal";
 import { noneProvider } from "./none";
 import { runloopProvider } from "./runloop";
+import { selfhostedProvider } from "./selfhosted";
 import type { ProviderRegistration } from "./types";
 import { vercelProvider } from "./vercel";
 
@@ -31,6 +32,7 @@ export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
   blaxel: blaxelProvider,
   cloudflare: cloudflareProvider,
   vercel: vercelProvider,
+  selfhosted: selfhostedProvider,
 };
 
 // Stub settings carrying every per-provider credential, used ONLY by the

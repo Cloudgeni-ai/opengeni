@@ -1,0 +1,65 @@
+{{- if and .Values.nats.enabled .Values.nats.authCallout.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats-config
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+data:
+  # The nats-server config for the bring-your-own-compute tenancy boundary
+  # (M-AUTH; dossier §10.1 NATS Accounts + §17 isolation smoke). This mirrors the
+  # version-controlled single source of truth at deploy/nats/auth-callout.conf.
+  #
+  # The secret VALUES (the callout issuer public key + the control/auth passwords)
+  # are NEVER baked into this configmap (the configmap is Helm-clobbered per the
+  # deploy memory and would expose them). Instead they are injected as ENV VARS
+  # from the opengeni-runtime secret and expanded by nats-server's native
+  # $VARIABLE substitution at startup (see the nats-deployment env block). This
+  # keeps the configmap secret-free while the conf still resolves the real values.
+  nats.conf: |
+    # Client (in-cluster) listener — the api/worker/control-plane + the callout
+    # responder connect here over plain nats:// inside the cluster.
+    port: {{ .Values.nats.clientPort }}
+    http: {{ .Values.nats.monitorPort }}
+    server_name: {{ include "opengeni.fullname" . }}-nats
+
+    # The websocket listener. The agent dials wss:// so the control-plane NATS
+    # endpoint rides the SAME TLS ingress as the stream relay (no separate public
+    # TCP LB). TLS terminates at the ingress; this listener runs no_tls behind it.
+    websocket {
+      port: {{ .Values.nats.authCallout.websocketPort }}
+      no_tls: true
+      same_origin: {{ .Values.nats.authCallout.websocketSameOrigin }}
+    }
+
+    accounts {
+      # The ONE shared application account: the control plane (control), the
+      # callout responder (auth), and every enrolled agent (placed here by the
+      # callout) all live in APP so subjects route. Per-workspace isolation is the
+      # agents' signed JWT subject permissions.
+      {{ .Values.nats.authCallout.account }}: {
+        users: [
+          { user: {{ .Values.nats.authCallout.controlUser }}, password: $OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD }
+          { user: {{ .Values.nats.authCallout.calloutUser }}, password: $OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD }
+        ]
+      }
+      # The system account (monitoring/advisories). Kept operationally separate.
+      SYS: {}
+    }
+    system_account: SYS
+
+    authorization {
+      auth_callout {
+        # The callout issuer = the callout account PUBLIC nkey (the public half of
+        # OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED), injected from the secret.
+        issuer: $OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY
+        # The users that authenticate DIRECTLY (bypass the callout): the responder
+        # + the privileged control plane. EVERY OTHER connection into APP is
+        # delegated to the callout — i.e. the agents, who present an enrollment
+        # bearer the responder validates before minting a scoped user JWT.
+        auth_users: [ {{ .Values.nats.authCallout.calloutUser }}, {{ .Values.nats.authCallout.controlUser }} ]
+        account: {{ .Values.nats.authCallout.account }}
+      }
+    }
+{{- end }}

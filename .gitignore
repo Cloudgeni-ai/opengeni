@@ -23,3 +23,6 @@ terraform.tfvars.json
 .agent/
 # Staged bundled-skills copy created at runtime (packages/runtime bundledSkillsDir)
 .opengeni/
+.claude/
+/agent/target/
+**/target/

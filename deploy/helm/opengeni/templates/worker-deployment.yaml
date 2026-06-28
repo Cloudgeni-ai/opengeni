@@ -60,6 +60,19 @@ spec:
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+            {{- if .Values.minio.enabled }}
+            # Worker-only override: the worker performs SERVER-SIDE object-storage
+            # PUTs in-cluster (e.g. recording uploads) and mints NO browser-facing
+            # presigned URLs, so it must reach MinIO over the in-cluster Service. The
+            # shared OPENGENI_OBJECT_STORAGE_ENDPOINT emitted by generatedRuntimeEnv is
+            # the PUBLIC endpoint that api/web sign browser presigned URLs against; on
+            # managed deployments that host has no MinIO ingress route, so a server-side
+            # PUT there 401s (the recording-upload bug). A later duplicate env entry
+            # wins in a container env list, so this overrides ONLY the worker — api/web
+            # keep the public endpoint for browser uploads.
+            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
+              value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
+            {{- end }}
           {{- else }}
           env: []
           {{- end }}

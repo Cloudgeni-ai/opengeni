@@ -117,6 +117,10 @@ const SettingsSchema = z.object({
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
   publicBaseUrl: z.string().url().optional(),
+  // Base URL for the bring-your-own-compute agent release assets the get.<domain>
+  // install routes redirect to. Defaults to this repo's GitHub Releases. The route
+  // appends `/download/agent-v<ver>/<asset>` (or `/latest/download/<asset>`).
+  agentReleasesBaseUrl: z.string().url().default("https://github.com/Cloudgeni-ai/opengeni/releases"),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -392,6 +396,70 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
+  // --- bring-your-own-compute (selfhosted 11th backend) rollout flag, default OFF ---
+  // The keystone flag for the whole selfhosted feature (the enrollment device-flow,
+  // the NATS control plane, the relay stream tier). When FALSE the enrollment routes
+  // 404 (invisible — the surface does not exist for this deployment) and the
+  // selfhosted backend is inert; boot is unaffected. EnvBoolean (NOT
+  // z.coerce.boolean(), which coerces "false" -> true). Flipped per-environment via
+  // the deploy-staging IaC secret/configmap pattern (dossier §17/§25.1).
+  sandboxSelfhostedEnabled: EnvBoolean.default(false),
+  // The HMAC secret the control plane signs the enrollment bearer credential with
+  // (the `oge_` envelope the agent presents back to the control plane). Optional:
+  // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
+  // credential plane disabled (graceful degrade, mirrors streamTokenSecret). NEVER
+  // logged. Lives in the opengeni-runtime secret (Helm-clobbered configmap avoided).
+  enrollmentSigningSecret: z.string().optional(),
+  // Connect-info the EnrollmentCredentials hand the agent: the NATS server URL(s)
+  // the agent dials for the control plane, and the relay edge base URL for streams.
+  // The per-workspace NATS Account creds binding is infra-deferred (M4/relay
+  // milestone) — the poll returns these endpoints + a placeholder creds field.
+  selfhostedNatsUrl: z.string().optional(),
+  selfhostedRelayUrl: z.string().optional(),
+  // The HMAC secret the control plane signs the agent's relay PRODUCER token with
+  // (the `ogr_` envelope threaded into EnrollmentCredentials.relayToken; M8b/dossier
+  // §10.5). The relay verifies the producer token with the SAME secret. Optional:
+  // when ABSENT the poll returns an empty relayToken (graceful degrade — the stream
+  // plane is simply unavailable until configured). Falls back to streamTokenSecret /
+  // delegationSecret (same HMAC family) so a deployment with a stream-token secret
+  // needs no second one. NEVER logged. Lives in the opengeni-runtime secret.
+  selfhostedRelayTokenSecret: z.string().optional(),
+  // The minisign PUBLIC key the agent pins for self-update verification (handed to
+  // the agent in EnrollmentCredentials; the SECRET key lives only in CI).
+  agentUpdatePublicKey: z.string().optional(),
+  // --- NATS auth-callout tenancy boundary (bring-your-own-compute M-AUTH; dossier
+  //     §10.1 NATS Accounts per workspace + §17 the isolation smoke) -------------
+  // nats-server is configured with AUTH CALLOUT: an external agent connects
+  // presenting its `oge_` enrollment bearer as the connect auth-token; the server
+  // issues an authorization request on $SYS.REQ.USER.AUTH to our responder, which
+  // validates the bearer and returns a SIGNED NATS user JWT scoped to pub/sub ONLY
+  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
+  // isolation. These are deployment-level secrets in the opengeni-runtime secret
+  // (Helm-clobbered configmap avoided), all OPTIONAL: when the callout plane is not
+  // configured the responder simply does not start (selfhosted agents cannot
+  // connect — graceful, never a boot-fail).
+  //
+  // The callout account SIGNING SEED (`SA...`). Both the user JWT and the
+  // authorization-response JWT are signed by this account key; its public key
+  // (`A...`) is the `auth_callout.issuer` in the server config. NEVER logged.
+  selfhostedNatsCalloutAccountSeed: z.string().optional(),
+  // The TARGET ACCOUNT NAME the minted user is placed into (the server-config-mode
+  // `auth_callout.account`, e.g. "APP"). The responder writes it as the minted user
+  // JWT `aud` so nats-server binds the agent to this account — the SAME account the
+  // privileged control plane connects into, so `agent.<ws>.<id>.rpc` request/reply
+  // routes. Optional; resolveNatsCalloutConfig defaults it to "APP".
+  selfhostedNatsCalloutAccountName: z.string().optional(),
+  // The callout RESPONDER's own NATS login (one of the `auth_callout.auth_users`
+  // in the AUTH account) — the responder connects with this to subscribe
+  // $SYS.REQ.USER.AUTH. Username/password.
+  selfhostedNatsCalloutUser: z.string().optional(),
+  selfhostedNatsCalloutPassword: z.string().optional(),
+  // The PRIVILEGED control-plane login (api/worker): a static account user that may
+  // request `agent.*.rpc` + receive its inbox replies. The event bus + the
+  // selfhosted control RPC ride THIS connection. Username/password; when unset the
+  // bus connects anonymously (local dev / a NATS with no auth_callout).
+  selfhostedNatsControlUser: z.string().optional(),
+  selfhostedNatsControlPassword: z.string().optional(),
   // --- sandbox lease cadences (cadence invariant validated at boot below) ---
   // reaperPeriod < viewerHolderTTL, and reaperPeriod + idleGrace < the EFFECTIVE
   // box idle timeout (effectiveModalIdleTimeoutSeconds, which defaults to the hard
@@ -704,6 +772,11 @@ export const SANDBOX_REQUIRED_ENV: Record<z.infer<typeof SandboxBackend>, readon
     { field: "vercelToken", env: "OPENGENI_VERCEL_TOKEN" },
     { field: "vercelProjectId", env: "OPENGENI_VERCEL_PROJECT_ID" },
   ],
+  // selfhosted needs NO per-box credentials: it is the user's own machine reached
+  // over the agent's own enrollment. The enrollment-signing + relay-token secrets
+  // are deployment-level (a single runtime secret, not per-active-backend creds),
+  // wired in the connectivity/enrollment milestones (M4/M5), not here.
+  selfhosted: [],
 };
 
 /** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
@@ -734,6 +807,7 @@ export function getSettings(): Settings {
     observabilityOtlpEndpoint: optional("OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT") ?? optional("OTEL_EXPORTER_OTLP_ENDPOINT"),
     observabilityOtlpHeaders: optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
@@ -846,6 +920,18 @@ export function getSettings(): Settings {
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
+    sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
+    enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
+    selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
+    selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
+    selfhostedRelayTokenSecret: optional("OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET"),
+    agentUpdatePublicKey: optional("OPENGENI_AGENT_UPDATE_PUBLIC_KEY"),
+    selfhostedNatsCalloutAccountSeed: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED"),
+    selfhostedNatsCalloutAccountName: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME"),
+    selfhostedNatsCalloutUser: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_USER"),
+    selfhostedNatsCalloutPassword: optional("OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD"),
+    selfhostedNatsControlUser: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_USER"),
+    selfhostedNatsControlPassword: optional("OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD"),
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
@@ -1820,6 +1906,95 @@ export function resolveStreamTokenSecret(settings: Settings): string | undefined
  */
 export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
+}
+
+/**
+ * Resolve the secret the control plane signs the enrollment bearer credential
+ * with (the `oge_` envelope the agent presents back — M5/dossier §10.2). Falls
+ * back to `delegationSecret` (the same HMAC envelope family) so a deployment that
+ * already carries a delegation secret needs no second one. Returns undefined when
+ * neither is set; when selfhosted is enabled but this is undefined, the poll route
+ * reports the credential plane disabled (graceful degrade, never a 500). NEVER log
+ * the returned value.
+ */
+export function resolveEnrollmentSigningSecret(settings: Settings): string | undefined {
+  const explicit = settings.enrollmentSigningSecret?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const delegation = settings.delegationSecret?.trim();
+  return delegation ? delegation : undefined;
+}
+
+/**
+ * Resolve the HMAC secret the control plane signs the agent's relay PRODUCER token
+ * with (the `ogr_` envelope; M8b/dossier §10.5). The RELAY verifies the producer
+ * token with the SAME secret (injected into the relay via env). Prefers an explicit
+ * `selfhostedRelayTokenSecret`, then the `streamTokenSecret` (the relay already
+ * needs that one to verify the viewer's `ogs_` token, so a single secret can back
+ * both planes), then `delegationSecret` (same HMAC family). Returns undefined when
+ * none is set — the enrollment poll then returns an empty relayToken (graceful
+ * degrade; the stream plane is unavailable until configured). NEVER log the value.
+ */
+export function resolveRelayTokenSecret(settings: Settings): string | undefined {
+  const explicit = settings.selfhostedRelayTokenSecret?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  const stream = settings.streamTokenSecret?.trim();
+  if (stream) {
+    return stream;
+  }
+  const delegation = settings.delegationSecret?.trim();
+  return delegation ? delegation : undefined;
+}
+
+/**
+ * The resolved NATS auth-callout responder config (M-AUTH). Present only when the
+ * callout plane is FULLY configured: the account signing seed + the responder's own
+ * login. When any piece is missing this returns null and the responder does not
+ * start (selfhosted agents cannot connect — a graceful disabled state, never a boot
+ * crash). The returned `accountSeed` is a secret; NEVER log it.
+ */
+export interface NatsCalloutConfig {
+  /** The callout account SIGNING seed (`SA...`) — signs the user + response JWTs. */
+  accountSeed: string;
+  /** The target account NAME the user is placed into (the response `aud`). */
+  accountName: string;
+  /** The responder's NATS login (an `auth_callout.auth_users` user). */
+  user: string;
+  password: string;
+}
+
+export function resolveNatsCalloutConfig(settings: Settings): NatsCalloutConfig | null {
+  const accountSeed = settings.selfhostedNatsCalloutAccountSeed?.trim();
+  const accountName = settings.selfhostedNatsCalloutAccountName?.trim() || "APP";
+  const user = settings.selfhostedNatsCalloutUser?.trim();
+  const password = settings.selfhostedNatsCalloutPassword?.trim();
+  if (!accountSeed || !user || !password) {
+    return null;
+  }
+  return { accountSeed, accountName, user, password };
+}
+
+/**
+ * The PRIVILEGED control-plane NATS login (api/worker). Present only when BOTH a
+ * user and password are set; otherwise null and the bus connects anonymously (local
+ * dev / a NATS without auth_callout). When the callout plane is on, this is the
+ * static account user permitted to request `agent.*.rpc`.
+ */
+export interface NatsControlPlaneAuth {
+  user: string;
+  password: string;
+}
+
+export function resolveNatsControlPlaneAuth(settings: Settings): NatsControlPlaneAuth | null {
+  const user = settings.selfhostedNatsControlUser?.trim();
+  const password = settings.selfhostedNatsControlPassword?.trim();
+  if (!user || !password) {
+    return null;
+  }
+  return { user, password };
 }
 
 function splitCsv(raw: string): string[] {

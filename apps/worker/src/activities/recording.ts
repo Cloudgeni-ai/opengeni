@@ -11,7 +11,7 @@
 
 import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
-import { updateRecording } from "@opengeni/db";
+import { deleteRecording, updateRecording } from "@opengeni/db";
 import type {
   RecordingAvailablePayload,
   RecordingCodec,
@@ -157,13 +157,20 @@ export async function finalizeRecording(args: {
     }
 
     // 3. PUT to storage (the byte transfer stays IN this process — F10).
+    //
+    // SERVER-SIDE authenticated direct PUT, NOT presign+fetch. The worker holds the
+    // storage creds, so a presigned URL buys nothing — and on a split public/
+    // internal endpoint topology (a PUBLIC `objectStorageEndpoint` with no in-cluster
+    // route, the preview case) the presigned URL points at the public host and the
+    // fetch PUT 401s. `putObject` sends the bytes straight to the backend over the
+    // configured (in-cluster) endpoint with the in-process SDK client. Browser
+    // uploads keep using `createPutUrl`; this is the trusted-server twin.
     const key = recordingStorageKey(args.workspaceId, args.sessionId, active.recordingId, codec);
-    const put = await objectStorage.createPutUrl({ key, contentType: finalized.contentType });
-    // Blob-wrap the bytes (the BodyInit shape fetch accepts; mirrors the SDK's
-    // upload path). `.slice()` detaches a fresh ArrayBuffer from the box read.
-    const res = await fetch(put.url, { method: "PUT", headers: put.requiredHeaders, body: new Blob([finalized.bytes.slice()]) });
-    if (!res.ok) {
-      return await fail("upload-failed", `storage PUT returned ${res.status}`);
+    try {
+      // `.slice()` detaches a fresh ArrayBuffer from the box read.
+      await objectStorage.putObject({ key, contentType: finalized.contentType, body: finalized.bytes.slice() });
+    } catch (uploadError) {
+      return await fail("upload-failed", uploadError instanceof Error ? uploadError.message : String(uploadError));
     }
 
     // 4. Commit `available` with the artifact ref.
@@ -194,6 +201,38 @@ export async function finalizeRecording(args: {
   } catch (error) {
     const reason: RecordingFailedReason = error instanceof RecordingError ? error.reason : "ffmpeg-error";
     return await fail(reason, error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Discard an on-turn recording that captured NO computer-use activity (a plain
+ * text turn): stop ffmpeg on the box, delete the box artifacts, and remove the
+ * recording row entirely. NO storage PUT and NO `recording.failed` — a clean
+ * no-op. NEVER throws (it runs in the turn `finally` and must not mask the turn
+ * outcome). Returns nothing; the caller emits no recording event for a discard.
+ */
+export async function discardRecording(args: {
+  db: Database;
+  accountId: string;
+  workspaceId: string;
+  active: ActiveRecording;
+  session: unknown;
+}): Promise<void> {
+  const { db, active } = args;
+  try {
+    // Stop ffmpeg cleanly, then delete the partial artifact off the box. Both are
+    // best-effort: a stuck box must not strand the discard (the box rides the
+    // provider idle-timeout regardless).
+    await stopRecordingOnBox(args.session, active.proc).catch(() => undefined);
+    await deleteRecordingArtifacts(args.session, active.proc).catch(() => undefined);
+  } finally {
+    // Remove the phantom row inserted at beginRecording so a no-activity turn
+    // leaves no recording trace at all.
+    await deleteRecording(db, {
+      accountId: args.accountId,
+      workspaceId: args.workspaceId,
+      recordingId: active.recordingId,
+    }).catch(() => undefined);
   }
 }
 

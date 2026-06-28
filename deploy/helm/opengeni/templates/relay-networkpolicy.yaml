@@ -1,0 +1,43 @@
+{{- if and .Values.networkPolicy.enabled .Values.relay.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-relay
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: relay
+  # The relay is a pure INGRESS edge: both the agent (producer) and the viewer
+  # (consumer) dial IN over wss through the ingress controller. The relay never
+  # initiates a cluster connection, so it has NO egress allow-list at all — an
+  # empty Egress policyType denies all egress (tightest possible blast radius for
+  # a net-new byte path; dossier §18/§25.2). DNS is not required because the relay
+  # resolves no names.
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # The ingress controller terminates TLS and forwards the wss dials.
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+        {{- with .Values.networkPolicy.monitoring }}
+        # Allow the metrics scraper (Prometheus) to reach GET /metrics on :8443.
+        - namespaceSelector:
+            {{- toYaml .namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.relay.containerPort }}
+  # No egress rules: with Egress in policyTypes and an empty egress list, all
+  # egress from the relay is denied.
+  egress: []
+{{- end }}

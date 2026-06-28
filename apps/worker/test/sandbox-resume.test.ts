@@ -21,7 +21,6 @@
 // torn down in afterAll regardless of outcome.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import {
   acquireLease,
@@ -32,51 +31,11 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { migrate } from "@opengeni/db/migrate";
-import { testSettings } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
 import { resumeBoxForTurn } from "../src/sandbox-resume";
 
-const CONTAINER = "ogtest-pg-p12-resume";
-const PORT = 55457;
-const PASSWORD = "x";
-const APP_PASSWORD = "apppw";
-const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
-const IMAGE = "pgvector/pgvector:pg16";
-
-function docker(args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-}
-
-function removeContainer(): void {
-  try {
-    docker(["rm", "-f", CONTAINER]);
-  } catch {
-    // already gone
-  }
-}
-
-async function waitForReady(): Promise<void> {
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    try {
-      const probe = postgres(ADMIN_URL, { max: 1, connect_timeout: 2 });
-      try {
-        await probe`SELECT 1`;
-        return;
-      } finally {
-        await probe.end();
-      }
-    } catch (err) {
-      if (Date.now() > deadline) {
-        throw new Error(`postgres did not become ready in time: ${String(err)}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  }
-}
-
 let available = true;
+let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
@@ -122,36 +81,23 @@ async function dropSession(established: { session: unknown }): Promise<void> {
 }
 
 beforeAll(async () => {
-  try {
-    removeContainer();
-    docker(["run", "--rm", "-d", "-e", `POSTGRES_PASSWORD=${PASSWORD}`, "-p", `${PORT}:5432`, "--name", CONTAINER, IMAGE]);
-  } catch (err) {
+  shared = await acquireSharedTestDatabase("worker-sandbox-resume");
+  if (!shared) {
     available = false;
-    console.warn(`[p12-resume] docker unavailable, skipping: ${String(err)}`);
+    // eslint-disable-next-line no-console
+    console.warn("[worker-sandbox-resume] docker unavailable, skipping");
     return;
   }
-  await waitForReady();
-  await migrate(ADMIN_URL);
-  admin = postgres(ADMIN_URL, { max: 4 });
-  await admin.unsafe(`
-    DO $$ BEGIN
-      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-        CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
-      END IF;
-    END $$;
-    GRANT USAGE ON SCHEMA public TO opengeni_app;
-    GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-  `);
-  client = createDb(APP_URL);
+  admin = shared.admin;
+  client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
 
 afterAll(async () => {
-  try { await client?.close(); } catch { /* noop */ }
-  try { await admin?.end(); } catch { /* noop */ }
-  removeContainer();
+  try {
+    await client?.close();
+  } catch { /* noop */ }
+  await shared?.release();
 });
 
 describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real lease + RLS)", () => {

@@ -1,0 +1,127 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/opengeni-agent",
+    "crates/opengeni-agent-proto",
+    "crates/opengeni-agent-platform",
+    "crates/opengeni-agent-stream",
+    "crates/opengeni-agent-update",
+    "crates/opengeni-relay",
+]
+
+# Shared metadata + lint posture for every crate in the agent workspace.
+# Idiomatic, well-documented Rust is a first-class requirement (dossier §3/§10.4):
+# we lean on clippy::pedantic at the workspace level and silence only the few
+# lints that fight generated code or add no value here.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/Cloudgeni-ai/opengeni"
+authors = ["OpenGeni"]
+
+[workspace.dependencies]
+# Wire protocol — generated from agent/proto/opengeni_agent.proto.
+prost = "0.13"
+prost-build = "0.13"
+# Pure-Rust protobuf compiler so `cargo build` needs NO `protoc` binary
+# (hermetic on NixOS, where downloaded binaries do not run).
+protox = "0.7"
+thiserror = "2"
+
+# Async runtime + ergonomics. The agent is IO-bound (NATS, child processes,
+# filesystem) so tokio is the natural fit; async-trait gives object-safe async
+# methods on the `Platform` trait.
+tokio = { version = "1", default-features = false }
+async-trait = "0.1"
+
+# Control-plane transport. async-nats is the official Rust NATS client; the agent
+# subscribes to `agent.<ws>.<id>.rpc` and answers ControlRequests (dossier §10.1).
+async-nats = "0.49"
+
+# Structured logging (never log secret values — dossier §10.6).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Enrollment: ed25519 install keypair + the device-flow HTTP client.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# CLI parsing.
+clap = { version = "4", features = ["derive", "env"] }
+
+# Misc.
+futures = "0.3"
+futures-util = "0.3"
+hostname = "0.4"
+# SAFE statvfs binding for the M10 disk metric — no FFI of our own, so the
+# workspace `unsafe_code = forbid` holds. Only the `fs` feature (statvfs) is
+# pulled; unix-only (cfg-gated at the call site).
+nix = { version = "0.29", default-features = false, features = ["fs"] }
+
+# M8 stream plane.
+# A real PTY (openpty/ConPTY) via a SAFE binding — no unsafe (dossier §10.4).
+portable-pty = "0.9"
+# Desktop frame encoding (capture → PNG chunk over a StreamFrame).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Linux X11 capture + XTEST input + RANDR geometry via the SAFE pure-Rust binding
+# (keeps unsafe_code = forbid; no FFI of our own).
+x11rb = { version = "0.13", features = ["xtest", "randr", "image"] }
+# The relay-dial wss fallback transport (the QUIC/WebTransport preferred path is
+# structured behind a trait; wss is the concrete day-1 impl, dossier §10.1/§10.5).
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+# Stream byte buffers (prost re-exports bytes, but the stream pumps use it directly).
+bytes = "1"
+
+# --- Relay tier (opengeni-relay) ------------------------------------------------
+# The HTTP/WebSocket server framework for the relay's wss listener + health/metrics
+# endpoints. rustls (no system OpenSSL) keeps the static-musl release build clean.
+axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "ws", "query"] }
+tower = { version = "0.5", default-features = false }
+# HMAC-SHA256 verify of the `ogs_` viewer token + the `ogr_` producer token (the
+# Rust mirror of the TS mint — the single-source token-verify contract, §10.5). A
+# pure-Rust impl so the musl static build needs no libsodium/OpenSSL.
+hmac = "0.12"
+sha2 = "0.10"
+# Constant-time signature comparison (mirrors the TS constantTimeEqual).
+subtle = "2"
+
+# --- Self-update (opengeni-agent-update) ----------------------------------------
+# Pure-Rust minisign (ed25519) signature verify — NO libsodium, keeps the static
+# musl build clean and the workspace `unsafe_code = forbid` intact. The SAME
+# pinned key the install scripts embed verifies every self-update artifact.
+minisign-verify = "0.2"
+# The genuinely-hard atomic self-replace primitive (current→backup, verified-new→
+# current; the Windows rename-self-aside). By the cargo-dist/Astral authors. We own
+# discovery/verify/rollback; we delegate ONLY the atomic replace.
+self-replace = "1"
+# Deterministic staged-rollout cohorting: blake3(agentId + cohort_salt) % 100.
+blake3 = "1"
+# Semantic-version comparison for version-monotonicity + min_supported gating.
+semver = "1"
+# Hex encode/decode for the sha256 compare.
+hex = "0.4"
+
+# Test-only helpers.
+tempfile = "3"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Generated prost code triggers these; not worth fighting.
+module_name_repetitions = "allow"
+# Doc-comment first-line punctuation is enforced loosely; allow terse docs.
+doc_markdown = "allow"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

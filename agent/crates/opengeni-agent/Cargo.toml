@@ -1,0 +1,59 @@
+[package]
+name = "opengeni-agent"
+description = "The OpenGeni self-hosted agent binary: enrollment, dial, RPC dispatch, and the resiliency supervisor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "opengeni-agent"
+path = "src/main.rs"
+
+[dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+opengeni-agent-platform = { path = "../opengeni-agent-platform" }
+opengeni-agent-stream = { path = "../opengeni-agent-stream" }
+opengeni-agent-update = { path = "../opengeni-agent-update" }
+
+prost = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "sync",
+    "fs",
+    "process",
+    "io-util",
+] }
+async-nats = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Enrollment: install keypair + device-flow HTTP client + credential persistence.
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+clap = { workspace = true }
+hostname = { workspace = true }
+
+# The M10 disk metric (statvfs of the workspace root) — unix-only, SAFE binding.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
+tempfile = { workspace = true }

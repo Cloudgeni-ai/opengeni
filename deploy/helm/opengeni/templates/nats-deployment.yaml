@@ -17,19 +17,54 @@ spec:
       labels:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: nats
+      {{- if .Values.nats.authCallout.enabled }}
+      annotations:
+        checksum/nats-config: {{ include (print $.Template.BasePath "/nats-configmap.yaml") . | sha256sum }}
+      {{- end }}
     spec:
       containers:
         - name: nats
           image: {{ printf "%s:%s" .Values.nats.image.repository .Values.nats.image.tag | quote }}
           imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          {{- if .Values.nats.authCallout.enabled }}
+          # Run from the mounted auth-callout config. -m is folded into the conf's
+          # `http:` line so the monitor port still serves /healthz. nats-server
+          # expands the $OPENGENI_SELFHOSTED_NATS_* env vars (from the runtime
+          # secret) into the conf at startup, so the secret VALUES never live in
+          # the configmap.
+          args:
+            - "-c"
+            - "/etc/nats/nats.conf"
+          env:
+            - name: OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.secretName" . }}
+                  key: {{ .Values.nats.authCallout.calloutPublicKeySecretKey | quote }}
+            - name: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.secretName" . }}
+                  key: {{ .Values.nats.authCallout.controlPasswordSecretKey | quote }}
+            - name: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.secretName" . }}
+                  key: {{ .Values.nats.authCallout.calloutPasswordSecretKey | quote }}
+          {{- else }}
           args:
             - "-m"
             - {{ .Values.nats.monitorPort | quote }}
+          {{- end }}
           ports:
             - name: client
               containerPort: {{ .Values.nats.clientPort }}
             - name: monitor
               containerPort: {{ .Values.nats.monitorPort }}
+            {{- if .Values.nats.authCallout.enabled }}
+            - name: websocket
+              containerPort: {{ .Values.nats.authCallout.websocketPort }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /healthz
@@ -44,4 +79,16 @@ spec:
             periodSeconds: 20
           resources:
             {{- toYaml .Values.nats.resources | nindent 12 }}
+          {{- if .Values.nats.authCallout.enabled }}
+          volumeMounts:
+            - name: nats-config
+              mountPath: /etc/nats
+              readOnly: true
+          {{- end }}
+      {{- if .Values.nats.authCallout.enabled }}
+      volumes:
+        - name: nats-config
+          configMap:
+            name: {{ include "opengeni.fullname" . }}-nats-config
+      {{- end }}
 {{- end }}

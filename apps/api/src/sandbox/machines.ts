@@ -1,0 +1,253 @@
+// apps/api/src/sandbox/machines.ts — the M10 Machines-DASHBOARD service (dossier
+// §10.7). Builds the `MachinesResponse` the dashboard renders: the workspace's
+// enrolled selfhosted machines, each enriched with
+//   * STATE — the M3 liveness (online/reconnecting/offline) overlaid with the
+//     enrollment-derived consent/display reasons (consent_required /
+//     display_unavailable) — a real ControlRpc ping (the subject IS the registry),
+//     reusing the M7 fleet probe;
+//   * METRICS — the latest machine_metrics_latest row (or null before a first
+//     heartbeat), projected to the contract's MetricSample;
+//   * sharedSessionCount — the lease refcount (how many sessions share this one
+//     whole machine, the maxSandboxes:1 disclosure).
+// PLUS, when a session context is supplied, the session's synthetic Modal group
+// box (isSessionGroup:true) + the active-sandbox pointer (activeSandboxId/Epoch).
+//
+// This is workspace-scoped (perm enrollments:read) and flag-gated upstream
+// (sandboxSelfhostedEnabled). It deliberately does NOT depend on a FleetContext
+// (which is session-coupled): the pure workspace dashboard works without a
+// session; an in-session view passes the optional session to add the group box +
+// active pointer.
+
+import type { Settings } from "@opengeni/config";
+import {
+  getSession,
+  listEnrollments,
+  listSandboxes,
+  readActiveSandbox,
+  readLease,
+  readMachineMetricsLatestForWorkspace,
+  type Database,
+  type EnrollmentRecord,
+  type MachineMetricsRow,
+} from "@opengeni/db";
+import type { EventBus } from "@opengeni/events";
+import {
+  MachineView,
+  MetricSample,
+  type MachinesResponse,
+} from "@opengeni/contracts";
+import {
+  NatsControlRpc,
+  selfhostedLiveness,
+  SelfhostedSession,
+  type ControlRpc,
+  type NatsRequestConnection,
+} from "@opengeni/runtime/sandbox";
+import { relayConfigFromSettings } from "./routing";
+
+export type MachinesServices = {
+  db: Database;
+  settings: Settings;
+  bus?: EventBus;
+};
+
+const PROBE_TIMEOUT_MS = 5_000;
+
+function controlRpc(bus: EventBus | undefined): ControlRpc {
+  return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
+    if (!bus) {
+      return null;
+    }
+    return bus.getRequestConnection();
+  });
+}
+
+/**
+ * Project a stored `machine_metrics_latest` row to the contract `MetricSample`.
+ * The DB carries `gpuUtilPercent` + `gpuMemUsedBytes`/`gpuMemTotalBytes`; the wire
+ * `MetricSample` exposes the single `gpuUtilPct` + `gpuMemBytes` (USED bytes — the
+ * "how much VRAM is in use" the dashboard reads). A null any-numeric stays null
+ * (the not-reported contract); the byte/load fields default to 0 when a sample
+ * carried no value (the agent reports 0 == not-reported for those).
+ */
+export function metricRowToSample(row: MachineMetricsRow): MetricSample {
+  return MetricSample.parse({
+    cpuPct: row.cpuPercent ?? 0,
+    load1: row.load1 ?? 0,
+    load5: row.load5 ?? 0,
+    load15: row.load15 ?? 0,
+    memUsedBytes: row.memUsedBytes ?? 0,
+    memTotalBytes: row.memTotalBytes ?? 0,
+    diskUsedBytes: row.diskUsedBytes ?? 0,
+    diskTotalBytes: row.diskTotalBytes ?? 0,
+    gpuUtilPct: row.gpuUtilPercent,
+    gpuMemBytes: row.gpuMemUsedBytes,
+    runQueue: row.contention ?? 0,
+    sampledAt: row.sampledAt,
+  });
+}
+
+/** Probe an enrolled machine's liveness — a real ControlRpc ping mapped through
+ *  `selfhostedLiveness` (the enrollment status/consent/display + lastSeenAt
+ *  disambiguate a probe-miss into reconnecting vs offline). Mirrors the M7 fleet
+ *  probe. A non-active enrollment is offline without a probe. */
+async function probeEnrollment(
+  services: MachinesServices,
+  workspaceId: string,
+  enrollment: EnrollmentRecord,
+): Promise<{ state: "online" | "reconnecting" | "offline"; consented: boolean; hasDisplay: boolean }> {
+  const { settings, bus } = services;
+  let probeResponded = false;
+  if (enrollment.status === "active") {
+    const session = new SelfhostedSession({
+      workspaceId,
+      agentId: enrollment.id,
+      controlRpc: controlRpc(bus),
+      relay: relayConfigFromSettings(settings),
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    try {
+      probeResponded = await session.ping();
+    } catch {
+      probeResponded = false;
+    }
+  }
+  const derived = selfhostedLiveness({
+    enrollment: {
+      status: enrollment.status,
+      exposure: enrollment.exposure,
+      allowScreenControl: enrollment.allowScreenControl,
+      hasDisplay: enrollment.hasDisplay,
+      lastSeenAt: enrollment.lastSeenAt,
+    },
+    probeResponded,
+  });
+  return { state: derived.state, consented: derived.consented, hasDisplay: derived.hasDisplay };
+}
+
+/**
+ * Resolve the dashboard STATE of an online machine. A machine that is online but
+ * (a) has no display → `display_unavailable`; (b) is displayed but whole-machine
+ * /screen-control consent is not acked → `consent_required`. Otherwise the
+ * liveness state (online/reconnecting/offline) is the state. This mirrors the
+ * desktop/computer-use degradation reasons in the selfhosted capability
+ * negotiation so the dashboard pill and the dock agree.
+ */
+function machineStateFor(
+  liveness: "online" | "reconnecting" | "offline",
+  consented: boolean,
+  hasDisplay: boolean,
+): MachinesResponse["machines"][number]["state"] {
+  if (liveness !== "online") {
+    return liveness;
+  }
+  if (!hasDisplay) {
+    return "display_unavailable";
+  }
+  if (!consented) {
+    return "consent_required";
+  }
+  return "online";
+}
+
+/**
+ * Build the Machines dashboard response for a workspace. When `sessionId` is
+ * supplied (an in-session view) the session's synthetic Modal group box is
+ * prepended (`isSessionGroup:true`) and the active-sandbox pointer is echoed;
+ * without it (the pure workspace dashboard) `activeSandboxId` is null and only
+ * the enrolled machines are listed.
+ */
+export async function listMachines(
+  services: MachinesServices,
+  input: { workspaceId: string; sessionId?: string | null },
+): Promise<MachinesResponse> {
+  const { db } = services;
+  const { workspaceId } = input;
+
+  // The session's active pointer (in-session view only). Absent session → the
+  // default null pointer (the workspace dashboard has no "active" machine).
+  let activeSandboxId: string | null = null;
+  let activeEpoch = 0;
+  let session: Awaited<ReturnType<typeof getSession>> | null = null;
+  if (input.sessionId) {
+    session = await getSession(db, workspaceId, input.sessionId);
+    if (session) {
+      const pointer = await readActiveSandbox(db, workspaceId, input.sessionId);
+      activeSandboxId = pointer?.activeSandboxId ?? null;
+      activeEpoch = pointer?.activeEpoch ?? 0;
+    }
+  }
+
+  const machines: MachineView[] = [];
+
+  // The session's own Modal group box (synthetic): the default/home sandbox a
+  // null active pointer routes to. Only present in an in-session view.
+  if (session) {
+    const groupActive = activeSandboxId === null;
+    machines.push(MachineView.parse({
+      sandboxId: session.sandboxGroupId,
+      enrollmentId: null,
+      name: "session sandbox",
+      kind: session.sandboxBackend === "selfhosted" ? "selfhosted" : "modal",
+      state: "online",
+      active: groupActive,
+      isSessionGroup: true,
+      // The Modal group box is a cloud Linux box; its precise OS/arch is not
+      // surfaced as a metric, so the dashboard shows the canonical linux/x86_64.
+      os: "linux",
+      arch: "x86_64",
+      hasDisplay: false,
+      allowScreenControl: false,
+      sharedSessionCount: 1,
+      lastSeenAt: null,
+      metrics: null,
+    }));
+  }
+
+  // The workspace's enrolled selfhosted machines. One bulk metrics read joined
+  // onto the machines (no N+1). Each machine is probed for liveness.
+  const [sandboxes, enrollments, metricsByEnrollment] = await Promise.all([
+    listSandboxes(db, workspaceId),
+    listEnrollments(db, workspaceId),
+    readMachineMetricsLatestForWorkspace(db, workspaceId),
+  ]);
+  const enrollmentById = new Map(enrollments.map((e) => [e.id, e]));
+
+  for (const sandbox of sandboxes) {
+    if (sandbox.kind !== "selfhosted" || !sandbox.enrollmentId) {
+      continue;
+    }
+    const enrollment = enrollmentById.get(sandbox.enrollmentId) ?? null;
+    if (!enrollment) {
+      continue;
+    }
+    const probe = await probeEnrollment(services, workspaceId, enrollment);
+    const state = machineStateFor(probe.state, probe.consented, probe.hasDisplay);
+
+    // sharedSessionCount = the lease refcount for this machine's group. The
+    // selfhosted sandbox id IS the lease group key (maxSandboxes:1, N sessions
+    // share via refcount). No lease yet → 0 sessions sharing.
+    const lease = await readLease(db, workspaceId, sandbox.id);
+    const sharedSessionCount = lease?.refcount ?? 0;
+
+    const metricsRow = metricsByEnrollment.get(enrollment.id) ?? null;
+    machines.push(MachineView.parse({
+      sandboxId: sandbox.id,
+      enrollmentId: enrollment.id,
+      name: sandbox.name,
+      kind: "selfhosted",
+      state,
+      active: activeSandboxId === sandbox.id,
+      isSessionGroup: false,
+      os: enrollment.os,
+      arch: enrollment.arch,
+      hasDisplay: enrollment.hasDisplay,
+      allowScreenControl: enrollment.allowScreenControl,
+      sharedSessionCount,
+      lastSeenAt: enrollment.lastSeenAt,
+      metrics: metricsRow ? metricRowToSample(metricsRow) : null,
+    }));
+  }
+
+  return { activeSandboxId, activeEpoch, machines };
+}

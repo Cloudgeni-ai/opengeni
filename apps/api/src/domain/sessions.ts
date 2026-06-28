@@ -32,6 +32,7 @@ import { HTTPException } from "hono/http-exception";
 import { hasPermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../dependencies";
+import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateEnvironmentAttachment } from "./environments";
 import {
@@ -76,6 +77,13 @@ export async function createAndStartSession(input: {
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
   // shared/{groupId} spawn passes the resolved group so both run in ONE box.
   sandboxGroupId?: string | null;
+  // Create-time machine targeting (A-2a, RACE-FREE): the enrolled machine (a
+  // sandbox id) to run this session on. When set, the active-sandbox pointer is
+  // resolved+validated+seeded (epoch-fenced) INSIDE finishStartSession, AFTER the
+  // session row exists but BEFORE the first turn is enqueued/the workflow woken,
+  // so the FIRST turn routes to the chosen machine. An invalid/unowned/offline
+  // target fails the create (422) — never a silent fall-back to the default box.
+  seedTargetSandbox?: { sandboxId: string; settings: Settings } | null;
 }) {
   const sessionMetadata = {
     ...input.metadata,
@@ -150,6 +158,7 @@ async function finishStartSession(input: {
   sandboxBackend: Settings["sandboxBackend"];
   environment?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
+  seedTargetSandbox?: { sandboxId: string; settings: Settings } | null;
 }, session: Session): Promise<Session> {
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
@@ -198,6 +207,36 @@ async function finishStartSession(input: {
   const userEvent = events.find((event) => event.type === "user.message");
   if (!userEvent) {
     throw new HTTPException(500, { message: "failed to append initial user event" });
+  }
+  // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
+  // the first turn is enqueued + the workflow woken, so the FIRST turn routes to
+  // the chosen machine. Race-free: the epoch-fenced setActiveSandbox commits here,
+  // before wakeSessionWorkflow below signals the worker. swapActiveSandbox does
+  // the same ownership+liveness validation as the live swap; an invalid/unowned/
+  // offline target FAILS the create (422) — never a silent fall-back to the box.
+  if (input.seedTargetSandbox) {
+    if (session.sandboxBackend === "none") {
+      throw new HTTPException(422, {
+        message: "cannot target a machine for a session with no sandbox (backend: none)",
+      });
+    }
+    const ctx: FleetContext = {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      sessionBackend: session.sandboxBackend,
+      sessionGroupId: session.sandboxGroupId,
+    };
+    const seeded = await swapActiveSandbox(
+      { db: input.db, settings: input.seedTargetSandbox.settings, bus: input.bus },
+      ctx,
+      input.seedTargetSandbox.sandboxId,
+    );
+    if (!seeded.swapped) {
+      throw new HTTPException(422, {
+        message: `cannot target sandbox ${input.seedTargetSandbox.sandboxId}: ${seeded.reason ?? "target is not attachable"}`,
+      });
+    }
   }
   const workflowId = workflowIdForSession(session.id);
   await setTemporalWorkflowId(input.db, session.workspaceId, session.id, workflowId);
@@ -508,6 +547,13 @@ export async function createSessionForRequest(
     firstPartyMcpPermissions,
     parentSessionId,
     createIdempotencyKey: payload.idempotencyKey ?? null,
+    // Create-time machine targeting (A-2a): when a target sandbox is named, the
+    // active-sandbox pointer is seeded race-free inside createAndStartSession
+    // (after the row exists, before the first turn dispatches). Validation
+    // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
+    seedTargetSandbox: payload.targetSandboxId
+      ? { sandboxId: payload.targetSandboxId, settings }
+      : null,
   });
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,

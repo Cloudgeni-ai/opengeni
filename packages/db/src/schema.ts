@@ -130,6 +130,21 @@ export const sessions = pgTable("sessions", {
   // The app generates the uuid and uses it for both id and sandbox_group_id in
   // one insert — it cannot SQL-default to id (id is defaultRandom()).
   sandboxGroupId: uuid("sandbox_group_id").notNull(),
+  // The first-class swappable-sandbox POINTER (bring-your-own-compute M2,
+  // dossier §10.3). NULL == "use the session's own group sandbox" (the
+  // backward-compat default — every existing/new row is a behavior-preserving
+  // no-op). The routing proxy re-reads (active_sandbox_id, active_epoch) PER
+  // TOOL CALL to make a Modal<->selfhosted hot-swap seamless. The FK
+  // (-> sandboxes(id) ON DELETE SET NULL — a deleted sandbox degrades the
+  // pointer to the group default, never dangles) lives in migration 0024, NOT a
+  // Drizzle .references() — exactly like parentSessionId below, so the const
+  // ordering imposes no forward-reference.
+  activeSandboxId: uuid("active_sandbox_id"),
+  // The SECOND epoch ABOVE sandbox_leases.lease_epoch, bumped on every swap; an
+  // in-flight op fenced by a stale active_epoch retries against the new active
+  // sandbox. integer (NOT bigint) — the lease-epoch spike: int8 reads back as a
+  // JS string and breaks the strict fence; int4 returns a number.
+  activeEpoch: integer("active_epoch").notNull().default(0),
   environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.
@@ -539,6 +554,194 @@ export const sandboxPtySessions = pgTable("sandbox_pty_sessions", {
   openIdx: index("sandbox_pty_sessions_session_idx")
     .on(table.workspaceId, table.sessionId)
     .where(sql`${table.status} = 'open'`),
+}));
+
+// ============================================================================
+// Bring-your-own-compute (M2): first-class swappable sandboxes + enrollment +
+// metrics (migration 0024 / dossier §10.3 + §10.7 + §23). The session→box
+// binding becomes a per-session mutable, epoch-fenced active_sandbox_id pointer
+// (declared on sessions above) that the routing proxy resolves PER TOOL CALL.
+
+// The lifecycle/enum domains, exported so the query layer + the migration share
+// ONE source of truth for each CHECK.
+export const enrollmentExposureValues = ["whole-machine"] as const;
+export const enrollmentStatusValues = ["active", "revoked"] as const;
+export const enrollmentOsValues = ["linux", "macos", "windows"] as const;
+export const sandboxKindValues = ["modal", "selfhosted"] as const;
+
+// One row per registered machine. The agent's ed25519 PUBLIC key IS the machine
+// identity (the NATS control-plane subject the agent subscribes to maps to it).
+// exposure is the loudly-consented access mode; has_display/allow_screen_control
+// are the desktop/computer-use consent bits (default false — opt-in). status is
+// the active|revoked lifecycle; last_seen_at the heartbeat liveness cursor the
+// Machines dashboard renders online/reconnecting/offline from.
+export const enrollments = pgTable("enrollments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  // The agent's ed25519 public key (the machine identity).
+  pubkey: text("pubkey").notNull(),
+  exposure: text("exposure", { enum: enrollmentExposureValues }).notNull().default("whole-machine"),
+  hasDisplay: boolean("has_display").notNull().default(false),
+  allowScreenControl: boolean("allow_screen_control").notNull().default(false),
+  status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
+  os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
+  arch: text("arch").notNull().default("x86_64"),
+  // Heartbeat liveness cursor. Null until the first connect.
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  // One enrollment per (workspace, pubkey): a re-enroll is an idempotent upsert.
+  workspacePubkey: uniqueIndex("enrollments_workspace_pubkey_idx").on(table.workspaceId, table.pubkey),
+  // List a workspace's ACTIVE machines without scanning revoked rows.
+  workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
+}));
+
+// The OAuth 2.0 device-authorization (RFC 8628) PENDING request (M5, migration
+// 0025 / dossier §10.2 enrollment + §18 LOUD consent). An agent's `enroll` starts
+// a flow (POST /enrollments/device/start) → one short-TTL, single-use row keyed by
+// an opaque `device_code` (the agent polls with) + a short `user_code` (the user
+// types at the approve page). The user (workspace-membership / workspace:admin
+// gated) approves it (POST /enrollments/device/approve), which records WHO
+// (subject + label) consented WHEN (approved_at) to WHAT (whole-machine mandatory +
+// screen-control per allow_screen_control) and stamps the resulting enrollment_id /
+// sandbox_id. The agent then polls (POST /enrollments/device/poll) and the approved
+// row yields the EnrollmentCredentials. State machine: pending → approved | denied;
+// a pending row past expires_at is EXPIRED; once the agent has polled an approved
+// row its credentials, the row flips to consumed (single-use). NOT a long-lived
+// record — a retention sweep prunes terminal rows; the durable identity is the
+// `enrollments` row the approve produced.
+export const deviceEnrollmentStatusValues = ["pending", "approved", "denied", "consumed"] as const;
+
+export const deviceEnrollmentRequests = pgTable("device_enrollment_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  // The opaque code the agent polls with (unguessable, single-use). Unique.
+  deviceCode: text("device_code").notNull(),
+  // The short human-typed code (e.g. "WDJB-MJHT"). Unique among LIVE (pending)
+  // rows via a partial unique index so a recycled code never collides with a
+  // terminal row.
+  userCode: text("user_code").notNull(),
+  // The workspace this request was started for (resolved from the deployment-edge
+  // request context — the agent presents the access key, the flow binds to the
+  // single managed workspace OR a workspace hint). account_id rides along for RLS.
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  // The agent's ed25519 public key (the machine identity the enrollment binds to).
+  pubkey: text("pubkey").notNull(),
+  os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
+  arch: text("arch").notNull().default("x86_64"),
+  machineName: text("machine_name"),
+  // The exposure the agent REQUESTED (whole-machine in v1; loudly consented at
+  // approve). Mirrors the enrollment column domain.
+  requestedExposure: text("requested_exposure", { enum: enrollmentExposureValues }).notNull().default("whole-machine"),
+  // The agent CAN offer a display (a real screen / Xvfb is available) — gates
+  // whether screen-control consent is even meaningful. has_display on the
+  // resulting enrollment is derived from this.
+  canOfferDisplay: boolean("can_offer_display").notNull().default(false),
+  // The agent REQUESTS screen control (computer-use). The user's allow_screen_control
+  // at approve is the AUTHORITATIVE consent; this is only the agent's request.
+  requestsScreenControl: boolean("requests_screen_control").notNull().default(false),
+  status: text("status", { enum: deviceEnrollmentStatusValues }).notNull().default("pending"),
+  // ── LOUD CONSENT capture (who/when/what), stamped at approve ──────────────
+  approvedBySubjectId: text("approved_by_subject_id"),
+  approvedBySubjectLabel: text("approved_by_subject_label"),
+  // The user's screen-control consent decision (whole-machine is mandatory at
+  // approve; screen-control is opt-in per this flag).
+  allowScreenControl: boolean("allow_screen_control").notNull().default(false),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  // The enrollment + sandbox the approve produced (acceptance #2: an enrollment
+  // row AND a sandbox row appear). Null until approved.
+  enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
+  sandboxId: uuid("sandbox_id").references(() => sandboxes.id, { onDelete: "set null" }),
+  // The short-TTL expiry; a pending row past this is EXPIRED on poll.
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  // The device_code is the agent's poll key — globally unique + indexed.
+  deviceCode: uniqueIndex("device_enrollment_requests_device_code_idx").on(table.deviceCode),
+  // The user_code must be unique among LIVE (pending) rows so the approve lookup
+  // is unambiguous; a terminal row's code may be recycled.
+  userCodePending: uniqueIndex("device_enrollment_requests_user_code_pending_idx")
+    .on(table.userCode)
+    .where(sql`${table.status} = 'pending'`),
+  workspaceCreated: index("device_enrollment_requests_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  expires: index("device_enrollment_requests_expires_idx").on(table.expiresAt),
+}));
+
+// The first-class NAMED sandbox a session's active_sandbox_id points AT. kind
+// discriminates the backend the routing proxy resolves to: 'modal' (cloud box,
+// NULL enrollment_id) or 'selfhosted' (a user's machine, enrollment_id -> the
+// enrollment it lives on). The selfhosted-needs-enrollment invariant is pinned by
+// the sandboxes_selfhosted_enrollment_chk CHECK in migration 0024. enrollment_id
+// is ON DELETE SET NULL so deleting an enrollment never cascade-kills a sandbox a
+// session might still point at (the routing layer surfaces agent_offline instead).
+export const sandboxes = pgTable("sandboxes", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  kind: text("kind", { enum: sandboxKindValues }).notNull(),
+  name: text("name").notNull(),
+  enrollmentId: uuid("enrollment_id").references(() => enrollments.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceCreated: index("sandboxes_workspace_created_idx").on(table.workspaceId, table.createdAt),
+  enrollment: index("sandboxes_enrollment_idx").on(table.enrollmentId).where(sql`${table.enrollmentId} is not null`),
+}));
+
+// Last-sample upsert: ONE row per enrollment, overwritten on every sample (the
+// PK on enrollment_id is the ON CONFLICT target). The §10.7 signals; nullable
+// where a platform/sample may not provide it (no GPU, headless).
+export const machineMetricsLatest = pgTable("machine_metrics_latest", {
+  enrollmentId: uuid("enrollment_id").primaryKey().references(() => enrollments.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  cpuPercent: numeric("cpu_percent").$type<number>(),
+  load1: numeric("load1").$type<number>(),
+  load5: numeric("load5").$type<number>(),
+  load15: numeric("load15").$type<number>(),
+  memUsedBytes: bigint("mem_used_bytes", { mode: "number" }),
+  memTotalBytes: bigint("mem_total_bytes", { mode: "number" }),
+  diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
+  diskTotalBytes: bigint("disk_total_bytes", { mode: "number" }),
+  gpuUtilPercent: numeric("gpu_util_percent").$type<number>(),
+  gpuMemUsedBytes: bigint("gpu_mem_used_bytes", { mode: "number" }),
+  gpuMemTotalBytes: bigint("gpu_mem_total_bytes", { mode: "number" }),
+  contention: numeric("contention").$type<number>(),
+  sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspace: index("machine_metrics_latest_workspace_idx").on(table.workspaceId),
+}));
+
+// Append-only downsampled history (~1/min per enrollment, retained N days). Same
+// signal columns as _latest. The (enrollment_id, sampled_at) index serves the
+// dashboard time-range read AND the (later) retention sweep.
+export const machineMetricsSeries = pgTable("machine_metrics_series", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  enrollmentId: uuid("enrollment_id").notNull().references(() => enrollments.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  cpuPercent: numeric("cpu_percent").$type<number>(),
+  load1: numeric("load1").$type<number>(),
+  load5: numeric("load5").$type<number>(),
+  load15: numeric("load15").$type<number>(),
+  memUsedBytes: bigint("mem_used_bytes", { mode: "number" }),
+  memTotalBytes: bigint("mem_total_bytes", { mode: "number" }),
+  diskUsedBytes: bigint("disk_used_bytes", { mode: "number" }),
+  diskTotalBytes: bigint("disk_total_bytes", { mode: "number" }),
+  gpuUtilPercent: numeric("gpu_util_percent").$type<number>(),
+  gpuMemUsedBytes: bigint("gpu_mem_used_bytes", { mode: "number" }),
+  gpuMemTotalBytes: bigint("gpu_mem_total_bytes", { mode: "number" }),
+  contention: numeric("contention").$type<number>(),
+  sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  enrollmentSampled: index("machine_metrics_series_enrollment_sampled_idx").on(table.enrollmentId, table.sampledAt),
+  sampled: index("machine_metrics_series_sampled_idx").on(table.sampledAt),
 }));
 
 export const scheduledTasks = pgTable("scheduled_tasks", {

@@ -10,9 +10,11 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 10 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
-// `packages/sdk/test/contract-parity.test.ts`. The existing four keep their
-// positions; the six new backends are additive.
+// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
+// END (the parity test pins positions): the original four, then the six cloud
+// backends, then `selfhosted` (bring-your-own-compute — a user's own machine
+// enrolled as a first-class sandbox).
 export const SandboxBackend = z.enum([
   "docker",
   "modal",
@@ -24,6 +26,7 @@ export const SandboxBackend = z.enum([
   "blaxel",
   "cloudflare",
   "vercel",
+  "selfhosted",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -350,6 +353,53 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     persistable: false,
     supportsRunAs: false,
   },
+  // Bring-your-own-compute: the user's OWN machine, enrolled via a Rust agent,
+  // becomes ONE shared whole-machine sandbox (the agent IS the box). It is the
+  // first backend to make macOS/Windows reachable (default linux). Desktop is
+  // capability-PROCLAIMED ("vnc-ws") — the agent serves a native display stack
+  // (Linux X11/Xvfb, macOS CGEvent/ScreenCaptureKit) consent-gated at enroll;
+  // the online/offline/consent/display negotiation lives in select.ts (M3), this
+  // row is the static feasibility ceiling. Always-on (process-lifetime, never
+  // idle-reaped) and NOT persistable — OpenGeni cannot snapshot the user's disk,
+  // so resume = "is the agent's subject live?", never a cold re-create. Ports
+  // surface on-demand through the stateless relay edge, which lands behind the
+  // `resolveExposedPort` swap-seam later; until then it reuses the existing
+  // `provider-tunnel` exposure kind (the relay IS the provider tunnel for the
+  // agent) so no new PortExposureKind literal — and no new switch arms — are
+  // introduced. supportsOnDemandPorts:true: the agent opens a stream channel for
+  // a port on request rather than pre-declaring 6080/7681 at construction.
+  selfhosted: {
+    backend: "selfhosted",
+    backendId: "selfhosted",
+    tier: "desktop",
+    os: { supported: ["linux", "macos", "windows"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "pty-ws", pty: true }, // real PTY over the relay
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" }, // proclaimed; consent-gated at enroll
+      Recording: { available: true }, // boot invariant: == DesktopStream.available
+    },
+    lifetime: {
+      // Whole-machine, always-there: online while the agent process runs, offline
+      // when it stops. The lease is NEVER idle-killed (it's the user's machine,
+      // not a reapable cloud box) and there is nothing to suspend/resume — the
+      // machine simply is or isn't reachable.
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true, // resume = address the live NATS subject; no provider lock
+    },
+    // persistable:false forces snapshot.kind:"none" (the descriptor invariant
+    // `persistable ⇒ snapshot.kind!=="none"`): OpenGeni cannot snapshot the
+    // user's disk — the machine itself is the persistence.
+    snapshot: { kind: "none", hasTarFallback: false },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
+    nativeBucketMount: false,
+    persistable: false,
+    supportsRunAs: false,
+  },
 };
 
 export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]);
@@ -437,6 +487,13 @@ export const Permission = z.enum([
   "environments:manage",
   "environments:use",
   "goals:manage",
+  // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
+  // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
+  // consent) + revokes a machine. Distinct from sessions/stream perms because an
+  // enrollment grants WHOLE-MACHINE access to a user's own hardware — a high-trust,
+  // admin-shaped action. workspace:admin is the super-wildcard over both.
+  "enrollments:read",
+  "enrollments:manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
 
@@ -555,6 +612,55 @@ export async function verifyDelegatedAccessToken(secret: string, token: string, 
   return payload.data;
 }
 
+// --- Enrollment bearer credential (bring-your-own-compute M5, dossier §10.2) ---
+//
+// The signed bearer the agent presents to the control plane after enrollment (the
+// EnrollmentCredentials.bearer the poll returns). REUSES the SAME HMAC envelope as
+// the delegated/stream tokens (base64Url payload + hmacSha256Base64Url) with a
+// distinct `oge_` prefix so it can never be confused with an `ogd_` access token or
+// an `ogs_` stream token. It binds (workspaceId, agentId, enrollmentId) so the
+// control plane can verify the agent owns the subject `agent.<ws>.<id>` it
+// subscribes to. Signed with resolveEnrollmentSigningSecret; the secret value is
+// NEVER logged. The real per-workspace NATS Account creds binding is infra-deferred
+// (M4/relay) — this bearer is the application-tier identity proof.
+export const EnrollmentBearerPayload = z.object({
+  workspaceId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  enrollmentId: z.string().uuid(),
+  // The Account-scoped control-plane subject prefix the agent subscribes to.
+  subjectPrefix: z.string().min(1),
+  exp: z.number().int().positive(),
+});
+export type EnrollmentBearerPayload = z.infer<typeof EnrollmentBearerPayload>;
+
+export async function signEnrollmentBearer(secret: string, payload: EnrollmentBearerPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(EnrollmentBearerPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `oge_${encodedPayload}.${signature}`;
+}
+
+export async function verifyEnrollmentBearer(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<EnrollmentBearerPayload | null> {
+  if (!token.startsWith("oge_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("oge_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  const payload = EnrollmentBearerPayload.safeParse(JSON.parse(base64UrlDecode(encodedPayload)));
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
 // --- Scoped data-plane stream token (master-spine §C.3 / crosscut PART 1.3) ---
 //
 // REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
@@ -627,6 +733,83 @@ export async function verifyStreamToken(secret: string, token: string, nowSecond
     return null;
   }
   const payload = StreamTokenPayload.safeParse(decoded);
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
+// --- Relay PRODUCER token (bring-your-own-compute M8b, dossier §10.5) ---
+//
+// The token the AGENT presents to the relay edge when it registers a pty/desktop
+// stream channel (role=AGENT) — distinct from the viewer's `ogs_` token. It is
+// minted by the control plane at enrollment and threaded into EnrollmentCredentials
+// (proto field `relay_token`); the relay verifies it on its own merits, then pairs
+// the producer with the consumer by the shared channel key.
+//
+// REUSES the EXACT SAME HMAC envelope as the `ogs_`/`ogd_`/`oge_` tokens
+// (base64Url JSON payload + hmacSha256Base64Url) — NOT a second crypto — with a
+// distinct `ogr_` prefix so it can never be confused with the others. The claim
+// set binds (workspaceId, agentId): the relay reads the channel-key's ws+agent
+// from the StreamOpen and asserts the producer token claims the SAME pair, so a
+// producer token for workspace A can never register a channel for workspace B.
+// Signed with resolveRelayTokenSecret (the relay-token HMAC secret); the value is
+// NEVER logged. Long-lived by design (it is enrollment-scoped, not per-stream —
+// the agent presents it on every channel registration for the life of the
+// enrollment); the relay additionally validates the channel key + (for the
+// viewer's `ogs_`) the lease/active-epoch fence.
+//
+// The Rust relay re-implements this verify (the same base64url(JSON) + HMAC-SHA256
+// + prefix split) so TS-mint and Rust-verify provably agree — see the cross-stack
+// fixture in agent/crates/opengeni-relay/tests and the relay's `token` module doc.
+export const RelayTokenPayload = z.object({
+  // The workspace the agent (and its channels) belong to — the relay asserts this
+  // equals the channel-key's ws so a producer can only register its own channels.
+  workspaceId: z.string().uuid(),
+  // The agent (machine) id — the relay asserts this equals the channel-key's agent.
+  agentId: z.string().uuid(),
+  // Expiry (unix seconds). Enrollment-scoped horizon (re-minted on re-enroll).
+  exp: z.number().int().positive(),
+});
+export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
+
+export async function signRelayToken(secret: string, payload: RelayTokenPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(RelayTokenPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `ogr_${encodedPayload}.${signature}`;
+}
+
+/**
+ * Verify a relay producer token: rejects (returns null) on a bad prefix, malformed
+ * envelope, bad HMAC signature (constant-time), schema-invalid claims, or expiry.
+ * Mirrors verifyStreamToken exactly. The relay (Rust) re-implements this verify;
+ * the TS verify here proves the format for the cross-stack fixture + any TS caller.
+ *
+ * The channel-key scope (claim.workspaceId/agentId vs the StreamOpen channel key)
+ * is enforced by the relay at USE — verify proves authenticity + freshness only.
+ */
+export async function verifyRelayToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<RelayTokenPayload | null> {
+  if (!token.startsWith("ogr_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("ogr_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = RelayTokenPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
@@ -1735,6 +1918,13 @@ export const Session = z.object({
   // own id for a singleton group (today's 1:1 default); equals the parent's
   // group when spawned shared (both sessions run in ONE box).
   sandboxGroupId: z.string().uuid(),
+  // The first-class swappable-sandbox POINTER (bring-your-own-compute M2). NULL
+  // resolves to the session's own group sandbox (the backward-compat default);
+  // a swap sets it to the target sandbox row. active_epoch is the second epoch
+  // ABOVE the lease epoch, bumped on every swap so the routing proxy can fence a
+  // stale in-flight op and retry against the new active sandbox.
+  activeSandboxId: z.string().uuid().nullable(),
+  activeEpoch: z.number().int().nonnegative(),
   environmentId: z.string().uuid().nullable(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
@@ -2306,6 +2496,11 @@ export const CreateSessionRequest = z.object({
   model: z.string().min(1).optional(),
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
+  // The enrolled machine (a sandbox id) to run this session on; seeds the
+  // active-sandbox pointer at creation so the FIRST turn routes to the chosen
+  // machine (race-free: the pointer is committed before the worker turn
+  // workflow can read it). An invalid/unowned/offline target fails the create.
+  targetSandboxId: z.string().uuid().optional(),
   // Workspace environment attachment is fixed at session creation; follow-up
   // user.message events cannot switch or add one.
   environmentId: z.string().uuid().optional(),
@@ -2432,6 +2627,12 @@ export const CapabilityUnavailableReason = z.enum([
   "disabled_by_policy",
   "lease_cold",
   "tier_headless",
+  // Selfhosted (bring-your-own-compute) negotiation states (M1 additive; the
+  // selfhosted negotiation in select.ts wires them in M3):
+  "agent_offline", // the enrolled agent process is not running / unreachable
+  "agent_reconnecting", // a transient blip — the agent is reconnecting (warmable)
+  "consent_required", // whole-machine / screen-control consent not yet acknowledged
+  "display_unavailable", // headless machine with no display stack (no DesktopStream)
 ]);
 export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
 
@@ -2588,6 +2789,275 @@ export const ViewerHeartbeatResponse = z.object({
   alive: z.boolean(),
 });
 export type ViewerHeartbeatResponse = z.infer<typeof ViewerHeartbeatResponse>;
+
+// =============================================================================
+// Bring-your-own-compute (M5) — enrollment device-flow HTTP contract.
+//
+// The HTTP shapes mirror the @opengeni/agent-proto device-flow messages
+// (DeviceAuthStart*, DeviceAuthPoll*, EnrollmentCredentials) so the Rust agent's
+// `enroll` command (which runs the flow over HTTP before it has NATS creds)
+// decodes the SAME field names (the proto's ts-proto JSON is camelCase). The
+// request bodies additionally carry the consent-relevant fields the dossier brief
+// mandates (the agent ed25519 pubkey + can-offer-display + requests-screen-control).
+// =============================================================================
+
+export const EnrollmentOs = z.enum(["linux", "macos", "windows"]);
+export type EnrollmentOs = z.infer<typeof EnrollmentOs>;
+export const EnrollmentArch = z.enum(["x86_64", "aarch64"]);
+export type EnrollmentArch = z.infer<typeof EnrollmentArch>;
+
+// POST /enrollments/device/start (agent-side, unauthenticated-at-the-user-level,
+// rate-limited). The agent presents its ed25519 public key + os/arch + the
+// requested whole-machine exposure + whether it can offer a display + whether it
+// requests screen control.
+export const DeviceEnrollmentStartRequest = z.object({
+  // The agent's ed25519 public key (the machine identity the enrollment binds to).
+  publicKey: z.string().min(1).max(1024),
+  os: EnrollmentOs.default("linux"),
+  arch: EnrollmentArch.default("x86_64"),
+  // Human-friendly machine name (hostname by default).
+  machineName: z.string().min(1).max(256).optional(),
+  // v1 only supports whole-machine; kept explicit so the consent is recorded.
+  exposure: z.literal("whole-machine").default("whole-machine"),
+  // The agent can offer a display (a real screen / Xvfb is available).
+  canOfferDisplay: z.boolean().default(false),
+  // The agent requests screen control (computer-use); the user's allow_screen_control
+  // at approve is the AUTHORITATIVE consent.
+  requestsScreenControl: z.boolean().default(false),
+  // The workspace this machine is enrolling into. The agent is told this at install
+  // (the user picks the workspace, or the install/enroll token carries it). The user
+  // who approves must hold a grant in THIS workspace — that binding is what makes
+  // the (user-unauthenticated) start safe: it cannot grant access to a workspace no
+  // authorized user later approves in.
+  workspaceId: z.string().uuid(),
+});
+export type DeviceEnrollmentStartRequest = z.infer<typeof DeviceEnrollmentStartRequest>;
+
+// The DeviceAuthStart response (field names match the proto's JSON).
+export const DeviceEnrollmentStartResponse = z.object({
+  deviceCode: z.string(),
+  userCode: z.string(),
+  verificationUri: z.string(),
+  verificationUriComplete: z.string(),
+  intervalSeconds: z.number().int().positive(),
+  expiresInSeconds: z.number().int().positive(),
+});
+export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStartResponse>;
+
+// POST /enrollments/device/approve (USER-authenticated, workspace-gated). The
+// LOUD CONSENT step. whole-machine is mandatory (implicit); screen-control is
+// opt-in per allow_screen_control.
+export const DeviceEnrollmentApproveRequest = z.object({
+  userCode: z.string().min(1).max(64),
+  allowScreenControl: z.boolean().default(false),
+});
+export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
+
+export const DeviceEnrollmentApproveResponse = z.object({
+  approved: z.boolean(),
+  enrollmentId: z.string().uuid(),
+  sandboxId: z.string().uuid(),
+  allowScreenControl: z.boolean(),
+});
+export type DeviceEnrollmentApproveResponse = z.infer<typeof DeviceEnrollmentApproveResponse>;
+
+// POST /enrollments/device/poll (agent-side). The poll state machine.
+export const DeviceEnrollmentPollRequest = z.object({
+  deviceCode: z.string().min(1).max(256),
+});
+export type DeviceEnrollmentPollRequest = z.infer<typeof DeviceEnrollmentPollRequest>;
+
+export const DeviceEnrollmentState = z.enum(["pending", "authorized", "denied", "expired", "disabled"]);
+export type DeviceEnrollmentState = z.infer<typeof DeviceEnrollmentState>;
+
+// The EnrollmentCredentials (field names match the proto's JSON). natsAccountCreds
+// is a PLACEHOLDER — the real per-workspace NATS Account creds binding is
+// infra-deferred (M4/relay); the bearer + subjectPrefix are the application-tier
+// identity the agent presents today.
+export const EnrollmentCredentialsResponse = z.object({
+  agentId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  // The signed bearer the agent presents to the control plane (the `oge_` token).
+  bearer: z.string(),
+  // The Account-scoped control-plane subject prefix the agent subscribes to:
+  // agent.<workspaceId>.<agentId>.
+  subjectPrefix: z.string(),
+  // Connect info for the control plane + stream relay (may be empty when not yet
+  // configured for this deployment — the agent surfaces "control plane unconfigured").
+  natsUrls: z.array(z.string()),
+  relayUrl: z.string(),
+  // The agent's PRODUCER token for the relay edge (the `ogr_` token; M8b). Presented
+  // as StreamOpen.token when the agent registers a pty/desktop channel; the relay
+  // verifies it then pairs the producer with the viewer (whose `ogs_` token the
+  // relay also verifies). Empty when the relay-token plane is unconfigured for this
+  // deployment (graceful degrade — the agent then presents an empty token the relay
+  // rejects, surfacing the gap loudly rather than silently producing a dead stream).
+  relayToken: z.string(),
+  // VESTIGIAL (M-AUTH): there is no per-machine NATS Account creds file. The agent
+  // presents the `bearer` above as the NATS connect AUTH-TOKEN; the server's
+  // auth-callout responder validates it and mints a workspace-scoped user JWT. This
+  // field echoes the bearer so a consumer reading it as the connect credential still
+  // works; new consumers should read `bearer` directly.
+  natsAccountCreds: z.string(),
+  // The minisign public key the agent pins for self-update verification.
+  updatePublicKey: z.string(),
+  consentedWholeMachine: z.boolean(),
+  consentedScreenControl: z.boolean(),
+});
+export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
+
+export const DeviceEnrollmentPollResponse = z.object({
+  state: DeviceEnrollmentState,
+  // Present only when state === "authorized".
+  credentials: EnrollmentCredentialsResponse.optional(),
+});
+export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollResponse>;
+
+// GET /enrollments — a workspace's machines (the Machines dashboard surface).
+export const EnrollmentSummary = z.object({
+  id: z.string().uuid(),
+  pubkey: z.string(),
+  exposure: z.literal("whole-machine"),
+  hasDisplay: z.boolean(),
+  allowScreenControl: z.boolean(),
+  status: z.enum(["active", "revoked"]),
+  os: EnrollmentOs,
+  arch: z.string(),
+  lastSeenAt: z.string().nullable(),
+  createdAt: z.string(),
+  revokedAt: z.string().nullable(),
+});
+export type EnrollmentSummary = z.infer<typeof EnrollmentSummary>;
+
+export const ListEnrollmentsResponse = z.object({
+  enrollments: z.array(EnrollmentSummary),
+});
+export type ListEnrollmentsResponse = z.infer<typeof ListEnrollmentsResponse>;
+
+export const RevokeEnrollmentResponse = z.object({
+  revoked: z.boolean(),
+});
+export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
+
+// ── Machines dashboard + per-machine metrics (M10, dossier §10.7) ────────────
+//
+// The SHARED data contract M10 (backend) implements + M9 (UI) renders. THE
+// orchestrator owns this shape; M9 imports these types so the dashboard never
+// drifts from the API. The fields mirror the agent's MetricsSample wire shape
+// (`@opengeni/agent-proto`) projected to the dashboard's JSON, plus the derived
+// machine state matrix (the M3 liveness + the consent/display reasons).
+
+/**
+ * A point-in-time machine metrics sample as the dashboard reads it. `cpuPct` and
+ * the load averages are 0..N doubles; the byte figures are integers; `gpuUtilPct`
+ * / `gpuMemBytes` are null when no GPU was present at sample time (the wire
+ * contract: absence == not-reported, NEVER a real zero). `runQueue` is the
+ * runnable-count contention signal. `sampledAt` is an ISO-8601 instant.
+ */
+export const MetricSample = z.object({
+  cpuPct: z.number(),
+  load1: z.number(),
+  load5: z.number(),
+  load15: z.number(),
+  memUsedBytes: z.number().int(),
+  memTotalBytes: z.number().int(),
+  diskUsedBytes: z.number().int(),
+  diskTotalBytes: z.number().int(),
+  gpuUtilPct: z.number().nullable(),
+  gpuMemBytes: z.number().int().nullable(),
+  runQueue: z.number(),
+  sampledAt: z.string(),
+});
+export type MetricSample = z.infer<typeof MetricSample>;
+
+/** The derived dashboard state of a machine. The M3 liveness
+ *  (online/reconnecting/offline) plus the enrollment-derived consent/display
+ *  reasons (consent_required / display_unavailable) and the in-flight device-flow
+ *  (enrolling). */
+export const MachineState = z.enum([
+  "online",
+  "reconnecting",
+  "offline",
+  "consent_required",
+  "display_unavailable",
+  "enrolling",
+]);
+export type MachineState = z.infer<typeof MachineState>;
+
+export const MachineKind = z.enum(["modal", "selfhosted"]);
+export type MachineKind = z.infer<typeof MachineKind>;
+
+/**
+ * A machine as the Machines dashboard renders it. The workspace's enrolled
+ * selfhosted machines PLUS the session's synthetic Modal group box
+ * (`isSessionGroup: true`). `active` marks the session's currently-active
+ * routing target. `sharedSessionCount` is the lease refcount (how many sessions
+ * share this whole machine). `metrics` is the latest sample, or null when none
+ * has landed yet (just enrolled / offline before a first heartbeat).
+ */
+export const MachineView = z.object({
+  sandboxId: z.string(),
+  enrollmentId: z.string().nullable(),
+  name: z.string(),
+  kind: MachineKind,
+  state: MachineState,
+  active: z.boolean(),
+  isSessionGroup: z.boolean(),
+  os: z.string(),
+  arch: z.string(),
+  hasDisplay: z.boolean(),
+  allowScreenControl: z.boolean(),
+  sharedSessionCount: z.number().int(),
+  lastSeenAt: z.string().nullable(),
+  metrics: MetricSample.nullable(),
+});
+export type MachineView = z.infer<typeof MachineView>;
+
+/**
+ * GET /v1/workspaces/:ws/machines — the dashboard list. `activeSandboxId` /
+ * `activeEpoch` echo the session's epoch-fenced active-sandbox pointer (null
+ * activeSandboxId == the session's own group box is active).
+ */
+export const MachinesResponse = z.object({
+  activeSandboxId: z.string().nullable(),
+  activeEpoch: z.number().int(),
+  machines: z.array(MachineView),
+});
+export type MachinesResponse = z.infer<typeof MachinesResponse>;
+
+/**
+ * POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — the user-
+ * authenticated swap of a session's active sandbox (the same epoch-fenced
+ * mechanic the M7 `sandbox_swap` MCP tool exposes to the agent). `target` is a
+ * `MachinesResponse` machine's `sandboxId`, or "session"/"default" to swap back
+ * to the session's own group box.
+ */
+export const SwapActiveSandboxRequest = z.object({
+  target: z.string().min(1),
+});
+export type SwapActiveSandboxRequest = z.infer<typeof SwapActiveSandboxRequest>;
+
+/**
+ * The swap outcome (mirrors the server `FleetSwapResult`). `swapped` is true on a
+ * successful repoint OR a no-op (already pointed there); `reason` carries the
+ * failure detail (unowned/offline target, or a lost epoch fence) when false.
+ */
+export const SwapActiveSandboxResponse = z.object({
+  swapped: z.boolean(),
+  activeSandboxId: z.string().nullable(),
+  activeEpoch: z.number().int(),
+  reason: z.string().optional(),
+});
+export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
+
+/**
+ * GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h — the
+ * downsampled (~1/min) history the dashboard time-range reads.
+ */
+export const MachineMetricsSeriesResponse = z.object({
+  samples: z.array(MetricSample),
+});
+export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
 
 /**
  * A single host-exposed model + the provider that serves it, as surfaced to

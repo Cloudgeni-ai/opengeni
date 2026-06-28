@@ -61,13 +61,15 @@ describe("useSessionCapabilities", () => {
       },
     });
     const hook = await renderHook(
-      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 5 }),
+      // A generous poll interval keeps the initial "cold" window observable even
+      // under heavy parallel test load (a 5ms window raced the render flush).
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client, warmingPollMs: 80 }),
       undefined,
     );
     await flush();
     expect(hook.result.current.state).toBe("cold");
-    // Let the poll fire and observe warm.
-    await flush(20);
+    // Let the poll fire (well past warmingPollMs) and observe warm.
+    await flush(200);
     expect(hook.result.current.state).toBe("ready");
     await hook.unmount();
   });

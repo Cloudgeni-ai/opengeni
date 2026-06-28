@@ -45,3 +45,19 @@ spec:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: web
 {{- end }}
+{{- if and .Values.relay.enabled .Values.relay.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opengeni.fullname" . }}-relay
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  minAvailable: {{ .Values.relay.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: relay
+{{- end }}

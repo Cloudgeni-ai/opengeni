@@ -37,6 +37,16 @@ export type ObjectStorage = {
   createGetUrl: (args: { key: string; expiresInSeconds?: number }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
+  /**
+   * SERVER-SIDE authenticated direct PUT (no presign + browser fetch). For an
+   * in-process upload from a trusted holder of the storage credentials (e.g. the
+   * worker writing a recording), this sends the bytes straight to the storage
+   * backend over the configured endpoint with the in-process SDK client — bypassing
+   * the presigned-URL round-trip, which on split public/internal topologies (a
+   * public `objectStorageEndpoint` with no in-cluster route) would otherwise 401.
+   * Browser uploads keep using `createPutUrl`; this is the trusted-server twin.
+   */
+  putObject: (args: { key: string; contentType: string; body: Uint8Array; sha256?: string | null }) => Promise<void>;
 };
 
 export function createObjectStorage(settings: Settings): ObjectStorage | null {
@@ -94,6 +104,19 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         }), { expiresIn }),
         expiresAt: new Date(Date.now() + expiresIn * 1000),
       };
+    },
+    async putObject(args) {
+      // Authenticated in-process PUT against the configured (in-cluster) endpoint.
+      // A presigned URL buys nothing here — the worker already holds the creds — and
+      // on a split public/internal endpoint topology the presigned URL points at the
+      // PUBLIC host (no MinIO route → 401). This sends bytes straight to the backend.
+      await client.send(new PutObjectCommand({
+        Bucket: settings.objectStorageBucket,
+        Key: args.key,
+        ContentType: args.contentType,
+        Body: args.body,
+        Metadata: args.sha256 ? { sha256: args.sha256 } : undefined,
+      }));
     },
     async headFile(file) {
       const head = await client.send(new HeadObjectCommand({
@@ -165,6 +188,13 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
       });
       return { url, expiresAt };
     },
+    async putObject(args) {
+      // Authenticated in-process PUT via the GCS SDK (the server holds the creds).
+      await bucket.file(args.key).save(Buffer.from(args.body), {
+        contentType: args.contentType,
+        ...(args.sha256 ? { metadata: { metadata: { sha256: args.sha256 } } } : {}),
+      });
+    },
     async headFile(file) {
       const [metadata] = await bucket.file(file.objectKey).getMetadata();
       return objectHead({
@@ -226,6 +256,15 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
         url: `${blobClient.url}?${sas}`,
         expiresAt,
       };
+    },
+    async putObject(args) {
+      // Authenticated in-process upload via the shared-key Azure client (no SAS).
+      const blobClient = containerClient.getBlockBlobClient(args.key);
+      const body = Buffer.from(args.body);
+      await blobClient.upload(body, body.byteLength, {
+        blobHTTPHeaders: { blobContentType: args.contentType },
+        ...(args.sha256 ? { metadata: { sha256: args.sha256 } } : {}),
+      });
     },
     async headFile(file) {
       return azureHeadToObjectHead(await containerClient.getBlobClient(file.objectKey).getProperties());

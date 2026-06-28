@@ -13,6 +13,7 @@ import { RailFooter } from "@/components/rail/rail-footer";
 import { useRail } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
+import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -160,8 +161,12 @@ function CanvasTopStrip() {
         <>
           <div className="min-w-0 flex-1">
             <SessionTitleEditor session={context.session} onRename={context.updateSessionTitle} />
-            <div className="truncate text-xs text-[color:var(--color-fg-subtle)]">
-              {context.session.model} · {String(context.session.metadata.reasoningEffort ?? "low")} · {context.session.sandboxBackend}
+            <div className="flex min-w-0 items-center gap-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+              <span className="truncate">
+                {context.session.model} · {String(context.session.metadata.reasoningEffort ?? "low")}
+              </span>
+              <span aria-hidden>·</span>
+              <SessionSandboxSwitcher workspaceId={context.session.workspaceId} sessionId={context.session.id} />
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">

@@ -59,6 +59,24 @@ describe("buildStreamUrl — provider URL assembly (urlForExposedPort parity)", 
     expect(() => buildStreamUrl({ host: "", port: 6080 } as ExposedPortEndpoint)).toThrow(StreamPortUnavailableError);
     expect(() => buildStreamUrl({ host: "h" } as unknown as ExposedPortEndpoint)).toThrow(StreamPortUnavailableError);
   });
+
+  test("the selfhosted relay path (/stream) + the channel-key routing query (M8b)", () => {
+    // The selfhosted relay listens at /stream and routes by the channel key; the
+    // viewer dials wss://relay/stream?ws=&agent=&port=&channel=. buildStreamUrl
+    // must honor the path AND preserve the routing query verbatim.
+    const url = buildStreamUrl({
+      host: "relay.opengeni.ai",
+      port: 443,
+      tls: true,
+      path: "/stream",
+      query: "ws=w1&agent=a1&port=7681&channel=ch-1",
+    });
+    expect(url).toBe("wss://relay.opengeni.ai/stream?ws=w1&agent=a1&port=7681&channel=ch-1");
+  });
+
+  test("a non-leading-slash path is normalized", () => {
+    expect(buildStreamUrl({ host: "h", port: 6080, tls: true, path: "stream" })).toBe("wss://h:6080/stream");
+  });
 });
 
 describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifies", () => {

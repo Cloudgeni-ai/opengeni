@@ -10,6 +10,11 @@ import {
   CreateSessionRequest as ContractCreateSessionRequest,
   DESKTOP_STREAM_PORT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
+  MachineState as ContractMachineState,
+  MachineView as ContractMachineView,
+  MachinesResponse as ContractMachinesResponse,
+  MetricSample as ContractMetricSample,
+  MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
@@ -42,6 +47,11 @@ import type {
   ClientSessionEventInput,
   CreateSessionRequest,
   ListWorkspaceMembersResponse,
+  MachineState,
+  MachineView,
+  MachinesResponse,
+  MetricSample,
+  MachineMetricsSeriesResponse,
   ReasoningEffort,
   SandboxBackend,
   SandboxOs,
@@ -98,13 +108,14 @@ describe("SDK / contracts parity", () => {
       "blaxel",
       "cloudflare",
       "vercel",
+      "selfhosted",
     ];
     const contracts = [...ContractSandboxBackend.options].sort();
     const deployment = [...DeploymentSandboxBackend.options].sort();
     const sdk = [...sdkBackends].sort();
     expect(contracts).toEqual(deployment);
     expect(contracts).toEqual(sdk);
-    expect(contracts).toHaveLength(10);
+    expect(contracts).toHaveLength(11);
   });
 
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
@@ -177,6 +188,43 @@ describe("SDK / contracts parity", () => {
       permissions: ["sessions:read"],
       createdAt: "2026-01-01T00:00:00.000Z",
     }).success).toBe(true);
+  });
+
+  test("machines + metrics shapes match the contracts (compile-time + runtime, M10)", () => {
+    // State enum is literal-for-literal identical.
+    const states: readonly MachineState[] = ContractMachineState.options;
+    expect(states).toEqual(ContractMachineState.options);
+    // Server -> client: anything the contracts produce, the SDK type accepts.
+    const acceptSample = (value: z.infer<typeof ContractMetricSample>): MetricSample => value;
+    const acceptMachine = (value: z.infer<typeof ContractMachineView>): MachineView => value;
+    const acceptList = (value: z.infer<typeof ContractMachinesResponse>): MachinesResponse => value;
+    const acceptSeries = (value: z.infer<typeof ContractMachineMetricsSeriesResponse>): MachineMetricsSeriesResponse => value;
+    expect([acceptSample, acceptMachine, acceptList, acceptSeries].every((fn) => typeof fn === "function")).toBe(true);
+
+    // A representative MachinesResponse round-trips through the contract schema.
+    const sample = {
+      cpuPct: 12.5, load1: 0.4, load5: 0.3, load15: 0.2,
+      memUsedBytes: 1_000, memTotalBytes: 2_000, diskUsedBytes: 3_000, diskTotalBytes: 4_000,
+      gpuUtilPct: null, gpuMemBytes: null, runQueue: 1, sampledAt: "2026-06-26T00:00:00.000Z",
+    };
+    const response = {
+      activeSandboxId: null,
+      activeEpoch: 0,
+      machines: [
+        {
+          sandboxId: "sb-1", enrollmentId: "en-1", name: "build-box", kind: "selfhosted",
+          state: "consent_required", active: false, isSessionGroup: false,
+          os: "linux", arch: "x86_64", hasDisplay: true, allowScreenControl: false,
+          sharedSessionCount: 2, lastSeenAt: "2026-06-26T00:00:00.000Z", metrics: sample,
+        },
+      ],
+    };
+    expect(ContractMachinesResponse.safeParse(response).success).toBe(true);
+    expect(ContractMachineMetricsSeriesResponse.safeParse({ samples: [sample] }).success).toBe(true);
+    // The SDK view-model accepts the parsed value (server -> client direction).
+    const parsed = ContractMachinesResponse.parse(response);
+    const asSdk: MachinesResponse = parsed;
+    expect(asSdk.machines[0]!.kind).toBe("selfhosted");
   });
 
   test("SDK-built create-session requests parse under the contracts schema", () => {

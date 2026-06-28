@@ -1,0 +1,909 @@
+// OpenGeni self-hosted agent — wire protocol (single source of truth).
+//
+// This file is the ONE definition of the control-plane RPC surface and the
+// stream-channel framing exchanged between the OpenGeni control plane (TypeScript)
+// and the `opengeni-agent` Rust binary running on a user's machine. It is
+// code-generated to BOTH Rust (via prost) and TypeScript (via ts-proto) so the
+// two stacks can never drift. See `agent/scripts/codegen.sh` for the single
+// regeneration command and `agent/tests/roundtrip_test.rs` /
+// `packages/agent-proto/test/roundtrip.test.ts` for the cross-stack agreement
+// proof.
+//
+// ## Transport overview (informational — the transport itself is NOT in this file)
+//
+//   * CONTROL plane: NATS request/reply. The agent subscribes to a subject that
+//     IS its identity (`agent.<workspaceId>.<agentId>.rpc`); the control plane
+//     issues a `ControlRequest` and receives a `ControlResponse`. Subject routing
+//     is the registry (no bespoke agentId→connection table). Liveness is "is
+//     there a responder on the subject". Ownership stays in Postgres (the lease);
+//     NATS only routes.
+//
+//   * STREAM plane: a stateless relay edge. pty + desktop bytes ride
+//     `StreamFrame` messages over a relay channel, fate-isolated from the control
+//     plane. The same scoped `ogs_` stream token authorizes a channel.
+//
+// ## Conventions
+//
+//   * proto3. All fields optional-by-default; absence is meaningful (e.g. an
+//     unset `display` capability means "agent did not report a display").
+//   * IDs are opaque strings (UUID v4 text or workspace/agent identifiers).
+//   * Timestamps are unix-epoch milliseconds (`int64`), monotonic-where-noted.
+//   * Sizes/counts are unsigned. Durations are milliseconds unless suffixed.
+//   * Every request/response is wrapped in an envelope oneof so a single NATS
+//     subject carries the whole control surface and new ops are additive.
+//   * Reserved field numbers are left as gaps where a field was removed; never
+//     reuse a tag.
+
+syntax = "proto3";
+
+package opengeni.agent.v1;
+
+// =============================================================================
+// Shared primitives
+// =============================================================================
+
+// A typed error returned by the agent (or synthesized by the control plane for
+// a non-responding agent). `code` is a stable machine-readable discriminant;
+// `message` is human-facing; `retryable` lets the turn layer decide whether to
+// pause-and-retry (a reconnect blip) versus surface a hard failure.
+message AgentError {
+  ErrorCode code = 1;
+  string message = 2;
+  bool retryable = 3;
+  // Optional structured detail (e.g. an OS errno, a git exit code) for logs.
+  map<string, string> detail = 4;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // The requested op is not implemented / not permitted on this platform.
+  ERROR_CODE_UNSUPPORTED = 1;
+  // A filesystem/exec/git op failed at the OS layer (see `detail`).
+  ERROR_CODE_OS = 2;
+  // The path/ref/target referenced by the op does not exist.
+  ERROR_CODE_NOT_FOUND = 3;
+  // The op was rejected by consent/capability gating (e.g. screen-control off).
+  ERROR_CODE_CONSENT_REQUIRED = 4;
+  // The op timed out inside the agent.
+  ERROR_CODE_TIMEOUT = 5;
+  // The agent is shutting down / draining and cannot accept new work.
+  ERROR_CODE_DRAINING = 6;
+  // A protocol-level violation (bad envelope, unknown op for this version).
+  ERROR_CODE_PROTOCOL = 7;
+  // A required stream channel could not be opened on the relay.
+  ERROR_CODE_STREAM = 8;
+  // The control plane synthesized this because no agent responded (offline).
+  ERROR_CODE_AGENT_OFFLINE = 9;
+  // An epoch fence rejected a stale op; caller should re-resolve and retry.
+  ERROR_CODE_FENCED = 10;
+}
+
+// The operating system family the agent runs on.
+enum Os {
+  OS_UNSPECIFIED = 0;
+  OS_LINUX = 1;
+  OS_MACOS = 2;
+  OS_WINDOWS = 3;
+}
+
+// CPU architecture.
+enum Arch {
+  ARCH_UNSPECIFIED = 0;
+  ARCH_X86_64 = 1;
+  ARCH_AARCH64 = 2;
+}
+
+// The kind of byte stream a relay channel carries.
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  // An interactive pseudo-terminal (ttyd-equivalent).
+  STREAM_KIND_PTY = 1;
+  // A desktop framebuffer (noVNC-equivalent) for view + computer-use.
+  STREAM_KIND_DESKTOP = 2;
+}
+
+// =============================================================================
+// Capability / hello
+// =============================================================================
+
+// The agent's self-description, sent on connect (the "hello") and refreshed on
+// reconnect. The control plane folds this into the negotiated SessionCapabilities
+// document (every capability cell is available:false+reason, never absent).
+message Hello {
+  string agent_id = 1;
+  string workspace_id = 2;
+  // Semantic version of the running agent binary (drives staged self-update).
+  string agent_version = 3;
+  Os os = 4;
+  Arch arch = 5;
+  // Human-friendly machine name (hostname by default; user-overridable).
+  string machine_name = 6;
+  // The agent-reported working root the control plane treats as the sandbox cwd.
+  string workspace_root = 7;
+  // Capabilities the agent can serve given its platform + consent grants.
+  Capabilities capabilities = 8;
+  // The update channel this agent follows (stable|beta), for fleet-pinning.
+  string update_channel = 9;
+  // A resume token minted by a prior connection, echoed so the control plane can
+  // recognize a reconnect (vs a fresh enrollment) and fence by epoch. Empty on
+  // first connect.
+  string resume_token = 10;
+}
+
+// What the agent is able and consented to do. Each bool is a hard capability
+// gate; the control plane maps a false to a CapabilityUnavailableReason.
+message Capabilities {
+  // Channel-A structural surface (always true for a connected agent).
+  bool exec = 1;
+  bool filesystem = 2;
+  bool git = 3;
+  // An interactive PTY can be opened over the relay.
+  bool pty = 4;
+  // A desktop framebuffer is available (a display exists or Xvfb is enabled).
+  bool desktop = 5;
+  // The user consented to whole-machine access during enrollment.
+  bool consented_whole_machine = 6;
+  // The user consented to screen capture + synthetic input (computer-use).
+  bool consented_screen_control = 7;
+  // Display detail (absent => headless / no display).
+  Display display = 8;
+}
+
+// Detail about the agent's graphical display, when one is present.
+message Display {
+  // e.g. ":0", ":99" (Xvfb), or a platform handle.
+  string id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  // True when backed by a virtual framebuffer (Xvfb) rather than a real screen.
+  bool virtual = 4;
+}
+
+// =============================================================================
+// Enrollment / auth (OAuth 2.0 device-authorization, RFC 8628)
+// =============================================================================
+
+// The agent begins enrollment by asking the control plane to start a device
+// flow. The control plane returns a user-code + verification URL the user visits
+// to consent (whole-machine + optional screen-control) and authorize.
+message DeviceAuthStartRequest {
+  // The agent's stable install identity (a per-install keypair fingerprint),
+  // bound to the enrollment so the issued credentials are non-transferable.
+  string install_fingerprint = 1;
+  Os os = 2;
+  Arch arch = 3;
+  string machine_name = 4;
+  // The update channel the user selected at install time.
+  string update_channel = 5;
+}
+
+message DeviceAuthStartResponse {
+  // Short code the user types at the verification URL.
+  string user_code = 1;
+  // The opaque device code the agent polls with.
+  string device_code = 2;
+  // Where the user goes to authorize (e.g. https://get.opengeni.ai/device).
+  string verification_uri = 3;
+  // A pre-filled convenience URL embedding the user_code.
+  string verification_uri_complete = 4;
+  // Seconds the device_code remains valid.
+  uint32 expires_in_seconds = 5;
+  // Minimum seconds the agent must wait between polls.
+  uint32 poll_interval_seconds = 6;
+}
+
+// The agent polls until the user authorizes (or it expires / is denied).
+message DeviceAuthPollRequest {
+  string device_code = 1;
+}
+
+message DeviceAuthPollResponse {
+  DeviceAuthState state = 1;
+  // Present only when state == AUTHORIZED.
+  EnrollmentCredentials credentials = 2;
+}
+
+enum DeviceAuthState {
+  DEVICE_AUTH_STATE_UNSPECIFIED = 0;
+  // The user has not yet completed the flow; keep polling.
+  DEVICE_AUTH_STATE_PENDING = 1;
+  // The user authorized; `credentials` are present.
+  DEVICE_AUTH_STATE_AUTHORIZED = 2;
+  // The user explicitly denied the request.
+  DEVICE_AUTH_STATE_DENIED = 3;
+  // The device_code expired before authorization.
+  DEVICE_AUTH_STATE_EXPIRED = 4;
+  // The agent is polling too fast and must slow down.
+  DEVICE_AUTH_STATE_SLOW_DOWN = 5;
+}
+
+// The scoped credentials persisted (0600) on the machine after enrollment.
+// These are workspace-scoped — they can address only this workspace's agents.
+message EnrollmentCredentials {
+  string agent_id = 1;
+  string workspace_id = 2;
+  // The NATS CONNECT AUTH-TOKEN the agent presents (the signed `oge_` enrollment
+  // bearer). The server runs with AUTH CALLOUT (dossier §10.1 / M-AUTH): on connect
+  // the agent passes this as the auth-token; nats-server issues an authorization
+  // request to the control-plane's callout responder, which validates the bearer
+  // and returns a SIGNED user JWT scoping the connection to pub/sub ONLY
+  // `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
+  // tenancy boundary — there is NO per-machine creds file to ship. (Field name kept
+  // for proto stability; it now carries the bearer, not an operator creds-file body.)
+  string nats_credentials = 3;
+  // The NATS server URL(s) to dial. For the control plane these are `wss://` URLs
+  // (the relay-symmetric TLS ingress) so the agent rides the same TLS endpoint as
+  // the stream relay — no separate public TCP load balancer (dossier M-AUTH).
+  repeated string nats_urls = 4;
+  // The relay edge base URL for opening stream channels.
+  string relay_url = 5;
+  // The minisign public key the agent pins for self-update verification.
+  string update_pubkey = 6;
+  // Whether the user consented to whole-machine access.
+  bool consented_whole_machine = 7;
+  // Whether the user consented to screen capture + synthetic input.
+  bool consented_screen_control = 8;
+  // The agent's PRODUCER token for the relay edge (dossier §10.5 / the relay-dial
+  // protocol). Presented as `StreamOpen.token` when the agent registers a
+  // pty/desktop channel (role=AGENT). It is a control-plane-minted, workspace+agent
+  // -scoped `ogr_` HMAC token the relay verifies on its own merits — DISTINCT from
+  // the viewer's `ogs_` stream token (which the control plane mints per viewer and
+  // the relay also verifies). The relay pairs the producer and consumer by the
+  // channel key once BOTH tokens pass. Additive proto3 field; empty for an
+  // enrollment minted before the relay-token plane is configured (the agent then
+  // presents an empty token the relay rejects, surfacing the gap loudly).
+  string relay_token = 9;
+}
+
+// =============================================================================
+// Exec
+// =============================================================================
+
+message ExecRequest {
+  // argv[0] is the program; the agent does NOT shell-interpret unless `shell`.
+  repeated string command = 1;
+  // When true, `command` is joined and run through the platform shell.
+  bool shell = 2;
+  // Working directory; defaults to the agent's workspace_root when empty.
+  string cwd = 3;
+  // Extra environment variables layered over the agent's environment.
+  map<string, string> env = 4;
+  // Optional stdin fed to the process.
+  bytes stdin = 5;
+  // Hard wall-clock timeout; 0 means the control-plane default.
+  uint32 timeout_ms = 6;
+}
+
+message ExecResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  // True when the process was killed by `timeout_ms`.
+  bool timed_out = 4;
+  // Wall-clock duration the process ran.
+  uint64 duration_ms = 5;
+}
+
+// =============================================================================
+// Filesystem (read/write/list/mkdir/move/stat/remove)
+// =============================================================================
+
+message FsReadRequest {
+  string path = 1;
+  // Optional byte offset + length for ranged reads (0 length => to EOF).
+  uint64 offset = 2;
+  uint64 length = 3;
+}
+
+message FsReadResponse {
+  bytes content = 1;
+  // Total size of the file (so a ranged read knows there is more).
+  uint64 total_size = 2;
+}
+
+message FsWriteRequest {
+  string path = 1;
+  bytes content = 2;
+  // Create parent directories as needed.
+  bool create_parents = 3;
+  // Append rather than truncate-and-write.
+  bool append = 4;
+  // POSIX mode for a newly created file (e.g. 0644); 0 => platform default.
+  uint32 mode = 5;
+}
+
+message FsWriteResponse {
+  uint64 bytes_written = 1;
+}
+
+message FsListRequest {
+  string path = 1;
+  // Recurse into subdirectories.
+  bool recursive = 2;
+}
+
+message FsListResponse {
+  repeated FsEntry entries = 1;
+}
+
+message FsEntry {
+  string name = 1;
+  // Path relative to the listed directory.
+  string path = 2;
+  FsEntryKind kind = 3;
+  uint64 size = 4;
+  // Last-modified time, unix epoch ms.
+  int64 modified_ms = 5;
+  uint32 mode = 6;
+}
+
+enum FsEntryKind {
+  FS_ENTRY_KIND_UNSPECIFIED = 0;
+  FS_ENTRY_KIND_FILE = 1;
+  FS_ENTRY_KIND_DIRECTORY = 2;
+  FS_ENTRY_KIND_SYMLINK = 3;
+}
+
+message FsMkdirRequest {
+  string path = 1;
+  // Create intermediate directories (mkdir -p).
+  bool parents = 2;
+  uint32 mode = 3;
+}
+
+message FsMkdirResponse {}
+
+message FsMoveRequest {
+  string from = 1;
+  string to = 2;
+  // Overwrite the destination if it exists.
+  bool overwrite = 3;
+}
+
+message FsMoveResponse {}
+
+message FsStatRequest {
+  string path = 1;
+}
+
+message FsStatResponse {
+  // Absent when the path does not exist (the op still succeeds; `exists=false`).
+  bool exists = 1;
+  FsEntry entry = 2;
+}
+
+message FsRemoveRequest {
+  string path = 1;
+  // Remove directories recursively.
+  bool recursive = 2;
+}
+
+message FsRemoveResponse {}
+
+// =============================================================================
+// Git
+// =============================================================================
+
+// A single git operation. The agent runs git against the repo rooted at `cwd`
+// (or workspace_root) and returns structured results where it can, falling back
+// to raw stdout for pass-through subcommands.
+message GitRequest {
+  GitOp op = 1;
+  // Repo working directory; defaults to workspace_root.
+  string cwd = 2;
+  // Free-form args for ops that pass through (e.g. log/diff flags).
+  repeated string args = 3;
+}
+
+enum GitOp {
+  GIT_OP_UNSPECIFIED = 0;
+  GIT_OP_STATUS = 1;
+  GIT_OP_DIFF = 2;
+  GIT_OP_LOG = 3;
+  GIT_OP_ADD = 4;
+  GIT_OP_COMMIT = 5;
+  GIT_OP_BRANCH = 6;
+  GIT_OP_CHECKOUT = 7;
+  GIT_OP_PULL = 8;
+  GIT_OP_PUSH = 9;
+  // Any other subcommand, passed through verbatim via `args`.
+  GIT_OP_RAW = 15;
+}
+
+message GitResponse {
+  int32 exit_code = 1;
+  // Raw stdout/stderr for pass-through fidelity.
+  bytes stdout = 2;
+  bytes stderr = 3;
+  // Structured status, present for GIT_OP_STATUS.
+  GitStatus status = 4;
+}
+
+message GitStatus {
+  string branch = 1;
+  // The upstream tracking branch, if any.
+  string upstream = 2;
+  int32 ahead = 3;
+  int32 behind = 4;
+  repeated GitFileStatus files = 5;
+  bool clean = 6;
+}
+
+message GitFileStatus {
+  string path = 1;
+  // Two-letter porcelain code (e.g. " M", "??", "A ").
+  string code = 2;
+  bool staged = 3;
+}
+
+// =============================================================================
+// PTY (interactive terminal) — control ops; the bytes ride the stream plane
+// =============================================================================
+
+// Open a PTY. The agent allocates a pseudo-terminal, spawns the shell/command,
+// and registers a relay stream channel of kind PTY. The returned `channel`
+// identifies the stream the viewer connects to.
+message PtyOpenRequest {
+  // Shell/command to run; empty => the user's default login shell.
+  repeated string command = 1;
+  string cwd = 2;
+  map<string, string> env = 3;
+  uint32 cols = 4;
+  uint32 rows = 5;
+  // The TERM value to advertise (e.g. "xterm-256color").
+  string term = 6;
+}
+
+message PtyOpenResponse {
+  // A handle for subsequent resize/close control ops.
+  string pty_id = 1;
+  // The relay stream channel carrying the PTY bytes.
+  StreamChannel channel = 2;
+}
+
+// Write input bytes to a PTY. (Bulk interactive bytes normally ride the stream
+// plane as StreamFrames; this control op exists for programmatic injection.)
+message PtyWriteRequest {
+  string pty_id = 1;
+  bytes data = 2;
+}
+
+message PtyWriteResponse {
+  uint64 bytes_written = 1;
+}
+
+message PtyResizeRequest {
+  string pty_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message PtyResizeResponse {}
+
+message PtyCloseRequest {
+  string pty_id = 1;
+}
+
+message PtyCloseResponse {
+  // The exit code of the PTY's root process, if it had exited.
+  int32 exit_code = 1;
+}
+
+// =============================================================================
+// Desktop (framebuffer + computer-use) — control ops; pixels ride the stream
+// plane. Synthetic input is gated on consented_screen_control.
+// =============================================================================
+
+// Ensure a desktop framebuffer stream exists, registering a relay channel of
+// kind DESKTOP. Idempotent: repeated calls return the same live channel.
+message DesktopEnsureRequest {
+  // Request a specific geometry (0 => the display's native geometry).
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message DesktopEnsureResponse {
+  StreamChannel channel = 1;
+  Display display = 2;
+}
+
+// =============================================================================
+// Heartbeat + metrics
+// =============================================================================
+
+// The agent's periodic liveness ping. Carries a metrics sample so the control
+// plane can upsert the machine's last-sample without a separate RPC. The
+// `seq` increments per heartbeat so the control plane can detect a gap.
+message Heartbeat {
+  uint64 seq = 1;
+  // Agent monotonic uptime in ms.
+  uint64 uptime_ms = 2;
+  // The number of sessions currently sharing this machine (lease refcount as the
+  // agent sees it; the authoritative count lives in Postgres).
+  uint32 active_sessions = 3;
+  MetricsSample metrics = 4;
+  // True when the agent is draining for a pending self-update (prefer other
+  // sandboxes for new work).
+  bool draining = 5;
+}
+
+message HeartbeatAck {
+  // The control plane may instruct the agent to adjust its heartbeat cadence.
+  uint32 next_interval_ms = 1;
+  // The control plane may signal a pending fleet action (e.g. update available).
+  bool update_available = 2;
+}
+
+// On-demand metrics request (the dashboard force-poll path).
+message MetricsRequest {}
+
+// A point-in-time machine metrics sample.
+message MetricsSample {
+  // Unix epoch ms when sampled.
+  int64 sampled_at_ms = 1;
+  // CPU utilization 0..100 (whole machine).
+  double cpu_percent = 2;
+  // Load averages.
+  double load1 = 3;
+  double load5 = 4;
+  double load15 = 5;
+  uint64 mem_used_bytes = 6;
+  uint64 mem_total_bytes = 7;
+  uint64 disk_used_bytes = 8;
+  uint64 disk_total_bytes = 9;
+  // A contention signal (run-queue length / pressure), if available.
+  double run_queue = 10;
+  // Per-GPU samples, when GPUs are present.
+  repeated GpuSample gpus = 11;
+}
+
+message GpuSample {
+  string name = 1;
+  // Utilization 0..100.
+  double util_percent = 2;
+  uint64 mem_used_bytes = 3;
+  uint64 mem_total_bytes = 4;
+}
+
+// =============================================================================
+// Liveness / lifecycle (ping, going-offline, reconnect/resume)
+// =============================================================================
+
+// A cheap liveness probe — the control plane requests it to test that a
+// responder exists on the subject (the NATS "is there an agent" check).
+message PingRequest {
+  // Echoed back so the caller can correlate / measure RTT.
+  uint64 nonce = 1;
+}
+
+message PingResponse {
+  uint64 nonce = 1;
+  // The agent's monotonic clock, for skew estimation.
+  uint64 agent_monotonic_ms = 2;
+}
+
+// Sent by the agent on a clean stop (SIGINT/SIGTERM) so the lease flips to
+// offline IMMEDIATELY rather than waiting on heartbeat dead-detection.
+message GoingOffline {
+  GoingOfflineReason reason = 1;
+  // Optional human note (e.g. "user pressed Ctrl-C").
+  string message = 2;
+}
+
+enum GoingOfflineReason {
+  GOING_OFFLINE_REASON_UNSPECIFIED = 0;
+  // The user stopped the foreground process.
+  GOING_OFFLINE_REASON_USER_STOP = 1;
+  // The agent is restarting itself for a self-update.
+  GOING_OFFLINE_REASON_UPDATE = 2;
+  // The host is shutting down / suspending.
+  GOING_OFFLINE_REASON_HOST_SHUTDOWN = 3;
+}
+
+// On reconnect, the agent presents its resume token; the control plane fences by
+// epoch and either accepts the resume (same machine, new connection generation)
+// or, if the token is unknown/stale, requires a fresh hello.
+message ResumeRequest {
+  string agent_id = 1;
+  string resume_token = 2;
+  // The lease epoch the agent last observed, for the integer fence.
+  uint32 last_known_epoch = 3;
+}
+
+message ResumeResponse {
+  bool accepted = 1;
+  // The new lease epoch the control plane assigned to this connection. Any op
+  // fenced by an older epoch must re-resolve and retry.
+  uint32 epoch = 2;
+  // A fresh resume token for the NEXT reconnect (tokens rotate per generation).
+  string resume_token = 3;
+}
+
+// =============================================================================
+// Self-update (the manifest the updater consumes — codegen'd so the TS
+// publisher and Rust consumer never drift; see §23.2 of the dossier)
+// =============================================================================
+
+// The agent asks whether a newer build is available for its channel + target.
+message UpdateCheckRequest {
+  string current_version = 1;
+  string channel = 2;
+  Os os = 3;
+  Arch arch = 4;
+}
+
+message UpdateCheckResponse {
+  bool update_available = 1;
+  UpdateManifest manifest = 2;
+}
+
+// A signed channel manifest. It is itself minisign-signed out-of-band; this
+// message is the decoded body the updater reasons over.
+message UpdateManifest {
+  string channel = 1;
+  string version = 2;
+  // The minimum version still permitted (downgrade-attack protection).
+  string min_supported = 3;
+  // Staged-rollout gate: an agent applies when blake3(agentId+salt)%100 < percent.
+  uint32 rollout_percent = 4;
+  string cohort_salt = 5;
+  repeated UpdateArtifact artifacts = 6;
+  string notes_url = 7;
+  int64 signed_at_ms = 8;
+  // When true, override drain and update mid-session (security CVE path).
+  bool force = 9;
+}
+
+message UpdateArtifact {
+  // Target triple, e.g. "x86_64-unknown-linux-musl".
+  string target = 1;
+  string url = 2;
+  uint64 size = 3;
+  string sha256 = 4;
+  // URL of the detached minisign signature for the artifact.
+  string minisig_url = 5;
+}
+
+// Before applying, the updater asks the control plane whether it may proceed
+// (the control plane reads the Postgres lease refcount). The agent drains until
+// the refcount reaches zero or a grace window elapses.
+message UpdateMayProceedRequest {
+  string agent_id = 1;
+  string target_version = 2;
+}
+
+message UpdateMayProceedResponse {
+  bool may_proceed = 1;
+  // When false, the number of live sessions blocking the update.
+  uint32 active_sessions = 2;
+}
+
+// =============================================================================
+// Control RPC envelope — the single oneof carrying every control-plane op
+// =============================================================================
+
+// Wraps an op-specific request. `request_id` correlates a response to a request
+// even over fan-out; `epoch` carries the lease/active epoch the control plane
+// resolved this op against, so the agent can reject a stale op (ERROR_CODE_FENCED).
+message ControlRequest {
+  string request_id = 1;
+  uint32 epoch = 2;
+  oneof op {
+    PingRequest ping = 10;
+    Hello hello = 11;
+    ResumeRequest resume = 12;
+    ExecRequest exec = 13;
+    FsReadRequest fs_read = 14;
+    FsWriteRequest fs_write = 15;
+    FsListRequest fs_list = 16;
+    FsMkdirRequest fs_mkdir = 17;
+    FsMoveRequest fs_move = 18;
+    FsStatRequest fs_stat = 19;
+    FsRemoveRequest fs_remove = 20;
+    GitRequest git = 21;
+    PtyOpenRequest pty_open = 22;
+    PtyWriteRequest pty_write = 23;
+    PtyResizeRequest pty_resize = 24;
+    PtyCloseRequest pty_close = 25;
+    DesktopEnsureRequest desktop_ensure = 26;
+    MetricsRequest metrics = 27;
+    UpdateMayProceedRequest update_may_proceed = 28;
+  }
+}
+
+// Wraps an op-specific response, or an error. `request_id` echoes the request.
+message ControlResponse {
+  string request_id = 1;
+  // Present when the op failed; when set, `result` is empty.
+  AgentError error = 2;
+  oneof result {
+    PingResponse ping = 10;
+    HelloAck hello = 11;
+    ResumeResponse resume = 12;
+    ExecResponse exec = 13;
+    FsReadResponse fs_read = 14;
+    FsWriteResponse fs_write = 15;
+    FsListResponse fs_list = 16;
+    FsMkdirResponse fs_mkdir = 17;
+    FsMoveResponse fs_move = 18;
+    FsStatResponse fs_stat = 19;
+    FsRemoveResponse fs_remove = 20;
+    GitResponse git = 21;
+    PtyOpenResponse pty_open = 22;
+    PtyWriteResponse pty_write = 23;
+    PtyResizeResponse pty_resize = 24;
+    PtyCloseResponse pty_close = 25;
+    DesktopEnsureResponse desktop_ensure = 26;
+    MetricsSample metrics = 27;
+    UpdateMayProceedResponse update_may_proceed = 28;
+  }
+}
+
+// The control plane's acknowledgement of a Hello, carrying the epoch it assigned
+// and a resume token for the next reconnect.
+message HelloAck {
+  uint32 epoch = 1;
+  string resume_token = 2;
+  // The heartbeat interval the agent should use.
+  uint32 heartbeat_interval_ms = 3;
+}
+
+// =============================================================================
+// Agent-initiated messages (the agent → control plane direction)
+// =============================================================================
+
+// Wraps a message the AGENT originates (not a reply to a ControlRequest):
+// heartbeats, the clean going-offline signal. These are published on the agent's
+// outbound subject; the control plane folds them into lease/metrics state.
+message AgentEvent {
+  string agent_id = 1;
+  oneof event {
+    Heartbeat heartbeat = 10;
+    GoingOffline going_offline = 11;
+  }
+}
+
+// The control plane's ack of an AgentEvent (e.g. a HeartbeatAck).
+message AgentEventAck {
+  oneof ack {
+    HeartbeatAck heartbeat = 10;
+  }
+}
+
+// =============================================================================
+// Stream-channel framing (pty + desktop bytes over the relay edge)
+// =============================================================================
+
+// Identifies a relay stream channel. The viewer/pty client connects to the
+// relay with this channel's coordinates plus a scoped `ogs_` token; the agent
+// dials out and registers the same channel. `{workspace_id, agent_id, port}`
+// is the routing key.
+message StreamChannel {
+  string channel_id = 1;
+  string workspace_id = 2;
+  string agent_id = 3;
+  StreamKind kind = 4;
+  // The logical port the channel maps to (so resolveExposedPort can address it).
+  uint32 port = 5;
+}
+
+// Open a stream channel on the relay. Sent by both ends (agent registers; client
+// attaches) as the first frame of a relay connection.
+message StreamOpen {
+  StreamChannel channel = 1;
+  // The scoped stream token (`ogs_` envelope) authorizing this channel; the
+  // relay validates authenticity + the lease/active-epoch fence.
+  string token = 2;
+  // Whether the sender is the producing agent or the consuming viewer.
+  StreamRole role = 3;
+  // For resume: the last frame sequence the sender successfully processed, so
+  // the peer can replay from there after a reconnect blip.
+  uint64 resume_from_seq = 4;
+}
+
+enum StreamRole {
+  STREAM_ROLE_UNSPECIFIED = 0;
+  // The agent producing pty/desktop bytes.
+  STREAM_ROLE_AGENT = 1;
+  // The viewer/pty client consuming them (and sending input back).
+  STREAM_ROLE_CLIENT = 2;
+}
+
+// The relay's acknowledgement of a StreamOpen.
+message StreamOpenAck {
+  bool accepted = 1;
+  AgentError error = 2;
+  // The sequence the peer will resume sending from.
+  uint64 resume_from_seq = 3;
+}
+
+// A data frame carrying raw stream bytes in either direction. `seq` is a
+// monotonic per-channel-per-direction counter enabling resume-from-seq. For a
+// DESKTOP channel `data` is an encoded framebuffer chunk; for PTY it is raw tty
+// bytes. Input (client→agent) for desktop computer-use rides DesktopInput
+// instead so synthetic events are typed, not opaque bytes.
+message StreamFrame {
+  string channel_id = 1;
+  uint64 seq = 2;
+  bytes data = 3;
+  // Unix epoch ms the frame was produced (for latency/lag metrics).
+  int64 produced_at_ms = 4;
+}
+
+// Close a stream channel. Either end may send it; the relay tears down the
+// channel and notifies the peer.
+message StreamClose {
+  string channel_id = 1;
+  StreamCloseReason reason = 2;
+  string message = 3;
+}
+
+enum StreamCloseReason {
+  STREAM_CLOSE_REASON_UNSPECIFIED = 0;
+  // Normal end (pty exited, viewer left).
+  STREAM_CLOSE_REASON_NORMAL = 1;
+  // The producing process ended.
+  STREAM_CLOSE_REASON_PROCESS_EXIT = 2;
+  // The epoch fence invalidated the channel (a swap-away).
+  STREAM_CLOSE_REASON_FENCED = 3;
+  // A relay/transport error (the client should reconnect+resume).
+  STREAM_CLOSE_REASON_TRANSPORT_ERROR = 4;
+  // Rate-limit / backpressure shed the channel.
+  STREAM_CLOSE_REASON_RATE_LIMITED = 5;
+}
+
+// Typed computer-use input from a client to a desktop channel (client→agent).
+// Synthetic input is gated on consented_screen_control; an ungated input op
+// fails with ERROR_CODE_CONSENT_REQUIRED.
+message DesktopInput {
+  string channel_id = 1;
+  oneof event {
+    PointerEvent pointer = 2;
+    KeyEvent key = 3;
+    ScrollEvent scroll = 4;
+  }
+}
+
+message PointerEvent {
+  int32 x = 1;
+  int32 y = 2;
+  PointerAction action = 3;
+  PointerButton button = 4;
+}
+
+enum PointerAction {
+  POINTER_ACTION_UNSPECIFIED = 0;
+  POINTER_ACTION_MOVE = 1;
+  POINTER_ACTION_DOWN = 2;
+  POINTER_ACTION_UP = 3;
+  POINTER_ACTION_CLICK = 4;
+  POINTER_ACTION_DOUBLE_CLICK = 5;
+}
+
+enum PointerButton {
+  POINTER_BUTTON_UNSPECIFIED = 0;
+  POINTER_BUTTON_LEFT = 1;
+  POINTER_BUTTON_RIGHT = 2;
+  POINTER_BUTTON_MIDDLE = 3;
+}
+
+message KeyEvent {
+  // A platform-independent key name (e.g. "Enter", "a", "ctrl+c") OR text to type.
+  string key = 1;
+  bool is_text = 2;
+  KeyAction action = 3;
+}
+
+enum KeyAction {
+  KEY_ACTION_UNSPECIFIED = 0;
+  KEY_ACTION_DOWN = 1;
+  KEY_ACTION_UP = 2;
+  KEY_ACTION_PRESS = 3;
+}
+
+message ScrollEvent {
+  int32 x = 1;
+  int32 y = 2;
+  int32 delta_x = 3;
+  int32 delta_y = 4;
+}

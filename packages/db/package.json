@@ -18,6 +18,7 @@
     "postgres": "^3.4.7"
   },
   "devDependencies": {
+    "@opengeni/testing": "workspace:*",
     "drizzle-kit": "^0.31.8",
     "typescript": "^6.0.3"
   }

@@ -23,6 +23,15 @@ networkPolicy:
   ingressController:
     namespaceSelector: {}
     podSelector: {}
+  # Optional: allow a metrics scraper (Prometheus) to reach the relay's
+  # GET /metrics on its wss port. Leave unset to omit the rule (the relay has no
+  # other ingress source than the ingress controller). When the kube-prometheus
+  # ServiceMonitor scrapes from a separate namespace, set both selectors here.
+  monitoring: {}
+    # namespaceSelector:
+    #   matchLabels:
+    #     kubernetes.io/metadata.name: monitoring
+    # podSelector: {}
 
 config:
   OPENGENI_SERVICE_NAME: opengeni
@@ -61,6 +70,28 @@ secret:
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
+  #
+  # Bring-your-own-compute (selfhosted) SECRET keys — set these in the runtime
+  # secret (NOT this file) when selfhosted.enabled=true. They thread into the
+  # api/worker via `envFrom: secretRef`, into the relay via explicit secretKeyRef,
+  # and into the chart-managed NATS via env-var expansion:
+  #   OPENGENI_ENROLLMENT_SIGNING_SECRET        HMAC the control plane signs the
+  #                                             `oge_` enrollment bearer with and
+  #                                             the callout responder verifies it
+  #                                             with (falls back to
+  #                                             OPENGENI_DELEGATION_SECRET).
+  #   OPENGENI_STREAM_TOKEN_SECRET              HMAC the relay verifies the viewer
+  #                                             `ogs_` stream token with (already
+  #                                             used by sandbox-surfacing).
+  #   OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET    HMAC the relay verifies the agent
+  #                                             `ogr_` producer token with (may be
+  #                                             omitted to reuse the stream secret).
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED   the callout account SEED the
+  #                                             control plane signs user JWTs with.
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY     the PUBLIC half of the seed —
+  #                                             the nats-server callout `issuer`.
+  #   OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD       the control-plane NATS login.
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD       the callout responder login.
   stringData: {}
 
 externalSecret:
@@ -294,6 +325,115 @@ web:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
 
+# Bring-your-own-compute stream relay (dossier §17 / §25). A stateless wss byte
+# pump: the agent (producer) and the viewer (consumer) both dial IN over wss
+# through the ingress, and the relay splices their pty/desktop streams. It holds
+# NO cluster state and makes NO cluster egress. Disabled by default — the whole
+# selfhosted feature is flag-gated off (see config.OPENGENI_SANDBOX_SELFHOSTED_ENABLED)
+# so existing deploys are unaffected. Enable together with the ingress relay host,
+# nats.authCallout, and the runtime-secret keys below.
+relay:
+  enabled: false
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  image:
+    repository: opengeni-relay
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # The wss listener port. The container, service targetPort, and the relay's
+  # OPENGENI_RELAY_BIND all derive from this single value.
+  containerPort: 8443
+  # The runtime-secret keys the relay's two HMAC token secrets are read from.
+  # The producer (ogr_) secret falls back to the viewer (ogs_) stream-token secret
+  # inside the relay when the relay key is absent, so a single OPENGENI_STREAM_TOKEN_SECRET
+  # can back both planes.
+  streamTokenSecretKey: OPENGENI_STREAM_TOKEN_SECRET
+  relayTokenSecretKey: OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET
+  # Non-secret relay tuning knobs (defaults match the relay binary's own defaults).
+  tuning:
+    ringFrames: 1024
+    spliceBuffer: 256
+    rateBurstBytes: 16777216
+    rateBytesPerSec: 8388608
+    pairTimeoutSecs: 120
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    # The distroless:nonroot base runs as uid/gid 65532.
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  # In-flight streams drain on SIGTERM (the relay's own handler stops the listener
+  # then drains). Give the pod real room so resumable streams keep splicing through
+  # a rolling deploy / node drain. The preStop sleep holds the pod past the
+  # endpoints-controller propagation so the ingress stops sending NEW dials first.
+  terminationGracePeriodSeconds: 120
+  preStopDrainSeconds: 15
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  # Optional dedicated node pool for the relay edge (values-gated, default off for
+  # staging — the relay co-schedules on the platform nodes). Set both to pin the
+  # relay to an isolated, internet-facing edge pool.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 8443
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    # The relay is bandwidth/connection bound more than CPU bound; memory is a
+    # second cheap signal that needs no metrics adapter. For connection-count or
+    # bytes-spliced scaling, wire customMetrics (needs a Prometheus adapter).
+    targetMemoryUtilizationPercentage: 80
+    customMetrics: []
+    behavior: {}
+
 migrations:
   enabled: true
   image:
@@ -461,6 +601,56 @@ nats:
     limits:
       cpu: 500m
       memory: 256Mi
+  # The bring-your-own-compute tenancy boundary (M-AUTH; dossier §10.1 NATS
+  # Accounts + §17). When enabled, the chart-managed nats fixture runs the
+  # auth-callout config (deploy/nats/auth-callout.conf is the version-controlled
+  # source of truth) with a websocket listener the agents dial over wss through
+  # the ingress. The control plane (api/worker) + the callout responder
+  # authenticate directly with the control/auth users; every enrolled agent is
+  # delegated to the callout responder, which mints a per-workspace-scoped user
+  # JWT. The secret VALUES (callout issuer public key, control/auth passwords)
+  # come from the runtime secret via env-var expansion — never the configmap.
+  #
+  # Production typically runs NATS outside this chart (nats.enabled=false) and
+  # folds the SAME auth-callout.conf into the platform NATS StatefulSet. This
+  # block is the in-chart fixture for preview/smoke + the documented config shape.
+  authCallout:
+    enabled: false
+    # The websocket listener port (TLS terminates at the ingress; no_tls here).
+    websocketPort: 8443
+    websocketSameOrigin: false
+    # The shared application account + the two direct-auth users. Match the
+    # control-plane env (OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME / _USER /
+    # _CONTROL_USER) and the responder's expectations.
+    account: APP
+    controlUser: control
+    calloutUser: auth
+    # The runtime-secret keys the callout issuer public key + the two passwords
+    # are read from. The issuer is the PUBLIC half of the callout account seed
+    # (OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED); the chart wires the public
+    # key (not the seed) into nats-server. The control plane separately holds the
+    # seed (to sign user JWTs) via the runtime secret read by the api/worker.
+    calloutPublicKeySecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY
+    controlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+    calloutPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
+
+# Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring threaded
+# into the api/worker configmap. The SECRET values live in the runtime secret
+# (see the DEPLOY NOTES / secret keys below). Disabled by default so existing
+# deploys are completely unaffected. To enable the feature end-to-end set
+# selfhosted.enabled=true, relay.enabled=true, nats.authCallout.enabled=true (or
+# point at an external NATS with the callout config), add the ingress relay+nats
+# hosts, and provision the runtime-secret keys.
+selfhosted:
+  enabled: false
+  # The public wss URLs the agent dials (must match the ingress hosts below).
+  natsUrl: ""   # e.g. wss://nats.opengeni.ai
+  relayUrl: ""  # e.g. wss://relay.opengeni.ai
+  # The NATS callout account + user NAMES the control plane uses (must match the
+  # nats.authCallout block). Non-secret; the seeds/passwords are in the secret.
+  natsCalloutAccountName: APP
+  natsControlUser: control
+  natsCalloutUser: auth
 
 observability:
   structuredLogs: true

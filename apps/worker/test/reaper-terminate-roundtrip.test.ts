@@ -144,6 +144,72 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     expect(deleteCalls).toEqual(["sb-live-123"]); // and terminated BY ID, AFTER persist
   });
 
+  test("CRITICAL: a selfhosted lease is NEVER provider-stopped by the reaper (drain-to-cold only)", async () => {
+    // The catastrophic-if-violated invariant (dossier §19/§21): a selfhosted box is
+    // a user's PHYSICAL machine. The reaper must drain its lease to cold WITHOUT
+    // building a provider client, resuming, snapshotting, or calling delete()/kill().
+    // We inject a spy client that records EVERY call; for a selfhosted lease the spy
+    // must be touched ZERO times, and terminateProviderBox must still return true so
+    // the caller's confirmDrainCold flips the lease draining→cold.
+    const clientBuilds: string[] = [];
+    const selfhostedResumeCalls: string[] = [];
+    const selfhostedDeleteCalls: string[] = [];
+    const spyClientFactory = ((backend: string) => {
+      clientBuilds.push(backend);
+      return {
+        backendId: backend,
+        async deserializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async resume() {
+          selfhostedResumeCalls.push(backend);
+          return { kill: async () => { selfhostedDeleteCalls.push("kill"); }, closed: false };
+        },
+        async serializeSessionState(state: Record<string, unknown>) {
+          return { ...state };
+        },
+        async delete() {
+          selfhostedDeleteCalls.push("delete");
+        },
+      };
+    }) as never;
+
+    const persistCalls: Array<string | null> = [];
+    const persistArchive = async (archiveBase64: string | null) => {
+      persistCalls.push(archiveBase64);
+      return { wrote: true as const, priorArchive: null };
+    };
+
+    // A fully-populated selfhosted lease envelope: resumeState present, backend
+    // selfhosted on BOTH the lease and the resume envelope. Even with a non-empty
+    // envelope (the guard must not depend on an empty one), nothing must fire.
+    const lease = {
+      sandboxGroupId: "group-selfhosted",
+      leaseEpoch: 1,
+      backend: "selfhosted",
+      resumeBackendId: "selfhosted",
+      resumeState: { backendId: "selfhosted", sessionState: { agentId: "agent-abc" } },
+    };
+    const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
+
+    const drainedCold = await terminateProviderBox(
+      settings,
+      lease as never,
+      observability,
+      persistArchive,
+      spyClientFactory,
+    );
+
+    // Drain-to-cold succeeds (the lease can go cold) ...
+    expect(drainedCold).toBe(true);
+    // ... but the provider was NEVER touched: no client built, no resume, no
+    // delete/kill, and no snapshot persist attempted (the machine IS the persistence).
+    expect(clientBuilds).toEqual([]);
+    expect(selfhostedResumeCalls).toEqual([]);
+    expect(selfhostedDeleteCalls).toEqual([]);
+    expect(persistCalls).toEqual([]);
+  });
+
   test("a persistWorkspace failure does NOT terminate the box (re-throws → lease stays draining)", async () => {
     resumeCalls.length = 0;
     deleteCalls.length = 0;

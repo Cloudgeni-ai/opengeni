@@ -11,8 +11,9 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (10 values; existing four keep
-// position). 3-way enum parity is pinned by `test/contract-parity.test.ts`.
+// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// additive at the end). 3-way enum parity is pinned by
+// `test/contract-parity.test.ts`.
 export type SandboxBackend =
   | "docker"
   | "modal"
@@ -23,7 +24,8 @@ export type SandboxBackend =
   | "e2b"
   | "blaxel"
   | "cloudflare"
-  | "vercel";
+  | "vercel"
+  | "selfhosted";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -43,7 +45,12 @@ export type CapabilityUnavailableReason =
   | "not_provisioned"
   | "disabled_by_policy"
   | "lease_cold"
-  | "tier_headless";
+  | "tier_headless"
+  // selfhosted (bring-your-own-compute) negotiation states:
+  | "agent_offline"
+  | "agent_reconnecting"
+  | "consent_required"
+  | "display_unavailable";
 
 // Mirror of `@opengeni/contracts` SessionCapabilities (the negotiated handshake
 // document). The descriptor table itself is NOT mirrored — it lives in
@@ -578,6 +585,9 @@ export type CreateSessionRequest = {
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
+  // The enrolled machine (a sandbox id) to run this session on; seeds the
+  // active-sandbox pointer at creation so the first turn lands on it.
+  targetSandboxId?: string | undefined;
   environmentId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
@@ -623,6 +633,8 @@ export const KNOWN_PERMISSIONS = [
   "environments:manage",
   "environments:use",
   "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
 ] as const;
 
 export type KnownPermission = (typeof KNOWN_PERMISSIONS)[number];
@@ -1472,3 +1484,88 @@ export type ClientSessionEventInput =
   | UserMessageEventInput
   | UserInterruptEventInput
   | UserApprovalDecisionEventInput;
+
+// ── Bring-your-own-compute: Machines dashboard + per-machine metrics (M10) ────
+// Hand-written mirrors of the `@opengeni/contracts` MetricSample / MachineView /
+// MachinesResponse / MachineMetricsSeriesResponse (pinned by contract-parity).
+// M9 imports THESE so the dashboard UI never drifts from the API.
+
+/** A point-in-time machine metrics sample. `gpuUtilPct`/`gpuMemBytes` are null
+ *  when no GPU was present (not-reported, never a real zero); the bytes/load are
+ *  numbers; `sampledAt` is an ISO-8601 instant. */
+export type MetricSample = {
+  cpuPct: number;
+  load1: number;
+  load5: number;
+  load15: number;
+  memUsedBytes: number;
+  memTotalBytes: number;
+  diskUsedBytes: number;
+  diskTotalBytes: number;
+  gpuUtilPct: number | null;
+  gpuMemBytes: number | null;
+  runQueue: number;
+  sampledAt: string;
+};
+
+/** The derived dashboard state of a machine (M3 liveness + consent/display
+ *  reasons + the in-flight device-flow). */
+export type MachineState =
+  | "online"
+  | "reconnecting"
+  | "offline"
+  | "consent_required"
+  | "display_unavailable"
+  | "enrolling";
+
+export type MachineKind = "modal" | "selfhosted";
+
+/** A machine as the Machines dashboard renders it (an enrolled selfhosted machine
+ *  or the session's synthetic Modal group box, `isSessionGroup: true`). */
+export type MachineView = {
+  sandboxId: string;
+  enrollmentId: string | null;
+  name: string;
+  kind: MachineKind;
+  state: MachineState;
+  active: boolean;
+  isSessionGroup: boolean;
+  os: string;
+  arch: string;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  sharedSessionCount: number;
+  lastSeenAt: string | null;
+  metrics: MetricSample | null;
+};
+
+/** GET /v1/workspaces/:ws/machines — the dashboard list + the active-sandbox
+ *  pointer (null activeSandboxId == the session's own group box is active). */
+export type MachinesResponse = {
+  activeSandboxId: string | null;
+  activeEpoch: number;
+  machines: MachineView[];
+};
+
+/** GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series — the downsampled
+ *  (~1/min) history the dashboard time-range reads. */
+export type MachineMetricsSeriesResponse = {
+  samples: MetricSample[];
+};
+
+/** POST /v1/workspaces/:ws/sessions/:sessionId/active-sandbox — swap a session's
+ *  active sandbox. `target` is a `MachineView.sandboxId`, or "session"/"default"
+ *  to swap back to the session's own group box. */
+export type SwapActiveSandboxRequest = {
+  target: string;
+};
+
+/** The swap outcome (mirrors the server `FleetSwapResult`). `swapped` is true on a
+ *  successful repoint OR a no-op (already there); `reason` carries the failure
+ *  detail (unowned/offline target, or a lost epoch fence) when false. */
+export type SwapActiveSandboxResponse = {
+  swapped: boolean;
+  activeSandboxId: string | null;
+  activeEpoch: number;
+  reason?: string;
+};

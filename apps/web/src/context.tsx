@@ -124,7 +124,11 @@ export type AppContextValue = {
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
-  startSession: (workspaceId: string, submission: TurnSubmission) => Promise<Session | null>;
+  startSession: (
+    workspaceId: string,
+    submission: TurnSubmission,
+    options?: { targetSandboxId?: string | null },
+  ) => Promise<Session | null>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
 };
@@ -426,7 +430,11 @@ export function RootRouteComponent() {
     setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
   }
 
-  async function startSession(workspaceId: string, submission: TurnSubmission): Promise<Session | null> {
+  async function startSession(
+    workspaceId: string,
+    submission: TurnSubmission,
+    options?: { targetSandboxId?: string | null },
+  ): Promise<Session | null> {
     setBusy(true);
     // Reuse the in-flight key if one survives a prior failed/double-fired
     // attempt; otherwise mint a fresh stable key for this logical create.
@@ -446,6 +454,12 @@ export function RootRouteComponent() {
         ...(submission.environmentId ? { environmentId: submission.environmentId } : {}),
         ...(submission.goal ? { goal: submission.goal } : {}),
         ...(submission.firstPartyMcpPermissions ? { firstPartyMcpPermissions: submission.firstPartyMcpPermissions } : {}),
+        // Seed the active-sandbox pointer at create (race-free) when a machine was
+        // picked. The contract accepts `targetSandboxId`; the SDK's request type
+        // doesn't yet surface it, so cast the field through.
+        ...(options?.targetSandboxId
+          ? ({ targetSandboxId: options.targetSandboxId } as { targetSandboxId: string })
+          : {}),
       });
       // Success: release the key so the next distinct submit is independent.
       pendingCreateKey.current = null;

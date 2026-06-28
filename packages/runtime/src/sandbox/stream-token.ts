@@ -29,7 +29,13 @@ export type MintStreamTokenInput = {
   sessionId: string;
   /** The sandbox_lease_holders viewer row id. */
   viewerId: string;
-  /** The live lease epoch — the fence the token is pinned to. */
+  /** The epoch the token is fenced to. For a Modal box this is the live LEASE
+   *  epoch (re-minted on box rollover). For a SELFHOSTED relay stream (M8b) this is
+   *  the session's swap `active_epoch`: the relay tracks the highest epoch any
+   *  viewer presented per channel and REJECTS a token with a lower epoch, so a
+   *  viewer whose token predates a swap-away cannot reach the machine the session
+   *  swapped off of. One field, two fences — the relay/in-box edge reads it as the
+   *  stale-viewer floor either way. */
   leaseEpoch: number;
   /** v1 is always "view"; "control" is the never-granted raw-input plane. */
   mode?: "view" | "control";

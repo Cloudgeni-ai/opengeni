@@ -64,6 +64,16 @@ import {
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
 import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle } from "../domain/sessions";
+import {
+  buildFleetContextForSession,
+  listFleet,
+  provisionSandbox,
+  runOnSandbox,
+  swapActiveSandbox,
+  type FleetContext,
+  type FleetServices,
+  type RunOnOp,
+} from "../sandbox/fleet";
 import { capEventPage, capSessionDetail } from "./session-view";
 
 export type McpServerOptions = {
@@ -99,6 +109,16 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // Goal tools require goals:manage (in the default first-party permission set).
   if (sessionId !== null && can("goals:manage")) {
     registerGoalTools(server, deps, grant, sessionId, json);
+  }
+
+  // Fleet tools (M7 bring-your-own-compute): list / attach / swap / run_on /
+  // provision over the session's Modal box + the workspace's enrolled machines.
+  // Session-scoped like goals (they steer THIS session's active-sandbox pointer),
+  // so they register only when the grant carries the worker-signed sessionId claim
+  // (never agent-controlled). Gated on the selfhosted feature flag: the active
+  // pointer + swap are only meaningful when bring-your-own-compute is enabled.
+  if (sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
+    registerFleetTools(server, deps, grant, sessionId, json);
   }
 
   // Orchestration, environment, and GitHub-connect tools are permission-gated
@@ -481,6 +501,74 @@ function registerGoalTools(
 }
 
 type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
+
+// Fleet tools (M7 bring-your-own-compute). Session-scoped (they steer THIS
+// session's active-sandbox pointer + reach the workspace's enrolled machines),
+// registered only with the worker-signed sessionId claim + the selfhosted flag.
+// The agent uses these to list the fleet (its Modal box + enrolled machines),
+// attach/swap the active sandbox mid-conversation (heterogeneous, single-active,
+// epoch-fenced), run a one-off op on a specific machine without swapping, and
+// surface provisioning (enroll-a-machine) instructions to a human.
+function registerFleetTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  const services: FleetServices = { db: deps.db, settings: deps.settings, bus: deps.bus };
+
+  // Resolve the session's group sandbox (the default/home fleet member) at
+  // call-time via the shared helper (same context the user-authenticated swap
+  // REST route builds). Throws when the session has no box (backend:none) — the
+  // fleet is only meaningful for a session that runs in a sandbox.
+  const fleetContext = async (): Promise<FleetContext> =>
+    await buildFleetContextForSession(deps, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId,
+    });
+
+  server.registerTool("sandboxes_list", {
+    description:
+      "List the sandboxes this session can run on: its own session sandbox (the Modal box) PLUS the workspace's enrolled selfhosted machines, each with liveness (online/reconnecting/offline) and an `active` marker for the currently-routed one. Use before sandbox_attach/sandbox_swap to pick a target. The `id` of any entry is the `target` for attach/swap/run_on.",
+    inputSchema: {},
+  }, async () => json(await listFleet(services, await fleetContext())));
+
+  server.registerTool("sandbox_attach", {
+    description:
+      "Attach this session to a sandbox (make it the active sandbox the agent's next tool calls run on). Heterogeneous: a Modal box or an enrolled selfhosted machine. Validates the target is owned by this workspace and online, then repoints under an epoch fence. Identical mechanic to sandbox_swap; use `target` = a sandboxes_list `id`, or \"session\"/\"default\" for this session's own box.",
+    inputSchema: { target: z4.string().min(1) },
+  }, async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)));
+
+  server.registerTool("sandbox_swap", {
+    description:
+      "Swap the active sandbox for this session mid-conversation (the next tool call runs on the new box). Heterogeneous Modal<->selfhosted<->selfhosted, single active at a time, flippable as many times as you like. Validates ownership + liveness, then bumps the active epoch (fencing any in-flight op, which retries against the new box). `target` = a sandboxes_list `id`, or \"session\"/\"default\" to swap back to this session's own box.",
+    inputSchema: { target: z4.string().min(1) },
+  }, async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)));
+
+  server.registerTool("run_on", {
+    description:
+      "Run a ONE-OFF op on a SPECIFIC enrolled selfhosted machine WITHOUT changing this session's active sandbox (a side-channel to another machine). Ops: exec (run a command), read (read a file), write (write a file). `target` = a selfhosted sandboxes_list `id`. To make a machine the active sandbox instead, use sandbox_swap.",
+    inputSchema: {
+      target: z4.string().min(1),
+      op: z4.discriminatedUnion("kind", [
+        z4.object({ kind: z4.literal("exec"), cmd: z4.string().min(1), workdir: z4.string().optional() }),
+        z4.object({ kind: z4.literal("read"), path: z4.string().min(1) }),
+        z4.object({ kind: z4.literal("write"), path: z4.string().min(1), content: z4.string() }),
+      ]),
+    },
+  }, async ({ target, op }) => json(await runOnSandbox(services, await fleetContext(), target, op as RunOnOp)));
+
+  server.registerTool("sandbox_provision", {
+    description:
+      "Provision a new sandbox for the fleet. kind=selfhosted returns device-flow enrollment instructions to share with a HUMAN (install the agent + enroll their machine with loud whole-machine consent — the agent cannot self-consent). kind=modal creates a named Modal sandbox record (its box materializes on first swap).",
+    inputSchema: {
+      kind: z4.enum(["selfhosted", "modal"]),
+      name: z4.string().min(1).max(120).optional(),
+    },
+  }, async ({ kind, name }) => json(await provisionSandbox(services, await fleetContext(), { kind, ...(name ? { name } : {}) })));
+}
 
 // Workspace orchestration for manager-style agents: sessions are listed,
 // inspected, spawned, and steered with the same domain functions the REST

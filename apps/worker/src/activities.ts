@@ -1,4 +1,4 @@
-import { getSettings } from "@opengeni/config";
+import { getSettings, resolveNatsControlPlaneAuth } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
@@ -34,10 +34,19 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     servicesPromise ??= (async () => {
       const settings = dependencies.settings ?? getSettings();
       const dbClient = dependencies.db ? null : createDb(settings.databaseUrl);
+      // The PRIVILEGED control-plane NATS login (M-AUTH): the worker resolves the
+      // SAME static account user the API uses to request `agent.*.rpc`. Null in
+      // local dev → anonymous connect (the bus default).
+      const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
       return {
         settings,
         db: dependencies.db ?? dbClient!.db,
-        bus: dependencies.bus ?? await createNatsEventBus(settings.natsUrl),
+        bus:
+          dependencies.bus ??
+          (await createNatsEventBus(
+            settings.natsUrl,
+            controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+          )),
         runtime: dependencies.runtime ?? createProductionAgentRuntime(),
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),

@@ -31,6 +31,10 @@ export type ExposedPortEndpoint = {
   query?: string;
   protocol?: string;
   url?: string;
+  /** The URL path the socket connects on. Modal/Daytona/Blaxel serve the edge at
+   *  the root (`/`, the default); the selfhosted relay serves it at `/stream`
+   *  (M8b). When set, buildStreamUrl uses it instead of the root. */
+  path?: string;
   [key: string]: unknown;
 };
 
@@ -109,7 +113,13 @@ export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
   const defaultPort = tls ? 443 : 80;
   // Bracket a bare IPv6 host (urlForExposedPort parity).
   const host = endpoint.host.includes(":") && !endpoint.host.startsWith("[") ? `[${endpoint.host}]` : endpoint.host;
-  const authority = endpoint.port === defaultPort ? `${scheme}://${host}/` : `${scheme}://${host}:${endpoint.port}/`;
+  // The path: default the root `/` (Modal/Daytona/Blaxel edge), or the
+  // provider-supplied path (the selfhosted relay's `/stream` route, M8b). Always
+  // leading-slash-normalized.
+  const rawPath = typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
+  const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  const origin = endpoint.port === defaultPort ? `${scheme}://${host}` : `${scheme}://${host}:${endpoint.port}`;
+  const authority = `${origin}${path}`;
   const query = endpoint.query ?? "";
   return query ? `${authority}?${query}` : authority;
 }

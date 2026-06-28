@@ -1,0 +1,25 @@
+{{- if .Values.relay.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-relay
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+  {{- if .Values.observability.metrics.enabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: {{ .Values.relay.service.port | quote }}
+  {{- end }}
+spec:
+  type: {{ .Values.relay.service.type }}
+  ports:
+    - port: {{ .Values.relay.service.port }}
+      targetPort: wss
+      protocol: TCP
+      name: wss
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+{{- end }}

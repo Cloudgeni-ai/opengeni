@@ -28,6 +28,7 @@ import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { CapabilitiesRoute } from "@/routes/capabilities";
 import { DocumentsRoute } from "@/routes/documents";
 import { EnvironmentsRoute } from "@/routes/environments";
+import { MachinesRoute } from "@/routes/machines";
 import { OrgSettingsRoute } from "@/routes/org-settings";
 import { SchedulesRoute } from "@/routes/schedules";
 import { SessionRoute } from "@/routes/session";
@@ -89,6 +90,11 @@ const workspaceEnvironmentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "environments",
   component: Environments,
+});
+const workspaceMachinesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "machines",
+  component: Machines,
 });
 // Legacy standalone Packs route: packs are now a subsection of Capabilities,
 // so this redirects there (focusing the Packs subsection) instead of mounting
@@ -153,6 +159,7 @@ const routeTree = rootRoute.addChildren([
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceEnvironmentsRoute,
+    workspaceMachinesRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
     workspaceSchedulesRoute,
@@ -206,6 +213,11 @@ function SessionView() {
 function Environments() {
   const { workspaceId } = workspaceEnvironmentsRoute.useParams();
   return <EnvironmentsRoute workspaceId={workspaceId} />;
+}
+
+function Machines() {
+  const { workspaceId } = workspaceMachinesRoute.useParams();
+  return <MachinesRoute workspaceId={workspaceId} />;
 }
 
 function PacksRedirect() {

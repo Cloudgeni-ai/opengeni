@@ -160,6 +160,8 @@ export const allWorkspacePermissions: Permission[] = [
   "environments:manage",
   "environments:use",
   "goals:manage",
+  "enrollments:read",
+  "enrollments:manage",
 ];
 
 export const allAccountPermissions: Permission[] = [
@@ -2904,6 +2906,27 @@ export async function updateRecording(db: Database, input: {
   });
 }
 
+/**
+ * Hard-delete a recording row. Used to DISCARD an on-turn recording that captured
+ * NO computer-use activity (a plain text turn): the row was inserted at
+ * `beginRecording` (state "recording") but the turn never drove the desktop, so it
+ * is removed entirely rather than surfaced as a phantom recording or a failure. No
+ * other table FK-references session_recordings, so the delete is self-contained.
+ */
+export async function deleteRecording(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.delete(schema.sessionRecordings)
+      .where(and(
+        eq(schema.sessionRecordings.workspaceId, input.workspaceId),
+        eq(schema.sessionRecordings.id, input.recordingId),
+      ));
+  });
+}
+
 export async function getRecording(db: Database, workspaceId: string, recordingId: string): Promise<SessionRecordingRow | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.sessionRecordings)
@@ -3857,6 +3880,838 @@ export async function recordLeaseTerminalDataPlaneUrl(db: Database, input: {
       `);
       return rows[0] ? mapLeaseRow(rows[0]) : null;
     });
+}
+
+// ============================================================================
+// Bring-your-own-compute (M2): first-class swappable sandboxes + enrollment +
+// per-machine metrics + the per-session epoch-fenced active-sandbox pointer
+// (migration 0024 / dossier §10.3 + §10.7 + §23). All workspace-scoped behind
+// the same RLS the lease DAOs use.
+// ============================================================================
+
+export type SandboxKind = (typeof schema.sandboxKindValues)[number];
+export type EnrollmentExposure = (typeof schema.enrollmentExposureValues)[number];
+export type EnrollmentStatus = (typeof schema.enrollmentStatusValues)[number];
+export type EnrollmentOs = (typeof schema.enrollmentOsValues)[number];
+
+export type EnrollmentRecord = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  exposure: EnrollmentExposure;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  status: EnrollmentStatus;
+  os: EnrollmentOs;
+  arch: string;
+  lastSeenAt: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  updatedAt: string;
+};
+
+function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentRecord {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    pubkey: row.pubkey,
+    exposure: row.exposure as EnrollmentExposure,
+    hasDisplay: row.hasDisplay,
+    allowScreenControl: row.allowScreenControl,
+    status: row.status as EnrollmentStatus,
+    os: row.os as EnrollmentOs,
+    arch: row.arch,
+    lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+    revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export type SandboxRecord = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  kind: SandboxKind;
+  name: string;
+  enrollmentId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapSandbox(row: typeof schema.sandboxes.$inferSelect): SandboxRecord {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    kind: row.kind as SandboxKind,
+    name: row.name,
+    enrollmentId: row.enrollmentId ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// ---- enrollments ----------------------------------------------------------
+
+// Register (or idempotently re-register) a machine. A re-enroll of the SAME
+// (workspace, pubkey) is an UPSERT — it refreshes the consent/OS fields and, if
+// the machine was previously revoked, re-activates it (status->active, revoked_at
+// cleared) — never a duplicate machine row. The agent's ed25519 pubkey is the
+// machine identity; the unique (workspace, pubkey) index is the conflict target.
+export async function createEnrollment(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  exposure?: EnrollmentExposure;
+  hasDisplay?: boolean;
+  allowScreenControl?: boolean;
+  os?: EnrollmentOs;
+  arch?: string;
+}): Promise<EnrollmentRecord> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.enrollments).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: input.pubkey,
+      exposure: input.exposure ?? "whole-machine",
+      hasDisplay: input.hasDisplay ?? false,
+      allowScreenControl: input.allowScreenControl ?? false,
+      os: input.os ?? "linux",
+      arch: input.arch ?? "x86_64",
+      status: "active",
+    }).onConflictDoUpdate({
+      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+      set: {
+        exposure: input.exposure ?? "whole-machine",
+        hasDisplay: input.hasDisplay ?? false,
+        allowScreenControl: input.allowScreenControl ?? false,
+        os: input.os ?? "linux",
+        arch: input.arch ?? "x86_64",
+        // A re-enroll re-activates a previously revoked machine.
+        status: "active",
+        revokedAt: null,
+        updatedAt: new Date(),
+      },
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create enrollment");
+    }
+    return mapEnrollment(row);
+  });
+}
+
+export async function getEnrollment(db: Database, workspaceId: string, enrollmentId: string): Promise<EnrollmentRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.enrollments)
+      .where(and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.id, enrollmentId)))
+      .limit(1);
+    return row ? mapEnrollment(row) : null;
+  });
+}
+
+// List a workspace's enrollments, newest first. `status` filters the lifecycle
+// (omit for all; 'active' for the Machines dashboard's live list).
+export async function listEnrollments(db: Database, workspaceId: string, options: { status?: EnrollmentStatus } = {}): Promise<EnrollmentRecord[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const where = options.status
+      ? and(eq(schema.enrollments.workspaceId, workspaceId), eq(schema.enrollments.status, options.status))
+      : eq(schema.enrollments.workspaceId, workspaceId);
+    const rows = await scopedDb.select().from(schema.enrollments)
+      .where(where)
+      .orderBy(desc(schema.enrollments.createdAt));
+    return rows.map(mapEnrollment);
+  });
+}
+
+// Revoke a machine (uninstall --purge / dashboard revoke). Idempotent: an already
+// -revoked row is a no-op (revoked:false). status->revoked, revoked_at stamped.
+export async function revokeEnrollment(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string;
+}): Promise<{ revoked: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.enrollments)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        eq(schema.enrollments.status, "active"),
+      ))
+      .returning({ id: schema.enrollments.id });
+    return { revoked: rows.length > 0 };
+  });
+}
+
+// Heartbeat liveness cursor: the agent reports it is alive. last_seen_at is read
+// by the online/reconnecting/offline derivation in the Machines surface.
+export async function touchEnrollmentLastSeen(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.update(schema.enrollments)
+      .set({ lastSeenAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+      ));
+  });
+}
+
+// ---- device-flow enrollment requests (M5, migration 0025) -----------------
+//
+// The OAuth 2.0 device-authorization (RFC 8628) PENDING request: one short-TTL,
+// single-use row per in-flight enrollment. The agent starts a flow (gets a
+// device_code + user_code), the user approves it (LOUD consent capture +
+// createEnrollment + createSandbox), and the agent polls the device_code for the
+// resulting EnrollmentCredentials. Dossier §10.2 + §18.
+
+export type DeviceEnrollmentStatus = (typeof schema.deviceEnrollmentStatusValues)[number];
+
+export type DeviceEnrollmentRequestRecord = {
+  id: string;
+  deviceCode: string;
+  userCode: string;
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  os: EnrollmentOs;
+  arch: string;
+  machineName: string | null;
+  requestedExposure: EnrollmentExposure;
+  canOfferDisplay: boolean;
+  requestsScreenControl: boolean;
+  status: DeviceEnrollmentStatus;
+  approvedBySubjectId: string | null;
+  approvedBySubjectLabel: string | null;
+  allowScreenControl: boolean;
+  approvedAt: string | null;
+  enrollmentId: string | null;
+  sandboxId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapDeviceEnrollmentRequest(row: typeof schema.deviceEnrollmentRequests.$inferSelect): DeviceEnrollmentRequestRecord {
+  return {
+    id: row.id,
+    deviceCode: row.deviceCode,
+    userCode: row.userCode,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    pubkey: row.pubkey,
+    os: row.os as EnrollmentOs,
+    arch: row.arch,
+    machineName: row.machineName ?? null,
+    requestedExposure: row.requestedExposure as EnrollmentExposure,
+    canOfferDisplay: row.canOfferDisplay,
+    requestsScreenControl: row.requestsScreenControl,
+    status: row.status as DeviceEnrollmentStatus,
+    approvedBySubjectId: row.approvedBySubjectId ?? null,
+    approvedBySubjectLabel: row.approvedBySubjectLabel ?? null,
+    allowScreenControl: row.allowScreenControl,
+    approvedAt: row.approvedAt ? row.approvedAt.toISOString() : null,
+    enrollmentId: row.enrollmentId ?? null,
+    sandboxId: row.sandboxId ?? null,
+    expiresAt: row.expiresAt.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+// Persist a fresh PENDING device-auth request (the agent's POST /start). The
+// caller supplies the unguessable device_code + user_code (minted with a CSPRNG)
+// and the short TTL. RLS-scoped to the workspace the flow binds to.
+export async function createDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  deviceCode: string;
+  userCode: string;
+  pubkey: string;
+  os?: EnrollmentOs;
+  arch?: string;
+  machineName?: string | null;
+  requestedExposure?: EnrollmentExposure;
+  canOfferDisplay?: boolean;
+  requestsScreenControl?: boolean;
+  expiresAt: Date;
+}): Promise<DeviceEnrollmentRequestRecord> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.deviceEnrollmentRequests).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      deviceCode: input.deviceCode,
+      userCode: input.userCode,
+      pubkey: input.pubkey,
+      os: input.os ?? "linux",
+      arch: input.arch ?? "x86_64",
+      machineName: input.machineName ?? null,
+      requestedExposure: input.requestedExposure ?? "whole-machine",
+      canOfferDisplay: input.canOfferDisplay ?? false,
+      requestsScreenControl: input.requestsScreenControl ?? false,
+      status: "pending",
+      expiresAt: input.expiresAt,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create device enrollment request");
+    }
+    return mapDeviceEnrollmentRequest(row);
+  });
+}
+
+// Look up a request by its opaque device_code (the agent's poll key). The
+// device_code IS the capability (unguessable + unique) and the agent has NO
+// workspace context yet, so resolve (account_id, workspace_id) via the SECURITY
+// DEFINER resolver (mirrors the global reaper's cross-workspace read), then re-read
+// the FULL row under that workspace's RLS scope. Returns null when unknown.
+export async function getDeviceEnrollmentRequestByDeviceCode(db: Database, deviceCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
+  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+    select account_id, workspace_id from opengeni_private.resolve_device_enrollment_request(${deviceCode})
+  `);
+  const ctx = resolved[0];
+  if (!ctx) {
+    return null;
+  }
+  return await withRlsContext(db, { accountId: ctx.account_id, workspaceId: ctx.workspace_id }, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(eq(schema.deviceEnrollmentRequests.deviceCode, deviceCode))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
+}
+
+// Look up the PENDING request for a user_code within a workspace (the approve
+// lookup). Workspace-scoped: a user can only approve a request bound to a
+// workspace they hold a grant in. Returns null when no LIVE pending row matches.
+export async function getPendingDeviceEnrollmentRequestByUserCode(db: Database, workspaceId: string, userCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, workspaceId),
+        eq(schema.deviceEnrollmentRequests.userCode, userCode),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
+}
+
+// THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
+//   1. re-read the pending row FOR UPDATE (fence against a double-approve / a
+//      concurrent expiry),
+//   2. createEnrollment (idempotent upsert: pubkey, whole-machine exposure,
+//      has_display from can_offer_display, allow_screen_control per the user's
+//      decision, os/arch) → an enrollments row,
+//   3. createSandbox (kind selfhosted, enrollment_id, a generated name) → a
+//      sandboxes row (acceptance #2),
+//   4. stamp the request approved + the consent record (WHO approved WHEN to WHAT)
+//      + the resulting enrollment_id / sandbox_id.
+// IDEMPOTENT: a re-approve of an ALREADY-approved row (same user_code re-submitted)
+// re-runs the enrollment upsert (M2 reactivate semantics) and returns the existing
+// enrollment/sandbox — never a duplicate. An expired / denied / consumed row is a
+// no-op (approved:false). Returns the enrollment + sandbox so the route echoes them.
+export async function approveDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  requestId: string;
+  allowScreenControl: boolean;
+  approvedBySubjectId: string;
+  approvedBySubjectLabel?: string | null;
+  // A name for the generated sandbox (machine name or a fallback).
+  sandboxName: string;
+  now?: Date;
+}): Promise<{ approved: boolean; enrollment: EnrollmentRecord | null; sandbox: SandboxRecord | null }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    // Re-read FOR UPDATE under the txn so a concurrent approve / expiry can't race.
+    const [pending] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+      ))
+      .for("update")
+      .limit(1);
+    if (!pending) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    // Already terminally approved → idempotent return of the existing rows (re-run
+    // the consent fields in case allow_screen_control changed on re-approve).
+    const expired = pending.expiresAt.getTime() <= now.getTime();
+    if (pending.status === "denied" || pending.status === "consumed") {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+    if (pending.status === "pending" && expired) {
+      return { approved: false, enrollment: null, sandbox: null };
+    }
+
+    // createEnrollment (idempotent upsert) — whole-machine is mandatory; the
+    // display + screen-control consent come from the agent's offer + the user's
+    // decision. RLS already set on scopedDb's session; call the raw insert here so
+    // it shares the transaction (createEnrollment opens its own scope — re-entering
+    // withRlsContext is safe but we inline to keep ONE txn).
+    const [enrollmentRow] = await scopedDb.insert(schema.enrollments).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: pending.pubkey,
+      exposure: "whole-machine",
+      hasDisplay: pending.canOfferDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: pending.os as EnrollmentOs,
+      arch: pending.arch,
+      status: "active",
+    }).onConflictDoUpdate({
+      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+      set: {
+        exposure: "whole-machine",
+        hasDisplay: pending.canOfferDisplay,
+        allowScreenControl: input.allowScreenControl,
+        os: pending.os as EnrollmentOs,
+        arch: pending.arch,
+        status: "active",
+        revokedAt: null,
+        updatedAt: now,
+      },
+    }).returning();
+    if (!enrollmentRow) {
+      throw new Error("Failed to create enrollment during device approve");
+    }
+    const enrollment = mapEnrollment(enrollmentRow);
+
+    // createSandbox (selfhosted, enrollment_id). A re-approve of the SAME machine
+    // reuses the existing selfhosted sandbox for this enrollment rather than
+    // creating a duplicate (idempotent re-enroll, acceptance #2 stays one machine).
+    const [existingSandbox] = await scopedDb.select().from(schema.sandboxes)
+      .where(and(
+        eq(schema.sandboxes.workspaceId, input.workspaceId),
+        eq(schema.sandboxes.enrollmentId, enrollment.id),
+      ))
+      .limit(1);
+    let sandbox: SandboxRecord;
+    if (existingSandbox) {
+      sandbox = mapSandbox(existingSandbox);
+    } else {
+      const [sandboxRow] = await scopedDb.insert(schema.sandboxes).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        kind: "selfhosted",
+        name: input.sandboxName,
+        enrollmentId: enrollment.id,
+      }).returning();
+      if (!sandboxRow) {
+        throw new Error("Failed to create sandbox during device approve");
+      }
+      sandbox = mapSandbox(sandboxRow);
+    }
+
+    // Stamp the request approved + the LOUD CONSENT record (who/when/what).
+    await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({
+        status: "approved",
+        allowScreenControl: input.allowScreenControl,
+        approvedBySubjectId: input.approvedBySubjectId,
+        approvedBySubjectLabel: input.approvedBySubjectLabel ?? null,
+        approvedAt: now,
+        enrollmentId: enrollment.id,
+        sandboxId: sandbox.id,
+        updatedAt: now,
+      })
+      .where(eq(schema.deviceEnrollmentRequests.id, pending.id));
+
+    return { approved: true, enrollment, sandbox };
+  });
+}
+
+// Mark a pending request DENIED (an explicit user "no" at the approve page).
+// Idempotent: a non-pending row is a no-op (denied:false).
+export async function denyDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ denied: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "denied", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { denied: rows.length > 0 };
+  });
+}
+
+// Flip an APPROVED request to CONSUMED once the agent has polled its credentials
+// (single-use). Fenced on status='approved' so a double-poll consumes exactly once;
+// a second poll then re-reads the consumed row and still returns credentials (the
+// agent may legitimately retry the same poll) — the route decides. Returns whether
+// THIS call performed the consume transition.
+export async function consumeDeviceEnrollmentRequest(db: Database, input: {
+  accountId: string; workspaceId: string; requestId: string;
+}): Promise<{ consumed: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.deviceEnrollmentRequests)
+      .set({ status: "consumed", updatedAt: new Date() })
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.workspaceId, input.workspaceId),
+        eq(schema.deviceEnrollmentRequests.id, input.requestId),
+        eq(schema.deviceEnrollmentRequests.status, "approved"),
+      ))
+      .returning({ id: schema.deviceEnrollmentRequests.id });
+    return { consumed: rows.length > 0 };
+  });
+}
+
+// ---- sandboxes ------------------------------------------------------------
+
+// Create a first-class named sandbox (the pointer target a session swaps to). The
+// DB CHECK pins selfhosted<->enrollment_id: a selfhosted sandbox MUST carry an
+// enrollment; a modal sandbox MUST NOT. We surface that as a typed pre-check so
+// the caller gets a clear error rather than a raw constraint violation.
+export async function createSandbox(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  kind: SandboxKind;
+  name: string;
+  enrollmentId?: string | null;
+}): Promise<SandboxRecord> {
+  const enrollmentId = input.enrollmentId ?? null;
+  if (input.kind === "selfhosted" && !enrollmentId) {
+    throw new Error("A selfhosted sandbox requires an enrollmentId.");
+  }
+  if (input.kind !== "selfhosted" && enrollmentId) {
+    throw new Error(`A ${input.kind} sandbox must not carry an enrollmentId.`);
+  }
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const [row] = await scopedDb.insert(schema.sandboxes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      name: input.name,
+      enrollmentId,
+    }).returning();
+    if (!row) {
+      throw new Error("Failed to create sandbox");
+    }
+    return mapSandbox(row);
+  });
+}
+
+export async function getSandbox(db: Database, workspaceId: string, sandboxId: string): Promise<SandboxRecord | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.sandboxes)
+      .where(and(eq(schema.sandboxes.workspaceId, workspaceId), eq(schema.sandboxes.id, sandboxId)))
+      .limit(1);
+    return row ? mapSandbox(row) : null;
+  });
+}
+
+// List a workspace's sandboxes, newest first (the sandboxes_list tool surface).
+export async function listSandboxes(db: Database, workspaceId: string): Promise<SandboxRecord[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sandboxes)
+      .where(eq(schema.sandboxes.workspaceId, workspaceId))
+      .orderBy(desc(schema.sandboxes.createdAt));
+    return rows.map(mapSandbox);
+  });
+}
+
+// ---- the per-session active-sandbox pointer (epoch-fenced swap) -----------
+
+export type ActiveSandboxPointer = {
+  activeSandboxId: string | null;
+  activeEpoch: number;
+};
+
+// Read the session's current pointer (the routing proxy re-reads this PER TOOL
+// CALL). NULL active_sandbox_id == "use the session's own group sandbox".
+export async function readActiveSandbox(db: Database, workspaceId: string, sessionId: string): Promise<ActiveSandboxPointer | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      activeSandboxId: schema.sessions.activeSandboxId,
+      activeEpoch: schema.sessions.activeEpoch,
+    }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    return { activeSandboxId: row.activeSandboxId ?? null, activeEpoch: Number(row.activeEpoch) };
+  });
+}
+
+// THE SWAP. Repoint a session at `targetSandboxId` (NULL == back to the group
+// sandbox) and BUMP active_epoch under a fence: the write is gated on the
+// session's current active_epoch == expectedEpoch, so a concurrent double-swap
+// (two callers both reading epoch N) lets exactly ONE win — the loser sees
+// swapped:false and re-reads. The bumped epoch fences any in-flight op cached
+// against the old pointer, which then retries against the new active sandbox.
+// integer epoch returns a JS number; Number()-coerced defensively (lease lesson).
+export async function setActiveSandbox(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  targetSandboxId: string | null;
+  expectedEpoch: number;
+}): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.execute<{ active_sandbox_id: string | null; active_epoch: number | string }>(sql`
+      update sessions set
+        active_sandbox_id = ${input.targetSandboxId},
+        active_epoch      = active_epoch + 1,
+        updated_at        = now()
+      where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+        and active_epoch = ${input.expectedEpoch}
+      returning active_sandbox_id, active_epoch
+    `);
+    const row = rows[0];
+    if (!row) {
+      return { swapped: false, pointer: null };
+    }
+    return {
+      swapped: true,
+      pointer: { activeSandboxId: row.active_sandbox_id ?? null, activeEpoch: Number(row.active_epoch) },
+    };
+  });
+}
+
+// ---- per-machine metrics (§10.7) ------------------------------------------
+
+// The sampled signal set the agent piggybacks on the heartbeat. Every field is
+// optional (a platform/sample may not provide it — no GPU, headless, etc.).
+export type MachineMetricsSample = {
+  cpuPercent?: number | null;
+  load1?: number | null;
+  load5?: number | null;
+  load15?: number | null;
+  memUsedBytes?: number | null;
+  memTotalBytes?: number | null;
+  diskUsedBytes?: number | null;
+  diskTotalBytes?: number | null;
+  gpuUtilPercent?: number | null;
+  gpuMemUsedBytes?: number | null;
+  gpuMemTotalBytes?: number | null;
+  contention?: number | null;
+  sampledAt: Date;
+};
+
+function metricColumns(sample: MachineMetricsSample) {
+  return {
+    cpuPercent: sample.cpuPercent ?? null,
+    load1: sample.load1 ?? null,
+    load5: sample.load5 ?? null,
+    load15: sample.load15 ?? null,
+    memUsedBytes: sample.memUsedBytes ?? null,
+    memTotalBytes: sample.memTotalBytes ?? null,
+    diskUsedBytes: sample.diskUsedBytes ?? null,
+    diskTotalBytes: sample.diskTotalBytes ?? null,
+    gpuUtilPercent: sample.gpuUtilPercent ?? null,
+    gpuMemUsedBytes: sample.gpuMemUsedBytes ?? null,
+    gpuMemTotalBytes: sample.gpuMemTotalBytes ?? null,
+    contention: sample.contention ?? null,
+    sampledAt: sample.sampledAt,
+  };
+}
+
+// Last-sample UPSERT: one row per enrollment, overwritten every sample (PK on
+// enrollment_id is the conflict target). The Machines dashboard's "now" read.
+export async function upsertMachineMetricsLatest(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const cols = metricColumns(input.sample);
+    await scopedDb.insert(schema.machineMetricsLatest).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...cols,
+    }).onConflictDoUpdate({
+      target: schema.machineMetricsLatest.enrollmentId,
+      set: { ...cols, updatedAt: new Date() },
+    });
+  });
+}
+
+// Append a downsampled (~1/min) series row (the history the dashboard time-range
+// reads + the later retention sweep prune).
+export async function insertMachineMetricsSeries(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.machineMetricsSeries).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...metricColumns(input.sample),
+    });
+  });
+}
+
+// The target spacing between series rows: the agent heartbeats ~every 5s, but we
+// downsample the long-term history to ~1/min (dossier §10.7). A new series row is
+// appended only when >= this much time has elapsed since the last one.
+export const MACHINE_METRICS_SERIES_INTERVAL_MS = 60_000;
+
+/**
+ * Ingest ONE sampled metrics point for an enrollment (the M10 ingestion seam):
+ *   1. UPSERT machine_metrics_latest (the "now" row, one per enrollment) — always.
+ *   2. APPEND a machine_metrics_series row only when >= ~1/min has elapsed since
+ *      the last series row (downsample) — so the 5s heartbeat cadence does not
+ *      flood the history table.
+ * Both happen under the same RLS context. Returns whether a series row was
+ * appended (the downsample decision) so the caller / tests can assert the ~1/min
+ * spacing. A null/absent `sampledAt` on the prior row treats it as "no prior" →
+ * append.
+ */
+export async function ingestMachineMetricsSample(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; sample: MachineMetricsSample;
+  /** Override the downsample interval (tests). Defaults to ~1/min. */
+  seriesIntervalMs?: number;
+}): Promise<{ latestUpserted: true; seriesAppended: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const cols = metricColumns(input.sample);
+    // 1. Latest upsert — always.
+    await scopedDb.insert(schema.machineMetricsLatest).values({
+      enrollmentId: input.enrollmentId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...cols,
+    }).onConflictDoUpdate({
+      target: schema.machineMetricsLatest.enrollmentId,
+      set: { ...cols, updatedAt: new Date() },
+    });
+
+    // 2. Series append — downsampled. Read the most recent series sampled_at and
+    // only append when the new sample is >= the interval newer (or there is no
+    // prior row). Done in-context so RLS scopes the read to this workspace.
+    const intervalMs = input.seriesIntervalMs ?? MACHINE_METRICS_SERIES_INTERVAL_MS;
+    const [prior] = await scopedDb.select({ sampledAt: schema.machineMetricsSeries.sampledAt })
+      .from(schema.machineMetricsSeries)
+      .where(eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId))
+      .orderBy(desc(schema.machineMetricsSeries.sampledAt))
+      .limit(1);
+    const priorMs = prior?.sampledAt ? prior.sampledAt.getTime() : null;
+    const sampleMs = input.sample.sampledAt.getTime();
+    const seriesAppended = priorMs === null || sampleMs - priorMs >= intervalMs;
+    if (seriesAppended) {
+      await scopedDb.insert(schema.machineMetricsSeries).values({
+        enrollmentId: input.enrollmentId,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        ...cols,
+      });
+    }
+    return { latestUpserted: true, seriesAppended };
+  });
+}
+
+// The mapped read shape of a stored metrics sample (latest or a series point).
+// numeric columns come back as strings from postgres-js; map them to numbers (or
+// null when never reported). The byte columns are bigint(mode:"number").
+export type MachineMetricsRow = {
+  enrollmentId: string;
+  cpuPercent: number | null;
+  load1: number | null;
+  load5: number | null;
+  load15: number | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  diskUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  gpuUtilPercent: number | null;
+  gpuMemUsedBytes: number | null;
+  gpuMemTotalBytes: number | null;
+  contention: number | null;
+  sampledAt: string;
+};
+
+function numericOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function mapMetricsRow(row: {
+  enrollmentId: string;
+  cpuPercent: number | string | null;
+  load1: number | string | null;
+  load5: number | string | null;
+  load15: number | string | null;
+  memUsedBytes: number | null;
+  memTotalBytes: number | null;
+  diskUsedBytes: number | null;
+  diskTotalBytes: number | null;
+  gpuUtilPercent: number | string | null;
+  gpuMemUsedBytes: number | null;
+  gpuMemTotalBytes: number | null;
+  contention: number | string | null;
+  sampledAt: Date;
+}): MachineMetricsRow {
+  return {
+    enrollmentId: row.enrollmentId,
+    cpuPercent: numericOrNull(row.cpuPercent),
+    load1: numericOrNull(row.load1),
+    load5: numericOrNull(row.load5),
+    load15: numericOrNull(row.load15),
+    memUsedBytes: row.memUsedBytes ?? null,
+    memTotalBytes: row.memTotalBytes ?? null,
+    diskUsedBytes: row.diskUsedBytes ?? null,
+    diskTotalBytes: row.diskTotalBytes ?? null,
+    gpuUtilPercent: numericOrNull(row.gpuUtilPercent),
+    gpuMemUsedBytes: row.gpuMemUsedBytes ?? null,
+    gpuMemTotalBytes: row.gpuMemTotalBytes ?? null,
+    contention: numericOrNull(row.contention),
+    sampledAt: row.sampledAt.toISOString(),
+  };
+}
+
+// Read the latest sample for ONE enrollment (the dashboard "now" read), or null
+// when none has landed (never seen / offline before a first heartbeat).
+export async function readMachineMetricsLatest(db: Database, workspaceId: string, enrollmentId: string): Promise<MachineMetricsRow | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.machineMetricsLatest)
+      .where(and(
+        eq(schema.machineMetricsLatest.workspaceId, workspaceId),
+        eq(schema.machineMetricsLatest.enrollmentId, enrollmentId),
+      ))
+      .limit(1);
+    return row ? mapMetricsRow(row) : null;
+  });
+}
+
+// Read the latest sample for EVERY enrollment in a workspace, keyed by
+// enrollmentId — the Machines list joins this onto the fleet entries with ONE
+// query rather than N per-machine reads.
+export async function readMachineMetricsLatestForWorkspace(db: Database, workspaceId: string): Promise<Map<string, MachineMetricsRow>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.machineMetricsLatest)
+      .where(eq(schema.machineMetricsLatest.workspaceId, workspaceId));
+    const byEnrollment = new Map<string, MachineMetricsRow>();
+    for (const row of rows) {
+      byEnrollment.set(row.enrollmentId, mapMetricsRow(row));
+    }
+    return byEnrollment;
+  });
+}
+
+// Read the downsampled series for ONE enrollment over a time window (the
+// dashboard time-range read). `sinceMs` bounds the window (e.g. now - 1h);
+// ordered oldest-first for a left-to-right chart. `limit` caps the row count
+// (defensive against an unbounded window).
+export async function readMachineMetricsSeries(db: Database, input: {
+  workspaceId: string; enrollmentId: string; since: Date; limit?: number;
+}): Promise<MachineMetricsRow[]> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.machineMetricsSeries)
+      .where(and(
+        eq(schema.machineMetricsSeries.workspaceId, input.workspaceId),
+        eq(schema.machineMetricsSeries.enrollmentId, input.enrollmentId),
+        gte(schema.machineMetricsSeries.sampledAt, input.since),
+      ))
+      .orderBy(asc(schema.machineMetricsSeries.sampledAt))
+      .limit(input.limit ?? 5_000);
+    return rows.map(mapMetricsRow);
+  });
 }
 
 // ============================================================================
@@ -5204,6 +6059,11 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
     sandboxGroupId: row.sandboxGroupId,
+    // The first-class swappable-sandbox pointer (M2). null == use the group
+    // sandbox; active_epoch is the swap fence. Defensive Number() coercion keeps
+    // the fence exact even if the column type ever drifts (the lease-epoch lesson).
+    activeSandboxId: row.activeSandboxId ?? null,
+    activeEpoch: Number(row.activeEpoch),
     environmentId: row.environmentId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     parentSessionId: row.parentSessionId ?? null,
