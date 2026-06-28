@@ -257,19 +257,34 @@ mod tests {
         // take_reader is once-only.
         assert!(proc.take_reader().is_none());
 
-        let mut buf = Vec::new();
-        // Read until EOF (the command exits and the master sees EOF).
-        let mut chunk = [0u8; 1024];
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(n) if n > 0 => buf.extend_from_slice(&chunk[..n]),
-                // EOF (Ok(0)) or a read error both end the loop.
-                _ => break,
+        // Read on a worker thread that STOPS as soon as the marker appears, rather
+        // than reading to EOF. On unix the child exits and the openpty master
+        // delivers EOF (`Ok(0)`); on Windows the ConPTY master does NOT surface
+        // EOF after the child exits, so a read-to-EOF loop would block forever.
+        // Stopping on the marker avoids the post-output read that never returns on
+        // ConPTY, and a `recv_timeout` bounds the whole read so a stuck master can
+        // never hang CI — the test fails fast instead of wedging the runner.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(n) if n > 0 => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if String::from_utf8_lossy(&buf).contains("pty-ok") || buf.len() > 4096 {
+                            break;
+                        }
+                    }
+                    // EOF (Ok(0)) or a read error both end the loop.
+                    _ => break,
+                }
             }
-            if buf.len() > 4096 {
-                break;
-            }
-        }
+            let _ = tx.send(buf);
+        });
+        let buf = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("pty read did not surface the marker within 15s (no output / no EOF)");
         let out = String::from_utf8_lossy(&buf);
         assert!(out.contains("pty-ok"), "pty output was {out:?}");
     }

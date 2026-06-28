@@ -66,6 +66,10 @@ jobs:
   test:
     name: test + build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The green matrix here finishes in ~2 min; cap execution so a wedged test
+    # (e.g. a PTY master that never delivers EOF) fails fast instead of holding a
+    # runner for the 6-hour default and leaving the check perpetually in-progress.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
