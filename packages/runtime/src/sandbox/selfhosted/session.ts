@@ -40,6 +40,40 @@ import {
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
+/**
+ * The SDK's VIRTUAL sandbox root. The `@openai/agents` agent loop presents the
+ * sandbox to the model rooted at this path — it equals `state.manifest.root`,
+ * which is held at "/workspace" to match the Modal createManifest root for the
+ * provided-session root-delta guard (`validateProvidedSessionManifestUpdate`).
+ *
+ * On a bring-your-own machine this path DOES NOT EXIST: the machine's real root
+ * is the agent's `workspace_root` (reported in Hello, e.g. "/home/jorge/repo").
+ * The Rust agent's `resolve_cwd` maps an EMPTY cwd / a RELATIVE path onto its
+ * `workspace_root`, but takes an ABSOLUTE path AS-IS. So a virtual-root-anchored
+ * path the SDK hands us ("/workspace" or "/workspace/sub", e.g. an exec workdir
+ * or a model-relative file the SDK resolved against the manifest root) would hit
+ * the machine as a literal absolute "/workspace/…" → `current_dir`/open ENOENT
+ * (the live-swap exec crash: `spawn hostname: No such file or directory`).
+ *
+ * `toMachinePath` rewrites the virtual frame onto the machine's: the root itself
+ * → "" (the agent substitutes its workspace_root); a child → its
+ * workspace_root-relative remainder (the agent joins it onto workspace_root). A
+ * path that is NOT under the virtual root — a genuine machine-absolute path the
+ * model/agent chose ("/tmp/x"), or a real path echoed back by `listDir` — passes
+ * through UNTOUCHED. This is the SOLE adapter rule between the SDK's virtual
+ * space and the machine's real filesystem; it is applied at every NATS path/cwd
+ * boundary below (exec cwd, fs read/write/list/stat, the editor's delete).
+ */
+const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
+
+function toMachinePath(p: string | undefined): string {
+  if (!p || p === SELFHOSTED_VIRTUAL_ROOT) return "";
+  if (p.startsWith(`${SELFHOSTED_VIRTUAL_ROOT}/`)) {
+    return p.slice(SELFHOSTED_VIRTUAL_ROOT.length + 1);
+  }
+  return p;
+}
+
 // ── The agent-turn provided-session contract (@openai/agents-core) ──────────
 // When the routing proxy resolves a selfhosted ACTIVE backend, the @openai/agents
 // agent loop binds its filesystem/shell/skills capabilities to THIS session and
@@ -209,7 +243,11 @@ export class SelfhostedSession {
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
     // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
     // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
-    // in validateProvidedSessionManifestUpdate). `environment` is the run's declared
+    // in validateProvidedSessionManifestUpdate). This is the VIRTUAL root the SDK
+    // presents to the model; `toMachinePath` (see SELFHOSTED_VIRTUAL_ROOT) rewrites
+    // it onto the machine's real `workspace_root` at every exec/fs NATS boundary,
+    // so the manifest never needs to carry the machine's true root. `environment`
+    // is the run's declared
     // sandbox environment — the SAME object the worker turn threads into the agent's
     // TARGET manifest — so the SDK's per-turn provided-session delta
     // (validateNoEnvironmentDelta) finds NO mismatch. `entries: {}` because the
@@ -258,7 +296,10 @@ export class SelfhostedSession {
       // single shell command string, so run it through the platform shell.
       command: [args.cmd],
       shell: true,
-      cwd: args.workdir ?? "",
+      // Rewrite a virtual-root cwd ("/workspace[/…]") onto the machine's frame —
+      // an absolute "/workspace" would ENOENT on a real machine (see
+      // SELFHOSTED_VIRTUAL_ROOT). Empty → the agent runs in its workspace_root.
+      cwd: toMachinePath(args.workdir),
       env: {},
       stdin: new Uint8Array(0),
       timeoutMs: 0,
@@ -353,7 +394,12 @@ export class SelfhostedSession {
     };
     const deletePath = async (path: string): Promise<void> => {
       // No fs-delete op in the proto; remove via the shell (the machine's own rm).
-      await this.exec({ cmd: `rm -rf -- ${shellQuote(path)}`, ...(runAs ? { runAs } : {}) });
+      // The path arg is embedded in the command (not a cwd), so translate the
+      // virtual root onto the machine's frame BEFORE quoting: a "/workspace/…"
+      // path becomes its workspace_root-relative remainder, and the rm — which
+      // runs with the default (empty) cwd = workspace_root — targets the real
+      // file. A non-virtual absolute path passes through and rm uses it as-is.
+      await this.exec({ cmd: `rm -rf -- ${shellQuote(toMachinePath(path))}`, ...(runAs ? { runAs } : {}) });
     };
     return {
       async createFile(operation) {
@@ -385,7 +431,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsRead",
       fsRead: {
-        path: args.path,
+        path: toMachinePath(args.path),
         offset: "0",
         length: args.maxBytes ? String(args.maxBytes) : "0",
       },
@@ -402,7 +448,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsWrite",
       fsWrite: {
-        path: args.path,
+        path: toMachinePath(args.path),
         content,
         createParents: args.createParents ?? true,
         append: args.append ?? false,
@@ -419,7 +465,7 @@ export class SelfhostedSession {
   async listFiles(args: { path: string; recursive?: boolean }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
     const result = await this.call({
       $case: "fsList",
-      fsList: { path: args.path, recursive: args.recursive ?? false },
+      fsList: { path: toMachinePath(args.path), recursive: args.recursive ?? false },
     });
     if (result.$case !== "fsList") {
       throw new Error(`selfhosted listFiles: unexpected result ${result.$case}`);
@@ -429,7 +475,7 @@ export class SelfhostedSession {
 
   /** Stat a path on the machine. */
   async statFile(args: { path: string }): Promise<{ exists: boolean }> {
-    const result = await this.call({ $case: "fsStat", fsStat: { path: args.path } });
+    const result = await this.call({ $case: "fsStat", fsStat: { path: toMachinePath(args.path) } });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
     }

@@ -186,6 +186,66 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
   });
 });
 
+describe("virtual-root → machine-frame path translation (the live-swap exec ENOENT fix)", () => {
+  // The bug: the SDK presents the sandbox rooted at the VIRTUAL "/workspace"
+  // (state.manifest.root, held there for the provided-session root-delta guard).
+  // It then hands the session exec workdirs / fs paths anchored at that root.
+  // The Rust agent's resolve_cwd takes an ABSOLUTE path as-is, so a literal
+  // "/workspace" → current_dir("/workspace") → ENOENT on a real machine
+  // ("spawn hostname: No such file or directory"). The session must rewrite the
+  // virtual frame onto the machine's: the root → "" (agent uses workspace_root),
+  // a child → its workspace_root-relative remainder; a real machine-absolute
+  // path passes through. The proof is the wire request the agent receives.
+
+  function execCwdFor(workdir: string | undefined): Promise<string> {
+    const mock = new MockAgentResponder({ hostname: "vm" });
+    return sessionWith(mock)
+      .exec({ cmd: "hostname", ...(workdir !== undefined ? { workdir } : {}) })
+      .then(() => {
+        const op = mock.requests[0]?.req.op;
+        if (op?.$case !== "exec") throw new Error("expected an exec op on the wire");
+        return op.exec.cwd;
+      });
+  }
+
+  test("exec workdir '/workspace' (the SDK virtual root) → empty cwd (agent uses its workspace_root)", async () => {
+    // This is the EXACT failing live-swap case: workdir was the manifest root.
+    expect(await execCwdFor("/workspace")).toBe("");
+  });
+
+  test("exec workdir '/workspace/sub/dir' → the workspace_root-relative remainder", async () => {
+    expect(await execCwdFor("/workspace/sub/dir")).toBe("sub/dir");
+  });
+
+  test("exec workdir undefined (the working pinned case) → empty cwd", async () => {
+    expect(await execCwdFor(undefined)).toBe("");
+  });
+
+  test("a genuine machine-absolute workdir ('/tmp') passes through untouched", async () => {
+    expect(await execCwdFor("/tmp")).toBe("/tmp");
+  });
+
+  test("a sibling that merely shares the prefix ('/workspaceX') is NOT rewritten", async () => {
+    expect(await execCwdFor("/workspaceX")).toBe("/workspaceX");
+  });
+
+  test("fs paths anchored at the virtual root are rewritten on the wire (write then read round-trips relative)", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    await session.writeFile({ path: "/workspace/notes.md", content: "hi" });
+    // The agent received the workspace_root-relative path, NOT a literal /workspace/…
+    const wop = mock.requests[0]?.req.op;
+    if (wop?.$case !== "fsWrite") throw new Error("expected fsWrite");
+    expect(wop.fsWrite.path).toBe("notes.md");
+    // And the same virtual path reads back through the translated key.
+    const bytes = await session.readFile({ path: "/workspace/notes.md" });
+    expect(new TextDecoder().decode(bytes)).toBe("hi");
+    const rop = mock.requests[1]?.req.op;
+    if (rop?.$case !== "fsRead") throw new Error("expected fsRead");
+    expect(rop.fsRead.path).toBe("notes.md");
+  });
+});
+
 describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
   const err = (code: ErrorCode, retryable = false): AgentError => ({ code, message: `e${code}`, retryable, detail: {} });
 
