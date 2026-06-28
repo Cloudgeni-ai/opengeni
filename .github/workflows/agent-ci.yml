@@ -59,10 +59,13 @@ jobs:
       - name: cargo clippy -D warnings
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-  # test + build across the FULL OS matrix. macos-26 (Apple Silicon) + macos-13
-  # (Intel) + windows-latest each prove the platform compiles AND its unit tests
-  # pass — the cross-platform guarantee for the per-OS code (platform/service/
-  # update) that cannot run on the Linux dev box.
+  # test + build across the OS matrix. macos-26 (Apple Silicon) + windows-latest
+  # each prove the platform compiles AND its unit tests pass — the cross-platform
+  # guarantee for the per-OS code (platform/service/update) that cannot run on the
+  # Linux dev box. This matches the documented proof set above. (The deprecated
+  # Intel macos-13 image is intentionally omitted: it is not in the Team-plan
+  # hosted-runner set, never schedules, and macOS is covered by macos-26 here +
+  # the macos-26 install-smoke leg below.)
   test:
     name: test + build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -73,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26, macos-13, windows-latest]
+        os: [ubuntu-latest, macos-26, windows-latest]
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
