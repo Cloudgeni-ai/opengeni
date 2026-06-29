@@ -5,6 +5,7 @@ import postgres from "postgres";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   createDb,
+  deleteCodexSubscriptionCredential,
   encryptEnvironmentValue,
   getCodexCredentialStatus,
   loadCodexCredentialForRun,
@@ -165,6 +166,20 @@ describe("codex_subscription_credentials accessors", () => {
     expect(status?.status).toBe("needs_relogin");
     expect(status?.connected).toBe(false);
     expect(status?.lastError).toBe("expired");
+  });
+
+  test("deleteCodexSubscriptionCredential disconnects (and is idempotent)", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await upsertCodexSubscriptionCredential(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
+      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
+      expiresAt: null, lastRefreshAt: null,
+    });
+    expect(await deleteCodexSubscriptionCredential(db, ws.workspaceId)).toBe(true);
+    expect(await getCodexCredentialStatus(db, ws.workspaceId)).toBeNull();
+    expect(await deleteCodexSubscriptionCredential(db, ws.workspaceId)).toBe(false); // already gone
   });
 
   test("RLS: workspace B cannot read workspace A's credential", async () => {

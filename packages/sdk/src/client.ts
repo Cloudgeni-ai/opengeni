@@ -5,6 +5,10 @@ import type {
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
+  CodexConnectionStatus,
+  CodexConnectPoll,
+  CodexConnectStart,
+  CodexUsage,
   BillingSummary,
   BillingUsageResponse,
   CapabilityCatalogItem,
@@ -1104,6 +1108,33 @@ export class OpenGeniClient {
   private url(path: string, query: Record<string, string> = {}): string {
     const params = new URLSearchParams(query).toString();
     return `${this.baseUrl}${path}${params ? `?${params}` : ""}`;
+  }
+
+  // --- Codex (ChatGPT) subscription (workspace-scoped) --------------------------------------------
+
+  /** Connection state + the codex models the workspace may select (empty until connected). */
+  async codexStatus(workspaceId: string): Promise<CodexConnectionStatus> {
+    return await this.requestJson<CodexConnectionStatus>("GET", `/v1/workspaces/${workspaceId}/codex/status`);
+  }
+
+  /** Begin device-code login: show `userCode` at `verificationUri`, then poll with `state`. */
+  async codexConnectStart(workspaceId: string): Promise<CodexConnectStart> {
+    return await this.requestJson<CodexConnectStart>("POST", `/v1/workspaces/${workspaceId}/codex/connect/start`);
+  }
+
+  /** Poll device-code authorization with the `state` from {@link codexConnectStart}. */
+  async codexConnectPoll(workspaceId: string, state: string): Promise<CodexConnectPoll> {
+    return await this.requestJson<CodexConnectPoll>("POST", `/v1/workspaces/${workspaceId}/codex/connect/poll`, { state });
+  }
+
+  /** Remaining usage / limits for the connected subscription. */
+  async codexUsage(workspaceId: string): Promise<CodexUsage> {
+    return await this.requestJson<CodexUsage>("GET", `/v1/workspaces/${workspaceId}/codex/usage`);
+  }
+
+  /** Disconnect: remove the workspace's stored credential. */
+  async codexDisconnect(workspaceId: string): Promise<{ disconnected: boolean }> {
+    return await this.requestJson<{ disconnected: boolean }>("DELETE", `/v1/workspaces/${workspaceId}/codex`);
   }
 
   private async requestJson<T>(method: string, path: string, body?: unknown, query: Record<string, string> = {}): Promise<T> {

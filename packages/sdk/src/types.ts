@@ -664,6 +664,38 @@ export type ClientModel = {
 };
 
 /**
+ * Connection state of a workspace's Codex (ChatGPT) subscription, returned by
+ * `GET /v1/workspaces/:id/codex/status`. `models` are the codex models the
+ * workspace can select (projected as ClientModel under their own "no credits"
+ * provider group), present only while connected.
+ */
+export type CodexConnectionStatus = {
+  connected: boolean;
+  plan?: string | null;
+  valid?: boolean;
+  expiresAt?: string | null;
+  lastError?: string | null;
+  models?: ClientModel[];
+};
+
+/** Device-code start: show `userCode` at `verificationUri`, then poll with `state`. */
+export type CodexConnectStart = {
+  userCode: string;
+  verificationUri: string;
+  intervalSeconds: number;
+  state: string;
+};
+
+/** Poll result: keep polling on `pending`, restart on `expired`, done on `connected`. */
+export type CodexConnectPoll =
+  | { status: "pending" }
+  | { status: "expired" }
+  | { status: "connected"; plan?: string | null };
+
+/** Remaining usage/limits. `usage` is the raw provider payload (windows, resets). */
+export type CodexUsage = { status: "ok" | "limit_reached" | "error"; usage: unknown };
+
+/**
  * How a deployment expects clients to authenticate to it, surfaced so a UI can
  * wire up the right header/cookie without prior knowledge of the host setup.
  * Discriminated on `mode`; `none` is the back-compat default.

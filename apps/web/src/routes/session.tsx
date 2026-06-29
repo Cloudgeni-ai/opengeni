@@ -43,6 +43,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
+import { useCodexModels } from "@/lib/use-codex-models";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { isMidTurn } from "@/lib/queue";
 import { buildTools } from "@/lib/session-tools";
@@ -258,6 +259,7 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => void;
 }) {
   const context = useAppContext();
+  const codexModels = useCodexModels(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
@@ -399,6 +401,7 @@ function SessionChatPane(props: {
                   model={model}
                   effort={context.reasoningEffort}
                   disabled={composer.sending}
+                  extraModels={codexModels}
                   onModelChange={(value) => context.setModelForSession(props.session.id, value)}
                   onEffortChange={context.setReasoningEffort}
                 />

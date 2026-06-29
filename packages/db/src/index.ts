@@ -2176,6 +2176,16 @@ export async function getCodexCredentialStatus(db: Database, workspaceId: string
   });
 }
 
+/** Disconnect: delete the workspace's codex credential. Returns true if a row was removed. */
+export async function deleteCodexSubscriptionCredential(db: Database, workspaceId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.delete(schema.codexSubscriptionCredentials)
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return rows.length > 0;
+  });
+}
+
 export async function recordAuditEvent(db: Database, input: {
   accountId: string;
   workspaceId?: string | null;

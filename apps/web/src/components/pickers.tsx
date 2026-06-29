@@ -17,7 +17,7 @@ import {
   type McpServerOption,
 } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type { ClientConfig } from "@/types";
+import type { ClientConfig, ClientModel } from "@/types";
 
 /**
  * One row in the model dropdown: the id sent to the host plus the display label
@@ -29,8 +29,10 @@ import type { ClientConfig } from "@/types";
  */
 type ModelChoice = { id: string; label: string; providerLabel: string | null };
 
-function modelChoices(config: ClientConfig | null, selected: string): ModelChoice[] {
-  const rich = config?.models ?? [];
+function modelChoices(config: ClientConfig | null, selected: string, extraModels: ClientModel[] = []): ModelChoice[] {
+  // extraModels are workspace-scoped (e.g. a connected Codex subscription's models)
+  // appended to the host's deployment list; provider grouping keeps them distinct.
+  const rich = [...(config?.models ?? []), ...extraModels];
   const choices: ModelChoice[] = rich.length > 0
     ? rich.map((model) => ({ id: model.id, label: model.label, providerLabel: model.providerLabel }))
     : (config?.allowedModels ?? [selected]).map((id) => ({ id, label: displayModel(id), providerLabel: null }));
@@ -52,13 +54,14 @@ export function ModelPicker(props: {
   model: string;
   effort: IntelligenceEffort;
   disabled?: boolean;
+  extraModels?: ClientModel[];
   onModelChange: (value: string) => void;
   onEffortChange: (value: IntelligenceEffort) => void;
 }) {
   // Host-curated effort allow-list, canonically ordered, full enum — mirrors how
   // the model picker is driven by config.allowedModels (no lossy UI filter).
   const effortOptions = effortOptionsFor(props.config);
-  const choices = modelChoices(props.config, props.model);
+  const choices = modelChoices(props.config, props.model, props.extraModels ?? []);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>

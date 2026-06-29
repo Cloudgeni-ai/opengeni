@@ -11,6 +11,9 @@ import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   accessTokenExpiry,
   CODEX_CLIENT_VERSION,
+  CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_MODEL_ID_PREFIX,
+  CODEX_PROVIDER_ID,
   CodexDeviceError,
   exchangeDeviceCode,
   fetchCodexModels,
@@ -20,11 +23,28 @@ import {
   startDeviceCode,
 } from "@opengeni/codex";
 import {
+  deleteCodexSubscriptionCredential,
   encryptEnvironmentValue,
   getCodexCredentialStatus,
   loadCodexCredentialForRun,
   upsertCodexSubscriptionCredential,
 } from "@opengeni/db";
+
+// The picker surfaces codex models under their own "no credits" provider group so
+// they read distinctly from the platform provider's same-named model.
+const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
+
+function codexModelsForPicker(slugs: string[]): Array<{ id: string; label: string; provider: string; providerLabel: string; api: "responses" }> {
+  return slugs
+    .filter((slug) => (/^gpt-5/.test(slug) || slug.includes("codex")) && slug !== "codex-auto-review")
+    .map((slug) => ({
+      id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      label: slug.replace(/^gpt-/, "GPT-"),
+      provider: CODEX_PROVIDER_ID,
+      providerLabel: CODEX_PROVIDER_LABEL,
+      api: "responses" as const,
+    }));
+}
 import { createSignedState, readSignedState } from "@opengeni/github";
 import type { ApiRouteDeps } from "../dependencies";
 import type { Hono } from "hono";
@@ -119,16 +139,20 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json({ connected: false });
     }
     let valid = false;
+    let models = codexModelsForPicker([...CODEX_FALLBACK_MODEL_SLUGS]); // offline fallback list
     try {
       const cred = await loadCodexCredentialForRun(db, settings, workspaceId);
       if (cred) {
-        const models = await fetchCodexModels({
+        const live = await fetchCodexModels({
           accessToken: cred.tokens.accessToken,
           chatgptAccountId: cred.chatgptAccountId,
           isFedramp: cred.isFedramp,
           clientVersion: CODEX_CLIENT_VERSION,
         });
-        valid = models.ok;
+        valid = live.ok;
+        if (live.ok && live.slugs.length > 0) {
+          models = codexModelsForPicker(live.slugs); // prefer the live catalog
+        }
       }
     } catch {
       valid = false;
@@ -139,7 +163,16 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       valid,
       expiresAt: status.expiresAt,
       lastError: status.lastError,
+      models, // ClientModel[] the picker surfaces under the "no credits" group
     });
+  });
+
+  // Disconnect: remove the workspace's stored credential.
+  app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const removed = await deleteCodexSubscriptionCredential(db, workspaceId);
+    return c.json({ disconnected: removed });
   });
 
   // Remaining usage / limits from GET /wham/usage. A 404-with-body is a limits state.

@@ -18,6 +18,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAppContext } from "@/context";
+import { useCodexModels } from "@/lib/use-codex-models";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import {
   emptyAdvancedSessionDraft,
@@ -148,6 +149,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 
 function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
+  const codexModels = useCodexModels(workspaceId);
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <ModelPicker
@@ -155,6 +157,7 @@ function SessionControlStrip({ workspaceId }: { workspaceId: string }) {
         model={context.model}
         effort={context.reasoningEffort}
         disabled={context.busy}
+        extraModels={codexModels}
         onModelChange={context.setModel}
         onEffortChange={context.setReasoningEffort}
       />
