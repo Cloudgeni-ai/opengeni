@@ -580,6 +580,25 @@ ingress:
         - path: /metrics
           pathType: Exact
           service: api
+        # The self-hosted agent install surface (get.<domain>). The API serves the
+        # committed install scripts AND the per-SHA baked opengeni-agent binaries
+        # from /agent/*; these MUST route to api, not fall through to the web SPA.
+        # The install bodies + agent binaries carry no secrets and are auth-exempt.
+        - path: /install.sh
+          pathType: Exact
+          service: api
+        - path: /install.ps1
+          pathType: Exact
+          service: api
+        - path: /uninstall.sh
+          pathType: Exact
+          service: api
+        - path: /opengeni-agent-minisign.pub
+          pathType: Exact
+          service: api
+        - path: /agent
+          pathType: Prefix
+          service: api
   tls: []
 
 # Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
