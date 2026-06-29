@@ -56,6 +56,46 @@ async function loadAsset(file: string): Promise<string> {
   return body;
 }
 
+// "The agent ships inside the control-plane" (cont.): the committed install
+// scripts default their release-asset base URL to the public archive
+// (get.opengeni.ai) so a from-source / standalone copy still works. But a
+// DEPLOYED control plane must serve a script that pulls the agent from ITSELF —
+// the per-SHA binary baked into THIS image, via the /agent/* routes below — so
+// `curl https://<this-host>/install.sh | sh` installs the exact agent that
+// matches the API it enrolls against, with NO dependency on a public CDN (which a
+// private/air-gapped deploy may not even resolve). When a public base URL is
+// configured we therefore rewrite each script's default-base-URL marker line to
+// that origin before serving. The user's OPENGENI_INSTALL_BASE_URL env override
+// still wins at run time (the scripts use `:-default`); only the built-in DEFAULT
+// changes. The marker lines are kept shape-stable in agent/install/install.{sh,ps1}.
+const DEFAULT_BASE_REWRITES: Record<string, (base: string) => { from: string; to: string }> = {
+  "install.sh": (base) => ({
+    from: 'OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"',
+    to: `OPENGENI_INSTALL_DEFAULT_BASE_URL="${base}"`,
+  }),
+  "install.ps1": (base) => ({
+    from: "$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'",
+    to: `$OpengeniInstallDefaultBaseUrl = '${base}'`,
+  }),
+};
+
+// Rewrite a served script's default release-asset base URL to this deployment's
+// own public origin. A no-op when no public base URL is configured (the public
+// archive default stands), when the URL is not absolute http(s) (never serve a
+// script with a broken base), or when the file has no marker (script drift — fail
+// safe to serving it verbatim rather than crashing the install surface).
+function rewriteDefaultBaseUrl(file: string, body: string, publicBaseUrl: string | undefined): string {
+  if (!publicBaseUrl || !/^https?:\/\//.test(publicBaseUrl)) {
+    return body;
+  }
+  const base = publicBaseUrl.replace(/\/+$/, "");
+  const rule = DEFAULT_BASE_REWRITES[file]?.(base);
+  if (!rule || !body.includes(rule.from)) {
+    return body;
+  }
+  return body.replace(rule.from, rule.to);
+}
+
 // The content type for a baked release asset. The binary is an
 // application/octet-stream download; its `.sha256`/`.minisig` sidecars are short
 // text the install script parses line-by-line.
@@ -100,7 +140,10 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   for (const [path, { file, contentType }] of Object.entries(TEXT_ASSETS)) {
     app.get(path, async (c) => {
-      const body = await loadAsset(file);
+      // Serve the committed body, but rewrite the install scripts' default
+      // asset base URL to THIS deployment's origin so the agent is pulled from
+      // the same control plane it enrolls against (see rewriteDefaultBaseUrl).
+      const body = rewriteDefaultBaseUrl(file, await loadAsset(file), deps.settings.publicBaseUrl);
       return c.text(body, 200, {
         "content-type": contentType,
         // Short cache: the edge serves the latest committed copy; new installs

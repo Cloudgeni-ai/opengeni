@@ -62,7 +62,16 @@ set -eu
 OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn'
 
 # --- Defaults / config -------------------------------------------------------
-BASE_URL="${OPENGENI_INSTALL_BASE_URL:-https://get.opengeni.ai}"
+# Default release-asset base URL. A DEPLOYED control plane REWRITES the next line
+# at serve time to its OWN origin, so `curl <control-plane>/install.sh | sh` pulls
+# the per-SHA agent baked into that exact deployment (zero version drift, and no
+# dependency on the public CDN — a private/air-gapped control plane may not even
+# resolve it). The committed default is the public archive, for a from-source or
+# standalone install. The OPENGENI_INSTALL_BASE_URL env override always wins.
+# Keep this line's shape stable: apps/api/src/routes/install.ts rewrites it by
+# exact match (DEFAULT_BASE_REWRITES).
+OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
+BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
 
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }

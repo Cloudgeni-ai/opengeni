@@ -48,7 +48,13 @@ function Get-EnvOr($name, $default) {
   if ([string]::IsNullOrEmpty($v)) { return $default } else { return $v }
 }
 
-$BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' 'https://get.opengeni.ai'
+# A DEPLOYED control plane rewrites the next line to its own origin at serve time
+# (see apps/api/src/routes/install.ts DEFAULT_BASE_REWRITES), so this Windows
+# installer pulls the matching baked agent from the same host it was fetched from.
+# Keep the line's shape stable (rewritten by exact match). OPENGENI_INSTALL_BASE_URL
+# still wins.
+$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'
+$BaseUrl = Get-EnvOr 'OPENGENI_INSTALL_BASE_URL' $OpengeniInstallDefaultBaseUrl
 $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 
 function Log($msg)  { Write-Host "opengeni-install: $msg" }

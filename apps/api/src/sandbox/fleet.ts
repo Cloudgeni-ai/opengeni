@@ -428,8 +428,12 @@ export async function provisionSandbox(
       kind: "selfhosted",
       instructions:
         "Share these instructions with a human operator. They install the OpenGeni agent on the machine, run `opengeni-agent enroll`, complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox.",
-      installCommandUnix: "curl -fsSL https://get.opengeni.ai/install.sh | sh",
-      installCommandWindows: "irm https://get.opengeni.ai/install.ps1 | iex",
+      // Install from THIS control plane's origin (not a hardcoded public CDN): the
+      // served install script is rewritten to pull the per-SHA agent baked into
+      // this exact deployment (see apps/api/src/routes/install.ts), so a deployed
+      // env is self-contained and a private/air-gapped one works with no public DNS.
+      installCommandUnix: `curl -fsSL ${base}/install.sh | sh`,
+      installCommandWindows: `irm ${base}/install.ps1 | iex`,
       verificationUri: `${base}/device`,
       note: "Whole-machine access requires explicit human consent in the device-flow web page; the agent cannot self-consent.",
     };

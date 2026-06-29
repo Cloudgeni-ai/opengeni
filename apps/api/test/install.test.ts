@@ -42,6 +42,36 @@ describe("get.<domain> install routes", () => {
     expect(body).toContain("opengeni-agent");
   });
 
+  // "The agent ships inside the control-plane": a DEPLOYED control plane self-serves
+  // its matching baked agent. The served install scripts must therefore default
+  // their asset base URL to THIS deployment's own public origin (so `curl
+  // <host>/install.sh | sh` pulls from the same host — no get.opengeni.ai dep),
+  // while the user's OPENGENI_INSTALL_BASE_URL override still wins.
+  test("GET /install.sh rewrites the default asset base URL to the deployment's own origin", async () => {
+    const settings = testSettings({ publicBaseUrl: "https://cp.example.com/" });
+    const res = await appFor(settings).request("/install.sh");
+    const body = await res.text();
+    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://cp.example.com"');
+    expect(body).not.toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+    // The user-facing override var name is untouched (operator can still repoint).
+    expect(body).toContain("OPENGENI_INSTALL_BASE_URL");
+  });
+
+  test("GET /install.ps1 rewrites the default asset base URL to the deployment's own origin", async () => {
+    const settings = testSettings({ publicBaseUrl: "https://cp.example.com" });
+    const res = await appFor(settings).request("/install.ps1");
+    const body = await res.text();
+    expect(body).toContain("$OpengeniInstallDefaultBaseUrl = 'https://cp.example.com'");
+    expect(body).not.toContain("$OpengeniInstallDefaultBaseUrl = 'https://get.opengeni.ai'");
+  });
+
+  test("GET /install.sh keeps the public-archive default when no public base URL is configured", async () => {
+    const settings = testSettings({ publicBaseUrl: undefined });
+    const res = await appFor(settings).request("/install.sh");
+    const body = await res.text();
+    expect(body).toContain('OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"');
+  });
+
   test("GET /install.ps1 serves the Windows installer", async () => {
     const res = await appFor(testSettings()).request("/install.ps1");
     expect(res.status).toBe(200);
