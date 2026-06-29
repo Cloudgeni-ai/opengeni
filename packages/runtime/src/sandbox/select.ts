@@ -188,20 +188,26 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     }
     // The REAL PTY (ttyd pty-ws) rides the SAME tunnel as the desktop, so it is
     // gated identically: a real-PTY backend (cap.pty), the terminal policy toggle
-    // ON, and a WARM box. Until those hold the cell advertises the read-only
+    // ON, and a live box. Until those hold the cell advertises the read-only
     // sse-events firehose (Channel-A command.output still works) with a typed
     // reason — degradation is a value, never an absent capability.
-    //   - cold lease           -> sse-events + lease_cold (the pty-ws address is
-    //                             minted by mintTerminalStream at viewer attach).
     //   - terminal off         -> sse-events + disabled_by_policy.
+    //   - cold lease + NO mint  -> sse-events + lease_cold (no live pty-ws address;
+    //                             the caller mints it via mintTerminalStream at
+    //                             viewer attach).
     //   - not a real-PTY backend-> sse-events (no reason; the firehose IS the cap).
+    // A PRESENT minted pty-ws url (ctx.terminalStream) is ITSELF proof of liveness:
+    // the box (Modal-warm OR selfhosted-online) actually served the ttyd port, so a
+    // cold MODAL-GROUP lease liveness must NOT degrade it. lease_cold only fires
+    // when nothing was minted. A selfhosted-active session has no warm Modal lease
+    // (liveness "cold") yet mints a valid RELAY pty-ws cell — honour it.
     const ptyCapable = cap.pty;
     let transport: "pty-ws" | "sse-events" = ptyCapable ? "pty-ws" : "sse-events";
     let reason: CapabilityUnavailableReason | null = null;
     if (ptyCapable && ctx.terminalEnabled === false) {
       transport = "sse-events";
       reason = "disabled_by_policy";
-    } else if (ptyCapable && ctx.liveness === "cold") {
+    } else if (ptyCapable && ctx.liveness === "cold" && !ctx.terminalStream) {
       transport = "sse-events";
       reason = "lease_cold";
     }
@@ -230,7 +236,8 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
 
   const desktop = (() => {
     const cap = descriptor.capabilities.DesktopStream;
-    // Reason precedence: OS > backend-tier feasibility > policy disable > cold lease.
+    // Reason precedence: OS > backend-tier feasibility > policy disable >
+    // stream-token-secret > cold lease WITHOUT a mint.
     let reason: CapabilityUnavailableReason | null = null;
     let available = cap.available;
     if (osReason) {
@@ -251,7 +258,13 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
       // reason rather than crashing the API.
       available = false;
       reason = "disabled_by_policy";
-    } else if (ctx.liveness === "cold") {
+    } else if (ctx.liveness === "cold" && !ctx.desktopStream) {
+      // A PRESENT minted pixel url (ctx.desktopStream) is ITSELF proof of liveness:
+      // the box (Modal-warm OR selfhosted-online) actually served the noVNC port,
+      // so a cold MODAL-GROUP lease liveness must NOT degrade it. lease_cold only
+      // fires when nothing was minted. A selfhosted-active session has no warm
+      // Modal lease (liveness "cold") yet mints a valid RELAY framebuffer cell —
+      // honour it (the un-redacted-pixel ack gate below still applies).
       available = false;
       reason = "lease_cold";
     }

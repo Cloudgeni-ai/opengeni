@@ -231,6 +231,90 @@ describe("negotiateCapabilities — coherent doc, degrades as a value", () => {
     expect(caps.DesktopStream.reason).toBe("lease_cold");
   });
 
+  // ── A successfully-minted relay/Modal stream url is ITSELF proof of liveness ──
+  // A selfhosted-active session has NO warm Modal GROUP lease, so ctx.liveness is
+  // "cold" — but the stream cells are minted against the selfhosted RELAY (the box
+  // actually served the port). A present minted url must therefore be HONOURED;
+  // lease_cold only fires when nothing was minted.
+  test("cold lease + minted terminalStream (selfhosted relay pty-ws) → honoured, NOT lease_cold", () => {
+    const minted = {
+      url: "wss://relay.preview.app.opengeni.ai/stream?ws=W&agent=A&port=7681&channel=C",
+      token: "ogs_terminaltoken",
+      expiresAt: "2026-06-20T01:00:00.000Z",
+    };
+    const caps = negotiateCapabilities({
+      ...base,
+      backend: "modal",
+      liveness: "cold",
+      terminalStream: minted,
+    });
+    expect(caps.Terminal.transport).toBe("pty-ws");
+    expect(caps.Terminal.url).toBe(minted.url);
+    expect(caps.Terminal.token).toBe(minted.token);
+    expect(caps.Terminal.expiresAt).toBe(minted.expiresAt);
+    expect(caps.Terminal.reason).toBeNull();
+  });
+
+  test("cold lease + minted+acked desktopStream (selfhosted relay framebuffer) → honoured, NOT lease_cold", () => {
+    const minted = {
+      url: "wss://relay.preview.app.opengeni.ai/stream?ws=W&agent=A&port=6080&channel=C",
+      token: "ogs_desktoptoken",
+      expiresAt: "2026-06-20T01:00:00.000Z",
+      resolution: [1280, 800] as [number, number],
+    };
+    const caps = negotiateCapabilities({
+      ...base,
+      backend: "modal",
+      liveness: "cold",
+      desktopEnabled: true,
+      streamTokenSecretAvailable: true,
+      desktopAcknowledged: true,
+      desktopStream: minted,
+    });
+    expect(caps.DesktopStream.transport).not.toBeNull();
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.DesktopStream.url).toBe(minted.url);
+    expect(caps.DesktopStream.token).toBe(minted.token);
+    expect(caps.DesktopStream.resolution).toEqual(minted.resolution);
+  });
+
+  test("REGRESSION: cold lease + NO minted stream → still lease_cold (terminal degrades to sse-events)", () => {
+    const caps = negotiateCapabilities({ ...base, backend: "modal", liveness: "cold" });
+    // Desktop (regression of the unchanged path above).
+    expect(caps.DesktopStream.transport).toBeNull();
+    expect(caps.DesktopStream.reason).toBe("lease_cold");
+    expect(caps.DesktopStream.url).toBeNull();
+    // Terminal also degrades to the read-only firehose when nothing was minted.
+    expect(caps.Terminal.transport).toBe("sse-events");
+    expect(caps.Terminal.reason).toBe("lease_cold");
+    expect(caps.Terminal.url).toBeNull();
+  });
+
+  // The ack gate is NOT weakened by honouring a cold-but-minted desktop: a minted
+  // url with NO acknowledgment is still withheld (the un-redacted-pixel consent
+  // gate). The cell stays available (liveness honoured) but the live url is dropped.
+  test("cold lease + minted desktopStream but NOT acknowledged → ack gate still drops the url", () => {
+    const minted = {
+      url: "wss://relay.preview.app.opengeni.ai/stream?ws=W&agent=A&port=6080&channel=C",
+      token: "ogs_desktoptoken",
+      expiresAt: "2026-06-20T01:00:00.000Z",
+      resolution: [1280, 800] as [number, number],
+    };
+    const caps = negotiateCapabilities({
+      ...base,
+      backend: "modal",
+      liveness: "cold",
+      desktopEnabled: true,
+      streamTokenSecretAvailable: true,
+      desktopAcknowledged: false,
+      desktopStream: minted,
+    });
+    expect(caps.DesktopStream.transport).not.toBeNull();
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.DesktopStream.url).toBeNull();
+    expect(caps.DesktopStream.acknowledged).toBe(false);
+  });
+
   test("unsupported OS knocks out every capability with os_unsupported", () => {
     const caps = negotiateCapabilities({ ...base, backend: "modal", os: "windows" });
     expect(caps.FileSystem.available).toBe(false);
