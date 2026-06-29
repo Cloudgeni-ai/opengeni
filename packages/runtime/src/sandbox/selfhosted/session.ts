@@ -22,7 +22,9 @@ import {
   StreamKind,
   type ExecRequest,
   type ExecResponse,
+  type StreamChannel,
 } from "@opengeni/agent-proto";
+import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 // `Manifest` from the ALLOWED sandbox-leaf entrypoint (`@openai/agents/sandbox`
 // re-exports `@openai/agents-core/sandbox`, which exports the Manifest class) —
 // NOT the agent-loop `@openai/agents` root the sandbox leaf forbids. The live
@@ -512,17 +514,39 @@ export class SelfhostedSession {
    * producer by the routing key.
    */
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {
-    // Ask the agent to ensure a stream channel exists for the port. M8b still uses
-    // the desktopEnsure op as the "ensure a channel" RPC (the only stream-channel
-    // op in the proto); the returned channelId is the relay correlation hint.
-    const result = await this.call({
-      $case: "desktopEnsure",
-      desktopEnsure: { width: 0, height: 0 },
-    });
-    if (result.$case !== "desktopEnsure") {
-      throw new Error(`selfhosted resolveExposedPort: unexpected result ${result.$case}`);
+    // Ask the agent to ensure a relay PRODUCER channel exists for the port, using the
+    // PORT-APPROPRIATE op. The PTY plane (7681) is INDEPENDENT of the desktop display:
+    // route it through `ptyOpen` (which spawns/attaches a PTY and NEVER touches X11),
+    // and ONLY the desktop framebuffer plane (6080) through `desktopEnsure` (which
+    // hard-requires a live virtual display). Earlier M8b used `desktopEnsure` for
+    // EVERY port — that wrongly coupled the terminal to the desktop probe, so a
+    // headless (or display-degraded) machine could never get a terminal even though
+    // `ptyOpen` would have succeeded. The returned channelId is the relay
+    // correlation hint; both ops carry a `StreamChannel` on their response.
+    let channel: StreamChannel | undefined;
+    if (port === DESKTOP_STREAM_PORT) {
+      const result = await this.call({
+        $case: "desktopEnsure",
+        desktopEnsure: { width: 0, height: 0 },
+      });
+      if (result.$case !== "desktopEnsure") {
+        throw new Error(`selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`);
+      }
+      channel = result.desktopEnsure.channel;
+    } else {
+      // The PTY plane (7681) + any non-desktop stream port. `command: []` => the
+      // user's default login shell; the agent's pty_pump bridges the PTY master to
+      // the relay channel. Display-INDEPENDENT — works on a headless machine.
+      const result = await this.call({
+        $case: "ptyOpen",
+        ptyOpen: { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "xterm-256color" },
+      });
+      if (result.$case !== "ptyOpen") {
+        throw new Error(`selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`);
+      }
+      channel = result.ptyOpen.channel;
     }
-    const channelId = result.desktopEnsure.channel?.channelId ?? channelKey(this.workspaceId, this.agentId, port);
+    const channelId = channel?.channelId ?? channelKey(this.workspaceId, this.agentId, port);
     const tls = this.relay.tls ?? true;
     // The routing key the relay pairs producer↔consumer by — IDENTICAL to the
     // agent's `ChannelKey::query` — plus the channel-id correlation hint.
@@ -538,7 +562,7 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
-      protocol: kindToProtocol(result.desktopEnsure.channel?.kind),
+      protocol: kindToProtocol(channel?.kind),
     };
   }
 

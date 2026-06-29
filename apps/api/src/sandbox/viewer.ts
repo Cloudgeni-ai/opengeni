@@ -839,7 +839,12 @@ async function tryMintActiveSelfhostedStream(
       });
       shSession = await client.resume({ agentId: sandbox.enrollmentId });
     }
-  } catch {
+  } catch (error) {
+    console.warn(
+      `[tryMintActiveSelfhostedStream] resume failed for agent=${sandbox.enrollmentId} ` +
+        `port=${input.port} epoch=${session.activeEpoch}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
     return null;
   }
   return mintSelfhostedStream(services, {
@@ -918,7 +923,14 @@ export async function mintSelfhostedStream(
     };
   } catch (error) {
     // A headless / offline / channel-ensure failure degrades the cell to
-    // transport:null rather than throwing (mirrors the Modal mint paths).
+    // transport:null rather than throwing (mirrors the Modal mint paths). The
+    // mint degrades SILENTLY to the client, so log WHY here — otherwise a relay
+    // ensure failure (agent display probe, producer dial) is invisible.
+    console.warn(
+      `[mintSelfhostedStream] relay stream mint degraded to transport:null ` +
+        `(session=${input.sessionId} port=${input.port} epoch=${input.activeEpoch}): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
     if (error instanceof StreamPortUnavailableError) {
       return null;
     }

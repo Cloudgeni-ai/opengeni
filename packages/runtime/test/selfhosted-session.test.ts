@@ -92,6 +92,27 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(endpoint.query).toContain("channel=");
   });
 
+  test("resolveExposedPort(7681) routes to ptyOpen (NOT desktopEnsure) — the PTY plane is display-independent", async () => {
+    const mock = new MockAgentResponder();
+    const endpoint = await sessionWith(mock).resolveExposedPort(7681);
+    // The terminal port resolves a relay endpoint on 7681 …
+    expect(endpoint.host).toBe("relay.test");
+    expect(endpoint.path).toBe("/stream");
+    expect(endpoint.query).toContain("port=7681");
+    expect(endpoint.query).toContain("channel=mock-pty");
+    // … and crucially the agent op was `ptyOpen`, NEVER `desktopEnsure` — the
+    // terminal must not inherit the desktop's live-display requirement (the gap).
+    const op = mock.requests.at(-1)?.req.op?.$case;
+    expect(op).toBe("ptyOpen");
+    expect(mock.requests.some((r) => r.req.op?.$case === "desktopEnsure")).toBe(false);
+  });
+
+  test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
+    const mock = new MockAgentResponder();
+    await sessionWith(mock).resolveExposedPort(6080);
+    expect(mock.requests.at(-1)?.req.op?.$case).toBe("desktopEnsure");
+  });
+
   test("ping returns true against a live responder, false when offline", async () => {
     const mock = new MockAgentResponder();
     expect(await sessionWith(mock).ping()).toBe(true);

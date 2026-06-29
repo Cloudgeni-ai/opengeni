@@ -172,6 +172,18 @@ export class MockAgentResponder implements ControlRpc {
           },
         });
       }
+      case "ptyOpen": {
+        // The PTY plane is display-INDEPENDENT and has NO consent gate (unlike
+        // desktopEnsure) — a terminal works on a headless machine. Returns a PTY
+        // StreamChannel on the 7681 port.
+        return ok(req.requestId, {
+          $case: "ptyOpen",
+          ptyOpen: {
+            ptyId: "mock-pty",
+            channel: { channelId: "mock-pty", workspaceId: "", agentId: "", kind: 1, port: 7681 },
+          },
+        });
+      }
       default:
         return errorResponse(req.requestId, ErrorCode.ERROR_CODE_UNSUPPORTED, `mock does not implement ${op.$case}`, false);
     }
