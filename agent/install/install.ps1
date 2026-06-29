@@ -41,7 +41,7 @@ Set-StrictMode -Version Latest
 
 # The PINNED minisign public key (the base64 line of opengeni-agent-minisign.pub).
 # Trust root: a binary is rejected unless its .minisig verifies against THIS key.
-$OPENGENI_MINISIGN_PUBKEY = 'RWTrFASYAF06Hp49HTGbUcHnqcujmRyJdNcgE/cDkrp8Ke3YwlVL/dT4'
+$OPENGENI_MINISIGN_PUBKEY = 'RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn'
 
 function Get-EnvOr($name, $default) {
   $v = [Environment]::GetEnvironmentVariable($name)

@@ -6,6 +6,11 @@
 !.env.example
 node_modules
 var
+# The Rust cargo build output (agent/target/) is large + irrelevant to the API/web
+# images. The signed PER-SHA agent binaries the API serves are staged into
+# agent/install/baked/ by scripts/bake-agent.sh and ride into the image via
+# `COPY . .`; the raw target/ tree must NOT bloat the build context.
+agent/target
 dist
 build
 coverage

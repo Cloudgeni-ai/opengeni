@@ -25,8 +25,8 @@ use crate::error::{UpdateError, UpdateResult};
 /// against THIS key. Rotating it means shipping a new signed binary — by design,
 /// exactly like rotating the key embedded in the install scripts.
 pub const PINNED_MINISIGN_PUBKEY: &str =
-    "untrusted comment: minisign public key 1E3A5D00980414EB\n\
-     RWTrFASYAF06Hp49HTGbUcHnqcujmRyJdNcgE/cDkrp8Ke3YwlVL/dT4";
+    "untrusted comment: minisign public key: 726E51117501AA9A\n\
+     RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn";
 
 /// Verifies a detached minisign signature over `artifact` against `pubkey_str`
 /// (the two-line minisign public-key text). Used with [`PINNED_MINISIGN_PUBKEY`]
@@ -183,7 +183,7 @@ mod tests {
         assert!(!line.starts_with("untrusted comment:"));
         assert_eq!(
             line,
-            "RWTrFASYAF06Hp49HTGbUcHnqcujmRyJdNcgE/cDkrp8Ke3YwlVL/dT4"
+            "RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn"
         );
     }
 }

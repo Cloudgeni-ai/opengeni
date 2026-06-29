@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
 import { testSettings } from "@opengeni/testing";
@@ -18,6 +20,15 @@ function appFor(settings: Settings) {
   } satisfies AppDependencies;
   return createApp(deps);
 }
+
+// The baked dir install.ts serves per-SHA binaries from. In the committed tree it
+// holds only a placeholder (so EVERY asset 302-redirects), and a deployed-env image
+// build writes the signed binaries here before `docker build`. The redirect tests
+// below therefore use assets that are NEVER baked into this Linux-musl-only dir
+// (mac/windows/un-built arches) so they are deterministic regardless of any local
+// build artifacts; the baked-path tests stage a throwaway file and clean it up.
+const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
+const BAKED_FIXTURE = "opengeni-agent-x86_64-unknown-linux-musl-test-fixture";
 
 describe("get.<domain> install routes", () => {
   test("GET /install.sh serves the committed POSIX script as a shell content type", async () => {
@@ -53,15 +64,18 @@ describe("get.<domain> install routes", () => {
     expect(body).toContain("minisign public key");
   });
 
-  test("GET /agent/latest/<asset> redirects to the GitHub latest-release alias", async () => {
-    const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-x86_64-unknown-linux-musl");
+  // An asset that is NEVER baked (mac universal) always falls through to the
+  // GitHub-Releases redirect, so these assertions hold whether or not a Linux
+  // binary happens to be baked into the local tree.
+  test("GET /agent/latest/<unbaked-asset> redirects to the GitHub latest-release alias", async () => {
+    const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/latest/download/opengeni-agent-x86_64-unknown-linux-musl",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/latest/download/opengeni-agent-universal-apple-darwin",
     );
   });
 
-  test("GET /agent/v<ver>/<asset> redirects to the immutable agent-v<ver> tag asset", async () => {
+  test("GET /agent/v<ver>/<unbaked-asset> redirects to the immutable agent-v<ver> tag asset", async () => {
     const res = await appFor(testSettings()).request("/agent/v1.2.3/opengeni-agent-universal-apple-darwin.minisig");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
@@ -71,10 +85,10 @@ describe("get.<domain> install routes", () => {
 
   test("a configured agentReleasesBaseUrl overrides the redirect target", async () => {
     const settings = testSettings({ agentReleasesBaseUrl: "https://mirror.example.com/rel/" });
-    const res = await appFor(settings).request("/agent/latest/opengeni-agent-x86_64-unknown-linux-musl");
+    const res = await appFor(settings).request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://mirror.example.com/rel/latest/download/opengeni-agent-x86_64-unknown-linux-musl",
+      "https://mirror.example.com/rel/latest/download/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -92,11 +106,65 @@ describe("get.<domain> install routes", () => {
     const installed = await app.request("/install.sh");
     expect(installed.status).toBe(200);
 
-    const redirect = await app.request("/agent/latest/opengeni-agent-x86_64-unknown-linux-musl");
+    // A binary-asset route is auth-exempt too (here the un-baked mac asset 302s).
+    const redirect = await app.request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(redirect.status).toBe(302);
 
     // A normal authenticated route is still gated (proves auth is actually on).
     const gated = await app.request("/v1/workspaces/ws_test/api-keys");
     expect(gated.status).toBe(401);
+  });
+});
+
+// The "agent ships inside the control-plane" path: when THIS image bakes a binary
+// into agent/install/baked/, the /agent/* routes serve it directly (200) instead of
+// 302-redirecting — for BOTH `latest` and a pinned `v<ver>` — with the binary as an
+// octet-stream and the .sha256/.minisig sidecars as text. We stage a throwaway
+// fixture so the test is hermetic and never depends on a real build artifact.
+describe("get.<domain> install routes — baked binary serving", () => {
+  beforeEach(async () => {
+    await mkdir(BAKED_DIR, { recursive: true });
+    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}`, "BAKED-BINARY-BYTES");
+    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, "deadbeef  baked\n");
+    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, "untrusted comment: x\nSIG\n");
+  });
+
+  afterEach(async () => {
+    await rm(`${BAKED_DIR}${BAKED_FIXTURE}`, { force: true });
+    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, { force: true });
+    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, { force: true });
+  });
+
+  test("GET /agent/latest/<baked-asset> serves the baked binary as octet-stream (no redirect)", async () => {
+    const res = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/octet-stream");
+    expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
+    expect(await res.text()).toBe("BAKED-BINARY-BYTES");
+  });
+
+  test("GET /agent/v<ver>/<baked-asset> serves the baked binary too (per-SHA image is the source)", async () => {
+    const res = await appFor(testSettings()).request(`/agent/v9.9.9/${BAKED_FIXTURE}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
+    expect(await res.text()).toBe("BAKED-BINARY-BYTES");
+  });
+
+  test("GET the baked .sha256 / .minisig sidecars as text/plain", async () => {
+    const sha = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}.sha256`);
+    expect(sha.status).toBe(200);
+    expect(sha.headers.get("content-type")).toContain("text/plain");
+    expect(await sha.text()).toContain("deadbeef");
+
+    const sig = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}.minisig`);
+    expect(sig.status).toBe(200);
+    expect(sig.headers.get("content-type")).toContain("text/plain");
+    expect(await sig.text()).toContain("untrusted comment");
+  });
+
+  test("an un-baked asset still 302s to GitHub Releases even while another asset is baked", async () => {
+    const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toContain("/releases/latest/download/opengeni-agent-universal-apple-darwin");
   });
 });

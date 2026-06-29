@@ -33,6 +33,16 @@ ENV NODE_ENV=production
 USER bun
 
 FROM base AS api
+# "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
+# Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by
+# the CI step scripts/bake-agent.sh BEFORE this build, and arrive in the image via
+# the `COPY --chown=bun:bun . .` above. The API serves them from /agent/* (see
+# apps/api/src/routes/install.ts), so a fresh machine installs an agent that matches
+# THIS control plane exactly. The signing key never enters this build — signing is
+# done in the pre-build CI step. When nothing is baked (a plain `docker build`),
+# agent/install/baked/ holds only its placeholder and /agent/* 302-redirects to the
+# GitHub Release (the public archive + install.sh fallback). No Dockerfile change is
+# needed to switch between the two: it is purely whether the baked files are present.
 EXPOSE 8000
 CMD ["bun", "run", "--cwd", "apps/api", "start"]
 

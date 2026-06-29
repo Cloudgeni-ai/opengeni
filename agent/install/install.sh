@@ -59,7 +59,7 @@ set -eu
 # trust root: a binary is rejected unless its .minisig verifies against THIS key.
 # Rotating the release key means shipping a new install script (audited) — by
 # design.
-OPENGENI_MINISIGN_PUBKEY='RWTrFASYAF06Hp49HTGbUcHnqcujmRyJdNcgE/cDkrp8Ke3YwlVL/dT4'
+OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2Pn'
 
 # --- Defaults / config -------------------------------------------------------
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-https://get.opengeni.ai}"

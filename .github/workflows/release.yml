@@ -147,6 +147,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # "The agent ships inside the control-plane": compile + SIGN the per-SHA agent
+      # binaries and stage them into agent/install/baked/ BEFORE the API image build,
+      # so they ride into the image via the Dockerfile's existing `COPY . .` and the
+      # API serves them from /agent/* (apps/api/src/routes/install.ts). Signing
+      # happens HERE so the minisign key never enters the Docker build; an absent key
+      # fails the bake loud (no unverifiable binary ships). GitHub Releases stays the
+      # public archive + self-update + install.sh fallback.
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (agent bake)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent
+          key: bake-musl
+
+      - name: Bake + sign the per-SHA agent binaries
+        env:
+          OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        run: scripts/bake-agent.sh
+
       - name: Build and push API image
         uses: docker/build-push-action@v6
         with:

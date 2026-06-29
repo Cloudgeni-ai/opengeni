@@ -244,9 +244,9 @@ jobs:
           # + self-update verify expects.
           cargo install --locked rsign2 || true
           printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
-          # rsign signs with an empty password (key generated with -W). The detached
-          # signature is <asset>.minisig.
-          echo "" | rsign sign -s /tmp/minisign.key -x "${{ matrix.asset }}.minisig" "${{ matrix.asset }}"
+          # The release key is passwordless (generated with -W); sign with -W so
+          # rsign never blocks on a TTY password prompt. Detached sig: <asset>.minisig.
+          rsign sign -W -s /tmp/minisign.key -x "${{ matrix.asset }}.minisig" "${{ matrix.asset }}"
           # sha256 sidecar.
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
@@ -327,7 +327,7 @@ jobs:
           set -euo pipefail
           cargo install --locked rsign2 || true
           printf '%s' "$MINISIGN_KEY" > /tmp/minisign.key
-          echo "" | rsign sign -s /tmp/minisign.key -x dist/SHA256SUMS.minisig dist/SHA256SUMS
+          rsign sign -W -s /tmp/minisign.key -x dist/SHA256SUMS.minisig dist/SHA256SUMS
           rm -f /tmp/minisign.key
 
       - name: Create the GitHub Release
