@@ -112,8 +112,18 @@ describe("negotiateCapabilities — the minted pixel cell folds in ONLY behind t
     expect(caps.DesktopStream.acknowledged).toBe(false);
   });
 
-  test("cold lease -> transport null + lease_cold; a minted cell would never be passed but is dropped if it were", () => {
+  test("cold lease + a MINTED cell -> honored (a successful mint proves liveness; selfhosted-active has no warm Modal lease)", () => {
+    // A present minted url is itself proof the box served the port, so a cold
+    // MODAL-GROUP lease must NOT degrade it. This is the selfhosted-swap path:
+    // liveness "cold" (no warm Modal lease) yet a valid RELAY cell was minted.
     const caps = negotiateCapabilities({ ...warmAcked, liveness: "cold", desktopStream: minted });
+    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.DesktopStream.url).toBe(minted.url);
+  });
+
+  test("cold lease + NO mint -> transport null + lease_cold (nothing was served)", () => {
+    const caps = negotiateCapabilities({ ...warmAcked, liveness: "cold" });
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.reason).toBe("lease_cold");
     expect(caps.DesktopStream.url).toBeNull();
