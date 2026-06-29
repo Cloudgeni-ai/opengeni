@@ -33,3 +33,50 @@ spec:
           {{- end }}
     {{- end }}
 {{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.publicIngress.enabled (or .Values.api.enabled .Values.web.enabled) }}
+---
+# A SECOND Ingress for the SAME host(s) that exposes ONLY the
+# unauthenticated-by-design public paths (the self-host installer scripts +
+# minisign pubkey, the release-asset redirect prefixes, and the device-flow
+# enrollment BOOTSTRAP endpoints a not-yet-credentialed machine calls).
+#
+# It deliberately carries NO `nginx.ingress.kubernetes.io/auth-*` annotations.
+# ingress-nginx merges Ingresses by host and applies auth per server-location,
+# so these more-specific un-gated locations win for EXACTLY these paths while the
+# primary Ingress keeps everything else (the web app, /v1/config/client, the
+# /device approval page, the rest of /v1) behind its basic-auth gate. This
+# mirrors how prod `get.opengeni.ai` serves these same assets ungated.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-public
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  {{- with .Values.ingress.publicIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.publicIngress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.publicIngress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-{{ .service }}
+                port:
+                  name: {{ .portName | default "http" }}
+          {{- end }}
+    {{- end }}
+{{- end }}

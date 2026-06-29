@@ -581,6 +581,57 @@ ingress:
           pathType: Exact
           service: api
   tls: []
+  # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
+  # unauthenticated-by-design public paths. Used by edge-gated deployments
+  # (e.g. the preview environment, whose primary Ingress sits behind nginx
+  # basic-auth) so that a fresh, un-credentialed machine can still
+  # `curl -fsSL https://<host>/install.sh | sh` and complete device-flow
+  # enrollment, while the web app and the rest of the API stay gated.
+  #
+  # ingress-nginx merges Ingresses by host and applies auth per location, so the
+  # more-specific paths listed here win and are served WITHOUT the primary
+  # Ingress's auth annotations. Keep this set MINIMAL — anything added here is
+  # publicly reachable. Disabled by default (only edge-gated deployments need it).
+  publicIngress:
+    enabled: false
+    # No auth annotations here by design. cert-manager / proxy tuning may be set
+    # by the deployment if this Ingress owns its own TLS entry (otherwise it
+    # shares the primary Ingress's already-issued host cert).
+    annotations: {}
+    hosts:
+      - host: opengeni.local
+        paths:
+          # Installer scripts + the pinned minisign public key (served verbatim,
+          # no secrets) — the `curl | sh` entry point and its trust root.
+          - path: /install.sh
+            pathType: Exact
+            service: api
+          - path: /install.ps1
+            pathType: Exact
+            service: api
+          - path: /uninstall.sh
+            pathType: Exact
+            service: api
+          - path: /opengeni-agent-minisign.pub
+            pathType: Exact
+            service: api
+          # Release-asset redirects the installer follows (302 → GitHub Releases).
+          - path: /agent/latest
+            pathType: Prefix
+            service: api
+          - path: /agent/v
+            pathType: Prefix
+            service: api
+          # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed
+          # machine calls (POST). The user-authenticated approve/list/revoke
+          # routes live under different paths and stay on the gated Ingress.
+          - path: /v1/enrollments/device/start
+            pathType: Exact
+            service: api
+          - path: /v1/enrollments/device/poll
+            pathType: Exact
+            service: api
+    tls: []
 
 # Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
 # Use an existing NATS endpoint or the official NATS chart for production.
