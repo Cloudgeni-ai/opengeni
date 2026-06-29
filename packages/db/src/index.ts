@@ -1997,6 +1997,185 @@ export async function loadWorkspaceEnvironmentForRun(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Codex (ChatGPT) subscription credentials
+//
+// One row per workspace. Secret tokens live inside `credential_encrypted` (v1
+// AES-256-GCM, same envelope as workspace env vars). The caller pre-encrypts the
+// JSON bundle {access_token, refresh_token, id_token} — the db layer never sees
+// plaintext token JSON on the write path. `loadCodexCredentialForRun` is the
+// ONLY decrypt-read accessor and must never be called from an API route;
+// `getCodexCredentialStatus` returns metadata only (never the secret column).
+// ---------------------------------------------------------------------------
+
+export type CodexCredentialTokens = { accessToken: string; refreshToken: string; idToken: string };
+
+export type CodexCredentialForRun = {
+  workspaceId: string;
+  tokens: CodexCredentialTokens;          // decrypted — never logged, never returned by a route
+  chatgptAccountId: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  status: string;
+  lastError: string | null;
+};
+
+/** Login / rotation write. Caller passes the PRE-encrypted credential blob. */
+export async function upsertCodexSubscriptionCredential(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  credentialEncrypted: string;            // v1 envelope of JSON {access_token, refresh_token, id_token}
+  chatgptAccountId: string | null;
+  scopes: string | null;
+  planType: string | null;
+  isFedramp: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+}): Promise<void> {
+  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const now = new Date();
+    await scopedDb.insert(schema.codexSubscriptionCredentials).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      credentialEncrypted: input.credentialEncrypted,
+      chatgptAccountId: input.chatgptAccountId,
+      scopes: input.scopes,
+      planType: input.planType,
+      isFedramp: input.isFedramp,
+      expiresAt: input.expiresAt,
+      lastRefreshAt: input.lastRefreshAt,
+      status: "active",
+      lastError: null,
+    }).onConflictDoUpdate({
+      target: [schema.codexSubscriptionCredentials.workspaceId],
+      set: {
+        credentialEncrypted: input.credentialEncrypted,
+        chatgptAccountId: input.chatgptAccountId,
+        scopes: input.scopes,
+        planType: input.planType,
+        isFedramp: input.isFedramp,
+        expiresAt: input.expiresAt,
+        lastRefreshAt: input.lastRefreshAt,
+        status: "active",
+        lastError: null,
+        version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
+        updatedAt: now,
+      },
+    });
+  });
+}
+
+/** The ONLY decrypt-read accessor. Fails closed. Never call from an API route that returns the result. */
+export async function loadCodexCredentialForRun(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+): Promise<CodexCredentialForRun | null> {
+  const key = environmentsEncryptionKeyBytes(settings);
+  if (!key) {
+    throw new Error("codex credential present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+  }
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.codexSubscriptionCredentials)
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId)).limit(1);
+    if (!row) {
+      return null;
+    }
+    let tokens: CodexCredentialTokens;
+    try {
+      // The stored blob uses OpenAI's snake_case token field names; map to the
+      // camelCase internal shape. Callers (route + worker) write snake_case.
+      const parsed = JSON.parse(decryptEnvironmentValue(key, row.credentialEncrypted)) as {
+        access_token: string;
+        refresh_token: string;
+        id_token: string;
+      };
+      tokens = { accessToken: parsed.access_token, refreshToken: parsed.refresh_token, idToken: parsed.id_token };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`);
+    }
+    return {
+      workspaceId,
+      tokens,
+      chatgptAccountId: row.chatgptAccountId,
+      scopes: row.scopes,
+      planType: row.planType,
+      isFedramp: row.isFedramp,
+      expiresAt: row.expiresAt,
+      lastRefreshAt: row.lastRefreshAt,
+      status: row.status,
+      lastError: row.lastError,
+    };
+  });
+}
+
+/** Persist rotated tokens after a successful refresh. Caller pre-encrypts. */
+export async function recordCodexTokenRefresh(db: Database, input: {
+  workspaceId: string;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+  lastRefreshAt: Date;
+}): Promise<void> {
+  await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.codexSubscriptionCredentials).set({
+      credentialEncrypted: input.credentialEncrypted,
+      expiresAt: input.expiresAt,
+      lastRefreshAt: input.lastRefreshAt,
+      status: "active",
+      lastError: null,
+      version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
+      updatedAt: new Date(),
+    }).where(eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId));
+  });
+}
+
+/** Surface a permanent or transient failure on the credential row. */
+export async function setCodexCredentialStatus(
+  db: Database,
+  workspaceId: string,
+  status: "active" | "needs_relogin" | "error",
+  lastError: string | null,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.codexSubscriptionCredentials)
+      .set({ status, lastError, updatedAt: new Date() })
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId));
+  });
+}
+
+/** Metadata-only read for API routes. NEVER selects credential_encrypted. */
+export async function getCodexCredentialStatus(db: Database, workspaceId: string): Promise<{
+  connected: boolean;
+  chatgptAccountId: string | null;
+  scopes: string | null;
+  planType: string | null;
+  status: string;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  lastError: string | null;
+} | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+      scopes: schema.codexSubscriptionCredentials.scopes,
+      planType: schema.codexSubscriptionCredentials.planType,
+      status: schema.codexSubscriptionCredentials.status,
+      expiresAt: schema.codexSubscriptionCredentials.expiresAt,
+      lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
+      lastError: schema.codexSubscriptionCredentials.lastError,
+    }).from(schema.codexSubscriptionCredentials)
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId)).limit(1);
+    if (!row) {
+      return null;
+    }
+    return { connected: row.status === "active", ...row };
+  });
+}
+
 export async function recordAuditEvent(db: Database, input: {
   accountId: string;
   workspaceId?: string | null;

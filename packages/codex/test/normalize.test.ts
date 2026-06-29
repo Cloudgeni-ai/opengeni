@@ -1,0 +1,84 @@
+import { describe, expect, test } from "bun:test";
+import { buildModelResolver, normalizeCodexRequestBody } from "../src";
+
+const identity = (s: string): string => s;
+
+describe("normalizeCodexRequestBody", () => {
+  test("forces store:false and strips max token fields", () => {
+    const body = normalizeCodexRequestBody({ model: "gpt-5.5", max_output_tokens: 1000, max_completion_tokens: 2000 }, identity);
+    expect(body.store).toBe(false);
+    expect("max_output_tokens" in body).toBe(false);
+    expect("max_completion_tokens" in body).toBe(false);
+  });
+
+  test("unions include with reasoning.encrypted_content, idempotently", () => {
+    expect(normalizeCodexRequestBody({}, identity).include).toEqual(["reasoning.encrypted_content"]);
+    const already = normalizeCodexRequestBody({ include: ["reasoning.encrypted_content"] }, identity);
+    expect(already.include).toEqual(["reasoning.encrypted_content"]);
+    const withOther = normalizeCodexRequestBody({ include: ["foo"] }, identity);
+    expect(withOther.include).toEqual(["foo", "reasoning.encrypted_content"]);
+  });
+
+  test("downgrades reasoning effort minimal -> low, leaves others", () => {
+    expect((normalizeCodexRequestBody({ reasoning: { effort: "minimal" } }, identity).reasoning as { effort: string }).effort).toBe("low");
+    expect((normalizeCodexRequestBody({ reasoning: { effort: "high" } }, identity).reasoning as { effort: string }).effort).toBe("high");
+  });
+
+  test("strips every item id but PRESERVES call_id", () => {
+    const body = normalizeCodexRequestBody({
+      input: [
+        { type: "message", id: "msg_1", role: "user", content: [] },
+        { type: "function_call", id: "fc_1", call_id: "call_abc", name: "x", arguments: "{}" },
+        { type: "function_call_output", id: "out_1", call_id: "call_abc", output: "ok" },
+        { type: "reasoning", id: "rs_1", encrypted_content: "blob" },
+      ],
+    }, identity);
+    const input = body.input as Array<Record<string, unknown>>;
+    for (const item of input) {
+      expect("id" in item).toBe(false);
+    }
+    expect(input[1]?.call_id).toBe("call_abc");
+    expect(input[2]?.call_id).toBe("call_abc");
+    expect(input[3]?.encrypted_content).toBe("blob"); // reasoning continuity preserved
+  });
+
+  test("does NOT remove item_reference items or convert orphans (verdict §0 a/c)", () => {
+    // item_reference never appears from @openai/agents; if one did, we leave it untouched.
+    const body = normalizeCodexRequestBody({ input: [{ type: "item_reference", id: "x" }] }, identity);
+    const input = body.input as Array<Record<string, unknown>>;
+    expect(input.length).toBe(1);
+    expect(input[0]?.type).toBe("item_reference");
+  });
+
+  test("leaves tools / tool_choice / parallel_tool_calls / text untouched", () => {
+    const original = { tools: [{ type: "function" }], tool_choice: "auto", parallel_tool_calls: true, text: { verbosity: "low" } };
+    const body = normalizeCodexRequestBody({ ...original }, identity);
+    expect(body.tools).toEqual(original.tools);
+    expect(body.tool_choice).toBe("auto");
+    expect(body.parallel_tool_calls).toBe(true);
+    expect(body.text).toEqual(original.text);
+  });
+
+  test("applies the model resolver to body.model", () => {
+    const body = normalizeCodexRequestBody({ model: "gpt-5.2-codex-high" }, buildModelResolver(["gpt-5.2-codex", "gpt-5.5"], "gpt-5.5"));
+    expect(body.model).toBe("gpt-5.2-codex");
+  });
+});
+
+describe("buildModelResolver", () => {
+  const resolve = buildModelResolver(["gpt-5.5", "gpt-5.4", "gpt-5.2-codex", "gpt-5.4-mini"], "gpt-5.5");
+
+  test("longest-prefix match wins", () => {
+    expect(resolve("gpt-5.2-codex-xhigh")).toBe("gpt-5.2-codex");
+    expect(resolve("gpt-5.4-mini")).toBe("gpt-5.4-mini"); // longer prefix beats gpt-5.4
+    expect(resolve("gpt-5.5")).toBe("gpt-5.5");
+  });
+
+  test("strips one leading namespace/ segment", () => {
+    expect(resolve("openai/gpt-5.5")).toBe("gpt-5.5");
+  });
+
+  test("unknown slug -> fallback", () => {
+    expect(resolve("o3-pro")).toBe("gpt-5.5");
+  });
+});

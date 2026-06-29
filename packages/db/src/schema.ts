@@ -104,6 +104,31 @@ export const workspaceEnvironmentVariables = pgTable("workspace_environment_vari
   environment: index("workspace_environment_variables_workspace_env_idx").on(table.workspaceId, table.environmentId),
 }));
 
+// Per-workspace ChatGPT/Codex subscription credential. One row per workspace.
+// access/refresh/id tokens live INSIDE credential_encrypted (v1 AES-256-GCM,
+// same envelope as workspace_environment_variables); the other columns are
+// plaintext metadata (header value + UI). RLS-isolated per workspace.
+export const codexSubscriptionCredentials = pgTable("codex_subscription_credentials", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  // Format: v1:<base64 iv>:<base64 ciphertext||gcm-tag>. JSON {access_token, refresh_token, id_token}. Never returned by any API.
+  credentialEncrypted: text("credential_encrypted").notNull(),
+  chatgptAccountId: text("chatgpt_account_id"),   // plaintext ChatGPT-Account-ID header value (non-secret)
+  scopes: text("scopes"),                         // space-delimited, as granted
+  planType: text("plan_type"),
+  isFedramp: boolean("is_fedramp").notNull().default(false),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),       // derived from access-token JWT exp
+  lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+  status: text("status").notNull().default("active"),               // active | needs_relogin | error
+  lastError: text("last_error"),
+  version: integer("version").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspace: uniqueIndex("codex_subscription_credentials_workspace_idx").on(table.workspaceId),
+}));
+
 export const sessions = pgTable("sessions", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

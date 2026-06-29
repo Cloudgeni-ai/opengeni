@@ -19,6 +19,7 @@ import { requireLimit } from "./billing/limits";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
+import { registerCodexRoutes } from "./routes/codex";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
@@ -230,6 +231,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerPackRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
+  registerCodexRoutes(app, routeDeps);
 
   return app;
 }
@@ -265,6 +267,10 @@ export function httpStatusForError(error: unknown): number {
 
 const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/, label: "/v1/workspaces/:workspaceId/codex/connect/start" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/poll$/, label: "/v1/workspaces/:workspaceId/codex/connect/poll" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/status$/, label: "/v1/workspaces/:workspaceId/codex/status" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/usage$/, label: "/v1/workspaces/:workspaceId/codex/usage" },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },

@@ -212,6 +212,11 @@ const SettingsSchema = z.object({
   // registry provider's models. validateSettings parses this at boot so a
   // malformed registry / unresolvable key / id collision fails fast.
   modelProvidersJson: z.string().default("[]"),
+  // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
+  // subscription is injected as a synthetic "codex-subscription" registry
+  // provider whose models route through the ChatGPT backend (@opengeni/codex).
+  codexSubscriptionEnabled: EnvBoolean.default(false),  // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  codexProductSku: z.string().optional(),               // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -596,6 +601,14 @@ const ModelPricingSchema = z.object({
 export const ModelProviderApi = z.enum(["responses", "chat"]);
 export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
+/**
+ * Registry provider kind. "api-key" providers carry their own static key/headers;
+ * "codex-subscription" providers authenticate per-request with a ChatGPT/Codex
+ * subscription token resolved at call time (no static key) — see @opengeni/codex.
+ */
+export const RegistryProviderKind = z.enum(["api-key", "codex-subscription"]);
+export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
+
 /** A single model exposed by a registry provider. */
 const RegistryModelSchema = z.object({
   id: z.string().min(1),                 // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
@@ -608,6 +621,7 @@ const RegistryModelSchema = z.object({
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
 const RegistryProviderSchema = z.object({
+  kind: RegistryProviderKind.default("api-key"),  // "codex-subscription" => per-request token, no static key
   id: z.string().min(1).regex(registryId),  // stable provider id, e.g. "fireworks"
   label: z.string().min(1).optional(),
   api: ModelProviderApi.default("chat"),
@@ -630,6 +644,7 @@ export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 export interface ResolvedModelProvider {
   id: string;                  // "openai" | "azure" | registry id
   label: string;
+  kind: RegistryProviderKind;  // "api-key" (built-ins + most registry) | "codex-subscription"
   api: ModelProviderApi;
   builtin: boolean;
   baseUrl?: string | undefined;
@@ -845,6 +860,8 @@ export function getSettings(): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
+    codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
@@ -1068,6 +1085,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
   const builtin: ResolvedModelProvider = {
     id: builtinProviderId(settings),
     label: builtinProviderLabel(settings),
+    kind: "api-key",
     api: "responses",
     builtin: true,
     compactionMode: resolveContextCompactionMode(settings),
@@ -1082,6 +1100,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
   const registry = parseModelProvidersJson(settings.modelProvidersJson).map((provider): ResolvedModelProvider => ({
     id: provider.id,
     label: provider.label ?? provider.id,
+    kind: provider.kind,
     api: provider.api,
     builtin: false,
     baseUrl: provider.baseUrl,

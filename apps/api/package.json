@@ -31,7 +31,8 @@
     "pg": "^8.21.0",
     "resend": "^6.12.4",
     "stripe": "^22.2.0",
-    "zod": "^4.2.1"
+    "zod": "^4.2.1",
+    "@opengeni/codex": "workspace:*"
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",

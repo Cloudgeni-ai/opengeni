@@ -19,6 +19,7 @@
     "paths": {
       "@opengeni/contracts": ["packages/contracts/src/index.ts"],
       "@opengeni/agent-proto": ["packages/agent-proto/src/index.ts"],
+      "@opengeni/codex": ["packages/codex/src/index.ts"],
       "@opengeni/config": ["packages/config/src/index.ts"],
       "@opengeni/db": ["packages/db/src/index.ts"],
       "@opengeni/db/schema": ["packages/db/src/schema.ts"],

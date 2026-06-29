@@ -40,7 +40,15 @@ import {
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
-import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { buildCodexTokenResolver } from "./codex-auth";
+import {
+  buildModelResolver,
+  CODEX_CLIENT_VERSION,
+  CODEX_FALLBACK_MODEL_SLUGS,
+  codexRequestStorage,
+  type CodexRequestContext,
+} from "@opengeni/codex";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -305,7 +313,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
     try {
-      const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
+      const mcpSettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
+      const capabilitySettings = await settingsWithCodexCredential(db, input.workspaceId, mcpSettings);
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
       const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
@@ -415,6 +424,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      // A codex-subscription turn resolves its per-workspace bearer at model-call
+      // time: codexSubscriptionFetch (on the provider's OpenAI client) reads this
+      // AsyncLocalStorage context. Build it once and wrap BOTH the compaction
+      // summarizer (a separate model call on the same codex client) and the main
+      // run; otherwise the summarizer would hit the codex backend unauthenticated.
+      const codexContext: CodexRequestContext | null = resolvedModel?.provider.kind === "codex-subscription"
+        ? ((): CodexRequestContext => {
+            const resolver = buildCodexTokenResolver(db, runSettings, input.workspaceId);
+            return {
+              clientVersion: CODEX_CLIENT_VERSION,
+              getToken: resolver.getToken,
+              refresh: resolver.refresh,
+              resolveModel: buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS, CODEX_FALLBACK_MODEL_SLUGS[0]),
+            };
+          })()
+        : null;
+      const withCodex = <T>(fn: () => Promise<T>): Promise<T> => (codexContext ? codexRequestStorage.run(codexContext, fn) : fn());
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
@@ -643,12 +669,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // (a chat provider can't summarize through OpenAI/Azure). Null
             // resolution keeps the default built-in Responses summarizer.
             resolvedModel
-              ? (s, m) => summarizeForCompaction(s, m, {
+              ? (s, m) => withCodex(() => summarizeForCompaction(s, m, {
                 client: resolvedModel.client,
                 api: resolvedModel.provider.api,
                 model: resolvedModel.configured.id,
                 maxOutputTokens: s.contextSummaryMaxTokens,
-              })
+              }))
               : undefined,
             forced ? { force: true } : {},
           );
@@ -697,7 +723,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
       let lastInputTokensObserved: number | null = null;
       throwIfWorkerShuttingDown();
-      stream = await runtime.runStream(agent, runInput, runSettings, {
+      const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> => runtime.runStream(agent, runInput, runSettings, {
         sandboxEnvironment,
         onRuntimeEvent: async (event) => {
           await publish!([{ type: event.type, payload: event.payload }], true);
@@ -714,6 +740,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           : {}),
       });
+      stream = await withCodex(runStreamOnce);
       batcher = createRuntimeBatcher(async (events) => {
         await publish!(events);
       });

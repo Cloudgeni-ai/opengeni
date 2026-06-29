@@ -48,6 +48,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     const provider: ResolvedModelProvider = {
       id: "fireworks",
       label: "Fireworks AI",
+      kind: "api-key",
       api: "chat",
       builtin: false,
       compactionMode: "client",
@@ -61,6 +62,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     const provider: ResolvedModelProvider = {
       id: "openai",
       label: "OpenAI",
+      kind: "api-key",
       api: "responses",
       builtin: true,
       compactionMode: "server",

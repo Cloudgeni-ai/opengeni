@@ -75,6 +75,7 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
+import { codexSubscriptionFetch } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -322,6 +323,19 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   }
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings)
+    : provider.kind === "codex-subscription"
+      // Codex subscription: the static apiKey is a placeholder — the real per-request
+      // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
+      // body normalization are all injected by codexSubscriptionFetch, which reads the
+      // per-workspace token from codexRequestStorage (AsyncLocalStorage) at call time.
+      // The provider id is constant ("codex-subscription"), so one cached client serves
+      // every workspace without baking a token into it.
+      ? new OpenAI({
+        apiKey: provider.apiKey ?? "codex-subscription",
+        ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
+        maxRetries: settings.openaiMaxRetries,
+        fetch: codexSubscriptionFetch(globalThis.fetch),
+      })
     // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
     // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
     // is passed straight through here rather than re-resolved.

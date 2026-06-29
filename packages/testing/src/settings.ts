@@ -81,6 +81,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
       },
     }),
     modelProvidersJson: "[]",
+    codexSubscriptionEnabled: false,
+    codexProductSku: undefined,
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh",
     openaiResponsesTransport: "http",

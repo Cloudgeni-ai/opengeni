@@ -47,6 +47,7 @@
         "@hono/zod-validator": "^0.7.6",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "@opengeni/agent-proto": "workspace:*",
+        "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -114,6 +115,7 @@
       "name": "@opengeni/worker",
       "version": "0.1.0",
       "dependencies": {
+        "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
@@ -144,6 +146,14 @@
         "typescript": "^6.0.3",
       },
     },
+    "packages/codex": {
+      "name": "@opengeni/codex",
+      "version": "0.1.0",
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/config": {
       "name": "@opengeni/config",
       "version": "0.1.0",
@@ -157,7 +167,7 @@
     },
     "packages/contracts": {
       "name": "@opengeni/contracts",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "zod": "^4.2.1",
       },
@@ -240,7 +250,7 @@
     },
     "packages/react": {
       "name": "@opengeni/react",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "dependencies": {
         "@opengeni/sdk": "workspace:*",
         "clsx": "^2.1.1",
@@ -317,6 +327,7 @@
         "@openai/agents": "^0.11.6",
         "@openai/agents-extensions": "^0.11.6",
         "@opengeni/agent-proto": "workspace:*",
+        "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "modal": "^0.7.4",
@@ -328,7 +339,7 @@
     },
     "packages/sdk": {
       "name": "@opengeni/sdk",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "devDependencies": {
         "@opengeni/contracts": "workspace:*",
         "@opengeni/deployment": "workspace:*",
@@ -883,6 +894,8 @@
     "@opengeni/agent-proto": ["@opengeni/agent-proto@workspace:packages/agent-proto"],
 
     "@opengeni/api": ["@opengeni/api@workspace:apps/api"],
+
+    "@opengeni/codex": ["@opengeni/codex@workspace:packages/codex"],
 
     "@opengeni/config": ["@opengeni/config@workspace:packages/config"],
 
