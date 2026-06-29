@@ -26,6 +26,7 @@ import {
   acquireLease,
   commitWarmingToWarm,
   failWarmingToCold,
+  getSandbox,
   getSandboxSessionEnvelope,
   heartbeatLeaseHolder,
   loadWorkspaceEnvironmentForRun,
@@ -36,6 +37,7 @@ import {
   SandboxLeaseSupersededError,
   type Database,
   type LeaseSnapshot,
+  type SandboxRecord,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -43,11 +45,14 @@ import { HTTPException } from "hono/http-exception";
 // The leaf — agent-loop-free. apps/api imports sandbox symbols ONLY from here
 // (enforced by sandbox-access-import-guard.test.ts).
 import {
+  DESKTOP_STREAM_PORT,
   ensureDisplayStack,
   ensureTerminalServer,
   establishSandboxSessionFromEnvelope,
   exposeStreamPort,
   desktopCapableBackend,
+  NatsControlRpc,
+  SelfhostedSandboxClient,
   serializeEstablishedSandboxEnvelope,
   mintStreamToken,
   STREAM_TOKEN_DEFAULT_TTL_SECONDS,
@@ -55,8 +60,11 @@ import {
   DisplayStackUnsupportedError,
   TerminalServerUnsupportedError,
   StreamPortUnavailableError,
+  type ControlRpc,
   type EstablishedSandboxSession,
+  type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
+import { relayConfigFromSettings } from "./routing";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -312,7 +320,7 @@ export async function readGroupLease(
 
 // The viewer heartbeat cadence: half the viewer-holder TTL, floored at 5s, so a
 // single missed beat never reaps a live viewer (two beats fit inside the TTL).
-function viewerHeartbeatIntervalMs(settings: Settings): number {
+export function viewerHeartbeatIntervalMs(settings: Settings): number {
   return Math.max(5_000, Math.floor(settings.sandboxViewerHolderTtlMs / 2));
 }
 
@@ -371,8 +379,9 @@ export type MintDesktopStreamInput = {
   session: Session;
   /** The viewer holder id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). */
-  lease: LeaseSnapshot;
+  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+   *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
+  lease?: LeaseSnapshot;
   /** The epoch the CALLER last observed the URL minted under. When the live
    *  lease epoch is greater, the box rolled over → emit stream.url.rotated to the
    *  other viewers. Omit on a first mint (no prior URL to rotate from). */
@@ -384,6 +393,9 @@ export type MintDesktopStreamInput = {
   establish?: (
     envelope: Record<string, unknown> | null,
   ) => Promise<EstablishedSandboxSession>;
+  /** Test seam: inject a fake relay-resolving session for the selfhosted-active
+   *  branch. Production NEVER passes this. */
+  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
 };
 
 /**
@@ -404,7 +416,8 @@ export async function mintDesktopStream(
   input: MintDesktopStreamInput,
 ): Promise<DesktopStreamMint | null> {
   const { db, settings, bus } = services;
-  const { accountId, workspaceId, session, lease } = input;
+  const { accountId, workspaceId, session } = input;
+  const lease = input.lease;
   // The scoped token's viewerId must be a UUID (StreamTokenPayload). The GET caps
   // handshake passes grant.subjectId, which is a non-UUID for an API-key principal
   // ("configured:key") — coerce it to a deterministic UUID so the mint never 500s
@@ -424,9 +437,23 @@ export async function mintDesktopStream(
   if (!secret) {
     return null;
   }
+
+  // SELFHOSTED ACTIVE: when the session's active sandbox is a selfhosted machine,
+  // route to the relay (NOT the Modal group-box path — it would resume the wrong
+  // box and return a Modal URL). No Modal lease required.
+  if (session.activeSandboxId) {
+    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    if (active?.kind === "selfhosted") {
+      const m = await tryMintActiveSelfhostedStream(services, { session, viewerId: input.viewerId, workspaceId, port: DESKTOP_STREAM_PORT, sandbox: active }, input.resolveSelfhostedSession);
+      // mintSelfhostedStream returns no resolution; the desktop cell needs it.
+      return m ? { url: m.url, token: m.token, expiresAt: m.expiresAt, resolution: defaultResolution(settings), leaseEpoch: m.leaseEpoch } : null;
+    }
+    // A Modal swap target (or unknown) falls through to the existing group-box path.
+  }
+
   // GATE 2: the box must be live (the handshake never spins one up — a cold box
   // returns lease_cold; the viewer-attach path warms it first, then mints).
-  if (lease.liveness !== "warm" && lease.liveness !== "draining") {
+  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
     return null;
   }
 
@@ -592,13 +619,17 @@ export type MintTerminalStreamInput = {
   session: Session;
   /** The viewer holder / principal id the scoped token is minted for. */
   viewerId: string;
-  /** The live lease (must be warm/draining — the box is up). */
-  lease: LeaseSnapshot;
+  /** The live lease (must be warm/draining — the box is up). A selfhosted-active
+   *  session may have no Modal group lease; omit and the selfhosted branch handles it. */
+  lease?: LeaseSnapshot;
   /** Test seam: override how the box is re-established by id (see
    *  MintDesktopStreamInput.establish). Production NEVER passes this. */
   establish?: (
     envelope: Record<string, unknown> | null,
   ) => Promise<EstablishedSandboxSession>;
+  /** Test seam: inject a fake relay-resolving session for the selfhosted-active
+   *  branch. Production NEVER passes this. */
+  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>;
 };
 
 /**
@@ -613,7 +644,8 @@ export async function mintTerminalStream(
   input: MintTerminalStreamInput,
 ): Promise<TerminalStreamMint | null> {
   const { db, settings } = services;
-  const { accountId, workspaceId, session, lease } = input;
+  const { accountId, workspaceId, session } = input;
+  const lease = input.lease;
   // Same caps-500 fix as the desktop mint: coerce a non-UUID principal id
   // (grant.subjectId = "configured:key" for an API key) to a deterministic UUID
   // so StreamTokenPayload.parse never throws an uncaught 500.
@@ -631,8 +663,21 @@ export async function mintTerminalStream(
   if (!secret) {
     return null;
   }
+
+  // SELFHOSTED ACTIVE: when the session's active sandbox is a selfhosted machine,
+  // route to the relay. NEVER fall through to the Modal group-box path (it would
+  // resume the wrong box / return a Modal URL).
+  if (session.activeSandboxId) {
+    const active = await getSandbox(db, workspaceId, session.activeSandboxId);
+    if (active?.kind === "selfhosted") {
+      return await tryMintActiveSelfhostedStream(services, { session, viewerId: input.viewerId, workspaceId, port: TERMINAL_STREAM_PORT, sandbox: active }, input.resolveSelfhostedSession);
+    }
+    // A Modal swap target (or unknown) falls through to the existing group-box path
+    // (unchanged — Modal swap-target streaming is out of scope for this fix).
+  }
+
   // GATE 2: the box must be live (the handshake never spins one up).
-  if (lease.liveness !== "warm" && lease.liveness !== "draining") {
+  if (!lease || (lease.liveness !== "warm" && lease.liveness !== "draining")) {
     return null;
   }
 
@@ -747,6 +792,65 @@ export async function mintTerminalStream(
 // session swapped off of. control ops are already active-epoch-fenced (the routing
 // proxy); this closes the STREAM side.
 // ============================================================================
+
+// Build a ControlRpc backed by the NATS events bus (mirrors fleet.ts:controlRpc).
+function controlRpc(bus: EventBus | undefined): ControlRpc {
+  return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
+    if (!bus) {
+      return null;
+    }
+    return bus.getRequestConnection();
+  });
+}
+
+/**
+ * Mint the relay stream cell against the session's ACTIVE selfhosted machine,
+ * fenced by active_epoch. Returns null (degrade, never throw) when the active
+ * sandbox is not selfhosted, the agent is offline, or the relay channel can't be
+ * ensured. `sandbox` is passed in already-fetched to avoid a duplicate getSandbox.
+ */
+async function tryMintActiveSelfhostedStream(
+  services: ViewerServices,
+  input: { session: Session; viewerId: string; workspaceId: string; port: number; sandbox: SandboxRecord },
+  // optional test seam (mirrors the existing `establish?` seam pattern): inject a
+  // fake relay-resolving session; production NEVER passes it.
+  resolveSelfhostedSession?: (sandbox: SandboxRecord) => Promise<{ resolveExposedPort?: (port: number) => Promise<unknown> }>,
+): Promise<TerminalStreamMint | null> {
+  const { settings, bus } = services;
+  const { session, workspaceId, port, sandbox } = input;
+  if (!sandbox.enrollmentId) {
+    return null;
+  }
+  // The relay needs NATS; degrade to null without a bus.
+  if (!bus && !resolveSelfhostedSession) {
+    return null;
+  }
+  let shSession: { resolveExposedPort?: (port: number) => Promise<unknown> };
+  try {
+    if (resolveSelfhostedSession) {
+      shSession = await resolveSelfhostedSession(sandbox);
+    } else {
+      const client = new SelfhostedSandboxClient({
+        workspaceId,
+        relay: relayConfigFromSettings(settings),
+        controlRpcFactory: () => controlRpc(bus),
+        agentId: sandbox.enrollmentId,
+        epoch: session.activeEpoch,
+      });
+      shSession = await client.resume({ agentId: sandbox.enrollmentId });
+    }
+  } catch {
+    return null;
+  }
+  return mintSelfhostedStream(services, {
+    workspaceId,
+    sessionId: session.id,
+    viewerId: input.viewerId,
+    activeEpoch: session.activeEpoch,
+    port,
+    session: shSession,
+  });
+}
 
 /** The structural slice of a selfhosted session the relay stream mint needs. */
 type RelayResolvableSession = {

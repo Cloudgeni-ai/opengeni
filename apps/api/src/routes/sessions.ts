@@ -36,6 +36,7 @@ import {
   clearSessionContext,
   closePtySession,
   getOpenPtySession,
+  getSandbox,
   getSession,
   getSessionGoal,
   getStreamAcknowledgment,
@@ -61,7 +62,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
-import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
+import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
   normalizeResources,
@@ -470,8 +471,8 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       settings.sandboxDesktopEnabled
       && !streamTokenDegraded(settings)
       && acknowledged
-      && (lease?.liveness === "warm" || lease?.liveness === "draining");
-    if (desktopUnlocked && lease) {
+      && (session.activeSandboxId != null || lease?.liveness === "warm" || lease?.liveness === "draining");
+    if (desktopUnlocked) {
       desktopStream = await mintDesktopStream({ db, settings, bus }, {
         accountId: grant.accountId,
         workspaceId,
@@ -481,7 +482,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         // POST /viewers. A previousEpoch != current would have rotated already
         // via the warming-commit; the read does not itself drive rotation.
         viewerId: grant.subjectId,
-        lease,
+        ...(lease ? { lease } : {}),
       });
     }
 
@@ -494,14 +495,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const terminalUnlocked =
       settings.sandboxTerminalEnabled
       && !streamTokenDegraded(settings)
-      && (lease?.liveness === "warm" || lease?.liveness === "draining");
-    if (terminalUnlocked && lease) {
-      terminalStream = await mintTerminalStream({ db, settings }, {
+      && (session.activeSandboxId != null || lease?.liveness === "warm" || lease?.liveness === "draining");
+    if (terminalUnlocked) {
+      terminalStream = await mintTerminalStream({ db, settings, bus }, {
         accountId: grant.accountId,
         workspaceId,
         session,
         viewerId: grant.subjectId,
-        lease,
+        ...(lease ? { lease } : {}),
       });
     }
 
@@ -628,51 +629,94 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(409, { message: "shared_acknowledgment_required" });
       }
     }
-    const result = await attachViewer({ db, settings }, {
-      accountId: grant.accountId,
-      workspaceId,
-      session,
-      ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
-    });
+    // SELFHOSTED ACTIVE: when the session's active sandbox is selfhosted, skip
+    // attachViewer (it warms the Modal group box — the wrong target). Synthesize a
+    // result shaped like ViewerAttachResult and mint relay cells directly.
+    const activeSandbox = session.activeSandboxId ? await getSandbox(db, workspaceId, session.activeSandboxId) : null;
+    const selfhostedActive = activeSandbox?.kind === "selfhosted";
 
-    // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
-    // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
-    // viewer holder, record data_plane_url, and fold the live address into the
-    // response. A degraded mint (no secret / headless / display-stack or tunnel
-    // failure) leaves dataPlaneUrl null — the client falls back to Channel-A. The
-    // box is warm here (attachViewer spun it up or attached), so the handshake's
-    // never-spin-up rule does not apply.
     let stream: DesktopStreamMint | null = null;
     let terminal: TerminalStreamMint | null = null;
-    if (
-      (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
-      && !streamTokenDegraded(settings)
-    ) {
-      const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
-      if (lease) {
-        // The pixel cell is minted only when the caller asked for the desktop plane
-        // (and consented above). A terminal-only attach skips it — the box is warm,
-        // the terminal mint below still runs.
+
+    let result: Awaited<ReturnType<typeof attachViewer>>;
+    if (selfhostedActive) {
+      const viewerId = parsed.data.viewerId ?? crypto.randomUUID();
+      result = {
+        viewerId,
+        liveness: "warm",
+        leaseEpoch: session.activeEpoch,
+        sandboxGroupId: session.sandboxGroupId,
+        viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
+        dataPlaneUrl: null,
+      };
+      if (
+        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
+        && !streamTokenDegraded(settings)
+      ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
           stream = await mintDesktopStream({ db, settings, bus }, {
             accountId: grant.accountId,
             workspaceId,
             session,
-            viewerId: result.viewerId,
-            lease,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
         }
-        // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
-        // address (independent of the desktop toggle). A degraded mint leaves the
-        // terminal fields null → the client falls back to the sse-events firehose.
         if (settings.sandboxTerminalEnabled) {
-          terminal = await mintTerminalStream({ db, settings }, {
+          terminal = await mintTerminalStream({ db, settings, bus }, {
             accountId: grant.accountId,
             workspaceId,
             session,
-            viewerId: result.viewerId,
-            lease,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
           });
+        }
+      }
+    } else {
+      result = await attachViewer({ db, settings }, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+      });
+
+      // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
+      // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
+      // viewer holder, record data_plane_url, and fold the live address into the
+      // response. A degraded mint (no secret / headless / display-stack or tunnel
+      // failure) leaves dataPlaneUrl null — the client falls back to Channel-A. The
+      // box is warm here (attachViewer spun it up or attached), so the handshake's
+      // never-spin-up rule does not apply.
+      if (
+        (settings.sandboxDesktopEnabled || settings.sandboxTerminalEnabled)
+        && !streamTokenDegraded(settings)
+      ) {
+        const lease = await readGroupLease({ db, settings }, { workspaceId, sandboxGroupId: session.sandboxGroupId });
+        if (lease) {
+          // The pixel cell is minted only when the caller asked for the desktop plane
+          // (and consented above). A terminal-only attach skips it — the box is warm,
+          // the terminal mint below still runs.
+          if (wantDesktop && settings.sandboxDesktopEnabled) {
+            stream = await mintDesktopStream({ db, settings, bus }, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
+          }
+          // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
+          // address (independent of the desktop toggle). A degraded mint leaves the
+          // terminal fields null → the client falls back to the sse-events firehose.
+          if (settings.sandboxTerminalEnabled) {
+            terminal = await mintTerminalStream({ db, settings, bus }, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
+          }
         }
       }
     }
