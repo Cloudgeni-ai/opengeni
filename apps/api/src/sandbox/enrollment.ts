@@ -53,6 +53,7 @@ import {
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
 } from "@opengeni/db";
+import { relayDialBaseFromSettings } from "./routing";
 
 // The device-flow timing knobs (RFC 8628). Short TTL + a poll interval the agent
 // must honor (the route rate-limits to the same cadence). These mirror the proto's
@@ -325,7 +326,11 @@ async function buildEnrollmentCredentials(
     bearer,
     subjectPrefix,
     natsUrls,
-    relayUrl: settings.selfhostedRelayUrl ?? "",
+    // Hand the agent the canonical `/stream` dial base, NOT the raw configured URL.
+    // The agent's relay producer appends only its routing query and assumes the base
+    // already carries the relay's `/stream` route; a path-less base 400s the dial and
+    // makes the terminal/desktop streams unreachable (dossier §V5/§V6).
+    relayUrl: relayDialBaseFromSettings(settings),
     relayToken,
     // M-AUTH closes the placeholder: there is NO per-machine NATS Account creds
     // file. The agent presents the BEARER as the NATS connect auth-token; the

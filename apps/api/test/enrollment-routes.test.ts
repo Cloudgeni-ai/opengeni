@@ -159,7 +159,12 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(creds.workspaceId).toBe(workspaceId);
     expect(creds.subjectPrefix).toBe(`agent.${workspaceId}.${approve.enrollmentId}`);
     expect(creds.natsUrls).toEqual(["nats://control.example:4222"]);
-    expect(creds.relayUrl).toBe("wss://relay.example");
+    // The agent-bound relay URL is the canonical `/stream` dial base, NOT the raw
+    // (path-less) configured `selfhostedRelayUrl`. The agent's producer appends only
+    // its routing query and assumes the base already carries `/stream`; without this
+    // normalization the producer dials a path-less URL the relay 400s and the
+    // terminal/desktop streams are unreachable (dossier §V5/§V6).
+    expect(creds.relayUrl).toBe("wss://relay.example/stream");
     // M-AUTH closed the placeholder: the agent presents the bearer as the NATS
     // connect auth-token (auth-callout), so natsAccountCreds is vestigial and
     // echoes the bearer (NOT the empty placeholder it used to be).

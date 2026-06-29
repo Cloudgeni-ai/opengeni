@@ -53,6 +53,25 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
   }
 }
 
+/** The canonical relay dial-BASE URL (`scheme://host[:port]/stream`) handed to the
+ *  agent PRODUCER. The agent's relay channel appends ONLY its routing query to
+ *  this base (`channel.rs`: `format!("{relay_url}{sep}{query}")`) and relies on the
+ *  base ALREADY carrying the relay's `/stream` route. `OPENGENI_SELFHOSTED_RELAY_URL`
+ *  is frequently pathless (e.g. `wss://relay.<env>.app.opengeni.ai`), which made the
+ *  producer dial a path-less URL the relay 400s. Derive the base from the SAME parser
+ *  the CONSUMER uses (`relayConfigFromSettings`) so producer + consumer always agree
+ *  on `/stream` — even when the configured URL omits it. An unconfigured relay maps to
+ *  `""` (graceful degrade: the agent reports no-relay rather than dialing a synthetic
+ *  host). Fixes preview AND managed prod with no agent rebuild (dossier §V5/§V6). */
+export function relayDialBaseFromSettings(settings: Settings): string {
+  if (!settings.selfhostedRelayUrl?.trim()) return "";
+  const { host, port, tls, path } = relayConfigFromSettings(settings);
+  const scheme = tls ? "wss" : "ws";
+  const defaultPort = tls ? 443 : 80;
+  const authority = port === defaultPort ? host : `${host}:${port}`;
+  return `${scheme}://${authority}${path}`;
+}
+
 function controlRpcFactory(bus: EventBus | undefined): () => ControlRpc {
   return () =>
     new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
