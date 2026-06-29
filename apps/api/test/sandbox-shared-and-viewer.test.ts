@@ -184,6 +184,22 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     })).rejects.toMatchObject({ status: 422 });
   }, 60_000);
 
+  test("targetSandboxId is consumed (seedTargetSandbox path) — rejects on a backend:'none' session", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    // Create-time machine targeting (A-2a): a named targetSandboxId seeds the
+    // active-sandbox pointer inside createAndStartSession. The harness settings
+    // pin sandboxBackend:"none", so the seed guard fires — proving the payload
+    // field actually reaches finishStartSession's seedTargetSandbox (not parsed
+    // away). The ownership/liveness validation for a real target is covered by
+    // the swapActiveSandbox / setActiveSandbox enrollment tests.
+    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "pin to a machine",
+      targetSandboxId: crypto.randomUUID(),
+    })).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
   test("{groupId} explicit join (I13/OD-S5) ⇒ same group as the sibling", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

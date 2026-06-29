@@ -628,6 +628,12 @@ function registerWorkspaceOrchestrationTools(
         model: z4.string().min(1).optional(),
         reasoningEffort: z4.string().optional(),
         sandboxBackend: z4.string().optional(),
+        // Create-time machine targeting: an enrolled sandbox id (from
+        // sandboxes_list) to run the spawned session on. Seeds the active-sandbox
+        // pointer at creation so the FIRST turn lands on the chosen machine
+        // (race-free). Ownership + liveness are validated in the domain via the
+        // same path as sandbox_swap; an unowned/offline/unknown target 422s.
+        targetSandboxId: z4.string().uuid().optional(),
         metadata: z4.record(z4.string(), z4.unknown()).optional(),
         // Workspace-scoped CREATE idempotency key: a retried session_create with
         // the same key returns the already-spawned worker instead of a duplicate.

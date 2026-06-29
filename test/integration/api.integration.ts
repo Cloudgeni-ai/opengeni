@@ -3907,6 +3907,46 @@ describe("API component integration", () => {
     })).rejects.toThrow("monthly agent run limit reached");
   });
 
+  test("manager MCP session_create forwards targetSandboxId to the domain (create-time machine targeting)", async () => {
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const mcpDeps = {
+      settings: testSettings({ databaseUrl: services.databaseUrl, environmentsEncryptionKey: environmentsTestKey }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by manager MCP tests");
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
+
+    // Control: a backend:"none" create WITHOUT a target succeeds — no machine
+    // is pinned, so nothing exercises the create-time targeting path.
+    const plain = await callMcpTool<{ id: string; sandboxBackend: string }>(mcp, "session_create", {
+      initialMessage: "no target",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(plain.sandboxBackend).toBe("none");
+
+    // The fix: targetSandboxId is now declared on the session_create inputSchema,
+    // so the MCP SDK no longer strips it before the handler runs — it reaches
+    // createSessionForRequest's seedTargetSandbox path. With backend:"none" the
+    // seed guard rejects (you cannot pin a machine for a sandbox-less session),
+    // which PROVES the value flowed end-to-end. Before the fix the unknown key
+    // was dropped and this create would have succeeded, silently swallowing the
+    // agent's machine-targeting request.
+    await expect(callMcpTool(mcp, "session_create", {
+      initialMessage: "pin to a machine",
+      model: "scripted-model",
+      sandboxBackend: "none",
+      targetSandboxId: crypto.randomUUID(),
+    })).rejects.toThrow(/cannot target a machine for a session with no sandbox/);
+  });
+
   test("manager MCP environment tools set variables write-only and create environments by name", async () => {
     const grant = await bootstrapMcpGrant(dbClient.db);
     const mcpDeps = {
