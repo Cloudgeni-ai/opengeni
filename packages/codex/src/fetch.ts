@@ -46,17 +46,37 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       headers.delete("OpenAI-Beta"); // omit on SSE (spec §1.2); fallback: "responses=experimental" if backend 400s
       headers.delete("x-api-key");
 
+      // The backend is streaming-only; force stream=true on the wire but remember
+      // the caller's intent so a non-streaming caller (e.g. the compaction
+      // summarizer) still gets a single JSON Response back.
+      let callerWantsStream = true;
       const nextInit: RequestInit = { ...init, headers };
       if (typeof init?.body === "string") {
         try {
-          nextInit.body = JSON.stringify(
-            normalizeCodexRequestBody(JSON.parse(init.body) as Record<string, unknown>, ctx.resolveModel),
-          );
+          const parsed = JSON.parse(init.body) as Record<string, unknown>;
+          callerWantsStream = parsed.stream === true;
+          nextInit.body = JSON.stringify(normalizeCodexRequestBody(parsed, ctx.resolveModel));
         } catch {
           /* leave unparseable bodies untouched (already copied from init) */
         }
       }
-      return base(rewritten, nextInit);
+      if (process.env.CODEX_DEBUG) {
+        const keys = typeof nextInit.body === "string" ? Object.keys(JSON.parse(nextInit.body) as Record<string, unknown>) : [];
+        console.error(`[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`);
+      }
+      const res = await base(rewritten, nextInit);
+      if (process.env.CODEX_DEBUG && !res.ok) {
+        console.error(`[codex-debug] <- ${res.status} ${await res.clone().text()}`);
+      }
+      // The codex backend leaves the terminal event's response.output empty and
+      // delivers the assistant items via output_item.done events instead. The
+      // @openai/agents parser (streaming AND non-streaming) reads response.output,
+      // so we must reconstruct it: collapse to one JSON Response for a non-streaming
+      // caller, or repair the live stream's terminal event for a streaming caller.
+      if (!res.ok) {
+        return res;
+      }
+      return callerWantsStream ? repairCodexStream(res) : await sseToJsonResponse(res);
     };
 
     let res = await attempt(await ctx.getToken());
@@ -65,4 +85,112 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     }
     return res;
   };
+}
+
+/**
+ * Collapse a Responses SSE stream into the single JSON Response object a
+ * non-streaming `responses.create` caller expects: the terminal response.*
+ * event carries the full `response` payload.
+ */
+async function sseToJsonResponse(res: Response): Promise<Response> {
+  const text = await res.text();
+  let final: Record<string, unknown> | null = null;
+  const items: unknown[] = []; // assembled from output_item.done (the codex backend
+  // leaves response.completed.response.output empty and emits the items separately).
+  for (const block of text.split("\n\n")) {
+    const data = block
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).trim())
+      .join("\n");
+    if (!data || data === "[DONE]") {
+      continue;
+    }
+    try {
+      const ev = JSON.parse(data) as { type?: string; response?: Record<string, unknown>; item?: unknown };
+      if (ev.type === "response.output_item.done" && ev.item !== undefined) {
+        items.push(ev.item);
+      } else if (ev.type === "response.completed" || ev.type === "response.done" || ev.type === "response.incomplete") {
+        final = ev.response ?? null;
+      }
+    } catch {
+      /* ignore non-JSON keepalive lines */
+    }
+  }
+  if (final && items.length > 0) {
+    final = { ...final, output: items }; // prefer the assembled items over an empty output array
+  }
+  if (process.env.CODEX_DEBUG) {
+    console.error(`[codex-debug] sse->json items=${items.length} outputLen=${Array.isArray(final?.output) ? (final.output as unknown[]).length : "?"}`);
+  }
+  const headers = new Headers(res.headers);
+  headers.set("content-type", "application/json");
+  headers.delete("content-length");
+  return new Response(JSON.stringify(final ?? {}), { status: 200, headers });
+}
+
+/**
+ * Repair a live Responses SSE stream for the @openai/agents streaming parser: pass
+ * every event through unchanged, collect the output_item.done items, and inject
+ * them into the terminal event's empty `output` so the parser sees the message.
+ */
+function repairCodexStream(res: Response): Response {
+  if (!res.body) {
+    return res;
+  }
+  const items: unknown[] = [];
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let idx = buffer.indexOf("\n\n");
+      while (idx !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        controller.enqueue(encoder.encode(`${patchSseBlock(block, items)}\n\n`));
+        idx = buffer.indexOf("\n\n");
+      }
+    },
+    flush(controller) {
+      if (buffer.length > 0) {
+        controller.enqueue(encoder.encode(patchSseBlock(buffer, items)));
+      }
+    },
+  });
+  const headers = new Headers(res.headers);
+  headers.delete("content-length");
+  return new Response(res.body.pipeThrough(transform), { status: res.status, headers });
+}
+
+/** Collect output_item.done items (mutating `items`); rewrite the terminal event's empty output. */
+function patchSseBlock(block: string, items: unknown[]): string {
+  const lines = block.split("\n");
+  const dataStr = lines.filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+  if (!dataStr || dataStr === "[DONE]") {
+    return block;
+  }
+  let ev: { type?: string; item?: unknown; response?: Record<string, unknown> };
+  try {
+    ev = JSON.parse(dataStr);
+  } catch {
+    return block;
+  }
+  if (ev.type === "response.output_item.done" && ev.item !== undefined) {
+    items.push(ev.item);
+    return block;
+  }
+  if (
+    (ev.type === "response.completed" || ev.type === "response.done" || ev.type === "response.incomplete") &&
+    ev.response
+  ) {
+    const out = ev.response.output;
+    if ((!Array.isArray(out) || out.length === 0) && items.length > 0) {
+      ev.response = { ...ev.response, output: items };
+      const nonData = lines.filter((l) => !l.startsWith("data:"));
+      return [...nonData, `data: ${JSON.stringify(ev)}`].join("\n");
+    }
+  }
+  return block;
 }

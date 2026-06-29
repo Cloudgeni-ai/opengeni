@@ -4,9 +4,10 @@ import { buildModelResolver, normalizeCodexRequestBody } from "../src";
 const identity = (s: string): string => s;
 
 describe("normalizeCodexRequestBody", () => {
-  test("forces store:false and strips max token fields", () => {
-    const body = normalizeCodexRequestBody({ model: "gpt-5.5", max_output_tokens: 1000, max_completion_tokens: 2000 }, identity);
+  test("forces store:false + stream:true and strips max token fields", () => {
+    const body = normalizeCodexRequestBody({ model: "gpt-5.5", stream: false, max_output_tokens: 1000, max_completion_tokens: 2000 }, identity);
     expect(body.store).toBe(false);
+    expect(body.stream).toBe(true); // backend is streaming-only
     expect("max_output_tokens" in body).toBe(false);
     expect("max_completion_tokens" in body).toBe(false);
   });

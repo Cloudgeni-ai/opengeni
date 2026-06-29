@@ -82,6 +82,41 @@ describe("codexSubscriptionFetch", () => {
     expect(res.status).toBe(200);
   });
 
+  // A realistic codex stream: the terminal response.completed leaves output EMPTY,
+  // and the assistant message arrives via output_item.done (the quirk we repair).
+  const CODEX_SSE = [
+    'data: {"type":"response.created","response":{"id":"r1"}}',
+    'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}}',
+    'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[],"usage":{"output_tokens":2}}}',
+    "",
+  ].join("\n\n");
+  const codexBase: FetchLike = async () => new Response(CODEX_SSE, { status: 200 });
+
+  test("non-streaming caller: SSE collapses to one JSON Response with output assembled from item events", async () => {
+    const fetchImpl = codexSubscriptionFetch(codexBase);
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", input: [] }) }),
+    );
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const json = await res.json() as { status: string; output: Array<{ type: string }> };
+    expect(json.status).toBe("completed");
+    expect(json.output).toHaveLength(1); // assembled from output_item.done, not the empty terminal output
+    expect(json.output[0]?.type).toBe("message");
+  });
+
+  test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
+    const fetchImpl = codexSubscriptionFetch(codexBase);
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+    );
+    const text = await res.text();
+    const terminal = text.split("\n\n").map((b) => b.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n"))
+      .filter(Boolean).map((d) => JSON.parse(d) as { type?: string; response?: { output?: unknown[] } })
+      .find((e) => e.type === "response.completed");
+    expect(terminal?.response?.output).toHaveLength(1); // injected; the SDK parser now sees the message
+    expect(text).toContain("response.output_item.done"); // intermediate events still pass through for incremental UI
+  });
+
   test("passes through untouched when there is no codex context", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);

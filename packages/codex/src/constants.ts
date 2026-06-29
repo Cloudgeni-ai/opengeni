@@ -25,22 +25,21 @@ export const CODEX_PROVIDER_ID = "codex-subscription";
 export const CODEX_PROVIDER_BASE_URL = "https://chatgpt.com/backend-api";
 export const CODEX_MODEL_ID_PREFIX = "codex/";
 
-// Offline fallback catalog (spec §1.4 bundled list). The live catalog from
-// GET /models supersedes this when wired; until then these are the selectable
-// codex models and the longest-prefix resolution targets.
+// Offline fallback catalog. The live catalog from GET /models supersedes this
+// when wired; until then these are the selectable codex models and the
+// longest-prefix resolution targets. Confirmed live (2026-06) against a pro plan:
+// GET /codex/models returned exactly these (plus the internal codex-auto-review).
 export const CODEX_FALLBACK_MODEL_SLUGS = [
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
-  "gpt-5.3-codex",
-  "gpt-5.2-codex",
-  "gpt-5.2",
+  "gpt-5.3-codex-spark",
 ] as const;
 
-// Sent as the `version` header and inside the User-Agent. TODO: confirm the
-// backend's accepted min/max in the live spike; /responses tolerates this but the
-// /models catalog filters by min_client_version.
-export const CODEX_CLIENT_VERSION = "0.45.0";
+// Sent as the `version` header and inside the User-Agent. Confirmed live: the
+// backend accepts the current codex CLI version; an older value risks /models
+// min_client_version filtering. Keep in step with the codex CLI releases.
+export const CODEX_CLIENT_VERSION = "0.142.4";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable

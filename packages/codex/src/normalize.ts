@@ -19,6 +19,7 @@ export function normalizeCodexRequestBody(
   resolveModel: (slug: string) => string,
 ): Record<string, unknown> {
   body.store = false; // ChatGPT backend REQUIRES store=false (spec §1.3)
+  body.stream = true; // ChatGPT backend REQUIRES stream=true (confirmed live: 400 "Stream must be set to true").
   delete body.max_output_tokens; // rejected -> strip (spec §1.3)
   delete body.max_completion_tokens;
 
