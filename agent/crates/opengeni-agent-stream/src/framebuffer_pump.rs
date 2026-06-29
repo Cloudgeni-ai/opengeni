@@ -24,12 +24,27 @@ use opengeni_agent_platform::DesktopBackend;
 
 use crate::channel::RelayChannel;
 use crate::codec::RelayMessage;
-use crate::error::StreamResult;
+use crate::error::{StreamError, StreamResult};
 
 /// The default desktop frame interval (~10 fps). A real codec / damage-tracking
 /// upgrade is a pump change, not a protocol change (dossier §10.5). Kept modest so
 /// a PNG-per-frame stream does not saturate the relay; M12 tunes it live.
 const DEFAULT_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How many times the pump retries the FIRST `capture()` before it gives up. Xvfb /
+/// the X server can take a beat to settle after `desktop_ensure` probed the display,
+/// so the framebuffer's first capture can fail transiently; we retry against that
+/// readiness rather than skipping the frame (which would leave the mint un-served).
+const FIRST_CAPTURE_MAX_ATTEMPTS: u32 = 20;
+/// The delay between first-capture retries (~20 × 100ms ≈ 2s of Xvfb settle budget,
+/// comfortably inside the owner's readiness timeout).
+const FIRST_CAPTURE_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// A one-shot pump-readiness signal: the framebuffer pump fires it once it has
+/// CAPTURED AND FORWARDED its first real frame, so a consumer dialing the minted URL
+/// is guaranteed a replayable frame. The owner (`register_desktop`) awaits it (with
+/// a timeout) before returning the descriptor.
+pub type ReadyTx = tokio::sync::oneshot::Sender<()>;
 
 /// Whether the agent is allowed to apply synthetic input on this channel. Set from
 /// the enrollment `consented_screen_control` grant; when `false` the pump captures
@@ -43,6 +58,10 @@ pub struct InputPolicy {
 /// Runs the framebuffer pump until the relay transport drops. Captures + ships a
 /// frame each interval and applies inbound computer-use input (when consented).
 ///
+/// `ready` (when `Some`) is fired once the FIRST real frame has been captured AND
+/// forwarded to the relay ring, so the owner's mint is gated on a serveable channel.
+/// It is only passed on the FIRST run — a reconnect re-enters with `ready = None`.
+///
 /// # Errors
 ///
 /// Propagates a [`StreamError::Transport`](crate::error::StreamError::Transport)
@@ -51,8 +70,9 @@ pub async fn run(
     desktop: &Arc<dyn DesktopBackend>,
     channel: &mut RelayChannel,
     policy: InputPolicy,
+    ready: Option<ReadyTx>,
 ) -> StreamResult<()> {
-    run_with_interval(desktop, channel, policy, DEFAULT_FRAME_INTERVAL).await
+    run_with_interval(desktop, channel, policy, DEFAULT_FRAME_INTERVAL, ready).await
 }
 
 /// [`run`] with an explicit frame interval (tests use a short one).
@@ -60,13 +80,26 @@ pub async fn run(
 /// # Errors
 ///
 /// Propagates a [`StreamError::Transport`](crate::error::StreamError::Transport)
-/// from the relay send/recv so the owner reconnects + resumes.
+/// from the relay send/recv so the owner reconnects + resumes, or
+/// [`StreamError::Platform`](crate::error::StreamError::Platform) if the FIRST
+/// capture never succeeds within the bounded Xvfb-settle retry budget.
 pub async fn run_with_interval(
     desktop: &Arc<dyn DesktopBackend>,
     channel: &mut RelayChannel,
     policy: InputPolicy,
     interval: Duration,
+    ready: Option<ReadyTx>,
 ) -> StreamResult<()> {
+    // First frame: retry transient capture failures against Xvfb readiness (the X
+    // server can still be settling right after `desktop_ensure` probed the display)
+    // rather than skipping the frame. Only the FIRST run carries `ready`; a reconnect
+    // resumes the steady-state loop directly.
+    if let Some(ready) = ready {
+        capture_and_forward_first_frame(desktop, channel).await?;
+        // The first real frame is now buffered in the relay ring — signal ready.
+        let _ = ready.send(());
+    }
+
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -105,6 +138,42 @@ pub async fn run_with_interval(
             }
         }
     }
+}
+
+/// Captures the FIRST framebuffer frame and forwards it to the relay, retrying a
+/// transient `capture()` failure against Xvfb readiness with a small bounded
+/// backoff. This is the readiness-barrier path: it does NOT cache a negative result,
+/// so a display that settles a beat after the probe still serves. A capture that is
+/// still failing after the budget surfaces as a typed [`StreamError::Platform`] (the
+/// owner returns it from the mint rather than minting a dead URL); a relay send
+/// failure surfaces as a retryable [`StreamError::Transport`].
+async fn capture_and_forward_first_frame(
+    desktop: &Arc<dyn DesktopBackend>,
+    channel: &mut RelayChannel,
+) -> StreamResult<()> {
+    let mut last_err = None;
+    for attempt in 1..=FIRST_CAPTURE_MAX_ATTEMPTS {
+        match desktop.capture().await {
+            Ok(frame) => {
+                channel.send_frame(bytes::Bytes::from(frame.png)).await?;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::debug!(
+                    attempt,
+                    error = %e,
+                    "desktop first-capture failed; retrying against Xvfb readiness"
+                );
+                last_err = Some(e);
+                if attempt < FIRST_CAPTURE_MAX_ATTEMPTS {
+                    tokio::time::sleep(FIRST_CAPTURE_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    Err(StreamError::Platform(last_err.unwrap_or_else(|| {
+        opengeni_agent_platform::PlatformError::os("desktop first capture produced no frame")
+    })))
 }
 
 #[cfg(test)]
@@ -204,6 +273,7 @@ mod tests {
             &mut channel,
             InputPolicy { allow_input: true },
             Duration::from_millis(10),
+            None,
         );
         // Bound the pump; we only need a couple frames + the inject to land.
         let _ = tokio::time::timeout(Duration::from_secs(2), pump).await;
@@ -263,6 +333,7 @@ mod tests {
             &mut channel,
             InputPolicy { allow_input: false },
             Duration::from_secs(1), // long interval: no capture noise
+            None,
         );
         let _ = tokio::time::timeout(Duration::from_secs(2), pump).await;
         let _ = relay.await;
@@ -270,6 +341,165 @@ mod tests {
         assert!(
             fake.injects.lock().unwrap().is_empty(),
             "unconsented input must not be injected"
+        );
+    }
+
+    /// A desktop whose first `fail_first` captures fail transiently (Xvfb still
+    /// settling) and succeed thereafter — models the cold-start race the readiness
+    /// barrier must absorb.
+    struct FlakyDesktop {
+        fail_first: u32,
+        captures: AtomicU32,
+    }
+
+    #[async_trait]
+    impl DesktopBackend for FlakyDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            Some(v1::Display {
+                id: ":99".to_string(),
+                width: 4,
+                height: 4,
+                r#virtual: true,
+            })
+        }
+        async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            let n = self.captures.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(opengeni_agent_platform::PlatformError::os(
+                    "x11 capture: display not ready",
+                ));
+            }
+            Ok(CapturedFrame {
+                png: b"\x89PNG-fake".to_vec(),
+                width: 4,
+                height: 4,
+            })
+        }
+        async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readiness_fires_only_after_the_first_frame_is_forwarded() {
+        // The pump must FORWARD a real frame to the relay BEFORE it fires readiness,
+        // so a consumer dialing the minted URL is guaranteed a replayable frame.
+        let desktop: Arc<dyn DesktopBackend> = Arc::new(FakeDesktop::default());
+        let (agent_side, mut relay_side) = MockTransport::pair();
+        let mut channel =
+            RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        // The pump borrows locals, so drive it inline (not spawned). A long interval
+        // means it never produces a SECOND frame; the relay (unbounded mock) is held
+        // by THIS task so the pump always has a live peer. The only thing that
+        // resolves the race is the first frame firing readiness.
+        let pump = run_with_interval(
+            &desktop,
+            &mut channel,
+            InputPolicy { allow_input: false },
+            Duration::from_secs(3600), // no steady-state ticks: isolate the first frame
+            Some(ready_tx),
+        );
+        tokio::select! {
+            _ = pump => panic!("the long-interval pump should not return on its own"),
+            r = tokio::time::timeout(Duration::from_secs(2), ready_rx) => {
+                r.expect("readiness must fire within the budget")
+                    .expect("readiness sender must not be dropped");
+            }
+        }
+        // The first frame must be buffered in the relay ring (readiness gates on it).
+        assert!(
+            matches!(relay_side.recv().await, Ok(Some(RelayMessage::Frame(_)))),
+            "the relay must see the first frame"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_capture_retries_a_transient_failure_then_serves() {
+        // The first two captures fail (Xvfb settling); the pump must retry rather
+        // than skip/give-up, then forward the first good frame and fire readiness.
+        let flaky = Arc::new(FlakyDesktop {
+            fail_first: 2,
+            captures: AtomicU32::new(0),
+        });
+        let desktop: Arc<dyn DesktopBackend> = flaky.clone();
+        let (agent_side, mut relay_side) = MockTransport::pair();
+        let mut channel =
+            RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        let pump = run_with_interval(
+            &desktop,
+            &mut channel,
+            InputPolicy { allow_input: false },
+            Duration::from_secs(3600),
+            Some(ready_tx),
+        );
+        tokio::select! {
+            _ = pump => panic!("the long-interval pump should not return on its own"),
+            r = tokio::time::timeout(Duration::from_secs(3), ready_rx) => {
+                r.expect("readiness must fire after the retried capture")
+                    .expect("readiness sender must not be dropped");
+            }
+        }
+        assert!(
+            matches!(relay_side.recv().await, Ok(Some(RelayMessage::Frame(_)))),
+            "after retrying the transient failures the relay must see a frame"
+        );
+        // Exactly: 2 failed + 1 succeeded = 3 capture attempts.
+        assert_eq!(flaky.captures.load(Ordering::SeqCst), 3);
+    }
+
+    /// A desktop whose capture always fails — models a display that never settles.
+    struct DeadDesktop;
+
+    #[async_trait]
+    impl DesktopBackend for DeadDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            Some(v1::Display {
+                id: ":99".to_string(),
+                width: 4,
+                height: 4,
+                r#virtual: true,
+            })
+        }
+        async fn capture(&self) -> PlatformResult<CapturedFrame> {
+            Err(opengeni_agent_platform::PlatformError::os(
+                "x11 capture: display gone",
+            ))
+        }
+        async fn inject(&self, _input: &v1::DesktopInput) -> PlatformResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_capture_that_never_succeeds_surfaces_a_typed_platform_error() {
+        // The retry budget is bounded: a capture that never succeeds must return a
+        // typed Platform error (and NOT fire readiness), so the owner fails the mint
+        // rather than minting a dead URL. `start_paused` auto-advances virtual time
+        // past the bounded retry backoff so the test does not actually sleep ~2s.
+        let desktop: Arc<dyn DesktopBackend> = Arc::new(DeadDesktop);
+        let (agent_side, _relay_side) = MockTransport::pair();
+        let mut channel =
+            RelayChannel::with_transport(desktop_channel_config(), Box::new(agent_side));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+
+        let err = run_with_interval(
+            &desktop,
+            &mut channel,
+            InputPolicy { allow_input: false },
+            Duration::from_secs(3600),
+            Some(ready_tx),
+        )
+        .await
+        .expect_err("a never-settling display must error the first-frame barrier");
+        assert!(matches!(err, StreamError::Platform(_)), "got {err:?}");
+        // Readiness was never fired (the sender was dropped with the pump).
+        assert!(
+            ready_rx.await.is_err(),
+            "readiness must NOT fire when the first frame never lands"
         );
     }
 }

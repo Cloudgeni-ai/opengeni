@@ -27,13 +27,14 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use opengeni_agent_platform::{
     DesktopBackend, PlatformError, PlatformResult, PtyProcess, StreamRegistry,
 };
 use opengeni_agent_proto::v1::{self, DesktopEnsureRequest, PtyOpenResponse, StreamChannel};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::backoff::ChannelBackoff;
 use crate::channel::{ChannelConfig, RelayChannel};
@@ -42,6 +43,15 @@ use crate::pty_pump::{self, PtyCommand, PtyControlTx};
 
 /// The control-channel buffer per PTY (write/resize/close commands).
 const PTY_COMMAND_BUFFER: usize = 32;
+
+/// How long `register_pty`/`register_desktop` wait for the spawned pump to confirm
+/// it is LIVE and has buffered its first real byte(s)/frame before giving up. The
+/// mint is gated on this so a consumer dialing the minted URL always finds
+/// replayable bytes; on a timeout the op returns a typed error rather than minting a
+/// dead URL (or hanging forever). Generous enough for a cold Xvfb/X11 to settle and
+/// a login shell to print a prompt, tight enough that a wedged pump fails the mint
+/// fast.
+const PUMP_READY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The logical port a PTY (terminal) stream maps to. Mirrors the in-box ttyd port
 /// the existing terminal-server uses, so `resolveExposedPort(7681)` addresses it.
@@ -139,8 +149,29 @@ impl StreamRegistry for RelayHub {
         }
 
         // Spawn the supervised pump: it auto-reconnects + resumes on a relay blip,
-        // and de-registers the pty control entry when it ends.
-        spawn_pty_pump(process, channel, cmd_rx, pty_id.clone(), self.ptys.clone());
+        // and de-registers the pty control entry when it ends. The readiness signal
+        // is fired once the pump is live + has shipped the shell's first prompt
+        // byte(s) into the relay ring, so a consumer dialing the minted URL sees
+        // output WITHOUT having to type.
+        let (ready_tx, ready_rx) = oneshot::channel();
+        spawn_pty_pump(
+            process,
+            channel,
+            cmd_rx,
+            pty_id.clone(),
+            self.ptys.clone(),
+            ready_tx,
+        );
+
+        // Gate the mint on the pump being serveable: do not return the descriptor
+        // until the first byte(s) are buffered. On a timeout (or a pump that died
+        // before becoming ready) drop the half-registered control entry and surface
+        // a typed error rather than minting a dead URL.
+        await_pump_ready(ready_rx, "pty").await.inspect_err(|_| {
+            if let Ok(mut ptys) = self.ptys.lock() {
+                ptys.remove(&pty_id);
+            }
+        })?;
 
         Ok(PtyOpenResponse {
             pty_id,
@@ -163,7 +194,12 @@ impl StreamRegistry for RelayHub {
         let policy = InputPolicy {
             allow_input: self.config.allow_screen_control,
         };
-        spawn_desktop_pump(desktop, channel, config, policy);
+        // Gate the mint on the framebuffer pump having captured + forwarded its first
+        // real frame (retrying a transient first-capture against Xvfb readiness), so
+        // a consumer dialing the minted URL immediately replays a frame.
+        let (ready_tx, ready_rx) = oneshot::channel();
+        spawn_desktop_pump(desktop, channel, config, policy, ready_tx);
+        await_pump_ready(ready_rx, "desktop").await?;
 
         Ok(descriptor)
     }
@@ -214,11 +250,15 @@ fn spawn_pty_pump(
     mut commands: mpsc::Receiver<PtyCommand>,
     pty_id: String,
     ptys: Arc<Mutex<HashMap<String, PtyControlTx>>>,
+    ready: oneshot::Sender<()>,
 ) {
     tokio::spawn(async move {
+        // The readiness signal is fired by the pump on its FIRST run only; a
+        // reconnect re-enters the pump with `None`.
+        let mut ready = Some(ready);
         let mut backoff = ChannelBackoff::standard();
         loop {
-            match pty_pump::run(&mut process, &mut channel, &mut commands).await {
+            match pty_pump::run(&mut process, &mut channel, &mut commands, ready.take()).await {
                 Ok(()) => {
                     // Clean PTY exit: tear the channel down with PROCESS_EXIT.
                     channel
@@ -253,11 +293,15 @@ fn spawn_desktop_pump(
     mut channel: RelayChannel,
     _config: ChannelConfig,
     policy: InputPolicy,
+    ready: oneshot::Sender<()>,
 ) {
     tokio::spawn(async move {
+        // The readiness signal is fired by the pump on its FIRST run only (after the
+        // first frame is captured + forwarded); a reconnect re-enters with `None`.
+        let mut ready = Some(ready);
         let mut backoff = ChannelBackoff::standard();
         loop {
-            match framebuffer_pump::run(&desktop, &mut channel, policy).await {
+            match framebuffer_pump::run(&desktop, &mut channel, policy, ready.take()).await {
                 Ok(()) => {
                     channel
                         .close(v1::StreamCloseReason::Normal, "desktop closed")
@@ -278,6 +322,29 @@ fn spawn_desktop_pump(
             }
         }
     });
+}
+
+/// Awaits the pump's readiness signal with a bounded timeout, mapping the two
+/// failure modes to typed platform errors so the mint never hangs and never returns
+/// a dead URL:
+///
+/// * the sender is DROPPED before firing (the pump died — e.g. a relay drop or a
+///   non-retryable first-capture failure — before serving a byte) ⇒ `Os`,
+/// * the timeout elapses (the pump is wedged) ⇒ `Timeout`.
+async fn await_pump_ready(
+    ready_rx: oneshot::Receiver<()>,
+    kind: &str,
+) -> PlatformResult<()> {
+    match tokio::time::timeout(PUMP_READY_TIMEOUT, ready_rx).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_recv)) => Err(PlatformError::os(format!(
+            "{kind} stream pump ended before it became ready"
+        ))),
+        Err(_elapsed) => Err(PlatformError::Timeout(format!(
+            "{kind} stream pump did not become ready within {}s",
+            PUMP_READY_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// A fresh channel id (a random hex token). Avoids pulling a uuid crate for what is
@@ -330,5 +397,45 @@ mod tests {
         assert_eq!(d.agent_id, "ag");
         assert_eq!(d.port, PTY_STREAM_PORT);
         assert_eq!(d.kind(), v1::StreamKind::Pty);
+    }
+
+    #[tokio::test]
+    async fn await_pump_ready_returns_when_the_pump_signals() {
+        let (tx, rx) = oneshot::channel();
+        tx.send(()).expect("send ready");
+        await_pump_ready(rx, "pty")
+            .await
+            .expect("a fired signal resolves Ok");
+    }
+
+    #[tokio::test]
+    async fn await_pump_ready_times_out_with_a_typed_error_rather_than_hanging() {
+        // A pump that never becomes ready must yield a typed Timeout (retryable at
+        // the control plane), NOT hang the mint forever. `pause`d time fast-forwards
+        // past the readiness timeout deterministically.
+        tokio::time::pause();
+        // Hold the sender so the channel is open but never fires.
+        let (_tx, rx) = oneshot::channel();
+        let waiter = tokio::spawn(async move { await_pump_ready(rx, "desktop").await });
+        // Advance virtual time past the readiness budget.
+        tokio::time::advance(PUMP_READY_TIMEOUT + Duration::from_secs(1)).await;
+        let err = waiter
+            .await
+            .expect("waiter task")
+            .expect_err("an un-fired pump must error");
+        assert!(matches!(err, PlatformError::Timeout(_)), "got {err:?}");
+        assert_eq!(err.code(), v1::ErrorCode::Timeout);
+    }
+
+    #[tokio::test]
+    async fn await_pump_ready_reports_a_pump_that_died_before_becoming_ready() {
+        // A pump that drops its sender (it died — a relay drop / non-retryable first
+        // capture — before serving a byte) must surface a typed Os error, not a hang.
+        let (tx, rx) = oneshot::channel();
+        drop(tx); // the pump ended without firing readiness.
+        let err = await_pump_ready(rx, "pty")
+            .await
+            .expect_err("a dropped sender must error");
+        assert!(matches!(err, PlatformError::Os { .. }), "got {err:?}");
     }
 }

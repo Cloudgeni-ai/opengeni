@@ -32,6 +32,21 @@ const OUTPUT_CHANNEL_BOUND: usize = 256;
 /// The PTY read chunk size.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// A one-shot pump-readiness signal: the pump fires it the instant it has entered
+/// its select loop (so inbound keystrokes are received immediately) AND shipped its
+/// first real byte(s) into the relay ring, so a consumer dialing the freshly-minted
+/// URL is guaranteed replayable output WITHOUT having to type. The owner
+/// (`register_pty`) awaits it (with a timeout) before returning the descriptor.
+pub type ReadyTx = tokio::sync::oneshot::Sender<()>;
+
+/// Fires the one-shot readiness signal exactly once (a no-op if already fired or the
+/// owner stopped waiting). Takes the sender out so subsequent frames do not re-fire.
+fn fire_ready(ready: &mut Option<ReadyTx>) {
+    if let Some(tx) = ready.take() {
+        let _ = tx.send(());
+    }
+}
+
 /// A control command sent to a live PTY pump out-of-band of the relay stream — the
 /// programmatic `pty_write`/`pty_resize`/`pty_close` control ops (which arrive over
 /// NATS, not the relay byte stream). The pump applies it against the owned
@@ -63,6 +78,10 @@ pub type PtyControlTx = mpsc::Sender<PtyCommand>;
 /// closes the channel `PROCESS_EXIT`); a transport error propagates so the caller
 /// can reconnect + resume and re-enter the pump.
 ///
+/// `ready` is fired once the loop is live AND the first output frame has been
+/// shipped to the relay (so the owner's mint is gated on a serveable channel). It is
+/// only passed on the FIRST run — a reconnect re-enters the pump with `ready = None`.
+///
 /// # Errors
 ///
 /// Propagates a [`StreamError::Transport`](crate::error::StreamError::Transport)
@@ -71,6 +90,7 @@ pub async fn run(
     process: &mut PtyProcess,
     channel: &mut RelayChannel,
     commands: &mut mpsc::Receiver<PtyCommand>,
+    ready: Option<ReadyTx>,
 ) -> StreamResult<()> {
     // --- output: blocking reader → bounded channel ---------------------------
     let reader = process.take_reader();
@@ -109,7 +129,15 @@ pub async fn run(
         })
     });
 
-    let result = pump_loop(process, channel, commands, &mut out_rx, &in_tx).await;
+    // Nudge the shell to print a fresh prompt so a freshly-attaching consumer sees
+    // output WITHOUT having to type: writing a lone newline to the PTY master makes
+    // an interactive login shell re-emit its prompt. This produces the first real
+    // byte(s) the readiness barrier waits on. Best-effort — if the writer task has
+    // already ended (a command-only PTY that exits instantly) the pump still serves
+    // whatever the command printed, and EOF resolves readiness via the first frame.
+    let _ = in_tx.send(b"\n".to_vec()).await;
+
+    let result = pump_loop(process, channel, commands, &mut out_rx, &in_tx, ready).await;
 
     // Tear down: dropping the senders/receivers ends the blocking tasks.
     drop(in_tx);
@@ -125,12 +153,18 @@ pub async fn run(
 
 /// The select loop: forward tty output frames out, apply inbound frames + control
 /// commands to the PTY. Ends when output EOFs (PTY exit) or the relay drops.
+///
+/// `ready` (when `Some`) is fired the first time an output frame is shipped to the
+/// relay (or, defensively, on an immediate PTY EOF that produced no output) — the
+/// loop is already selecting on `channel.recv()` by then, so inbound keystrokes are
+/// received the instant a consumer sends them.
 async fn pump_loop(
     process: &mut PtyProcess,
     channel: &mut RelayChannel,
     commands: &mut mpsc::Receiver<PtyCommand>,
     out_rx: &mut mpsc::Receiver<Vec<u8>>,
     in_tx: &mpsc::Sender<Vec<u8>>,
+    mut ready: Option<ReadyTx>,
 ) -> StreamResult<()> {
     // Once the command sender is dropped, stop selecting on it so a closed channel
     // (which resolves immediately) does not spin the loop.
@@ -139,15 +173,17 @@ async fn pump_loop(
         tokio::select! {
             // tty output → relay frame.
             chunk = out_rx.recv() => {
-                match chunk {
-                    Some(bytes) => {
-                        channel.send_frame(bytes::Bytes::from(bytes)).await?;
-                    }
-                    None => {
-                        // The reader task ended (PTY EOF) — clean exit.
-                        return Ok(());
-                    }
-                }
+                let Some(bytes) = chunk else {
+                    // The reader task ended (PTY EOF) — clean exit. Release a
+                    // still-pending readiness waiter so the owner's mint does not
+                    // stall on a PTY that exited before printing anything.
+                    fire_ready(&mut ready);
+                    return Ok(());
+                };
+                channel.send_frame(bytes::Bytes::from(bytes)).await?;
+                // First real byte(s) are now buffered in the relay ring — a consumer
+                // dialing the minted URL will replay them. Signal ready.
+                fire_ready(&mut ready);
             }
             // relay inbound → tty input (or ignore non-frame control).
             inbound = channel.recv() => {
@@ -298,7 +334,7 @@ mod tests {
         });
 
         let (_cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCommand>(8);
-        let pump = run(&mut proc, &mut channel, &mut cmd_rx);
+        let pump = run(&mut proc, &mut channel, &mut cmd_rx, None);
         // The PTY exits quickly; bound the test so a hang fails loudly.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), pump).await;
         let seen = tokio::time::timeout(std::time::Duration::from_secs(2), collector)
@@ -320,5 +356,63 @@ mod tests {
             "relay never saw the pty marker; saw {:?}",
             String::from_utf8_lossy(&seen)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pump_emits_an_initial_byte_and_fires_readiness_without_input() {
+        // The readiness contract: a freshly-attaching consumer must see output
+        // WITHOUT typing. The pump writes an initial newline to the PTY master; the
+        // tty driver echoes it (canonical mode), so the relay sees a frame and the
+        // pump fires readiness — all before the test sends a single keystroke.
+        //
+        // `cat` keeps the PTY open (it reads stdin forever), so the pump stays in its
+        // select loop with `channel.recv()` live — proving the inbound arm is polled
+        // the instant a consumer would send a keystroke.
+        let req = v1::PtyOpenRequest {
+            command: vec!["cat".to_string()],
+            cols: 80,
+            rows: 24,
+            ..Default::default()
+        };
+        let mut proc = spawn_pty_resilient(&req, &["/bin/sh".to_string()]).expect("spawn cat");
+
+        let (agent_side, mut relay_side) = MockTransport::pair();
+        let mut channel = RelayChannel::with_transport(pty_channel_config(), Box::new(agent_side));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (_cmd_tx, mut cmd_rx) = mpsc::channel::<PtyCommand>(8);
+
+        // Drive the pump inline (it borrows locals); `cat` keeps it alive (it reads
+        // stdin forever) so it never returns on its own, and `relay_side` is held by
+        // THIS task so the pump always has a live peer — readiness firing is the only
+        // thing that resolves the race.
+        let pump = run(&mut proc, &mut channel, &mut cmd_rx, Some(ready_tx));
+        tokio::select! {
+            _ = pump => panic!("the cat-backed pump should not exit on its own"),
+            r = tokio::time::timeout(std::time::Duration::from_secs(3), ready_rx) => {
+                r.expect("readiness must fire within the budget")
+                    .expect("readiness sender must not be dropped");
+            }
+        }
+
+        // The relay must see at least one NON-EMPTY byte WITHOUT the test sending any
+        // input — the initial-newline nudge echoed by the tty driver. Readiness fires
+        // WITH the first frame, so it is already buffered in the unbounded mock ring.
+        let mut saw_byte = false;
+        for _ in 0..16 {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), relay_side.recv()).await {
+                Ok(Ok(Some(RelayMessage::Frame(f)))) if !f.data.is_empty() => {
+                    saw_byte = true;
+                    break;
+                }
+                Ok(Ok(Some(_))) => {}
+                _ => break,
+            }
+        }
+        assert!(
+            saw_byte,
+            "the pump must ship a non-empty initial frame without input"
+        );
+        let _ = proc.kill();
     }
 }
