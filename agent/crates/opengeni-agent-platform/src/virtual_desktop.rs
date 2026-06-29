@@ -215,7 +215,10 @@ mod tests {
         let _ = std::fs::remove_file(&lock);
         let _ = std::fs::remove_file(&socket);
 
-        assert!(lock_gone, "stale lock with no live server should be removed");
+        assert!(
+            lock_gone,
+            "stale lock with no live server should be removed"
+        );
         assert!(
             socket_gone,
             "stale socket file with no live server should be removed"

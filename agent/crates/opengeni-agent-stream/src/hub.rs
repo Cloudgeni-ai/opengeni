@@ -331,10 +331,7 @@ fn spawn_desktop_pump(
 /// * the sender is DROPPED before firing (the pump died — e.g. a relay drop or a
 ///   non-retryable first-capture failure — before serving a byte) ⇒ `Os`,
 /// * the timeout elapses (the pump is wedged) ⇒ `Timeout`.
-async fn await_pump_ready(
-    ready_rx: oneshot::Receiver<()>,
-    kind: &str,
-) -> PlatformResult<()> {
+async fn await_pump_ready(ready_rx: oneshot::Receiver<()>, kind: &str) -> PlatformResult<()> {
     match tokio::time::timeout(PUMP_READY_TIMEOUT, ready_rx).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(_recv)) => Err(PlatformError::os(format!(
