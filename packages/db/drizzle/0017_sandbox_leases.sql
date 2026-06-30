@@ -168,7 +168,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'sandbox_leases' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'sandbox_leases' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "sandbox_leases";
   END IF;
@@ -181,7 +181,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'sandbox_lease_holders' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'sandbox_lease_holders' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "sandbox_lease_holders";
   END IF;
@@ -211,7 +211,15 @@ CREATE OR REPLACE FUNCTION opengeni_private.reap_sandbox_leases(
 RETURNS TABLE (workspace_id uuid, sandbox_group_id uuid, instance_id text, lease_epoch integer)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public, opengeni_private
+-- EMBED-SAFE: this function references sandbox_leases / sandbox_lease_holders
+-- (the DATA schema) and opengeni_private helpers. It deliberately does NOT pin
+-- `SET search_path = public, ...` because under the embedded dedicated-schema
+-- topology those tables live in the host's chosen schema (e.g. `opengeni`), not
+-- `public`; a pinned `public` path would silently resolve them to an empty/
+-- absent table and the reaper sweep would no-op. Inheriting the caller's
+-- search_path resolves the data tables in standalone (caller path `public,
+-- opengeni_private`) AND embedded (caller path `<schema>, opengeni_private`)
+-- alike. opengeni_private fns are still called with an absolute prefix below.
 AS $$
 BEGIN
   -- (a) Reap stale VIEWER holders cross-workspace (turn holders are TTL-exempt).
@@ -285,7 +293,10 @@ RETURNS TABLE (
 )
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, opengeni_private
+-- EMBED-SAFE: see reap_sandbox_leases above — no pinned `public` search_path so
+-- the cross-workspace warm-lease read resolves sandbox_leases in whatever data
+-- schema the caller's search_path selects (standalone `public`, embedded
+-- `<schema>`). Inherits the caller's path instead of hardcoding `public`.
 AS $$
   SELECT L.account_id, L.workspace_id, L.sandbox_group_id, L.lease_epoch, L.backend
   FROM sandbox_leases L

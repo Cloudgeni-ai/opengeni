@@ -15,7 +15,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'workspace_environments' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'workspace_environments' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "workspace_environments";
   END IF;
@@ -43,7 +43,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'workspace_environment_variables' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'workspace_environment_variables' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "workspace_environment_variables";
   END IF;

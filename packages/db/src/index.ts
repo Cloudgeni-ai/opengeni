@@ -58,7 +58,8 @@ import { isCodexBilledModel } from "@opengeni/codex";
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
 import { and, asc, desc, eq, gt, gte, inArray, lt, ne, sql, type SQL } from "drizzle-orm";
-import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
+import type { PgDatabase } from "drizzle-orm/pg-core";
+import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
@@ -67,8 +68,33 @@ import * as schema from "./schema";
 export { sql as dbSql } from "drizzle-orm";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export { sanitizeEventPayload, sanitizeEventString } from "./event-payload-sanitizer";
+// Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
+// The `@opengeni/db/migrate` subpath stays available too (internal callers + the
+// db:migrate script use it). Re-exporting does NOT run migrate.ts's
+// `import.meta.main` block — that only fires when migrate.ts is the entry.
+export { migrate, runMigrations } from "./migrate";
+// Step I SDK entry points for the embedded topology: a host drives migration +
+// role provisioning over an explicit admin connection + target schema. Importing
+// these does NOT run the modules' `import.meta.main` CLI blocks.
+export { provisionRoles, type ProvisionResult, type ProvisionRolesOptions } from "./provision-roles";
 
-export type Database = PostgresJsDatabase<typeof schema>;
+// §7.7 driver widening (Step I). `Database` is the structural, cross-driver
+// query-layer port: every helper in this file accepts `db: Database` and uses
+// only the methods present on drizzle's base `PgDatabase` (select/insert/update/
+// delete/transaction/execute). Widening from the concrete
+// `PostgresJsDatabase<typeof schema>` to `PgDatabase<any, typeof schema>` is a
+// pure TYPE change — no runtime behavior changes — that lets an embedded host
+// inject ANY drizzle pg driver handle (node-postgres, neon-http, etc.) bound to
+// OpenGeni's schema, not just the postgres-js handle `createDb` builds. The
+// `any` for the query-result HKT is deliberate: it keeps `db.execute(sql\`…\`)`
+// callable across drivers whose raw-result shapes differ (postgres-js returns a
+// row array; node-postgres returns `{ rows }`). The three raw `db.execute(…)`
+// reads that index a row array (`getManagedUserByEmail` here is the only
+// host-facing one — see `userLookup`) stay postgres-js-shaped for standalone;
+// `userLookup` is the injection seam for hosts on a different driver.
+// `PostgresJsDatabase<typeof schema>` is assignable to this, so standalone is
+// unaffected.
+export type Database = PgDatabase<any, typeof schema>;
 
 export type DbClient = {
   db: Database;
@@ -80,7 +106,99 @@ export type RlsContext = {
   workspaceId?: string | null;
 };
 
-export function createDb(databaseUrl: string): DbClient {
+/**
+ * RLS posture for the connection OpenGeni's query layer runs over (Step I, §7.7).
+ *
+ * - `"force"` (DEFAULT — today's standalone behavior, byte-for-byte): OpenGeni
+ *   connects as a NON-OWNER role (`opengeni_app`) and every table carries
+ *   `FORCE ROW LEVEL SECURITY`, so the workspace/account GUCs set by
+ *   `setRlsContext` are the ONLY thing that admits rows — even the table owner
+ *   is subject to RLS. This is the Fork-A isolation guarantee.
+ * - `"scoped"` (embedded Fork-B opt-in): the host runs OpenGeni's queries over a
+ *   role that OWNS the dedicated schema (RLS need not be forced for that role),
+ *   relying on the host's own tenant boundary. OpenGeni STILL emits the
+ *   `set_config('opengeni.account_id'/'workspace_id', …)` GUCs defensively on
+ *   every scoped query, so the application query path is byte-identical between
+ *   the two strategies and the app code is RLS-mode-agnostic. The strategy is a
+ *   declared posture (consumed by `provisionRoles` and as a documented
+ *   invariant), NOT a query-path branch — there is deliberately no `if
+ *   (strategy === …)` anywhere in the helpers below. Picking `"scoped"` does not
+ *   relax any GUC; it only changes which DB role the host provisions/connects as
+ *   and asserts that the host accepts owning the isolation boundary.
+ */
+export type RlsStrategy = "force" | "scoped";
+
+/**
+ * Resolve a host-IdP/Better-Auth user *identifier* by email. Injected via
+ * `createDb({ userLookup })` (Step I). UNSET → today's raw parameterized select
+ * against Better Auth's `auth_users` table (see `getManagedUserByEmail`), which
+ * relies on the postgres-js array-shaped `db.execute` result. An embedded host
+ * whose identity lives elsewhere (a different IdP table, a different driver, or
+ * a non-`auth_users` user store) injects this closure so OpenGeni never touches
+ * `auth_users` directly. Returns the user id, or null when no such user exists.
+ */
+export type UserLookup = (db: Database, email: string) => Promise<string | null>;
+
+export type CreateDbOptions = {
+  /**
+   * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
+   * UNSET → today's behavior: NO `search_path` startup parameter is sent, so the
+   * server default applies (`public` for standalone, where every table + the
+   * `vector` extension + `gen_random_uuid()` live). For an embedded dedicated
+   * schema, pass e.g. `"opengeni,opengeni_private,public"` — postgres-js sends
+   * it as a per-session startup parameter (the supported, query-param-free way;
+   * URL `?search_path=` is IGNORED by postgres-js). Keep `public` LAST so the
+   * `vector` type and `gen_random_uuid()` (which live in `public` on the
+   * pgvector image) still resolve — the SPIKE-1 live footgun.
+   */
+  searchPath?: string;
+  /** RLS posture; defaults to `"force"` (today's standalone). */
+  rlsStrategy?: RlsStrategy;
+  /** Host-provided user-by-email resolver; unset → today's raw `auth_users` query. */
+  userLookup?: UserLookup;
+  /** postgres-js pool size; defaults to today's `10`. */
+  max?: number;
+};
+
+/**
+ * The active RLS strategy + userLookup for an injected `Database`, recorded in a
+ * side WeakMap so helpers (and `getManagedUserByEmail`) can consult the host's
+ * binding without changing every call signature. A handle with no recorded
+ * config (e.g. one built outside `createDb`, or in a test) falls back to the
+ * standalone defaults: `rlsStrategy: "force"`, raw `auth_users` lookup.
+ */
+type DbBinding = { rlsStrategy: RlsStrategy; userLookup?: UserLookup };
+const dbBindings = new WeakMap<object, DbBinding>();
+
+/** The strategy bound to a handle (or the `"force"` default). */
+export function rlsStrategyFor(db: Database): RlsStrategy {
+  return dbBindings.get(db as unknown as object)?.rlsStrategy ?? "force";
+}
+
+/**
+ * Run a raw SQL query and read its rows as a typed array.
+ *
+ * Why this exists: the Step I driver widening (`Database = PgDatabase<any, …>`)
+ * deliberately sets the query-result HKT to `any` so `db.execute(…)` is callable
+ * across drivers whose raw-result shapes differ (postgres-js → row array;
+ * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
+ * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
+ * OWN internal raw queries (sandbox-lease reaping, warm-meter reads, group
+ * session-id lists) ALWAYS run over the postgres-js handle `createDb` builds,
+ * whose `.execute` returns an array of rows — so this helper re-applies that
+ * array-of-`T` typing in ONE documented place instead of scattering casts. It is
+ * NOT a cross-driver abstraction: a host on a non-array driver must override the
+ * specific helper (today only `userLookup`), not call internal raw queries.
+ */
+async function rawRows<T extends Record<string, unknown>>(
+  executor: Pick<Database, "execute">,
+  query: SQL,
+): Promise<T[]> {
+  const result = await executor.execute<T>(query);
+  return result as unknown as T[];
+}
+
+export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
   // statements (`s_N`) are bound to one backend, but a transaction pooler hands
@@ -91,18 +209,44 @@ export function createDb(databaseUrl: string): DbClient {
   // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
   // is never reused indefinitely; application_name aids server-side diagnostics.
   const client = postgres(databaseUrl, {
-    max: 10,
+    max: options.max ?? 10,
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
-    connection: { application_name: "opengeni" },
+    // `connection` carries per-session Postgres STARTUP parameters. `application_name`
+    // (always) aids server-side diagnostics; `search_path` (embedded only) is the
+    // supported, query-param-free way to scope a connection to a dedicated schema —
+    // postgres-js IGNORES a URL `?search_path=`. Unset searchPath → omit it so the
+    // server default (`public`) is unchanged for standalone.
+    connection: {
+      application_name: "opengeni",
+      ...(options.searchPath ? { search_path: options.searchPath } : {}),
+    },
+  });
+  const db = drizzle(client, { schema });
+  dbBindings.set(db as unknown as object, {
+    rlsStrategy: options.rlsStrategy ?? "force",
+    ...(options.userLookup ? { userLookup: options.userLookup } : {}),
   });
   return {
-    db: drizzle(client, { schema }),
+    db,
     close: async () => {
       await client.end();
     },
   };
+}
+
+/**
+ * Register a host's `rlsStrategy`/`userLookup` against an externally-constructed
+ * `Database` handle (e.g. one the embedded host built from its own driver and
+ * injected, rather than via `createDb`). Lets the same WeakMap-backed lookups
+ * work for injected handles. Standalone never calls this (it uses `createDb`).
+ */
+export function registerDbBinding(db: Database, binding: { rlsStrategy?: RlsStrategy; userLookup?: UserLookup }): void {
+  dbBindings.set(db as unknown as object, {
+    rlsStrategy: binding.rlsStrategy ?? "force",
+    ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
+  });
 }
 
 export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
@@ -524,17 +668,31 @@ export async function removeWorkspaceMember(db: Database, workspaceId: string, s
 }
 
 /**
- * Resolve a Better Auth user email to its user id. The `auth_users` table is
- * owned by Better Auth and is NOT in the Drizzle schema, so this runs a raw
- * parameterized select. Returns the id (or null when no such user exists),
- * matching emails case-insensitively. Used to add an already-registered user
- * to a workspace; email invites for unknown users are deferred.
+ * Resolve a managed user email to its user id.
+ *
+ * STANDALONE (default, unchanged): the `auth_users` table is owned by Better
+ * Auth and is NOT in the Drizzle schema, so this runs the raw parameterized
+ * select below — matching emails case-insensitively, returning the id or null.
+ *
+ * EMBEDDED (Step I `userLookup` port): when the handle was built via
+ * `createDb({ userLookup })` (or registered with `registerDbBinding`), this
+ * delegates to the host's resolver instead — so a host whose identity lives in
+ * a different IdP/table/driver never forces OpenGeni to touch `auth_users`. The
+ * raw query also assumes the postgres-js array-shaped `db.execute` result; the
+ * port is the cross-driver escape hatch for that too.
+ *
+ * Used to add an already-registered user to a workspace; email invites for
+ * unknown users are deferred.
  */
 export async function getManagedUserByEmail(db: Database, email: string): Promise<string | null> {
+  const binding = dbBindings.get(db as unknown as object);
+  if (binding?.userLookup) {
+    return await binding.userLookup(db, email);
+  }
   const rows = await db.execute(sql<{ id: string }>`
     select id from auth_users where lower(email) = lower(${email}) limit 1
   `);
-  return (rows[0]?.id as string | undefined) ?? null;
+  return ((rows as unknown as Array<{ id?: string }>)[0]?.id) ?? null;
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
@@ -4553,7 +4711,7 @@ export async function reapStaleLeaseHolders(db: Database, input: {
       // (d) DRAINING-grace elapsed: surface leases whose grace is up AND still
       // idle, with instance_id + epoch, so the caller can issue the provider
       // stop() then confirmDrainCold. DB-only: no provider call here.
-      const drainable = await tx.execute<{ sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(sql`
+      const drainable = await rawRows<{ sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(tx, sql`
         select sandbox_group_id, instance_id, lease_epoch from sandbox_leases
         where workspace_id = ${input.workspaceId}
           and liveness = 'draining' and expires_at < now() and refcount = 0
@@ -4582,7 +4740,7 @@ export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   viewerHolderTtlMs: number;
   idleGraceMs: number;
 }): Promise<ReapDrainable[]> {
-  const rows = await db.execute<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(sql`
+  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
     select workspace_id, sandbox_group_id, instance_id, lease_epoch
     from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
   `);
@@ -4608,7 +4766,7 @@ export interface MeterableWarmLease {
 }
 
 export async function listMeterableWarmLeases(db: Database): Promise<MeterableWarmLease[]> {
-  const rows = await db.execute<{ account_id: string; workspace_id: string; sandbox_group_id: string; lease_epoch: number | string; backend: string }>(sql`
+  const rows = await rawRows<{ account_id: string; workspace_id: string; sandbox_group_id: string; lease_epoch: number | string; backend: string }>(db, sql`
     select account_id, workspace_id, sandbox_group_id, lease_epoch, backend
     from opengeni_private.list_meterable_warm_leases()
   `);
@@ -5901,7 +6059,7 @@ export async function getStreamAcknowledgment(db: Database, input: {
 // boundary; stress g). RLS-scoped: a foreign-workspace group returns no rows.
 export async function listSessionIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<string[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.execute<{ id: string }>(sql`
+    const rows = await rawRows<{ id: string }>(scopedDb, sql`
       select id from sessions
       where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
       order by created_at asc
@@ -6200,7 +6358,7 @@ export async function forceDrainOverLimitViewerOnlyBoxes(db: Database, input: {
     // CAS the now-holderless leases warm→draining at refcount 0 with the grace
     // deadline stamped — so the SAME reaper sweep's refcount=0 drain predicate
     // then terminates the box.
-    const drained = await scopedDb.execute<{ sandbox_group_id: string }>(sql`
+    const drained = await rawRows<{ sandbox_group_id: string }>(scopedDb, sql`
       update sandbox_leases set
         liveness = 'draining',
         refcount = 0, turn_holders = 0, viewer_holders = 0,

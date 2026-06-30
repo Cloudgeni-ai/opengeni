@@ -26,7 +26,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'capability_catalog_items' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'capability_catalog_items' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "capability_catalog_items";
   END IF;
@@ -56,7 +56,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'capability_installations' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'capability_installations' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "capability_installations";
   END IF;

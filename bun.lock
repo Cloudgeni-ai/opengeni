@@ -166,6 +166,7 @@
         "zod": "^4.2.1",
       },
       "devDependencies": {
+        "tsup": "^8.5.0",
         "typescript": "^6.0.3",
       },
     },
@@ -193,6 +194,7 @@
       "devDependencies": {
         "@opengeni/testing": "workspace:*",
         "drizzle-kit": "^0.31.8",
+        "tsup": "^8.5.0",
         "typescript": "^6.0.3",
       },
     },

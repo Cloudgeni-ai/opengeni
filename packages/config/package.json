@@ -1,12 +1,38 @@
 {
   "name": "@opengeni/config",
   "version": "0.1.0",
-  "private": true,
+  "description": "OpenGeni runtime configuration: settings resolution, deployment knobs, and config validation shared across the server packages.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/config"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "./src/index.ts",
+  "module": "./src/index.ts",
   "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
   },
   "dependencies": {
     "@opengeni/codex": "workspace:*",
@@ -14,6 +40,7 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
+    "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   }
 }
