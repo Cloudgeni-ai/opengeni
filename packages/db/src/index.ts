@@ -2953,6 +2953,10 @@ export async function appendSessionHistoryItems(db: Database, input: {
   workspaceId: string;
   sessionId: string;
   turnId?: string | null;
+  // The codex account that produced these items (the turn's resolved credential
+  // id), or null/undefined on the non-codex path. Stored verbatim so the read
+  // path can strip cross-account reasoning.encrypted_content blobs per turn.
+  producerCodexCredentialId?: string | null;
   items: Array<{ position: number; item: Record<string, unknown> }>;
 }): Promise<void> {
   if (input.items.length === 0) {
@@ -2964,6 +2968,7 @@ export async function appendSessionHistoryItems(db: Database, input: {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
       turnId: input.turnId ?? null,
+      producerCodexCredentialId: input.producerCodexCredentialId ?? null,
       position: entry.position,
       item: sanitizeEventPayload(entry.item),
     }))).onConflictDoNothing({
@@ -2992,11 +2997,12 @@ export async function getSessionHistoryItems(db: Database, workspaceId: string, 
  * (summarized-away) prefix rows are excluded while the full transcript stays in
  * the table as an audit trail.
  */
-export async function getActiveSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown> }>> {
+export async function getActiveSessionHistoryItems(db: Database, workspaceId: string, sessionId: string): Promise<Array<{ position: number; item: Record<string, unknown>; producerCodexCredentialId: string | null }>> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select({
       position: schema.sessionHistoryItems.position,
       item: schema.sessionHistoryItems.item,
+      producerCodexCredentialId: schema.sessionHistoryItems.producerCodexCredentialId,
     }).from(schema.sessionHistoryItems)
       .where(and(
         eq(schema.sessionHistoryItems.workspaceId, workspaceId),

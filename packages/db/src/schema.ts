@@ -457,6 +457,17 @@ export const sessionHistoryItems = pgTable("session_history_items", {
   // inserts ONE synthetic active summary row at the boundary. Defaults true so
   // every existing and normally-appended row is live.
   active: boolean("active").notNull().default(true),
+  // The Codex account that PRODUCED these items: the per-turn resolved codex
+  // credential id (pin > workspace-active), or NULL when produced on the
+  // non-codex / Azure path (or before this column existed). Used to strip
+  // cross-account `reasoning.encrypted_content` blobs — those are account/org-
+  // bound, minted by the ChatGPT/Codex backend, so replaying account A's blob
+  // into a turn running on account B 400s. The read path drops the encrypted
+  // reasoning of any item whose producer != the turn's current codex account.
+  // Deliberately NO FK: provenance must OUTLIVE the account's hard-disconnect
+  // (an ON DELETE SET NULL would erase the tag, and a stale-but-null tag still
+  // mismatches a live codex id so the strip stays correct either way).
+  producerCodexCredentialId: uuid("producer_codex_credential_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   positionIdx: uniqueIndex("session_history_items_position_idx").on(table.workspaceId, table.sessionId, table.position),

@@ -5,6 +5,7 @@ import {
   rewriteComputerCallsToActionsOnly,
   rewriteEmptyComputerCallOutputImageUrls,
   sanitizeHistoryItemsForModel,
+  stripReasoningEncryptedContent,
 } from "../src/history-sanitizer";
 
 // The exact 1×1 transparent PNG placeholder used by the SDK (agents-core
@@ -513,5 +514,62 @@ describe("computerCallNormalizingFetch — empty image_url backstop (action-time
     // computer_call_output → placeholder
     const out = sent.input[1].output;
     expect(out.image_url).toBe(PLACEHOLDER);
+  });
+});
+
+describe("stripReasoningEncryptedContent", () => {
+  test("drops providerData.encrypted_content (snake) but preserves reasoning text", () => {
+    const item = {
+      type: "reasoning",
+      id: "rs_1",
+      summary: [{ type: "summary_text", text: "I considered the options" }],
+      content: [{ type: "input_text", text: "visible chain of thought" }],
+      providerData: { encrypted_content: "gAAAA-account-A-blob", other: "keep" },
+    } as any;
+    const out = stripReasoningEncryptedContent(item) as any;
+    // The opaque blob is gone…
+    expect("encrypted_content" in out.providerData).toBe(false);
+    // …but the visible reasoning text and every other field survive.
+    expect(out.providerData.other).toBe("keep");
+    expect(out.summary).toEqual(item.summary);
+    expect(out.content).toEqual(item.content);
+    expect(out.id).toBe("rs_1");
+    // Non-mutating: the input keeps its blob.
+    expect(item.providerData.encrypted_content).toBe("gAAAA-account-A-blob");
+  });
+
+  test("drops providerData.encryptedContent (camel) too", () => {
+    const item = {
+      type: "reasoning",
+      providerData: { encryptedContent: "blob", encrypted_content: "blob2" },
+    } as any;
+    const out = stripReasoningEncryptedContent(item) as any;
+    expect("encryptedContent" in out.providerData).toBe(false);
+    expect("encrypted_content" in out.providerData).toBe(false);
+  });
+
+  test("clears a top-level encrypted_content (compaction item shape)", () => {
+    const item = { type: "compaction", encrypted_content: "blob", summary: "kept" } as any;
+    const out = stripReasoningEncryptedContent(item) as any;
+    expect("encrypted_content" in out).toBe(false);
+    expect(out.summary).toBe("kept");
+  });
+
+  test("returns the SAME reference when there is nothing encrypted to strip", () => {
+    const reasoningNoBlob = { type: "reasoning", content: [{ type: "input_text", text: "t" }] } as any;
+    expect(stripReasoningEncryptedContent(reasoningNoBlob)).toBe(reasoningNoBlob);
+  });
+
+  test("leaves non-reasoning items untouched (by reference)", () => {
+    const message = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "hello" }],
+      // A message would never carry this, but prove we never touch it.
+      providerData: { encrypted_content: "should-not-be-removed" },
+    } as any;
+    const out = stripReasoningEncryptedContent(message);
+    expect(out).toBe(message);
+    expect((out as any).providerData.encrypted_content).toBe("should-not-be-removed");
   });
 });

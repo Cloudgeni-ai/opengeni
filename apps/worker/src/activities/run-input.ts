@@ -9,7 +9,40 @@ import {
   requireFile,
   type Database,
 } from "@opengeni/db";
-import type { OpenGeniRuntime } from "@opengeni/runtime";
+import { stripReasoningEncryptedContent, type OpenGeniRuntime } from "@opengeni/runtime";
+
+/**
+ * The turn's current codex account, threaded into the history read path so it can
+ * strip cross-account `reasoning.encrypted_content` blobs. Non-null ONLY for a
+ * codex-billed turn with a resolved account; null for every non-codex turn (then
+ * the strip is a no-op and stored items replay byte-for-byte). When non-null, any
+ * carried history item whose producer != `currentCodexCredentialId` has its
+ * encrypted reasoning dropped (message content is always preserved).
+ */
+export type CodexHistoryStrip = { currentCodexCredentialId: string };
+
+/**
+ * Apply the cross-account encrypted-reasoning strip to a set of stored history
+ * rows. Pure + non-mutating. A row keeps its item verbatim unless this is a codex
+ * turn (`codexStrip` non-null) AND the row was produced by a DIFFERENT codex
+ * account (`producerCodexCredentialId !== currentCodexCredentialId`) — in which
+ * case the item's account/org-bound reasoning.encrypted_content is dropped
+ * (message content preserved). Mismatch covers a foreign codex account, the
+ * non-codex/Azure producer (null), and legacy untagged rows (null): all are
+ * stripped on a codex turn, which is defensive and harmless (one turn of lost
+ * chain-of-thought continuity at most). No-op when `codexStrip` is null
+ * (non-codex turn) or every producer equals the current account (single-account
+ * workspace / unchanged-account turn) — those rows pass through by reference.
+ */
+export function applyCodexHistoryStrip(
+  rows: ReadonlyArray<{ item: Record<string, unknown>; producerCodexCredentialId: string | null }>,
+  codexStrip: CodexHistoryStrip | null,
+): Array<Record<string, unknown>> {
+  return rows.map((row) =>
+    codexStrip && row.producerCodexCredentialId !== codexStrip.currentCodexCredentialId
+      ? stripReasoningEncryptedContent(row.item)
+      : row.item);
+}
 
 export async function turnInput(
   db: Database,
@@ -17,6 +50,7 @@ export async function turnInput(
   agent: any,
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
   settings?: Settings,
+  codexStrip: CodexHistoryStrip | null = null,
 ) {
   if (!trigger) {
     throw new Error("Missing trigger event");
@@ -32,7 +66,7 @@ export async function turnInput(
       payload.text,
       Array.isArray(payload.resources) ? payload.resources as ResourceRef[] : [],
     );
-    return await messageInput(db, runtime, agent, trigger, text, settings);
+    return await messageInput(db, runtime, agent, trigger, text, settings, codexStrip);
   }
   if (trigger.type === "goal.continuation") {
     const payload = trigger.payload as { text?: unknown };
@@ -41,7 +75,7 @@ export async function turnInput(
     }
     // Threading the stored conversation keeps the agent's full context across
     // continuations — this is what makes "keep working" coherent.
-    return await messageInput(db, runtime, agent, trigger, payload.text, settings);
+    return await messageInput(db, runtime, agent, trigger, payload.text, settings, codexStrip);
   }
   if (trigger.type === "turn.preempted") {
     const payload = trigger.payload as { text?: unknown };
@@ -51,7 +85,7 @@ export async function turnInput(
     // A turn re-entering after a graceful worker shutdown checkpointed it
     // mid-flight: thread the stored conversation (which includes the turn's
     // original input and its progress so far) behind a resume notice.
-    return await messageInput(db, runtime, agent, trigger, payload.text, settings);
+    return await messageInput(db, runtime, agent, trigger, payload.text, settings, codexStrip);
   }
   if (trigger.type === "user.approvalDecision") {
     const payload = trigger.payload as {
@@ -91,6 +125,7 @@ async function messageInput(
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>,
   text: string,
   settings?: Settings,
+  codexStrip: CodexHistoryStrip | null = null,
 ) {
   // Read-path budget guard (the last-resort backstop behind best-effort pre-turn
   // compaction): supply B only when the client-side compaction path is active
@@ -104,12 +139,19 @@ async function messageInput(
     const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
     if (stored.length > 0) {
       const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
+      // Cross-account encrypted-reasoning strip: on a codex turn, drop the
+      // account/org-bound reasoning.encrypted_content of any carried item NOT
+      // produced by THIS turn's codex account (a foreign blob 400s the codex
+      // backend). No-op for non-codex turns (codexStrip null), single-account
+      // workspaces, and unchanged-account turns (every producer == current), so
+      // those replay byte-for-byte. Message content is never touched.
+      const historyItems = applyCodexHistoryStrip(stored, codexStrip);
       return await runtime.prepareInput(
         agent,
         {
           kind: "message",
           text,
-          historyItems: stored.map((row) => row.item) as any,
+          historyItems: historyItems as any,
           sandboxEnvelope: envelope,
         },
         inputBudgetTokens ? { inputBudgetTokens } : {},

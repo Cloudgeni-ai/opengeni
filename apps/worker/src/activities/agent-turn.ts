@@ -365,6 +365,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId,
+              // Tag each row with the codex account that produced it (null on the
+              // non-codex path). Resolved at line ~504 before any reconcile pass
+              // runs, so this is the turn's effective account. The read path uses
+              // it to strip cross-account reasoning.encrypted_content next turn.
+              producerCodexCredentialId: effectiveCodexCredentialId,
               items: rows,
             });
           }
@@ -549,11 +554,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
-      // A codex-subscription turn resolves its per-workspace bearer at model-call
-      // time: codexSubscriptionFetch (on the provider's OpenAI client) reads this
-      // AsyncLocalStorage context. Build it once and wrap BOTH the compaction
-      // summarizer (a separate model call on the same codex client) and the main
-      // run; otherwise the summarizer would hit the codex backend unauthenticated.
+      // A codex-subscription turn resolves the bearer for THIS turn's effective
+      // codex account (effectiveCodexCredentialId; pin > workspace-active) at
+      // model-call time — multi-account P1 means a workspace can hold N accounts,
+      // so the bearer is per-account, not per-workspace. codexSubscriptionFetch
+      // (on the provider's OpenAI client) reads this AsyncLocalStorage context.
+      // Build it once and wrap BOTH the compaction summarizer (a separate model
+      // call on the same codex client) and the main run; otherwise the summarizer
+      // would hit the codex backend unauthenticated.
       const codexContext: CodexRequestContext | null = resolvedModel?.provider.kind === "codex-subscription"
         ? ((): CodexRequestContext => {
             // The empty-string fallback yields no row → null credential → the
@@ -848,7 +856,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);
         }
       }
-      const runInput = await turnInput(db, runtime, agent, trigger, runSettings);
+      // Cross-account encrypted-reasoning strip: pass THIS turn's codex account
+      // so the history read path drops the account/org-bound
+      // reasoning.encrypted_content of any carried item produced by a DIFFERENT
+      // codex account (which the codex backend 400s). Non-null only for a
+      // codex-billed turn with a resolved account; null elsewhere makes the strip
+      // a no-op (non-codex turns, and the single-account / unchanged-account
+      // common path replay byte-for-byte).
+      const runInput = await turnInput(
+        db,
+        runtime,
+        agent,
+        trigger,
+        runSettings,
+        isCodexTurn && effectiveCodexCredentialId ? { currentCodexCredentialId: effectiveCodexCredentialId } : null,
+      );
       // Slice index = the length of the model-facing (active) history this turn
       // is seeded from; new items beyond it (the trigger message + this turn's
       // generated items) are the ones to persist. After a compaction this is the

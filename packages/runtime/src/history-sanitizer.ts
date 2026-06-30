@@ -203,6 +203,57 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
 }
 
 /**
+ * Drop the account/org-bound `reasoning.encrypted_content` blob from a single
+ * history item, preserving everything else (the visible chain-of-thought text in
+ * `summary`/`content`, and every non-reasoning field). Pure + non-mutating: when
+ * there is nothing to strip the SAME reference is returned (so the common,
+ * same-account path stays byte-identical); otherwise a shallow clone is returned.
+ *
+ * WHY. A codex-subscription turn round-trips `reasoning.encrypted_content` — an
+ * opaque blob minted by the ChatGPT/Codex backend that is bound to the account
+ * (org) that produced it. After a manual switch from codex account A to B, the
+ * carried history items still hold A-minted blobs; replaying them into a turn
+ * running on B is rejected (400). The read-path caller strips this blob from any
+ * item NOT produced by the turn's current codex account. The blob is purely a
+ * chain-of-thought continuity optimization — dropping it costs at most one turn
+ * of lost CoT continuity and never any message content.
+ *
+ * The SDK's Responses converter reads the blob via `providerData.encryptedContent`
+ * (camel) or `providerData.encrypted_content` (snake); persisted rows use the
+ * snake form, but we delete both casings defensively. We also clear a top-level
+ * `encrypted_content` (the `compaction`-item shape) belt-and-braces — that blob
+ * is likewise source-bound. Only `reasoning` and `compaction` items are touched;
+ * messages, tool calls, and tool outputs pass through untouched by reference.
+ */
+export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): T {
+  const type = itemType(item);
+  if (type !== "reasoning" && type !== "compaction") {
+    return item;
+  }
+  const record = item as Record<string, unknown>;
+  const providerData = record.providerData;
+  const providerHasBlob = !!providerData && typeof providerData === "object"
+    && ("encryptedContent" in (providerData as Record<string, unknown>)
+      || "encrypted_content" in (providerData as Record<string, unknown>));
+  const topLevelHasBlob = "encrypted_content" in record;
+  if (!providerHasBlob && !topLevelHasBlob) {
+    // Nothing encrypted to strip — return the same reference (byte-identical).
+    return item;
+  }
+  const clone: Record<string, unknown> = { ...record };
+  if (providerHasBlob) {
+    const providerClone = { ...(providerData as Record<string, unknown>) };
+    delete providerClone.encryptedContent;
+    delete providerClone.encrypted_content;
+    clone.providerData = providerClone;
+  }
+  if (topLevelHasBlob) {
+    delete clone.encrypted_content;
+  }
+  return clone as unknown as T;
+}
+
+/**
  * Normalize `computer_call` items so each carries EXACTLY ONE of the two
  * mutually-exclusive action fields the provider accepts.
  *
