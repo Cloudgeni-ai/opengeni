@@ -435,7 +435,11 @@ fn parse_top_cpu_busy(text: &str) -> f64 {
     for seg in after.split(',') {
         let seg = seg.trim();
         if seg.ends_with("user") || seg.ends_with("sys") {
-            if let Some(pct) = seg.split('%').next().and_then(|p| p.trim().parse::<f64>().ok()) {
+            if let Some(pct) = seg
+                .split('%')
+                .next()
+                .and_then(|p| p.trim().parse::<f64>().ok())
+            {
                 busy += pct;
             }
         }
@@ -631,13 +635,21 @@ Buffers:          500000 kB
         let blocks = 262_144u64; // 262144 × 4096 == 1 GiB
         let avail = 131_072u64; // half free
         let (used, total) = disk_used_total(frsize, blocks, avail);
-        assert_eq!(total, 1024 * 1024 * 1024, "1 GiB total, counted in frsize units");
+        assert_eq!(
+            total,
+            1024 * 1024 * 1024,
+            "1 GiB total, counted in frsize units"
+        );
         assert_eq!(used, 512 * 1024 * 1024, "half used");
 
         // Documents the bug the fix removes: had we used f_bsize (1 MiB) as the
         // multiplier the total would have been exactly 256x too large.
         let buggy_block = frsize.max(1024 * 1024);
-        assert_eq!(blocks * buggy_block, total * 256, "the 256x inflation, gone");
+        assert_eq!(
+            blocks * buggy_block,
+            total * 256,
+            "the 256x inflation, gone"
+        );
     }
 
     #[test]
@@ -677,7 +689,10 @@ Processes: 500 total, 3 running\n\
 CPU usage: 4.76% user, 9.52% sys, 85.71% idle\n\
 PhysMem: 8G used\n";
         let busy = parse_top_cpu_busy(fixture);
-        assert!((busy - 14.28).abs() < 1e-9, "second sample: 4.76 + 9.52, not the first");
+        assert!(
+            (busy - 14.28).abs() < 1e-9,
+            "second sample: 4.76 + 9.52, not the first"
+        );
     }
 
     #[test]
@@ -735,6 +750,9 @@ Pages free:                              100000.\n";
     fn parse_vm_stat_page_size_defaults_to_4096_when_absent() {
         // No header → fall back to 4096 (the parser returns None, caller defaults).
         assert!(parse_vm_stat_page_size("Pages free: 1.\n").is_none());
-        assert_eq!(parse_vm_stat_page_size("foo (page size of 16384 bytes)\n"), Some(16384));
+        assert_eq!(
+            parse_vm_stat_page_size("foo (page size of 16384 bytes)\n"),
+            Some(16384)
+        );
     }
 }
