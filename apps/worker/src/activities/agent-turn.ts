@@ -14,6 +14,7 @@ import {
   workspaceCodexSubscriptionActive,
   getCodexRotationSettings,
   listCodexAccountStatuses,
+  fetchCodexUsageForAccount,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
   setActiveCodexCredential,
@@ -51,7 +52,8 @@ import {
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
 import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { chooseRotationActive, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
+import { chooseRotationActive, computeIdleDelayMs, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
+import type { CodexAccountStatus } from "@opengeni/db";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
   buildModelResolver,
@@ -319,6 +321,34 @@ export async function resolveActiveSandboxBackend(
   }
 }
 
+/**
+ * SELF-HEAL helper for the all-capped rotation idle (invariant 4: BOUNDED, no thrash).
+ * The turn hot path never refreshes Codex usage — only the usage API route does — so a
+ * window that has actually reset still reads OVER-threshold from the stale cache, which
+ * would idle-loop forever. Before idling, refresh LIVE usage for every connected account
+ * the cache marks over-threshold (bounded to the account count), which re-writes the
+ * cache columns, then return the re-read rows so the ranker can pick up a genuinely-reset
+ * window THIS turn. A refresh/read failure is swallowed (fall back to the pre-refresh rows
+ * + the bounded idle). Cooling (429'd) accounts are NOT refreshed: their exhaustedUntil
+ * cooldown is authoritative, and refreshing them would burn a provider call for nothing.
+ */
+async function refreshCappedCodexUsageRows(
+  db: ActivityServices["db"],
+  settings: Settings,
+  workspaceId: string,
+  accounts: CodexAccountStatus[],
+): Promise<CodexAccountStatus[]> {
+  const nearPct = settings.codexRotationNearExhaustionPct;
+  const stale = accounts.filter(
+    (a) => a.status === "active" && ((a.primaryUsedPercent ?? 0) >= nearPct || (a.secondaryUsedPercent ?? 0) >= nearPct),
+  );
+  if (stale.length === 0) {
+    return accounts;
+  }
+  await Promise.all(stale.map((a) => fetchCodexUsageForAccount(db, settings, workspaceId, a.id).catch(() => undefined)));
+  return listCodexAccountStatuses(db, workspaceId).catch(() => accounts);
+}
+
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const { settings, db, bus, runtime, objectStorage, observability, wakeSessionWorkflow } = await services();
@@ -561,14 +591,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // stays the active pointer and selectCodexCredentialForTurn is called with
         // byte-identical arguments to today — zero added cost on non-rotation turns.
         if (rotation?.rotationEnabled && sessionPin == null) {
+          let rankAccounts = accounts;
           rotationDecision = chooseRotationActive({
             rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
             activeCredentialId: rotation.activeCredentialId,
             priorCredentialId: sessionCodex?.lastCredentialId ?? null,
-            accounts,
+            accounts: rankAccounts,
             nearExhaustionPct: settings.codexRotationNearExhaustionPct,
             now: new Date(),
           });
+          if (rotationDecision.kind === "allCapped") {
+            // SELF-HEAL (invariant 4): the turn hot path NEVER refreshes usage, so a
+            // window that has actually reset still reads capped from the stale cache —
+            // which would otherwise idle-loop forever (idle → continuation re-dispatch →
+            // same stale all-capped → idle …). Before idling, refresh usage for the
+            // over-threshold accounts (bounded to the account count) and re-rank ONCE,
+            // so a genuinely-reset window is picked up immediately and the cache heals.
+            rankAccounts = await refreshCappedCodexUsageRows(db, settings, input.workspaceId, rankAccounts);
+            rotationDecision = chooseRotationActive({
+              rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
+              activeCredentialId: rotation.activeCredentialId,
+              priorCredentialId: sessionCodex?.lastCredentialId ?? null,
+              accounts: rankAccounts,
+              nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+              now: new Date(),
+            });
+          }
           if (rotationDecision.kind === "active") {
             if (rotationDecision.moved) {
               // The single authoritative pointer-move site: persist the new active.
@@ -576,16 +624,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             chosenActive = rotationDecision.credentialId;
           } else if (rotationDecision.kind === "allCapped" && publish && turnId) {
-            // Every eligible account is capped/cooling: idle the turn AT THE BOUNDARY
-            // (no wasted model/sandbox build) until the EARLIEST reset across all
-            // accounts — the multi-account generalization of #143's single-account
-            // idle-until-reset. No saveRunState: no model ran, nothing to freeze.
+            // Every eligible account is capped/cooling (and a usage refresh did NOT
+            // surface a reset): idle the turn AT THE BOUNDARY (no wasted model/sandbox
+            // build) until the EARLIEST reset across all accounts — the multi-account
+            // generalization of #143's single-account idle-until-reset. No saveRunState:
+            // no model ran, nothing to freeze.
             const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
             const goalActive = Boolean(goal && goal.status === "active");
-            const resumeMs = Math.min(
-              Math.max(0, rotationDecision.earliestResetAt.getTime() - Date.now()),
-              CODEX_USAGE_LIMIT_MAX_RESUME_MS,
-            );
+            // BOUNDED + POSITIVE: clamp to [MIN_IDLE_MS, max] so a null/elapsed/unknown
+            // reset can never yield a 0 (which session.ts would treat as "continue now",
+            // re-entering this path in a tight CPU/DB-hammering loop).
+            const resumeMs = computeIdleDelayMs(rotationDecision.earliestResetAt, new Date(), CODEX_USAGE_LIMIT_MAX_RESUME_MS);
             const failurePayload = codexUsageLimitFailurePayload(
               { resetsInSeconds: Math.ceil(resumeMs / 1000) },
               "all connected Codex subscriptions are rate-limited",
@@ -598,7 +647,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await finishTurn(db, input.workspaceId, turnId, "failed");
             await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
-            return goalActive ? { status: "idle", continueDelayMs: resumeMs } : { status: "idle" };
+            // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
+            // resumeMs even if a future change made it 0 — never a tight re-dispatch.
+            return goalActive ? { status: "idle", continueDelayMs: resumeMs, idleUntilReset: true } : { status: "idle" };
           }
           // kind:"none" (no accounts) → chosenActive stays null → existing relogin path.
         }
@@ -1525,14 +1576,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Rotation: a candidate is available → continue NOW (0). All-capped → idle until the
           // earliest reset across all accounts (capped at 1h). Else the unchanged single-account idle.
           if (rotationResumeMs !== null) {
+            // A candidate IS available (the just-failed account is now cooling, so the
+            // ranker cannot re-pick it — at most N rotations per N accounts, invariant 4).
+            // 0 ⇒ re-dispatch NOW; this is the legitimate skip-the-hold case.
             return { status: "idle", continueDelayMs: rotationResumeMs };
           }
+          // All-capped: clamp to [MIN_IDLE_MS, max] — a POSITIVE, BOUNDED hold (never 0,
+          // so session.ts can never tight-loop). The post-idle continuation re-dispatch
+          // hits the proactive seam, which refreshes usage and self-heals.
           const resumeMs = allCappedResetAt
-            ? Math.min(Math.max(0, allCappedResetAt.getTime() - Date.now()), CODEX_USAGE_LIMIT_MAX_RESUME_MS)
+            ? computeIdleDelayMs(allCappedResetAt, new Date(), CODEX_USAGE_LIMIT_MAX_RESUME_MS)
             : (usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
                 ? Math.min(Math.ceil(usageLimit.resetsInSeconds) * 1000, CODEX_USAGE_LIMIT_MAX_RESUME_MS)
                 : CODEX_USAGE_LIMIT_MAX_RESUME_MS);
-          return { status: "idle", continueDelayMs: resumeMs };
+          return { status: "idle", continueDelayMs: resumeMs, ...(allCappedResetAt ? { idleUntilReset: true } : {}) };
         }
         return { status: "idle" };
       }

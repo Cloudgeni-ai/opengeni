@@ -126,4 +126,10 @@ export type RunAgentTurnResult = {
   // workflow holds the loop this long before admitting the next turn (an
   // active goal's continuation would otherwise immediately re-hit the limit).
   continueDelayMs?: number;
+  // Multi-account rotation all-capped idle: every connected Codex subscription is
+  // rate-limited/cooling. This is a MANDATORY hold — session.ts must wait
+  // continueDelayMs (floored to a minimum) and must NOT treat a 0/elapsed delay as
+  // "continue now" (invariant 4: NO THRASH). Distinct from a normal continueDelayMs:0
+  // which legitimately means "a rotation candidate is ready, re-dispatch immediately".
+  idleUntilReset?: boolean;
 };

@@ -18,6 +18,36 @@ import { activity, workflowFailureMessage } from "./activities";
 const TURNS_PER_RUN_BACKSTOP = 2_000;
 
 /**
+ * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
+ * floor so that even a 0/elapsed continueDelayMs (a stale/unknown reset) can never
+ * collapse the hold into a tight re-dispatch loop that hammers CPU/DB and never runs
+ * the model (invariant 4: NO THRASH). Mirrors MIN_IDLE_MS in codex-rotation.ts; kept
+ * local so the deterministic workflow bundle does not import the activities module.
+ */
+const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
+
+/**
+ * How long the continuation loop must hold before re-admitting the next turn. 0 ⇒ no
+ * hold (re-dispatch immediately — a rotation candidate is ready, or no idle delay was
+ * requested). A rotation all-capped idle (`idleUntilReset`) ALWAYS holds at least
+ * `floorMs`, so a 0/elapsed continueDelayMs can never skip the hold (invariant 4).
+ * Pure + exported so the boundedness contract is unit-testable without a workflow env.
+ */
+export function continuationHoldMs(
+  result: { status: string; continueDelayMs?: number; idleUntilReset?: boolean },
+  floorMs: number,
+): number {
+  if (result.status !== "idle") {
+    return 0;
+  }
+  const delay = result.continueDelayMs ?? 0;
+  if (result.idleUntilReset) {
+    return Math.max(delay, floorMs);
+  }
+  return Math.max(delay, 0);
+}
+
+/**
  * True when an agent-turn activity failure means "the worker hosting the
  * turn died or vanished" rather than "the turn itself failed": the server
  * closed the activity with a HEARTBEAT timeout (the worker was killed before
@@ -331,12 +361,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
     }
 
-    if (outcome.result.status === "idle" && outcome.result.continueDelayMs) {
-      // Provider backpressure: hold the loop so an active goal's continuation
-      // does not immediately re-enter the same rate-limit window. An interrupt
-      // or user signal ends the wait early and is handled by the main loop.
+    const holdMs = continuationHoldMs(outcome.result, ROTATION_IDLE_FLOOR_MS);
+    if (holdMs > 0) {
+      // Provider backpressure / rotation all-capped idle: hold the loop so an active
+      // goal's continuation does not immediately re-enter the same rate-limit window.
+      // A rotation all-capped idle is a MANDATORY hold (idleUntilReset) — a 0/elapsed
+      // delay can never skip it (invariant 4: NO THRASH). An interrupt or user signal
+      // ends the wait early and is handled by the main loop.
       const seenWakeups = wakeups;
-      await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, outcome.result.continueDelayMs);
+      await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, holdMs);
     }
     return true;
   }

@@ -21,7 +21,20 @@ export type RotationDecision =
   // No connected accounts at all (preserves today's relogin-fail path).
   | { kind: "none" };
 
-const EPOCH0 = new Date(0);
+// Invariant 4 (NO THRASH / BOUNDED) safety floors. An all-capped idle MUST be a
+// positive, bounded wait — a null / elapsed / unknown reset can NEVER collapse it
+// into a 0 or a past instant (which the caller would turn into a 0 continueDelayMs
+// and a tight re-dispatch loop that hammers CPU/DB and never runs the model, so the
+// stale usage cache never self-heals).
+/** The minimum all-capped idle: continueDelayMs is clamped to at least this (never 0). */
+export const MIN_IDLE_MS = 60_000; // 60s
+/**
+ * Cooldown applied to an over-threshold account whose cached reset is null / unknown
+ * / already-elapsed (the turn hot path never refreshes usage, so a capped window's
+ * reset reads stale). Treating it as "available after a default cooldown" keeps
+ * availableAt — and therefore earliestReset — ALWAYS in the future.
+ */
+export const DEFAULT_RESET_COOLDOWN_MS = 60_000; // 60s
 
 /** The worse-window used percent: weekly binds as hard as 5h, so take the max. null ⇒ 0. */
 function bindingUsedPct(acct: CodexAccountStatus): number {
@@ -55,23 +68,58 @@ function eligible(acct: CodexAccountStatus, nearExhaustionPct: number, now: Date
  * The soonest instant `acct` clears EVERY blocking condition: its cooldown end,
  * and each window's reset (only when that window is at/over the threshold). The
  * literal multi-account generalization of #143's single-account resetsInSeconds.
+ *
+ * GUARANTEE (invariant 4): the result is ALWAYS in the future. A blocking window
+ * whose cached reset is null / unknown / already-elapsed does NOT contribute a past
+ * instant (the old EPOCH0 seed bug that made earliestReset land in 1970 → a 0
+ * continueDelayMs → a tight idle loop). Such a window is treated as clearing after a
+ * default cooldown (now + DEFAULT_RESET_COOLDOWN_MS), so the caller always idles a
+ * bounded positive time and re-checks (which refreshes usage and self-heals).
  */
-function availableAt(acct: CodexAccountStatus, nearExhaustionPct: number): Date {
-  const candidates: Date[] = [acct.exhaustedUntil ?? EPOCH0];
-  if ((acct.primaryUsedPercent ?? 0) >= nearExhaustionPct) {
-    candidates.push(acct.primaryResetAt ?? EPOCH0);
+export function availableAt(acct: CodexAccountStatus, nearExhaustionPct: number, now: Date): Date {
+  const nowMs = now.getTime();
+  // An unknown/elapsed block clears after a default cooldown, never in the past.
+  const defaultClear = new Date(nowMs + DEFAULT_RESET_COOLDOWN_MS);
+  const candidates: Date[] = [];
+  // An active cooldown only blocks while it is still in the future; a past cooldown
+  // self-clears (matches `cooling()`), so it must not pin availableAt to the past.
+  if (acct.exhaustedUntil != null && acct.exhaustedUntil.getTime() > nowMs) {
+    candidates.push(acct.exhaustedUntil);
   }
-  if ((acct.secondaryUsedPercent ?? 0) >= nearExhaustionPct) {
-    candidates.push(acct.secondaryResetAt ?? EPOCH0);
+  const windowClear = (over: boolean, resetAt: Date | null | undefined) => {
+    if (!over) return;
+    // Over-threshold window: wait for its KNOWN future reset; a null/elapsed cached
+    // reset is unknown → default cooldown (never a past instant).
+    candidates.push(resetAt != null && resetAt.getTime() > nowMs ? resetAt : defaultClear);
+  };
+  windowClear((acct.primaryUsedPercent ?? 0) >= nearExhaustionPct, acct.primaryResetAt);
+  windowClear((acct.secondaryUsedPercent ?? 0) >= nearExhaustionPct, acct.secondaryResetAt);
+  // Ineligible for a non-quota reason (needs_relogin / error) with no known block, or
+  // a cleared cooldown: still idle a bounded cooldown before re-check — never the past.
+  if (candidates.length === 0) {
+    return defaultClear;
   }
-  return candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a), EPOCH0);
+  // Clears EVERY blocking condition ⇒ the MAX of the per-condition clear instants.
+  return candidates.reduce((a, b) => (b.getTime() > a.getTime() ? b : a));
 }
 
 /** earliestResetAt across ALL connected accounts (min of each account's availableAt). */
-function earliestReset(accounts: CodexAccountStatus[], nearExhaustionPct: number): Date {
+function earliestReset(accounts: CodexAccountStatus[], nearExhaustionPct: number, now: Date): Date {
   return accounts
-    .map((acct) => availableAt(acct, nearExhaustionPct))
+    .map((acct) => availableAt(acct, nearExhaustionPct, now))
     .reduce((a, b) => (b.getTime() < a.getTime() ? b : a));
+}
+
+/**
+ * The bounded all-capped idle delay: clamp(earliestResetAt − now) into
+ * [MIN_IDLE_MS, maxMs]. NEVER 0 and NEVER negative, so a null / elapsed / unknown
+ * reset cannot collapse the hold into a tight re-dispatch loop (invariant 4). The two
+ * agent-turn call sites (proactive turn-start + reactive 429) feed allCapped's
+ * earliestResetAt through this before returning continueDelayMs.
+ */
+export function computeIdleDelayMs(earliestResetAt: Date, now: Date, maxMs: number): number {
+  const delta = earliestResetAt.getTime() - now.getTime();
+  return Math.min(Math.max(delta, MIN_IDLE_MS), maxMs);
 }
 
 /**
@@ -103,7 +151,7 @@ export function chooseRotationActive(args: {
 
   const decide = (chosen: CodexAccountStatus | undefined): RotationDecision => {
     if (!chosen) {
-      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct) };
+      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
     }
     return { kind: "active", credentialId: chosen.id, moved: chosen.id !== activeCredentialId };
   };
@@ -112,7 +160,7 @@ export function chooseRotationActive(args: {
     // Next eligible AFTER the prior account in list order (wrap around). When the
     // prior account isn't found, start from the head.
     if (eligibles.length === 0) {
-      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct) };
+      return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
     }
     const priorIdx = priorCredentialId ? accounts.findIndex((acct) => acct.id === priorCredentialId) : -1;
     const ordered = priorIdx >= 0
