@@ -7,7 +7,7 @@
 // Degrades gracefully: when selfhosted is disabled the machines API 404s →
 // `fleet.machines` is empty and this falls back to a static "Run on: Cloud
 // sandbox" label with no actionable dropdown.
-import { useMachines, type MachineView } from "@opengeni/react";
+import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";

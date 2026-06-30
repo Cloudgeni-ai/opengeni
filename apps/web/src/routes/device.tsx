@@ -15,7 +15,7 @@ import {
   EnrollmentConsent,
   type EnrollmentConsentMachine,
   type EnrollmentConsentPhase,
-} from "@opengeni/react";
+} from "@opengeni/react/machines";
 import type { DeviceEnrollmentLookupResponse } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { LaptopIcon, LogInIcon } from "lucide-react";

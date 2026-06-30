@@ -23,7 +23,7 @@ const external = [
 ];
 
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/machines.ts"],
   format: ["esm"],
   target: "es2022",
   dts: true,

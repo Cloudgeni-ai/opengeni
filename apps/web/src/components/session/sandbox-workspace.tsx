@@ -9,20 +9,17 @@
 // `WorkspaceDock` shell renders (the dock owns resize / collapse / maximize).
 import {
   DesktopViewer,
-  MachineDockBar,
   SandboxFiles,
   SandboxTerminal,
-  SharedMachineDisclosure,
-  useMachines,
   useSandboxFiles,
   useSandboxGit,
   useSandboxTerminal,
   useSessionCapabilities,
   xtermThemeFromTokens,
-  type MachineView,
   type WorkspaceTab,
   type XtermTheme,
 } from "@opengeni/react";
+import { MachineDockBar, SharedMachineDisclosure, useMachines, type MachineView } from "@opengeni/react/machines";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 

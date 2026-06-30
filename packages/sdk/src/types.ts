@@ -588,6 +588,9 @@ export type CreateSessionRequest = {
   // The enrolled machine (a sandbox id) to run this session on; seeds the
   // active-sandbox pointer at creation so the first turn lands on it.
   targetSandboxId?: string | undefined;
+  // Host working directory for a connected-machine target (the agent runs here;
+  // default = the machine's launch dir). Ignored for managed sandboxes.
+  workingDir?: string | undefined;
   environmentId?: string | undefined;
   goal?: GoalSpec | undefined;
   clientEventId?: string | undefined;
