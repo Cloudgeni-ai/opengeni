@@ -51,11 +51,26 @@ sha256_of_file() {
 mkdir -p "$BAKED_DIR"
 
 # --- Toolchain: cargo-zigbuild gives a robust static musl cross-link with no
-# system musl-gcc (the agent-release.yml pattern). Idempotent installs.
+# system musl-gcc (the agent-release.yml pattern). It needs BOTH its own binary
+# AND a `zig` compiler, and the two cache DIFFERENTLY: cargo-zigbuild lands in
+# ~/.cargo/bin (restored by Swatinem/rust-cache), but `zig` comes from the
+# `ziglang` pip wheel, which is NOT part of the cargo cache. Gating the wheel
+# install on the binary's absence (the old behaviour) therefore SKIPPED zig on
+# every warm-cache run → "Error: Failed to find zig". Install each against its
+# OWN presence check so a cached cargo-zigbuild can never mask a missing zig.
+# Idempotent.
 if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-  log "installing cargo-zigbuild + ziglang"
-  pip install ziglang >/dev/null 2>&1 || pip install --user ziglang
+  log "installing cargo-zigbuild"
   cargo install --locked cargo-zigbuild
+fi
+# cargo-zigbuild resolves zig from PATH or the `python -m ziglang` wheel; ensure
+# one of them is present regardless of the cargo-zigbuild cache state.
+if ! command -v zig >/dev/null 2>&1 \
+  && ! python3 -m ziglang version >/dev/null 2>&1 \
+  && ! python -m ziglang version >/dev/null 2>&1; then
+  log "installing ziglang (pip wheel — provides zig for cargo-zigbuild)"
+  pip install ziglang >/dev/null 2>&1 || pip3 install ziglang >/dev/null 2>&1 \
+    || pip install --user ziglang || pip3 install --user ziglang
 fi
 
 # --- Signing key presence (mirrors agent-release.yml's loud key-absent handling).
