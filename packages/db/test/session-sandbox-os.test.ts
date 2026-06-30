@@ -38,6 +38,8 @@ function baseSession() {
     activeTurnId: null,
     lastInputTokens: null,
     lastSequence: 0,
+    codexPinnedCredentialId: null,
+    codexLastCredentialId: null,
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
   };

@@ -2015,6 +2015,12 @@ export const Session = z.object({
   // signal. Null until a turn with usage has completed.
   lastInputTokens: z.number().int().nonnegative().nullable(),
   lastSequence: z.number().int().nonnegative(),
+  // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
+  // manually PINNED to (null ⇒ follow the workspace active pointer).
+  // codexLastCredentialId: the account the most recent turn actually ran on (the
+  // "Running on:" indicator's source). Both are credential-row ids, null until set.
+  codexPinnedCredentialId: z.string().uuid().nullable(),
+  codexLastCredentialId: z.string().uuid().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -2081,6 +2087,10 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  // Multi-account Codex (P1): the account a session's turn runs on changed
+  // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
+  // the in-session "Running on:" indicator's live flip.
+  "codex.account.switched",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 

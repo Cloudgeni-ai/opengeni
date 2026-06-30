@@ -123,10 +123,40 @@ export const codexSubscriptionCredentials = pgTable("codex_subscription_credenti
   status: text("status").notNull().default("active"),               // active | needs_relogin | error
   lastError: text("last_error"),
   version: integer("version").notNull().default(1),
+  label: text("label"),                 // user-chosen nickname; null ⇒ derive from email/plan/account
+  accountEmail: text("account_email"),  // email from the id_token (user's own email; non-secret)
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  workspace: uniqueIndex("codex_subscription_credentials_workspace_idx").on(table.workspaceId),
+  // REPLACES codex_subscription_credentials_workspace_idx (the one-per-workspace cap).
+  // One row per (workspace, ChatGPT account). Partial WHERE chatgpt_account_id IS NOT NULL
+  // so degenerate null-account rows can't collide; the device-grant connect path always
+  // populates chatgpt_account_id.
+  wsAccount: uniqueIndex("codex_subscription_credentials_ws_account_idx")
+    .on(table.workspaceId, table.chatgptAccountId)
+    .where(sql`${table.chatgptAccountId} is not null`),
+  workspace: index("codex_subscription_credentials_workspace_lookup_idx").on(table.workspaceId),
+}));
+
+// Per-workspace Codex account selection (the ACTIVE pointer) + P3 rotation
+// forward-compat. One row per workspace. The only P1-load-bearing column is
+// activeCredentialId — the account a session runs on when it has no pin. NULL ⇒
+// none selected (e.g. the active one was just disconnected). The
+// (account_id, workspace_id) pair inherits the verbatim workspace_rls_visible
+// policy. active_credential_id's FK is declared in the MIGRATION (not
+// .references()) to avoid a forward-reference on the const ordering, exactly like
+// sessions.activeSandboxId; ON DELETE SET NULL.
+export const codexRotationSettings = pgTable("codex_rotation_settings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  activeCredentialId: uuid("active_credential_id"),
+  rotationEnabled: boolean("rotation_enabled").notNull().default(false),     // P3, inert in P1
+  rotationStrategy: text("rotation_strategy").notNull().default("most_remaining"), // P3, inert
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspace: uniqueIndex("codex_rotation_settings_workspace_idx").on(table.workspaceId),
 }));
 
 export const sessions = pgTable("sessions", {
@@ -208,6 +238,15 @@ export const sessions = pgTable("sessions", {
   // the trigger survives a worker restart and converges before the next turn.
   compactRequested: boolean("compact_requested").notNull().default(false),
   lastSequence: integer("last_sequence").notNull().default(0),
+  // The session's PINNED Codex account (manual override from the in-session
+  // switcher). NULL ⇒ follow the workspace active pointer. FK declared in the
+  // migration with ON DELETE SET NULL (a disconnected pin degrades to "follow
+  // active", never dangles), same pattern as activeSandboxId.
+  codexPinnedCredentialId: uuid("codex_pinned_credential_id"),
+  // The Codex account the session's most recent turn ACTUALLY ran on — drives
+  // the "Running on:" indicator. Written by the worker at the turn boundary. FK
+  // ON DELETE SET NULL (migration).
+  codexLastCredentialId: uuid("codex_last_credential_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

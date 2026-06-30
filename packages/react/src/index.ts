@@ -266,6 +266,8 @@ export type {
 } from "./components/enrollment-consent";
 export { useMachines } from "./hooks/use-machines";
 export type { MachinesClientLike, UseMachinesOptions, UseMachinesResult } from "./hooks/use-machines";
+export { useCodexAccounts, isCodexAccountEvent } from "./hooks/use-codex-accounts";
+export type { CodexAccountsClientLike, UseCodexAccountsOptions, UseCodexAccountsResult } from "./hooks/use-codex-accounts";
 
 // Sandbox helpers
 export { gitFileDiffToPatch } from "./lib/git-patch";

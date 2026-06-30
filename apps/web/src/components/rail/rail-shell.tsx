@@ -14,6 +14,7 @@ import { useRail } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
+import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -167,6 +168,12 @@ function CanvasTopStrip() {
               </span>
               <span aria-hidden>·</span>
               <SessionSandboxSwitcher workspaceId={context.session.workspaceId} sessionId={context.session.id} />
+              {/* Codex-prefix-gated inside the component: absent for host-credit sessions. */}
+              <CodexAccountIndicator
+                workspaceId={context.session.workspaceId}
+                sessionId={context.session.id}
+                model={context.session.model}
+              />
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">

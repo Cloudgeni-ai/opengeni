@@ -55,15 +55,16 @@ describe("refreshCodexToken", () => {
 });
 
 describe("parseIdToken", () => {
-  test("extracts chatgpt_account_id / plan_type / fedramp from the auth claim", () => {
+  test("extracts chatgpt_account_id / plan_type / fedramp / email from the claims", () => {
     const jwt = makeJwt({
+      email: "jane@example.com",
       "https://api.openai.com/auth": { chatgpt_account_id: "acct_1", chatgpt_plan_type: "pro", chatgpt_account_is_fedramp: true },
     });
-    expect(parseIdToken(jwt)).toEqual({ chatgptAccountId: "acct_1", planType: "pro", isFedramp: true });
+    expect(parseIdToken(jwt)).toEqual({ chatgptAccountId: "acct_1", planType: "pro", isFedramp: true, email: "jane@example.com" });
   });
 
   test("missing claim -> nulls and isFedramp false", () => {
-    expect(parseIdToken(makeJwt({}))).toEqual({ chatgptAccountId: null, planType: null, isFedramp: false });
+    expect(parseIdToken(makeJwt({}))).toEqual({ chatgptAccountId: null, planType: null, isFedramp: false, email: null });
   });
 });
 

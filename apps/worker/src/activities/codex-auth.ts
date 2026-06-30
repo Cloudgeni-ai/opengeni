@@ -58,6 +58,12 @@ export function buildCodexTokenResolver(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  // The RESOLVED effective credential id (pin > workspace active), threaded from
+  // the worker. A mid-turn switch loads a DIFFERENT row id, gets a distinct
+  // single-flight key, and the (id, version) CAS in recordCodexTokenRefresh writes
+  // 0 rows against the now-inactive row — so a refresh racing a switch can never
+  // clobber the newly-active account. The single-flight map needs zero change.
+  credentialId: string,
   deps: CodexAuthDeps = defaultDeps,
 ): { getToken: () => Promise<CodexTokenSnapshot>; refresh: () => Promise<CodexTokenSnapshot> } {
   const snapshot = (cred: CodexCredentialForRun): CodexTokenSnapshot => ({
@@ -93,7 +99,7 @@ export function buildCodexTokenResolver(
         // The row changed under us. Our rotated tokens belong to a stale family;
         // fall back to whatever is connected NOW (a reconnect leaves an active
         // row). If nothing active remains, a relogin is genuinely required.
-        const current = await deps.loadCredential(db, settings, workspaceId);
+        const current = await deps.loadCredential(db, settings, workspaceId, credentialId);
         if (current && current.status === "active") {
           return snapshot(current);
         }
@@ -135,7 +141,7 @@ export function buildCodexTokenResolver(
   };
 
   const resolve = async (force: boolean): Promise<CodexTokenSnapshot> => {
-    const cred = await deps.loadCredential(db, settings, workspaceId);
+    const cred = await deps.loadCredential(db, settings, workspaceId, credentialId);
     if (!cred) {
       throw new CodexReloginRequired("No Codex subscription is connected for this workspace.");
     }

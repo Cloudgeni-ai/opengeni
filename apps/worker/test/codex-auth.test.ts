@@ -50,7 +50,7 @@ function deps(overrides: Partial<CodexAuthDeps> = {}): { deps: CodexAuthDeps; co
 describe("buildCodexTokenResolver", () => {
   test("returns the cached token without refreshing when not stale", async () => {
     const { deps: d, counts } = deps();
-    const resolver = buildCodexTokenResolver(db, settings, "ws_fresh", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_fresh", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("AC");
     expect(counts.refresh).toBe(0);
@@ -58,7 +58,7 @@ describe("buildCodexTokenResolver", () => {
 
   test("refreshes and persists when the token is within the expiry window", async () => {
     const { deps: d, counts } = deps({ loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }) });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_stale", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_stale", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("AC2");
     expect(counts.refresh).toBe(1);
@@ -72,7 +72,7 @@ describe("buildCodexTokenResolver", () => {
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
       refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_concurrent", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_concurrent", "cred_1", d);
     const both = Promise.all([resolver.getToken(), resolver.getToken()]);
     release();
     const [a, b] = await both;
@@ -88,7 +88,7 @@ describe("buildCodexTokenResolver", () => {
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
       refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_force_concurrent", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_force_concurrent", "cred_1", d);
     const both = Promise.all([resolver.refresh(), resolver.refresh()]); // two 401 retries at once
     release();
     await both;
@@ -100,14 +100,14 @@ describe("buildCodexTokenResolver", () => {
       loadCredential: async () => makeCred({ expiresAt: new Date(Date.now() - 1000) }),
       refresh: async () => { counts.refresh += 1; throw new CodexReloginRequired("expired"); },
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_relogin", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_relogin", "cred_1", d);
     await expect(resolver.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
     expect(counts.status).toBe(1);
   });
 
   test("a missing credential throws CodexReloginRequired", async () => {
     const { deps: d } = deps({ loadCredential: async () => null });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_missing", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_missing", "cred_1", d);
     await expect(resolver.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
   });
 
@@ -115,7 +115,7 @@ describe("buildCodexTokenResolver", () => {
     const { deps: d, counts } = deps({
       loadCredential: async () => makeCred({ id: "cred_A", version: 7, expiresAt: new Date(Date.now() - 1000) }),
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_cas", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_cas", "cred_1", d);
     await resolver.getToken();
     expect(counts.recordArgs).toEqual([{ id: "cred_A", version: 7 }]);
   });
@@ -133,7 +133,7 @@ describe("buildCodexTokenResolver", () => {
       },
       recordRefresh: async () => { counts.record += 1; return false; }, // CAS miss
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("NEW"); // used the reconnected credential, not the stale rotation
     expect(counts.status).toBe(0); // never stamped needs_relogin on the new row
@@ -150,7 +150,7 @@ describe("buildCodexTokenResolver", () => {
       },
       recordRefresh: async () => { counts.record += 1; return false; }, // CAS miss
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_gone", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_gone", "cred_1", d);
     await expect(resolver.getToken()).rejects.toBeInstanceOf(CodexReloginRequired);
     // The needs_relogin stamp is compare-and-set on the OLD id+version, so it
     // can never clobber a credential that replaced it.
@@ -169,7 +169,7 @@ describe("buildCodexTokenResolver", () => {
       },
       refresh: async () => { counts.refresh += 1; await gate; return { accessToken: "AC2" }; },
     });
-    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_inflight", d);
+    const resolver = buildCodexTokenResolver(db, settings, "ws_reconnect_inflight", "cred_1", d);
     const both = Promise.all([resolver.refresh(), resolver.refresh()]);
     release();
     await both;

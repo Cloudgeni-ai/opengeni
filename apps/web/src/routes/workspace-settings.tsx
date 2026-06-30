@@ -22,7 +22,7 @@ import {
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { CodexConnectionCard } from "@/components/codex-connection";
+import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
@@ -238,8 +238,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           </Button>
         </section>
 
-        {/* Codex (ChatGPT) subscription */}
-        <CodexConnectionCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
+        {/* Codex (ChatGPT) subscriptions (multi-account) */}
+        <CodexSubscriptionsCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
 
         {/* API keys (moved from the old account page) */}
         <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">

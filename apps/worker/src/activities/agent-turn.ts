@@ -12,6 +12,10 @@ import {
   getSessionTurn,
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
+  getCodexRotationSettings,
+  listCodexAccountStatuses,
+  getSessionCodexState,
+  recordSessionActiveCodexCredential,
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
@@ -89,6 +93,28 @@ import { randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+/**
+ * Resolve which Codex account a turn runs on (multi-account P1): session-pin >
+ * workspace-active. No rotation in P1. The selected id must still be in the
+ * connected set — a disconnected pin was FK-nulled, so a stale id can't appear,
+ * but we guard anyway. Returns null when there is no usable account (the turn
+ * then fails with the existing relogin error path).
+ */
+export function selectCodexCredentialForTurn(args: {
+  sessionPinnedCredentialId: string | null;
+  activeCredentialId: string | null;
+  connectedIds: Set<string>;
+}): string | null {
+  const { sessionPinnedCredentialId: pin, activeCredentialId: active, connectedIds } = args;
+  if (pin && connectedIds.has(pin)) {
+    return pin;
+  }
+  if (active && connectedIds.has(active)) {
+    return active;
+  }
+  return null;
+}
 
 // Resume notice fed to the model when a turn re-enters after a graceful
 // worker shutdown (deploy/rollout restart) checkpointed it mid-flight. The
@@ -362,6 +388,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // created (and used for turn.started) before the environment is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
     let environmentId = "";
+    // The Codex account this turn runs on (pin > workspace active), resolved once
+    // a codex-billed turn is confirmed and threaded into the token resolver below.
+    let effectiveCodexCredentialId: string | null = null;
     // Hoisted for the preemption path: an approval-decision rerun must
     // re-enter through the approval resume path (its frozen mid-flight state
     // only exists in the RunState blob), never through a swapped trigger.
@@ -460,6 +489,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       ], true);
       turnStartedPublished = true;
 
+      // Multi-account (P1): resolve the effective Codex account for this turn
+      // (session-pin > workspace active) and stamp it on the session so the
+      // in-session "Running on:" indicator reflects reality. Emit a switch event
+      // when it changed from the prior run's account so the pill flips live.
+      // Gated on the codex-billed predicate — non-codex turns never touch this.
+      if (isCodexTurn) {
+        const [rotation, accounts, sessionCodex] = await Promise.all([
+          getCodexRotationSettings(db, input.workspaceId),
+          listCodexAccountStatuses(db, input.workspaceId),
+          getSessionCodexState(db, input.workspaceId, input.sessionId),
+        ]);
+        const connectedIds = new Set(accounts.map((account) => account.id));
+        effectiveCodexCredentialId = selectCodexCredentialForTurn({
+          sessionPinnedCredentialId: sessionCodex?.pinnedCredentialId ?? null,
+          activeCredentialId: rotation?.activeCredentialId ?? null,
+          connectedIds,
+        });
+        if (effectiveCodexCredentialId) {
+          const priorAccountId = sessionCodex?.lastCredentialId ?? null;
+          await recordSessionActiveCodexCredential(db, input.workspaceId, input.sessionId, effectiveCodexCredentialId);
+          if (priorAccountId !== effectiveCodexCredentialId) {
+            await publish([{
+              type: "codex.account.switched",
+              payload: { fromAccountId: priorAccountId, toAccountId: effectiveCodexCredentialId, reason: "manual" },
+            }]);
+          }
+        }
+      }
+
       // Pack-scoped runtime: enabled packs may declare the sandbox image this
       // workspace's sessions run in and skills for the sandbox skill index.
       // Resolved after turn.started so a composition conflict (two enabled
@@ -498,7 +556,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // run; otherwise the summarizer would hit the codex backend unauthenticated.
       const codexContext: CodexRequestContext | null = resolvedModel?.provider.kind === "codex-subscription"
         ? ((): CodexRequestContext => {
-            const resolver = buildCodexTokenResolver(db, runSettings, input.workspaceId);
+            // The empty-string fallback yields no row → null credential → the
+            // existing CodexReloginRequired path (a codex turn with no usable
+            // account fails closed, exactly as before multi-account).
+            const resolver = buildCodexTokenResolver(db, runSettings, input.workspaceId, effectiveCodexCredentialId ?? "");
             return {
               clientVersion: CODEX_CLIENT_VERSION,
               getToken: resolver.getToken,

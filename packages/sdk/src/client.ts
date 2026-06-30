@@ -5,6 +5,8 @@ import type {
   AddWorkspaceMemberRequest,
   ApiKey,
   BillingEntitlementsResponse,
+  CodexAccount,
+  CodexAccountsResponse,
   CodexConnectionStatus,
   CodexConnectPoll,
   CodexConnectStart,
@@ -1198,9 +1200,34 @@ export class OpenGeniClient {
     return await this.requestJson<CodexUsage>("GET", `/v1/workspaces/${workspaceId}/codex/usage`);
   }
 
-  /** Disconnect: remove the workspace's stored credential. */
+  /** Disconnect ALL accounts (legacy workspace-wide). Prefer `disconnectCodexAccount`. */
   async codexDisconnect(workspaceId: string): Promise<{ disconnected: boolean }> {
     return await this.requestJson<{ disconnected: boolean }>("DELETE", `/v1/workspaces/${workspaceId}/codex`);
+  }
+
+  /** List every connected Codex account + the workspace active pointer + settings. */
+  async listCodexAccounts(workspaceId: string): Promise<CodexAccountsResponse> {
+    return await this.requestJson<CodexAccountsResponse>("GET", `/v1/workspaces/${workspaceId}/codex/accounts`);
+  }
+
+  /** Switch the workspace ACTIVE Codex account (the one unpinned sessions use). */
+  async activateCodexAccount(workspaceId: string, accountId: string): Promise<{ activated: boolean; accountId: string }> {
+    return await this.requestJson<{ activated: boolean; accountId: string }>("POST", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/activate`);
+  }
+
+  /** Disconnect ONE Codex account by id (re-picks active when the removed one was active). */
+  async disconnectCodexAccount(workspaceId: string, accountId: string): Promise<{ disconnected: boolean; newActiveId: string | null }> {
+    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>("DELETE", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`);
+  }
+
+  /** Rename a Codex account (label only in P1). */
+  async renameCodexAccount(workspaceId: string, accountId: string, label: string | null): Promise<CodexAccount> {
+    return await this.requestJson<CodexAccount>("PATCH", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`, { label });
+  }
+
+  /** Pin (or unpin via "auto") a session's Codex account. Applies on the next turn. */
+  async pinSessionCodexAccount(workspaceId: string, sessionId: string, target: string): Promise<{ pinned: string }> {
+    return await this.requestJson<{ pinned: string }>("POST", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/codex-account`, { target });
   }
 
   private async requestJson<T>(method: string, path: string, body?: unknown, query: Record<string, string> = {}): Promise<T> {

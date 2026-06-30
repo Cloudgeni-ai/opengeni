@@ -23,16 +23,39 @@ import {
   startDeviceCode,
 } from "@opengeni/codex";
 import {
-  deleteCodexSubscriptionCredential,
+  disconnectAllCodexAccounts,
+  disconnectCodexAccount,
   encryptEnvironmentValue,
+  ensureCodexRotationSettings,
   getCodexCredentialStatus,
+  getCodexRotationSettings,
+  listCodexAccountStatuses,
   loadCodexCredentialForRun,
+  renameCodexAccount,
+  setActiveCodexCredential,
   upsertCodexSubscriptionCredential,
+  type CodexAccountStatus,
 } from "@opengeni/db";
 
 // The picker surfaces codex models under their own "no credits" provider group so
 // they read distinctly from the platform provider's same-named model.
 const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
+
+// The wire shape for one Codex account (metadata only; never the secret column).
+function codexAccountJson(row: CodexAccountStatus) {
+  return {
+    id: row.id,
+    chatgptAccountId: row.chatgptAccountId,
+    label: row.label,
+    email: row.accountEmail,
+    plan: row.planType,
+    status: row.status,
+    active: row.isActive,
+    expiresAt: row.expiresAt,
+    lastRefreshAt: row.lastRefreshAt,
+    lastError: row.lastError,
+  };
+}
 
 function codexModelsForPicker(slugs: string[]): Array<{ id: string; label: string; provider: string; providerLabel: string; api: "responses" }> {
   return slugs
@@ -112,7 +135,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!key) {
       throw new HTTPException(500, { message: "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured" });
     }
-    await upsertCodexSubscriptionCredential(db, {
+    const upserted = await upsertCodexSubscriptionCredential(db, {
       accountId: grant.accountId,
       workspaceId,
       credentialEncrypted: encryptEnvironmentValue(
@@ -125,8 +148,21 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       isFedramp: id.isFedramp,
       expiresAt: accessTokenExpiry(tokens.accessToken),
       lastRefreshAt: new Date(),
+      accountEmail: id.email ?? null,
+      label: id.email ?? id.chatgptAccountId ?? null,
     });
-    return c.json({ status: "connected", plan: id.planType });
+    // Ensure the per-workspace rotation-settings row exists, then auto-activate
+    // the FIRST account only. Additional new accounts do NOT auto-activate — a
+    // manual switch is required (no auto-rotation in P1). A re-connect of the
+    // already-active account is a no-op for the pointer.
+    await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
+    const rotation = await getCodexRotationSettings(db, workspaceId);
+    let isActive = rotation?.activeCredentialId === upserted.id;
+    if (!isActive && rotation?.activeCredentialId == null) {
+      await setActiveCodexCredential(db, workspaceId, upserted.id);
+      isActive = true;
+    }
+    return c.json({ status: "connected", plan: id.planType, accountId: upserted.id, isActive });
   });
 
   // Connection health: the cheapest real call is GET /codex/models (a 200 proves
@@ -138,10 +174,15 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!status) {
       return c.json({ connected: false });
     }
+    const accounts = await listCodexAccountStatuses(db, workspaceId);
+    const activeRow = accounts.find((account) => account.id === status.credentialId) ?? null;
+    const activeAccount = activeRow
+      ? { id: activeRow.id, label: activeRow.label ?? activeRow.accountEmail ?? activeRow.planType ?? activeRow.chatgptAccountId, chatgptAccountId: activeRow.chatgptAccountId }
+      : null;
     let valid = false;
     let models = codexModelsForPicker([...CODEX_FALLBACK_MODEL_SLUGS]); // offline fallback list
     try {
-      const cred = await loadCodexCredentialForRun(db, settings, workspaceId);
+      const cred = status.credentialId ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId) : null;
       if (cred) {
         const live = await fetchCodexModels({
           accessToken: cred.tokens.accessToken,
@@ -164,22 +205,89 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       expiresAt: status.expiresAt,
       lastError: status.lastError,
       models, // ClientModel[] the picker surfaces under the "no credits" group
+      activeAccount, // the account a session runs on when unpinned (label for the indicator)
+      accountCount: accounts.length,
     });
   });
 
-  // Disconnect: remove the workspace's stored credential.
+  // List every connected Codex account (metadata only, never decrypts) + the
+  // workspace active pointer + rotation settings. Read access.
+  app.get("/v1/workspaces/:workspaceId/codex/accounts", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [accounts, rotation] = await Promise.all([
+      listCodexAccountStatuses(db, workspaceId),
+      getCodexRotationSettings(db, workspaceId),
+    ]);
+    const activeAccountId = rotation?.activeCredentialId ?? null;
+    return c.json({
+      accounts: accounts.map(codexAccountJson),
+      activeAccountId,
+      settings: {
+        rotationEnabled: rotation?.rotationEnabled ?? false,
+        rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
+        activeCredentialId: activeAccountId,
+      },
+    });
+  });
+
+  // Manually switch the workspace ACTIVE account (the one unpinned sessions use).
+  // Pure pointer flip; in-flight turns pick it up on their next token fetch.
+  app.post("/v1/workspaces/:workspaceId/codex/accounts/:accountId/activate", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const accountId = c.req.param("accountId");
+    const activated = await setActiveCodexCredential(db, workspaceId, accountId);
+    if (!activated) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    return c.json({ activated: true, accountId });
+  });
+
+  // Rename an account (label only in P1).
+  app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const accountId = c.req.param("accountId");
+    const body = (await c.req.json()) as { label?: string | null };
+    const label = typeof body.label === "string" ? body.label : null;
+    const renamed = await renameCodexAccount(db, workspaceId, accountId, label);
+    if (!renamed) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    const accounts = await listCodexAccountStatuses(db, workspaceId);
+    const row = accounts.find((account) => account.id === accountId);
+    if (!row) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    return c.json(codexAccountJson(row));
+  });
+
+  // Disconnect ONE account by id. The accessor re-picks active when the removed
+  // row was active (FK ON DELETE SET NULL + re-pick in the same RLS txn).
+  app.delete("/v1/workspaces/:workspaceId/codex/accounts/:accountId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const accountId = c.req.param("accountId");
+    const result = await disconnectCodexAccount(db, workspaceId, accountId);
+    return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
+  });
+
+  // Legacy "disconnect all" (old workspace-wide behavior), deprecated in favor of
+  // the by-id route above.
   app.delete("/v1/workspaces/:workspaceId/codex", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const removed = await deleteCodexSubscriptionCredential(db, workspaceId);
-    return c.json({ disconnected: removed });
+    const removed = await disconnectAllCodexAccounts(db, workspaceId);
+    return c.json({ disconnected: removed > 0 });
   });
 
   // Remaining usage / limits from GET /wham/usage. A 404-with-body is a limits state.
   app.get("/v1/workspaces/:workspaceId/codex/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const cred = await loadCodexCredentialForRun(db, settings, workspaceId);
+    const status = await getCodexCredentialStatus(db, workspaceId);
+    const cred = status?.credentialId ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId) : null;
     if (!cred) {
       throw new HTTPException(404, { message: "codex subscription is not connected" });
     }

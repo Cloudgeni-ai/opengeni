@@ -2070,7 +2070,15 @@ export type CodexCredentialForRun = {
   lastError: string | null;
 };
 
-/** Login / rotation write. Caller passes the PRE-encrypted credential blob. */
+/**
+ * Login / rotation write (multi-account P1). Caller passes the PRE-encrypted
+ * credential blob. Keyed on the composite partial index (workspace, chatgpt
+ * account): re-connecting the SAME ChatGPT account updates that row in place
+ * (re-asserts account_id, bumps version); connecting a NEW account inserts a new
+ * row. Returns the row id + whether it was newly inserted. The route — not this
+ * accessor — auto-activates a brand-new first account and ensures the
+ * rotation-settings row exists.
+ */
 export async function upsertCodexSubscriptionCredential(db: Database, input: {
   accountId: string;
   workspaceId: string;
@@ -2081,10 +2089,12 @@ export async function upsertCodexSubscriptionCredential(db: Database, input: {
   isFedramp: boolean;
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
-}): Promise<void> {
-  await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+  accountEmail?: string | null;
+  label?: string | null;
+}): Promise<{ id: string; isNew: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const now = new Date();
-    await scopedDb.insert(schema.codexSubscriptionCredentials).values({
+    const [row] = await scopedDb.insert(schema.codexSubscriptionCredentials).values({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       credentialEncrypted: input.credentialEncrypted,
@@ -2094,39 +2104,70 @@ export async function upsertCodexSubscriptionCredential(db: Database, input: {
       isFedramp: input.isFedramp,
       expiresAt: input.expiresAt,
       lastRefreshAt: input.lastRefreshAt,
+      accountEmail: input.accountEmail ?? null,
+      label: input.label ?? null,
       status: "active",
       lastError: null,
     }).onConflictDoUpdate({
-      target: [schema.codexSubscriptionCredentials.workspaceId],
+      // The unique index is PARTIAL (WHERE chatgpt_account_id IS NOT NULL), so the
+      // conflict target MUST repeat that predicate via targetWhere, else postgres
+      // raises "no unique or exclusion constraint matching the ON CONFLICT".
+      target: [schema.codexSubscriptionCredentials.workspaceId, schema.codexSubscriptionCredentials.chatgptAccountId],
+      targetWhere: sql`chatgpt_account_id is not null`,
       set: {
         // account_id MUST be re-asserted on conflict. Omitting it leaves a stale
         // account_id on a row whose owning account changed (e.g. a reconnect
         // under a different grant), which makes the row RLS-INVISIBLE to every
         // subsequent scoped read — a permanent phantom "no active subscription".
-        // The caller derives accountId from the workspace, so this keeps the row
-        // aligned with its tenant.
         accountId: input.accountId,
         credentialEncrypted: input.credentialEncrypted,
-        chatgptAccountId: input.chatgptAccountId,
         scopes: input.scopes,
         planType: input.planType,
         isFedramp: input.isFedramp,
         expiresAt: input.expiresAt,
         lastRefreshAt: input.lastRefreshAt,
+        // Refresh the derived email; keep an existing user-chosen label (only seed
+        // it when still null) so a re-connect never clobbers a rename.
+        accountEmail: input.accountEmail ?? null,
+        label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
         status: "active",
         lastError: null,
         version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
         updatedAt: now,
       },
+    }).returning({
+      id: schema.codexSubscriptionCredentials.id,
+      createdAt: schema.codexSubscriptionCredentials.createdAt,
+      updatedAt: schema.codexSubscriptionCredentials.updatedAt,
     });
+    // The upsert always returns exactly one row (insert or update).
+    if (!row) {
+      throw new Error("upsertCodexSubscriptionCredential returned no row");
+    }
+    // A fresh INSERT leaves created_at === updated_at (both the same per-txn db
+    // now()). A conflict UPDATE stamps updated_at to our JS `now` while created_at
+    // keeps the original (older) value, so the two diverge. This distinguishes
+    // insert from update without a second read.
+    const isNew = row.createdAt.getTime() === row.updatedAt.getTime();
+    return { id: row.id, isNew };
   });
 }
 
-/** The ONLY decrypt-read accessor. Fails closed. Never call from an API route that returns the result. */
+/**
+ * The ONLY decrypt-read accessor. Fails closed. Never call from an API route that
+ * returns the result.
+ *
+ * The run's account is the resolved pin-or-active credential id, not LIMIT 1: the
+ * caller (worker) resolves the effective credential id and passes it here so a
+ * pinned session loads its SPECIFIC account. RLS still constrains the row to the
+ * workspace; an unknown/disconnected id returns null → the caller treats it as
+ * "needs relogin / re-pick".
+ */
 export async function loadCodexCredentialForRun(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  credentialId: string,
 ): Promise<CodexCredentialForRun | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) {
@@ -2134,7 +2175,10 @@ export async function loadCodexCredentialForRun(
   }
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId)).limit(1);
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      )).limit(1);
     if (!row) {
       return null;
     }
@@ -2205,39 +2249,47 @@ export async function recordCodexTokenRefresh(db: Database, input: {
 }
 
 /**
- * Surface a permanent or transient failure on the credential row.
+ * Surface a permanent or transient failure on a SPECIFIC credential row.
  *
- * Optionally COMPARE-AND-SET (P1-c): when `expected` is supplied, the status is
- * stamped only if the row STILL matches the (id, version) the resolver loaded.
- * This stops a refresh that began before a disconnect→reconnect from stamping
- * `needs_relogin` on the brand-new, good credential. Returns true iff a row was
- * updated. Without `expected` it falls back to the legacy workspace-scoped write.
+ * COMPARE-AND-SET (P1-c): the status is stamped only if the row STILL matches the
+ * (id, version) the resolver loaded. This stops a refresh that began before a
+ * disconnect→reconnect (or a manual account switch) from stamping `needs_relogin`
+ * on the brand-new, good credential — with N accounts per workspace a
+ * workspace-wide write would be flat-out wrong (it would scribble on every
+ * account). Returns true iff the guarded row was updated.
  */
 export async function setCodexCredentialStatus(
   db: Database,
   workspaceId: string,
   status: "active" | "needs_relogin" | "error",
   lastError: string | null,
-  expected?: { id: string; version: number },
+  target: { id: string; version: number },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const where = expected
-      ? and(
-        eq(schema.codexSubscriptionCredentials.id, expected.id),
-        eq(schema.codexSubscriptionCredentials.version, expected.version),
-      )
-      : eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId);
     const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ status, lastError, updatedAt: new Date() })
-      .where(where)
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, target.id),
+        eq(schema.codexSubscriptionCredentials.version, target.version),
+      ))
       .returning({ id: schema.codexSubscriptionCredentials.id });
     return updated.length > 0;
   });
 }
 
-/** Metadata-only read for API routes. NEVER selects credential_encrypted. */
+/**
+ * Metadata-only read for API routes, repointed to the per-workspace ACTIVE
+ * credential. NEVER selects credential_encrypted.
+ *
+ * Reads codex_rotation_settings.active_credential_id and joins the credential by
+ * id (deterministic). If the pointer is NULL but credentials exist (the
+ * mid-disconnect window), it falls back to the most-recently-connected row and
+ * lazily repairs the pointer so the next read is deterministic. The returned
+ * `credentialId` is the active row's id (null when no credential exists at all).
+ */
 export async function getCodexCredentialStatus(db: Database, workspaceId: string): Promise<{
   connected: boolean;
+  credentialId: string | null;
   chatgptAccountId: string | null;
   scopes: string | null;
   planType: string | null;
@@ -2247,7 +2299,8 @@ export async function getCodexCredentialStatus(db: Database, workspaceId: string
   lastError: string | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.select({
+    const cols = {
+      id: schema.codexSubscriptionCredentials.id,
       chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
       scopes: schema.codexSubscriptionCredentials.scopes,
       planType: schema.codexSubscriptionCredentials.planType,
@@ -2255,12 +2308,36 @@ export async function getCodexCredentialStatus(db: Database, workspaceId: string
       expiresAt: schema.codexSubscriptionCredentials.expiresAt,
       lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
       lastError: schema.codexSubscriptionCredentials.lastError,
-    }).from(schema.codexSubscriptionCredentials)
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId)).limit(1);
+    } as const;
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
+
+    let row: { id: string; chatgptAccountId: string | null; scopes: string | null; planType: string | null; status: string; expiresAt: Date | null; lastRefreshAt: Date | null; lastError: string | null } | undefined;
+    if (settingsRow?.activeCredentialId) {
+      [row] = await scopedDb.select(cols).from(schema.codexSubscriptionCredentials)
+        .where(and(
+          eq(schema.codexSubscriptionCredentials.id, settingsRow.activeCredentialId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        )).limit(1);
+    }
+    if (!row) {
+      // No active pointer (or it dangles): fall back to the most-recently-connected
+      // credential and lazily repair the pointer so the active account is stable.
+      [row] = await scopedDb.select(cols).from(schema.codexSubscriptionCredentials)
+        .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt)).limit(1);
+      if (row && settingsRow && settingsRow.activeCredentialId !== row.id) {
+        await scopedDb.update(schema.codexRotationSettings)
+          .set({ activeCredentialId: row.id, updatedAt: new Date() })
+          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
+      }
+    }
     if (!row) {
       return null;
     }
-    return { connected: row.status === "active", ...row };
+    const { id, ...rest } = row;
+    return { connected: rest.status === "active", credentialId: id, ...rest };
   });
 }
 
@@ -2353,13 +2430,220 @@ export async function isCodexBilledTurn(input: {
   return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
 }
 
-/** Disconnect: delete the workspace's codex credential. Returns true if a row was removed. */
-export async function deleteCodexSubscriptionCredential(db: Database, workspaceId: string): Promise<boolean> {
+// ---------------------------------------------------------------------------
+// Multi-account (P1) metadata accessors. All metadata-only — NEVER decrypt.
+// ---------------------------------------------------------------------------
+
+export type CodexAccountStatus = {
+  id: string;
+  chatgptAccountId: string | null;
+  label: string | null;
+  accountEmail: string | null;
+  planType: string | null;
+  status: string;        // active | needs_relogin | error
+  isActive: boolean;
+  expiresAt: Date | null;
+  lastRefreshAt: Date | null;
+  lastError: string | null;
+};
+
+/**
+ * Metadata-only list of every connected Codex account in the workspace, for the
+ * accounts UI + the worker's selection resolver. NEVER decrypts. `isActive` marks
+ * the workspace active pointer. Ordered by created_at ASC (stable list order).
+ */
+export async function listCodexAccountStatuses(db: Database, workspaceId: string): Promise<CodexAccountStatus[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
+    const activeId = settingsRow?.activeCredentialId ?? null;
+    const rows = await scopedDb.select({
+      id: schema.codexSubscriptionCredentials.id,
+      chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+      label: schema.codexSubscriptionCredentials.label,
+      accountEmail: schema.codexSubscriptionCredentials.accountEmail,
+      planType: schema.codexSubscriptionCredentials.planType,
+      status: schema.codexSubscriptionCredentials.status,
+      expiresAt: schema.codexSubscriptionCredentials.expiresAt,
+      lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
+      lastError: schema.codexSubscriptionCredentials.lastError,
+    }).from(schema.codexSubscriptionCredentials)
+      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+      .orderBy(asc(schema.codexSubscriptionCredentials.createdAt));
+    return rows.map((row) => ({ ...row, isActive: row.id === activeId }));
+  });
+}
+
+export type CodexRotationSettings = {
+  activeCredentialId: string | null;
+  rotationEnabled: boolean;     // P1: always false
+  rotationStrategy: string;     // P1: 'most_remaining' (unused)
+};
+
+/** The per-workspace rotation/active-pointer row (null when none exists yet). */
+export async function getCodexRotationSettings(db: Database, workspaceId: string): Promise<CodexRotationSettings | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      rotationEnabled: schema.codexRotationSettings.rotationEnabled,
+      rotationStrategy: schema.codexRotationSettings.rotationStrategy,
+    }).from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
+    return row ?? null;
+  });
+}
+
+/** Idempotently ensure the per-workspace rotation-settings row exists. */
+export async function ensureCodexRotationSettings(db: Database, accountId: string, workspaceId: string): Promise<void> {
+  await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
+    await scopedDb.insert(schema.codexRotationSettings)
+      .values({ accountId, workspaceId })
+      .onConflictDoNothing({ target: [schema.codexRotationSettings.workspaceId] });
+  });
+}
+
+/**
+ * THE manual-switch primitive (workspace scope). Validates the credential id
+ * belongs to the workspace, then one-cell UPDATEs active_credential_id. Returns
+ * false if the id is unknown (so the route can 404).
+ */
+export async function setActiveCodexCredential(db: Database, workspaceId: string, credentialId: string): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [cred] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
+      .from(schema.codexSubscriptionCredentials)
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      )).limit(1);
+    if (!cred) {
+      return false;
+    }
+    const updated = await scopedDb.update(schema.codexRotationSettings)
+      .set({ activeCredentialId: credentialId, updatedAt: new Date() })
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+      .returning({ id: schema.codexRotationSettings.id });
+    return updated.length > 0;
+  });
+}
+
+/** P1 rename (label only); P3 widens to rotation fields. */
+export async function renameCodexAccount(db: Database, workspaceId: string, credentialId: string, label: string | null): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
+      .set({ label, updatedAt: new Date() })
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
+  });
+}
+
+export type SessionCodexState = {
+  pinnedCredentialId: string | null;
+  lastCredentialId: string | null;
+};
+
+/** The session's pin + last-ran-on Codex account (drives the worker resolver + indicator). */
+export async function getSessionCodexState(db: Database, workspaceId: string, sessionId: string): Promise<SessionCodexState | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      pinnedCredentialId: schema.sessions.codexPinnedCredentialId,
+      lastCredentialId: schema.sessions.codexLastCredentialId,
+    }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Per-session pin (manual override). pinnedCredentialId === null clears the pin
+ * (follow the workspace active). Validates the id belongs to the workspace when
+ * non-null. Returns false if the session is unknown or the id is invalid.
+ */
+export async function setSessionCodexPin(
+  db: Database, workspaceId: string, sessionId: string, pinnedCredentialId: string | null,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    if (pinnedCredentialId !== null) {
+      const [cred] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
+        .from(schema.codexSubscriptionCredentials)
+        .where(and(
+          eq(schema.codexSubscriptionCredentials.id, pinnedCredentialId),
+          eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+        )).limit(1);
+      if (!cred) {
+        return false;
+      }
+    }
+    const updated = await scopedDb.update(schema.sessions)
+      .set({ codexPinnedCredentialId: pinnedCredentialId, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .returning({ id: schema.sessions.id });
+    return updated.length > 0;
+  });
+}
+
+/** Written by the worker at the turn boundary; drives the in-session indicator. */
+export async function recordSessionActiveCodexCredential(
+  db: Database, workspaceId: string, sessionId: string, credentialId: string,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.update(schema.sessions)
+      .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)));
+  });
+}
+
+/**
+ * Disconnect ONE account. DELETE WHERE id = credentialId AND workspace_id. If it
+ * was the active pointer, the FK ON DELETE SET NULL clears it; this fn then
+ * re-picks the most-recently-connected remaining account as active, atomically in
+ * the same RLS txn. Returns whether a row was removed + the new active id.
+ */
+export async function disconnectCodexAccount(
+  db: Database, workspaceId: string, credentialId: string,
+): Promise<{ removed: boolean; newActiveCredentialId: string | null }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const removedRows = await scopedDb.delete(schema.codexSubscriptionCredentials)
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    // The FK SET NULL already cleared the pointer if we deleted the active row.
+    const [settingsRow] = await scopedDb.select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .from(schema.codexRotationSettings)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId)).limit(1);
+    if (removedRows.length === 0) {
+      return { removed: false, newActiveCredentialId: settingsRow?.activeCredentialId ?? null };
+    }
+    let newActive = settingsRow?.activeCredentialId ?? null;
+    if (newActive === null) {
+      const [next] = await scopedDb.select({ id: schema.codexSubscriptionCredentials.id })
+        .from(schema.codexSubscriptionCredentials)
+        .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
+        .orderBy(desc(schema.codexSubscriptionCredentials.createdAt)).limit(1);
+      newActive = next?.id ?? null;
+      if (settingsRow) {
+        await scopedDb.update(schema.codexRotationSettings)
+          .set({ activeCredentialId: newActive, updatedAt: new Date() })
+          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
+      }
+    }
+    return { removed: true, newActiveCredentialId: newActive };
+  });
+}
+
+/** Legacy "disconnect all" (old workspace-wide behavior). Returns rows removed. */
+export async function disconnectAllCodexAccounts(db: Database, workspaceId: string): Promise<number> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.delete(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .returning({ id: schema.codexSubscriptionCredentials.id });
-    return rows.length > 0;
+    return rows.length;
   });
 }
 
@@ -6546,6 +6830,8 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     activeTurnId: row.activeTurnId,
     lastInputTokens: row.lastInputTokens ?? null,
     lastSequence: row.lastSequence,
+    codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
+    codexLastCredentialId: row.codexLastCredentialId ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

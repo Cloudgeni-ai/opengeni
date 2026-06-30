@@ -49,6 +49,7 @@ import {
   reorderQueuedSessionTurns,
   requestSessionCompaction,
   requireSession,
+  setSessionCodexPin,
   revokeViewer,
   setSessionGoalStatus,
   updatePtySessionActivity,
@@ -105,6 +106,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
+  });
+
+  // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
+  // "auto" clears the pin (the session follows the workspace active pointer); a
+  // uuid pins the session to that specific account. The pin applies to the NEXT
+  // turn (the worker reads it at turn start). 404 when the session or the target
+  // account id isn't in the workspace.
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/codex-account", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const body = (await c.req.json()) as { target?: string };
+    const target = typeof body.target === "string" ? body.target : "";
+    if (!target) {
+      throw new HTTPException(400, { message: "target is required (\"auto\" or an account id)" });
+    }
+    const pinned = target === "auto" ? null : target;
+    const ok = await setSessionCodexPin(db, workspaceId, sessionId, pinned);
+    if (!ok) {
+      throw new HTTPException(404, { message: "session or codex account not found" });
+    }
+    return c.json({ pinned: target === "auto" ? "auto" : target });
   });
 
   // Manual rename. A user-set title is permanent: the db write is

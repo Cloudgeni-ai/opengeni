@@ -256,6 +256,10 @@ export type Session = {
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
   lastSequence: number;
+  /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
+  codexPinnedCredentialId?: string | null;
+  /** Multi-account Codex (P1): the account the most recent turn ran on (the "Running on:" indicator). */
+  codexLastCredentialId?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -343,6 +347,8 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  // Multi-account Codex (P1): the session's inference account changed.
+  "codex.account.switched",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];
@@ -676,6 +682,45 @@ export type CodexConnectionStatus = {
   expiresAt?: string | null;
   lastError?: string | null;
   models?: ClientModel[];
+  /** The account a session runs on when unpinned (label for the in-session indicator). */
+  activeAccount?: { id: string; label?: string | null; chatgptAccountId?: string | null } | null;
+  /** How many Codex accounts the workspace has connected. */
+  accountCount?: number;
+};
+
+/** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
+export type CodexAccount = {
+  id: string;
+  chatgptAccountId?: string | null;
+  label?: string | null;
+  email?: string | null;
+  plan?: string | null;
+  status: "active" | "needs_relogin" | "error";
+  active: boolean;
+  expiresAt?: string | null;
+  lastRefreshAt?: string | null;
+  lastError?: string | null;
+};
+
+/** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */
+export type CodexRotationSettings = {
+  rotationEnabled: boolean;
+  rotationStrategy: "most_remaining" | "round_robin" | "drain_then_next";
+  activeCredentialId: string | null;
+};
+
+/** GET /codex/accounts — the accounts list + the workspace active pointer + settings. */
+export type CodexAccountsResponse = {
+  accounts: CodexAccount[];
+  activeAccountId: string | null;
+  settings: CodexRotationSettings;
+};
+
+/** Payload of a `codex.account.switched` session event. */
+export type CodexAccountSwitchedPayload = {
+  fromAccountId: string | null;
+  toAccountId: string;
+  reason: "manual" | "exhausted" | "rotation";
 };
 
 /** Device-code start: show `userCode` at `verificationUri`, then poll with `state`. */
@@ -690,7 +735,7 @@ export type CodexConnectStart = {
 export type CodexConnectPoll =
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "connected"; plan?: string | null };
+  | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
 
 /** Remaining usage/limits. `usage` is the raw provider payload (windows, resets). */
 export type CodexUsage = { status: "ok" | "limit_reached" | "error"; usage: unknown };

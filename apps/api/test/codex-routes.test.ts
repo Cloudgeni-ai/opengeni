@@ -100,3 +100,45 @@ describe("codex connect routes", () => {
     expect([401, 403]).toContain(res.status);
   });
 });
+
+describe("codex multi-account routes (auth + validation)", () => {
+  test("GET /codex/accounts requires auth (route exists, db untouched on the reject)", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts`);
+    expect([401, 403]).toContain(res.status);
+  });
+
+  test("POST /codex/accounts/:id/activate requires auth", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1/activate`, { method: "POST" });
+    expect([401, 403]).toContain(res.status);
+  });
+
+  test("DELETE /codex/accounts/:id requires auth", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1`, { method: "DELETE" });
+    expect([401, 403]).toContain(res.status);
+  });
+
+  test("PATCH /codex/accounts/:id requires auth", async () => {
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/accounts/acc_1`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ label: "x" }),
+    });
+    expect([401, 403]).toContain(res.status);
+  });
+
+  test("POST /sessions/:id/codex-account rejects a missing target with 400 BEFORE any db touch", async () => {
+    const SESSION = "00000000-0000-4000-8000-0000000000d4";
+    const res = await app().request(`/v1/workspaces/${WS_A}/sessions/${SESSION}/codex-account`, {
+      method: "POST",
+      headers: { authorization: await bearer(WS_A, ["sessions:control"]), "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400); // target validation happens before setSessionCodexPin (poisonDb untouched)
+  });
+
+  test("POST /sessions/:id/codex-account requires auth", async () => {
+    const SESSION = "00000000-0000-4000-8000-0000000000d4";
+    const res = await app().request(`/v1/workspaces/${WS_A}/sessions/${SESSION}/codex-account`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ target: "auto" }),
+    });
+    expect([401, 403]).toContain(res.status);
+  });
+});

@@ -109,6 +109,7 @@ export function parseIdToken(idToken: string): {
   chatgptAccountId: string | null;
   planType: string | null;
   isFedramp: boolean;
+  email: string | null;
 } {
   const payload = decodeJwtPayload(idToken);
   const auth = (payload?.[CODEX_ID_TOKEN_AUTH_CLAIM] ?? {}) as Record<string, unknown>;
@@ -116,5 +117,8 @@ export function parseIdToken(idToken: string): {
     chatgptAccountId: typeof auth.chatgpt_account_id === "string" ? auth.chatgpt_account_id : null,
     planType: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : null,
     isFedramp: auth.chatgpt_account_is_fedramp === true,
+    // The user's own email (standard OIDC `email` claim on the id_token); a
+    // non-secret display field for the accounts UI. Null when absent.
+    email: typeof payload?.email === "string" ? payload.email : null,
   };
 }
