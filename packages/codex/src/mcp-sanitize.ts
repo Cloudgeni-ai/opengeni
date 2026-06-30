@@ -88,8 +88,16 @@ export class ToolNameMapper {
   }
 }
 
-/** Drop bad outputSchemas + sanitize tool names on a JSON-RPC tools/list result, in place. */
-function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper): void {
+/**
+ * Drop bad outputSchemas + sanitize tool names on a JSON-RPC tools/list result, in place.
+ *
+ * P4 (Part B.1): when `namespaceSink` is provided, accumulate each tool's ORIGINAL
+ * connector namespace (the segment BEFORE the first dot, e.g. `github` from
+ * `github.create_issue`) into it — captured HERE because this pass sees the original
+ * dotted name BEFORE mapper.sanitize rewrites the dot away. Only dotted names carry a
+ * connector namespace; un-dotted (already-legal) names are not connectors and are skipped.
+ */
+function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper, namespaceSink?: Set<string>): void {
   if (!message || typeof message !== "object") {
     return;
   }
@@ -109,16 +117,22 @@ function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper): vo
       }
     }
     if (typeof record.name === "string") {
+      if (namespaceSink && record.name.includes(".")) {
+        const namespace = record.name.slice(0, record.name.indexOf("."));
+        if (namespace) {
+          namespaceSink.add(namespace);
+        }
+      }
       record.name = mapper.sanitize(record.name);
     }
   }
 }
 
 /** Sanitize a single JSON body (application/json MCP response). */
-export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new ToolNameMapper()): string {
+export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new ToolNameMapper(), namespaceSink?: Set<string>): string {
   try {
     const parsed = JSON.parse(text);
-    sanitizeToolsInRpcMessage(parsed, mapper);
+    sanitizeToolsInRpcMessage(parsed, mapper, namespaceSink);
     return JSON.stringify(parsed);
   } catch {
     return text; // not JSON we understand — leave untouched
@@ -126,7 +140,7 @@ export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new T
 }
 
 /** Sanitize an SSE body: each JSON-RPC message rides on a `data:` line. */
-export function sanitizeMcpSseBody(text: string, mapper: ToolNameMapper = new ToolNameMapper()): string {
+export function sanitizeMcpSseBody(text: string, mapper: ToolNameMapper = new ToolNameMapper(), namespaceSink?: Set<string>): string {
   return text
     .split("\n")
     .map((line) => {
@@ -136,7 +150,7 @@ export function sanitizeMcpSseBody(text: string, mapper: ToolNameMapper = new To
       const payload = line.slice("data:".length).trimStart();
       try {
         const parsed = JSON.parse(payload);
-        sanitizeToolsInRpcMessage(parsed, mapper);
+        sanitizeToolsInRpcMessage(parsed, mapper, namespaceSink);
         return `data: ${JSON.stringify(parsed)}`;
       } catch {
         return line;
@@ -173,8 +187,13 @@ export function remapToolCallRequestBody(body: string, mapper: ToolNameMapper): 
  * the name mapping recorded), and tools/call requests get their name reversed back
  * to the MCP server's original. Only the POST request/response is buffered; the
  * long-lived GET notification SSE stream is passed through untouched.
+ *
+ * P4 (Part B.1): an optional `namespaceSink` Set accumulates the ORIGINAL-dotted
+ * connector namespaces seen across every tools/list this turn (captured before the
+ * dot is sanitized away). The worker reads the (live, by-reference) Set after the
+ * turn to cache the serving account's connector set — packages/codex stays db-free.
  */
-export function codexAppsSanitizingFetch(base: FetchLike = globalThis.fetch): FetchLike {
+export function codexAppsSanitizingFetch(base: FetchLike = globalThis.fetch, namespaceSink?: Set<string>): FetchLike {
   const mapper = new ToolNameMapper();
   return async (input, init) => {
     // Outgoing: reverse a sanitized tools/call name to the server's original.
@@ -197,7 +216,9 @@ export function codexAppsSanitizingFetch(base: FetchLike = globalThis.fetch): Fe
       return res;
     }
     const originalBody = await res.text();
-    const sanitized = isJson ? sanitizeMcpJsonBody(originalBody, mapper) : sanitizeMcpSseBody(originalBody, mapper);
+    const sanitized = isJson
+      ? sanitizeMcpJsonBody(originalBody, mapper, namespaceSink)
+      : sanitizeMcpSseBody(originalBody, mapper, namespaceSink);
     const headers = new Headers(res.headers);
     headers.delete("content-length"); // body length changed
     headers.delete("content-encoding");

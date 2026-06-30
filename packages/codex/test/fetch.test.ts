@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   type CodexRequestContext,
   type CodexTokenSnapshot,
+  type CodexUsageHeaderSnapshot,
   type FetchLike,
   classifyCodexUsageLimitError,
   codexRequestStorage,
   codexSubscriptionFetch,
+  parseCodexUsageHeaders,
 } from "../src";
 
 type Capture = { url: string; init?: RequestInit | undefined };
@@ -199,5 +201,97 @@ describe("classifyCodexUsageLimitError", () => {
     expect(classifyCodexUsageLimitError(new Error("nope"))).toBeNull();
     expect(classifyCodexUsageLimitError("string")).toBeNull();
     expect(classifyCodexUsageLimitError(null)).toBeNull();
+  });
+});
+
+// Multi-account P4 (Part A): the free per-turn usage scrape.
+describe("parseCodexUsageHeaders", () => {
+  test("both windows present → full 5-column snapshot (epoch seconds → ms)", () => {
+    const resetPrimary = 1782700000;
+    const resetSecondary = 1783200000;
+    const snap = parseCodexUsageHeaders(new Headers({
+      "x-codex-primary-used-percent": "42",
+      "x-codex-primary-reset-at": String(resetPrimary),
+      "x-codex-secondary-used-percent": "7",
+      "x-codex-secondary-reset-at": String(resetSecondary),
+    }));
+    expect(snap).not.toBeNull();
+    expect(snap!.primaryUsedPercent).toBe(42);
+    expect(snap!.secondaryUsedPercent).toBe(7);
+    expect(snap!.primaryResetAt.getTime()).toBe(resetPrimary * 1000);
+    expect(snap!.secondaryResetAt.getTime()).toBe(resetSecondary * 1000);
+    expect(snap!.checkedAt).toBeInstanceOf(Date);
+  });
+
+  test("primary-only (missing secondary) → null (NO partial-window clobber)", () => {
+    expect(parseCodexUsageHeaders(new Headers({
+      "x-codex-primary-used-percent": "42",
+      "x-codex-primary-reset-at": "1782700000",
+    }))).toBeNull();
+  });
+
+  test("absent / non-integer used-percent → null (safe no-op)", () => {
+    expect(parseCodexUsageHeaders(new Headers({}))).toBeNull();
+    expect(parseCodexUsageHeaders(new Headers({
+      "x-codex-primary-used-percent": "n/a",
+      "x-codex-secondary-used-percent": "3",
+    }))).toBeNull();
+  });
+
+  test("reset-after-seconds fallback when no absolute reset-at", () => {
+    const before = Date.now();
+    const snap = parseCodexUsageHeaders(new Headers({
+      "x-codex-primary-used-percent": "10",
+      "x-codex-primary-reset-after-seconds": "3600",
+      "x-codex-secondary-used-percent": "20",
+      "x-codex-secondary-reset-after-seconds": "7200",
+    }));
+    expect(snap).not.toBeNull();
+    expect(snap!.primaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 3600 * 1000);
+    expect(snap!.secondaryResetAt.getTime()).toBeGreaterThanOrEqual(before + 7200 * 1000);
+  });
+});
+
+describe("codexSubscriptionFetch — usage-header sink (P4 Part A)", () => {
+  function usageBase(status: number, headers: Record<string, string>): FetchLike {
+    return async () => new Response("data: {}\n\n", {
+      status,
+      headers: { "content-type": "text/event-stream", ...headers },
+    });
+  }
+
+  test("fires onUsageHeaders on the OK path with the parsed snapshot", async () => {
+    const seen: CodexUsageHeaderSnapshot[] = [];
+    const fetchImpl = codexSubscriptionFetch(usageBase(200, {
+      "x-codex-primary-used-percent": "55",
+      "x-codex-primary-reset-at": "1782700000",
+      "x-codex-secondary-used-percent": "12",
+      "x-codex-secondary-reset-at": "1783200000",
+    }));
+    await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.primaryUsedPercent).toBe(55);
+    expect(seen[0]!.secondaryUsedPercent).toBe(12);
+  });
+
+  test("fires on the 429 hard-cap path too (an exhausted account stamps its own usage)", async () => {
+    const seen: CodexUsageHeaderSnapshot[] = [];
+    const fetchImpl = codexSubscriptionFetch(usageBase(429, {
+      "x-codex-primary-used-percent": "100",
+      "x-codex-secondary-used-percent": "100",
+    }));
+    await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.primaryUsedPercent).toBe(100);
+  });
+
+  test("does NOT fire when headers are absent/partial (safe no-op)", async () => {
+    const seen: CodexUsageHeaderSnapshot[] = [];
+    const fetchImpl = codexSubscriptionFetch(usageBase(200, { "x-codex-primary-used-percent": "55" }));
+    await codexRequestStorage.run(ctx({ onUsageHeaders: (s) => seen.push(s) }), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ stream: true }) }));
+    expect(seen).toHaveLength(0);
   });
 });

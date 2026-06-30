@@ -137,6 +137,14 @@ export const codexSubscriptionCredentials = pgTable("codex_subscription_credenti
   // usage cap on a rotation turn; the rotation engine treats `exhausted_until > now()` as
   // capped/skip so it isn't immediately re-picked. Self-clears via the now() comparison.
   exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
+  // P4 connector-aware rotation cache (plaintext metadata; NEVER a token). The set
+  // of ORIGINAL-dotted connector namespaces (github/gmail/linear/…) this account
+  // exposes via codex_apps, captured from the per-turn tools/list. null ⇒ never
+  // probed (the ranker treats it as unknown: never credited as covering, never
+  // excluded). The writer only ever sets a NON-empty set, so a flaky empty turn
+  // can't false-drop coverage. connectorsCheckedAt is the freshness clock.
+  connectorNamespaces: text("connector_namespaces").array(),
+  connectorsCheckedAt: timestamp("connectors_checked_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

@@ -115,6 +115,23 @@ describe("sanitizeMcpJsonBody", () => {
   test("returns non-JSON input unchanged", () => {
     expect(sanitizeMcpJsonBody("not json")).toBe("not json");
   });
+
+  // P4 (Part B.1): the connector-namespace sink captures the ORIGINAL dotted
+  // namespace before the dot is sanitized away.
+  test("namespace sink accumulates the original connector namespace (before dot rewrite)", () => {
+    const sink = new Set<string>();
+    const body = JSON.stringify(toolsListMsg([
+      { name: "github.create_issue", inputSchema: { type: "object" } },
+      { name: "github.list_repos", inputSchema: { type: "object" } },   // dedup → still one "github"
+      { name: "gmail.send", inputSchema: { type: "object" } },
+      { name: "set_session_title", inputSchema: { type: "object" } },   // un-dotted → not a connector namespace
+    ]));
+    const tools = JSON.parse(sanitizeMcpJsonBody(body, new ToolNameMapper(), sink)).result.tools;
+    // The wire names were sanitized (dot → underscore) for the model.
+    expect(tools[0].name).toBe("github_create_issue");
+    // The sink kept the ORIGINAL namespaces, deduped, excluding the un-dotted tool.
+    expect([...sink].sort()).toEqual(["github", "gmail"]);
+  });
 });
 
 describe("sanitizeMcpSseBody", () => {

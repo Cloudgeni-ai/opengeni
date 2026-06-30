@@ -13,7 +13,10 @@ export type CodexRotationStrategy = "most_remaining" | "round_robin" | "drain_th
 export type RotationDecision =
   // The chosen account. `moved` ⇒ it differs from the current active pointer, so
   // the caller must persist the pointer move (and the switch is a "rotation").
-  | { kind: "active"; credentialId: string; moved: boolean }
+  // `droppedConnectors` (P4 Part B): the leaving session's used connectors that the
+  // chosen account does NOT cover — populated ONLY on a Tier-2/unknown pick that
+  // can't cover (prefer-not-require: failover still happens, but the pill warns).
+  | { kind: "active"; credentialId: string; moved: boolean; droppedConnectors?: string[] }
   // Every eligible account is capped/cooling: idle until the soonest instant ANY
   // account clears every blocking condition (the multi-account generalization of
   // the single-account idle-until-reset).
@@ -54,6 +57,42 @@ function bindingRemaining(acct: CodexAccountStatus): number {
 
 function cooling(acct: CodexAccountStatus, now: Date): boolean {
   return acct.exhaustedUntil != null && acct.exhaustedUntil.getTime() > now.getTime();
+}
+
+/**
+ * P4 connector coverage (prefer-not-require). `acct` COVERS `usedConnectors` iff its
+ * cached connector set is a SUPERSET of the session's used set. An empty used set is
+ * trivially covered by everyone (→ Tier 1 == all eligibles == byte-identical to P3).
+ * A null (never-probed) set is UNKNOWN: never credited as covering (Tier 2 only),
+ * but — critically — never excluded, so failover is fully preserved.
+ */
+function covers(acct: CodexAccountStatus, usedConnectors: string[]): boolean {
+  if (usedConnectors.length === 0) {
+    return true;
+  }
+  const owned = acct.connectorNamespaces;
+  if (owned === null) {
+    return false; // unprobed ⇒ unknown ⇒ never Tier 1 (but still a Tier-2 candidate)
+  }
+  const ownedSet = new Set(owned);
+  return usedConnectors.every((connector) => ownedSet.has(connector));
+}
+
+/**
+ * The used connectors the chosen account does NOT cover (the "switch dropped a
+ * connector" note). Empty when the account covers (superset) or nothing was used.
+ * A null (unknown) set surfaces ALL used connectors — we can't prove it covers them.
+ */
+function droppedConnectorsFor(acct: CodexAccountStatus, usedConnectors: string[]): string[] {
+  if (usedConnectors.length === 0) {
+    return [];
+  }
+  const owned = acct.connectorNamespaces;
+  if (owned === null) {
+    return [...usedConnectors];
+  }
+  const ownedSet = new Set(owned);
+  return usedConnectors.filter((connector) => !ownedSet.has(connector));
 }
 
 /**
@@ -133,8 +172,14 @@ export function chooseRotationActive(args: {
   accounts: CodexAccountStatus[];
   nearExhaustionPct: number;
   now: Date;
+  // P4 (Part B): the connectors the leaving session has access to (the leaving
+  // account's cached connector set, used as the "session needs these" proxy).
+  // Optional + defaults to [] ⇒ when absent/empty the ranker is BYTE-IDENTICAL to
+  // P3 (every account trivially covers → Tier 1 == all eligibles). Self-gating.
+  usedConnectors?: string[];
 }): RotationDecision {
   const { rotationStrategy, activeCredentialId, priorCredentialId, accounts, nearExhaustionPct, now } = args;
+  const usedConnectors = args.usedConnectors ?? [];
 
   if (accounts.length === 0) {
     return { kind: "none" };
@@ -153,7 +198,15 @@ export function chooseRotationActive(args: {
     if (!chosen) {
       return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
     }
-    return { kind: "active", credentialId: chosen.id, moved: chosen.id !== activeCredentialId };
+    // P4: surface the dropped-connector note when the chosen account doesn't cover
+    // the session's used connectors (a Tier-2/unknown failover pick). Empty ⇒ omit.
+    const dropped = droppedConnectorsFor(chosen, usedConnectors);
+    return {
+      kind: "active",
+      credentialId: chosen.id,
+      moved: chosen.id !== activeCredentialId,
+      ...(dropped.length > 0 ? { droppedConnectors: dropped } : {}),
+    };
   };
 
   if (rotationStrategy === "round_robin") {
@@ -180,12 +233,22 @@ export function chooseRotationActive(args: {
   }
 
   // most_remaining (default + the correctness path).
+  // Healthy-active fast path UNCHANGED (no-thrash): a session whose active account
+  // is still eligible never switches — not even for connector coverage. Coverage
+  // matters ONLY on the must-move branch below.
   if (activeRow && eligible(activeRow, nearExhaustionPct, now)) {
     return { kind: "active", credentialId: activeRow.id, moved: false };
   }
-  // Active is capped/near-cap/cooling/missing → pick max remaining, ties broken by
-  // list (created_at) order via a stable reduce.
-  const chosen = eligibles.reduce<CodexAccountStatus | undefined>((best, acct) => {
+  // Active is capped/near-cap/cooling/missing → must move. Two-tier coverage pick
+  // over the SAME eligible set (prefer-not-require):
+  //   Tier 1 — eligibles whose connector set COVERS the session's used set.
+  //   Tier 2 — ALL eligibles, only if Tier 1 is empty (failover fully preserved).
+  // Within the chosen tier, max bindingRemaining, ties broken by list (created_at)
+  // order via a stable reduce — byte-identical to P3 when usedConnectors is empty
+  // (Tier 1 == all eligibles).
+  const covering = eligibles.filter((acct) => covers(acct, usedConnectors));
+  const pool = covering.length > 0 ? covering : eligibles;
+  const chosen = pool.reduce<CodexAccountStatus | undefined>((best, acct) => {
     if (!best) {
       return acct;
     }

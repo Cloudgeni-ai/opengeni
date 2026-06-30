@@ -63,6 +63,8 @@ function account(id: string, over: Partial<opengeniDb.CodexAccountStatus> = {}):
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
+    connectorNamespaces: null,
+    connectorsCheckedAt: null,
     ...over,
   };
 }

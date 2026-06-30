@@ -13,6 +13,23 @@ export type CodexTokenSnapshot = {
   isFedramp: boolean;
 };
 
+/**
+ * Multi-account P4 (Part A): a full usage snapshot scraped FOR FREE from the
+ * `x-codex-primary-*` / `x-codex-secondary-*` response headers the codex backend
+ * stamps on every `/codex/responses` turn (success AND 429 hard-cap). Integer-
+ * identical to GET /wham/usage but with zero extra round-trip. parseCodexUsageHeaders
+ * returns this only when BOTH windows parse, so a write is always a full 5-column
+ * snapshot (no partial-window clobber). Shape mirrors db's CodexAccountUsageSnapshot
+ * (non-null here: a partial read is filtered to null upstream, never half-written).
+ */
+export type CodexUsageHeaderSnapshot = {
+  primaryUsedPercent: number;
+  primaryResetAt: Date;
+  secondaryUsedPercent: number;
+  secondaryResetAt: Date;
+  checkedAt: Date;
+};
+
 export type CodexRequestContext = {
   clientVersion: string;
   /** Worker-supplied: proactive refresh + single-flight + db persist. */
@@ -21,6 +38,13 @@ export type CodexRequestContext = {
   refresh: () => Promise<CodexTokenSnapshot>;
   /** Model-slug resolver (longest-prefix against the live catalog). */
   resolveModel: (slug: string) => string;
+  /**
+   * Multi-account P4 (Part A): fire-and-forget usage-header sink. Called by
+   * codexSubscriptionFetch on EVERY response (sync, non-throwing, never awaited)
+   * with the parsed full-window snapshot. The worker records the latest into the
+   * P2 usage cache once per turn in its `finally` — packages/codex stays db-free.
+   */
+  onUsageHeaders?: (snapshot: CodexUsageHeaderSnapshot) => void;
 };
 
 export const codexRequestStorage = new AsyncLocalStorage<CodexRequestContext>();

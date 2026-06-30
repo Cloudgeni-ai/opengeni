@@ -33,6 +33,8 @@ function acct(id: string, over: Partial<CodexAccountStatus> = {}): CodexAccountS
     secondaryResetAt: null,
     usageCheckedAt: null,
     exhaustedUntil: null,
+    connectorNamespaces: null,
+    connectorsCheckedAt: null,
     ...over,
   };
 }
@@ -297,6 +299,78 @@ describe("chooseRotationActive — round_robin / drain_then_next", () => {
       .toEqual({ kind: "active", credentialId: "b", moved: true });
     const capped = [acct("a", { primaryUsedPercent: 99 }), acct("b")];
     expect(chooseRotationActive({ ...base, rotationStrategy: "drain_then_next", activeCredentialId: "a", priorCredentialId: "a", accounts: capped }))
+      .toEqual({ kind: "active", credentialId: "b", moved: true });
+  });
+});
+
+// P4 — connector-aware rotation (prefer-not-require). The ranker PREFERS a failover
+// target whose connector set COVERS the leaving session's used connectors, but still
+// fails over to a lesser-coverage account when that is the only one with quota. When
+// usedConnectors is empty the ranker is byte-identical to P3.
+describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => {
+  test("empty usedConnectors → byte-identical to P3 (max remaining wins, no dropped note)", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 95 }),                                    // active, near-cap
+      acct("b", { primaryUsedPercent: 40, connectorNamespaces: ["github"] }),   // 60 remaining
+      acct("c", { primaryUsedPercent: 10, connectorNamespaces: [] }),           // 90 remaining ← winner
+    ];
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: [] }))
+      .toEqual({ kind: "active", credentialId: "c", moved: true });
+  });
+
+  test("PREFERS a covering target even when a non-covering one has MORE remaining quota", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 95, connectorNamespaces: ["github"] }),                 // active, near-cap (leaving)
+      acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "gmail"] }),        // covers github, 50 remaining ← winner
+      acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["gmail"] }),                   // 95 remaining BUT lacks github
+    ];
+    // Session used github (the leaving account's set). c has the most quota but can't
+    // cover github → Tier 1 = {b}; b is chosen despite less remaining. No dropped note.
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github"] }))
+      .toEqual({ kind: "active", credentialId: "b", moved: true });
+  });
+
+  test("FAILS OVER to a non-covering account when it is the ONLY one with quota (+ dropped note)", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github"] }),                 // active, capped (leaving)
+      acct("b", { primaryUsedPercent: 99, connectorNamespaces: ["github", "gmail"] }),        // covers BUT also capped
+      acct("c", { primaryUsedPercent: 10, connectorNamespaces: ["gmail"] }),                  // eligible BUT lacks github
+    ];
+    // Tier 1 (covering) is empty among eligibles → Tier 2 = {c}: failover preserved,
+    // and the dropped-connector note surfaces github so the pill can warn.
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github"] }))
+      .toEqual({ kind: "active", credentialId: "c", moved: true, droppedConnectors: ["github"] });
+  });
+
+  test("null (never-probed) connector set is UNKNOWN: never Tier 1, never excluded, dropped note lists the used set", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github"] }), // active, capped (leaving)
+      acct("b", { primaryUsedPercent: 10, connectorNamespaces: null }),       // unprobed → Tier 2 only, but eligible
+    ];
+    // No covering eligible (b is unknown) → Tier 2 picks b (failover), and since we
+    // can't prove b covers github, the note surfaces it.
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github"] }))
+      .toEqual({ kind: "active", credentialId: "b", moved: true, droppedConnectors: ["github"] });
+  });
+
+  test("healthy-active fast path is UNCHANGED by coverage (no switch for connectors)", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 10, connectorNamespaces: [] }),                  // active, healthy, lacks github
+      acct("b", { primaryUsedPercent: 5, connectorNamespaces: ["github"] }),           // covers github, more remaining
+    ];
+    // Even though b covers github and a does not, the still-eligible active account
+    // never switches for coverage — no-thrash. No move, no dropped note.
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github"] }))
+      .toEqual({ kind: "active", credentialId: "a", moved: false });
+  });
+
+  test("a covering target that is a strict SUPERSET covers (multi-connector session)", () => {
+    const accounts = [
+      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github", "linear"] }),                 // capped (leaving)
+      acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "linear", "gmail"] }),        // superset ← covers
+      acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["github"] }),                            // most quota but missing linear
+    ];
+    expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github", "linear"] }))
       .toEqual({ kind: "active", credentialId: "b", moved: true });
   });
 });

@@ -12,9 +12,65 @@
 
 import { CODEX_ORIGINATOR } from "./constants";
 import { normalizeCodexRequestBody } from "./normalize";
-import { codexRequestStorage, type CodexTokenSnapshot } from "./request-context";
+import { codexRequestStorage, type CodexTokenSnapshot, type CodexUsageHeaderSnapshot } from "./request-context";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+/** Parse an integer header value; null when absent or not a finite integer. */
+function parseIntHeader(value: string | null): number | null {
+  if (value === null) {
+    return null;
+  }
+  const n = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Resolve a window reset instant from the response headers: prefer the absolute
+ * `*-reset-at` (epoch SECONDS → ms, mirroring codex-token-resolver's usage parse),
+ * else the relative `*-reset-after-seconds` from now, else now (a missing reset
+ * reads as "already cleared" — availableAt treats an elapsed reset as a bounded
+ * default cooldown, so the ranker never strands on it).
+ */
+function resolveResetAt(headers: Headers, atKey: string, afterKey: string, nowMs: number): Date {
+  const at = parseIntHeader(headers.get(atKey));
+  if (at !== null) {
+    return new Date(at * 1000);
+  }
+  const after = parseIntHeader(headers.get(afterKey));
+  if (after !== null) {
+    return new Date(nowMs + after * 1000);
+  }
+  return new Date(nowMs);
+}
+
+/**
+ * Multi-account P4 (Part A): scrape the full usage snapshot the codex backend
+ * stamps on every `/codex/responses` response in `x-codex-primary-*` /
+ * `x-codex-secondary-*` headers (integer-identical to GET /wham/usage, for free).
+ *
+ * CRITICAL clobber-fix: return null unless BOTH windows expose a valid used-percent
+ * integer. recordCodexAccountUsage writes all five columns unconditionally, so a
+ * primary-only snapshot would null the weekly column. Both windows are always
+ * emitted together on `/codex/responses`; gating on both makes every write a full
+ * 5-column snapshot byte-identical to the poll path, and a malformed/absent header
+ * set simply no-ops (the /wham/usage poll fallback still covers it).
+ */
+export function parseCodexUsageHeaders(headers: Headers): CodexUsageHeaderSnapshot | null {
+  const primaryUsedPercent = parseIntHeader(headers.get("x-codex-primary-used-percent"));
+  const secondaryUsedPercent = parseIntHeader(headers.get("x-codex-secondary-used-percent"));
+  if (primaryUsedPercent === null || secondaryUsedPercent === null) {
+    return null; // not a full both-windows snapshot — no-op (never a partial clobber)
+  }
+  const nowMs = Date.now();
+  return {
+    primaryUsedPercent,
+    primaryResetAt: resolveResetAt(headers, "x-codex-primary-reset-at", "x-codex-primary-reset-after-seconds", nowMs),
+    secondaryUsedPercent,
+    secondaryResetAt: resolveResetAt(headers, "x-codex-secondary-reset-at", "x-codex-secondary-reset-after-seconds", nowMs),
+    checkedAt: new Date(nowMs),
+  };
+}
 
 export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): FetchLike {
   return async (input, init) => {
@@ -65,6 +121,16 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         console.error(`[codex-debug] POST ${rewritten} stream=${callerWantsStream} bodyKeys=[${keys.join(",")}]`);
       }
       const res = await base(rewritten, nextInit);
+      // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
+      // OK/!res.ok branch, so the same fire-and-forget read also covers the 429
+      // hard-cap path (an exhausted serving account stamps its own fresh
+      // used_percent with no extra fetch). Sync + non-throwing + never awaited;
+      // `if (usage)` makes an absent/malformed header set a safe no-op. We read
+      // res.headers only — the SSE body is never touched here.
+      const usage = parseCodexUsageHeaders(res.headers);
+      if (usage) {
+        ctx.onUsageHeaders?.(usage);
+      }
       if (process.env.CODEX_DEBUG && !res.ok) {
         console.error(`[codex-debug] <- ${res.status} ${await res.clone().text()}`);
       }

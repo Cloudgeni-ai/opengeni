@@ -2455,6 +2455,11 @@ export type CodexAccountStatus = {
   // P3 rotation cooldown: when set and in the future, this account is cooling-down
   // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
   exhaustedUntil: Date | null;
+  // P4 connector-aware rotation: the ORIGINAL-dotted connector namespaces this
+  // account exposes via codex_apps (github/gmail/linear/…). null ⇒ never probed
+  // (the ranker treats it as unknown: never credited as covering, never excluded).
+  connectorNamespaces: string[] | null;
+  connectorsCheckedAt: Date | null;
 };
 
 /**
@@ -2485,6 +2490,9 @@ export async function listCodexAccountStatuses(db: Database, workspaceId: string
       secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
       usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
       exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
+      // P4 connector-set cache — metadata-only, rides along on this read.
+      connectorNamespaces: schema.codexSubscriptionCredentials.connectorNamespaces,
+      connectorsCheckedAt: schema.codexSubscriptionCredentials.connectorsCheckedAt,
     }).from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.createdAt));
@@ -2605,6 +2613,43 @@ export async function setCodexCredentialExhausted(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ exhaustedUntil: until })
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
+  });
+}
+
+/**
+ * P4 connector-set cache writer: persist the set of ORIGINAL-dotted connector
+ * namespaces a SPECIFIC credential exposes via codex_apps (+ the freshness clock).
+ * Modeled byte-for-byte on recordCodexAccountUsage / setCodexCredentialExhausted:
+ * RLS-scoped, guarded by (id, workspace_id), and — critically — NO `version` bump and
+ * NO `updatedAt` touch, so it can never race the (id, version) token-refresh CAS.
+ *
+ * The CALLER must only invoke this with a NON-EMPTY set: codex_apps connects
+ * best-effort (a transient failure yields an empty tools/list), and overwriting a
+ * known non-empty set with [] would falsely "drop" coverage on a flaky turn. A
+ * genuinely connector-less account stays null (the ranker treats null as unknown).
+ * Returns true iff a row was updated (false ⇒ the credential was disconnected under us).
+ */
+export async function recordCodexAccountConnectors(
+  db: Database,
+  workspaceId: string,
+  credentialId: string,
+  namespaces: string[],
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
+      .set({
+        connectorNamespaces: namespaces,
+        connectorsCheckedAt: new Date(),
+        // NB: no `version` bump and no `updatedAt` touch — connector set is non-credential
+        // metadata and must NOT race the (id, version) refresh CAS (same discipline as
+        // recordCodexAccountUsage / setCodexCredentialExhausted).
+      })
       .where(and(
         eq(schema.codexSubscriptionCredentials.id, credentialId),
         eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),

@@ -890,6 +890,13 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
   close: () => Promise<void>;
+  // P4 (Part B.1): the live, by-reference Set of ORIGINAL-dotted connector
+  // namespaces the codex_apps transport saw across this turn's tools/list calls.
+  // Accumulates as the agent lists tools during the run, so the worker reads it
+  // AFTER the turn (in its finally) to cache the serving account's connector set.
+  // Empty when this turn has no codex_apps server (or it never listed any
+  // namespaced tool) — the worker only persists a non-empty set.
+  codexConnectorNamespaces: Set<string>;
 };
 
 export type PrepareToolsOptions = {
@@ -907,8 +914,12 @@ export type PrepareToolsOptions = {
 };
 
 export async function prepareAgentTools(settings: Settings, tools: ToolRef[], options: PrepareToolsOptions = {}): Promise<PreparedAgentTools> {
+  // P4 (Part B.1): one Set per prepareTools call, shared by reference into the
+  // codex_apps sanitizing fetch so every tools/list this turn accumulates the
+  // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
+  const codexConnectorNamespaces = new Set<string>();
   if (tools.length === 0) {
-    return { mcpServers: [], close: async () => {} };
+    return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const servers = await Promise.all(tools.map(async (tool) => {
@@ -923,8 +934,9 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       cacheToolsList: config.cacheToolsList,
       // codex_apps returns connector tools with empty `outputSchema: {}` that the
       // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-      // sanitize the response on the wire before validation.
-      ...(isCodexAppsMcpServer(config) ? { fetch: codexAppsSanitizingFetch(globalThis.fetch) } : {}),
+      // sanitize the response on the wire before validation. The namespace Set
+      // also captures each tool's original connector namespace (P4 Part B.1).
+      ...(isCodexAppsMcpServer(config) ? { fetch: codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces) } : {}),
       ...await mcpServerRequestInit(settings, config, options),
       ...(config.timeoutMs ? {
         timeout: config.timeoutMs,
@@ -957,6 +969,7 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
         await connectedBestEffort.close();
       }
     },
+    codexConnectorNamespaces,
   };
 }
 

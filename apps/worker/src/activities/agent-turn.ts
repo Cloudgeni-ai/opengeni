@@ -17,6 +17,8 @@ import {
   fetchCodexUsageForAccount,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
+  recordCodexAccountUsage,
+  recordCodexAccountConnectors,
   setActiveCodexCredential,
   setCodexCredentialExhausted,
   requireSession,
@@ -62,6 +64,7 @@ import {
   classifyCodexUsageLimitError,
   codexRequestStorage,
   type CodexRequestContext,
+  type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import {
   mergeResourceRefs,
@@ -470,6 +473,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // The Codex account this turn runs on (pin > workspace active), resolved once
     // a codex-billed turn is confirmed and threaded into the token resolver below.
     let effectiveCodexCredentialId: string | null = null;
+    // Multi-account P4 (Part A): the latest usage-header snapshot scraped FOR FREE
+    // off this turn's `/codex/responses` responses (a turn issues many model calls;
+    // latest wins). Flushed ONCE into the P2 usage cache for the serving account in
+    // the `finally` — cheaper than a /wham/usage poll AND it self-heals P3 rotation
+    // (the proactive + 429 rankers read these exact columns). null ⇒ nothing scraped.
+    // Hoisted to activity scope so the finally flush (below) sees it. The sink is
+    // wired into codexContext.onUsageHeaders inside the try.
+    let latestCodexUsage: CodexUsageHeaderSnapshot | null = null;
     // Hoisted for the preemption path: an approval-decision rerun must
     // re-enter through the approval resume path (its frozen mid-flight state
     // only exists in the RunState blob), never through a swapped trigger.
@@ -599,6 +610,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             accounts: rankAccounts,
             nearExhaustionPct: settings.codexRotationNearExhaustionPct,
             now: new Date(),
+            // P4: the leaving (active) account's cached connector set is the proxy
+            // for "what this session has access to" — prefer a covering target.
+            usedConnectors: rankAccounts.find((a) => a.id === rotation.activeCredentialId)?.connectorNamespaces ?? [],
           });
           if (rotationDecision.kind === "allCapped") {
             // SELF-HEAL (invariant 4): the turn hot path NEVER refreshes usage, so a
@@ -615,6 +629,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               accounts: rankAccounts,
               nearExhaustionPct: settings.codexRotationNearExhaustionPct,
               now: new Date(),
+              // P4: leaving (active) account's connector set (refreshCappedCodexUsageRows
+              // only touches usage columns, so connectorNamespaces is preserved here).
+              usedConnectors: rankAccounts.find((a) => a.id === rotation.activeCredentialId)?.connectorNamespaces ?? [],
             });
           }
           if (rotationDecision.kind === "active") {
@@ -666,9 +683,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // "rotation" only when the engine actually moved the pointer; otherwise the
             // unchanged P1 "manual" literal (a manual active flip between turns).
             const rotated = rotationDecision?.kind === "active" && rotationDecision.moved;
+            // P4: surface the dropped-connector note when this rotation pick couldn't
+            // cover the session's used connectors (a Tier-2/unknown failover); the pill
+            // renders the badge. Omitted when the switch covered everything (the norm).
+            const droppedConnectors = rotationDecision?.kind === "active" ? rotationDecision.droppedConnectors : undefined;
             await publish([{
               type: "codex.account.switched",
-              payload: { fromAccountId: priorAccountId, toAccountId: effectiveCodexCredentialId, reason: rotated ? "rotation" : "manual" },
+              payload: {
+                fromAccountId: priorAccountId,
+                toAccountId: effectiveCodexCredentialId,
+                reason: rotated ? "rotation" : "manual",
+                ...(droppedConnectors && droppedConnectors.length > 0 ? { droppedConnectors } : {}),
+              },
             }]);
           }
         }
@@ -724,6 +750,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               getToken: resolver.getToken,
               refresh: resolver.refresh,
               resolveModel: buildModelResolver(CODEX_FALLBACK_MODEL_SLUGS, CODEX_FALLBACK_MODEL_SLUGS[0]),
+              onUsageHeaders: (snapshot) => { latestCodexUsage = snapshot; }, // latest wins; flushed once in finally
             };
           })()
         : null;
@@ -1543,6 +1570,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               accounts: fresh,
               nearExhaustionPct: settings.codexRotationNearExhaustionPct,
               now: new Date(),
+              // P4: the just-capped serving account's connector set is the proxy for
+              // "what this session has access to" — prefer a covering failover target.
+              usedConnectors: serving?.connectorNamespaces ?? [],
             });
             if (decision.kind === "active") {
               rotated = true;
@@ -1709,6 +1739,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         },
         error: activityError,
       });
+      // Multi-account P4: flush the serving account's free per-turn caches ONCE,
+      // best-effort (same discipline as today's usage write). Both writers skip
+      // version/updatedAt, so neither can race the token-refresh CAS.
+      if (effectiveCodexCredentialId) {
+        // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
+        // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
+        // is byte-identical to the /wham/usage write — no partial-window clobber.
+        if (latestCodexUsage) {
+          await recordCodexAccountUsage(db, input.workspaceId, effectiveCodexCredentialId, latestCodexUsage)
+            .catch(() => undefined);
+        }
+        // Part B.1: the connector namespaces codex_apps listed this turn → the
+        // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
+        // overwrite a known set with [] (false coverage drop). Read by reference
+        // AFTER the run, so every tools/list this turn has accumulated.
+        const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
+        if (connectorNamespaces && connectorNamespaces.size > 0) {
+          await recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [...connectorNamespaces])
+            .catch(() => undefined);
+        }
+      }
       await preparedTools?.close().catch(() => undefined);
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);

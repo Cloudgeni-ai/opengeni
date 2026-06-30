@@ -764,6 +764,10 @@ export type CodexAccountSwitchedPayload = {
   fromAccountId: string | null;
   toAccountId: string;
   reason: "manual" | "exhausted" | "rotation";
+  // P4 connector-aware rotation: the session's used connectors that the new account
+  // does NOT cover (a prefer-not-require failover that dropped a connector). Present
+  // only on such a switch; the UI renders a "dropped <connector>" badge on the pill.
+  droppedConnectors?: string[];
 };
 
 /** Device-code start: show `userCode` at `verificationUri`, then poll with `state`. */
