@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@opengeni/codex": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "zod": "^4.2.1"
   },

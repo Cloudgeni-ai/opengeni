@@ -420,6 +420,17 @@ export class MultiProviderModelProvider implements ModelProvider {
     if (modelName) {
       const resolved = resolveTurnModel(this.settings, modelName);
       if (resolved) {
+        // Fail-loud floor (defense in depth): a `codex/<slug>` id must only ever
+        // resolve through the synthetic codex-subscription provider (which installs
+        // fetch: codexSubscriptionFetch + the per-workspace bearer). If a future
+        // settings path re-introduces a built-in/registry shadow that binds a
+        // `codex/` id to any other provider kind, that would silently ship the id
+        // to Azure/OpenAI as a deployment name (DeploymentNotFound 404). Refuse it
+        // here so codex can never reach a non-codex client on ANY backend; the
+        // primary fix (config configuredModels) keeps this a no-op in practice.
+        if (modelName.startsWith(CODEX_MODEL_ID_PREFIX) && resolved.provider.kind !== "codex-subscription") {
+          throw new CodexSubscriptionUnavailableError(modelName);
+        }
         return resolved.model;
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay

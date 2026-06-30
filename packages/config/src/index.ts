@@ -9,6 +9,7 @@ import {
   StaticUsageLimits,
   UsageLimitsMode,
 } from "@opengeni/contracts";
+import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
 import { z } from "zod";
 
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -1123,16 +1124,39 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
 export function configuredModels(settings: Settings): ConfiguredModel[] {
   const builtinId = builtinProviderId(settings);
   const builtinLabel = builtinProviderLabel(settings);
-  const out: ConfiguredModel[] = uniqueValues([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]).map((id) => ({
-    id,
-    label: id,
-    providerId: builtinId,
-    providerLabel: builtinLabel,
-    api: "responses" as const,
-    contextWindowTokens: settings.contextWindowTokens,
-    reasoningEffort: true,
-    hostedWebSearch: settings.webSearchEnabled,
-  }));
+  // The built-in (OpenAI/Azure) provider must NEVER claim a registry-namespaced
+  // model id. The worker overwrites settings.openaiModel with the turn's model
+  // (apps/worker agent-turn runSettings) — including a `codex/<slug>` id, or a
+  // registry id like "accounts/fireworks/models/glm-5p2" — so without this
+  // filter the built-in allow-list would emit a `{ id, providerId: <azure> }`
+  // entry that, by the first-wins de-dup below, shadows the real registry /
+  // codex-subscription provider and ships the id to Azure as a deployment name
+  // (opaque DeploymentNotFound 404). A `<provider>/<model>`-namespaced id (it
+  // contains "/") that a registry actually owns is never a valid Azure/OpenAI
+  // deployment name, and a `codex/`-prefixed id never is either — exclude both
+  // from the built-in list. A BARE id a registry merely redeclares (e.g.
+  // "gpt-5.5") is left in place so the built-in still wins it via the first-wins
+  // de-dup below (preserving the documented built-in-precedence contract). When
+  // a codex/ id has NO codex provider injected (no active subscription) it then
+  // resolves to nothing and getModel fails loud with
+  // CodexSubscriptionUnavailableError instead of mis-routing to Azure.
+  const registryOwnedIds = new Set(
+    parseModelProvidersJson(settings.modelProvidersJson).flatMap((provider) => provider.models.map((model) => model.id)),
+  );
+  const isRegistryNamespaced = (id: string): boolean =>
+    id.startsWith(CODEX_MODEL_ID_PREFIX) || (id.includes("/") && registryOwnedIds.has(id));
+  const out: ConfiguredModel[] = uniqueValues([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)])
+    .filter((id) => !isRegistryNamespaced(id))
+    .map((id) => ({
+      id,
+      label: id,
+      providerId: builtinId,
+      providerLabel: builtinLabel,
+      api: "responses" as const,
+      contextWindowTokens: settings.contextWindowTokens,
+      reasoningEffort: true,
+      hostedWebSearch: settings.webSearchEnabled,
+    }));
   for (const provider of parseModelProvidersJson(settings.modelProvidersJson)) {
     const providerLabel = provider.label ?? provider.id;
     for (const model of provider.models) {
