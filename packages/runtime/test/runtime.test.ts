@@ -6,6 +6,19 @@ import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQu
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
+import { codexRequestStorage, type CodexRequestContext, type CodexTokenSnapshot } from "@opengeni/codex";
+
+function makeCodexContext(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): CodexRequestContext {
+  const token: CodexTokenSnapshot = overrides.token ?? { accessToken: "tok-123", chatgptAccountId: "acct-9", isFedramp: false };
+  return {
+    clientVersion: "0.0.0-test",
+    getToken: overrides.tokenError ? async () => { throw overrides.tokenError; } : async () => token,
+    refresh: async () => token,
+    resolveModel: (slug: string) => slug,
+  };
+}
+
+const CODEX_APPS_ENTRY = (url: string) => ({ id: "codex_apps", name: "codex_apps", url, cacheToolsList: false });
 
 describe("runtime event normalization", () => {
   test("does not send legacy Azure api-version query for v1 base URLs", () => {
@@ -1043,6 +1056,91 @@ describe("runtime event normalization", () => {
       }), [{ kind: "mcp", id: "cap-secure" }])).rejects.toThrow();
     } finally {
       mcp.close();
+    }
+  });
+
+  test("codex_apps: injects the dynamic ChatGPT bearer + account-id from the codex ALS at connect", async () => {
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" } });
+    const prepared = await codexRequestStorage.run(makeCodexContext(), () =>
+      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+    try {
+      expect(prepared.mcpServers).toHaveLength(1);
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("codex_apps__search_documents");
+      const result = await prepared.mcpServers[0]!.callTool("codex_apps__search_documents", { query: "gmail" });
+      expect(JSON.stringify(result)).toContain("found document for gmail");
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: emits X-OpenAI-Product-Sku only when configured", async () => {
+    const withSku = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" } });
+    const preparedWith = await codexRequestStorage.run(makeCodexContext(), () =>
+      prepareAgentTools(testSettings({ codexProductSku: "plus", mcpServers: [CODEX_APPS_ENTRY(withSku.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+    try {
+      expect(preparedWith.mcpServers).toHaveLength(1); // connected => SKU header accepted
+    } finally {
+      await preparedWith.close();
+      withSku.close();
+    }
+
+    // With the SKU unset, a server that REQUIRES the header rejects the connect,
+    // and the best-effort drop leaves codex_apps absent (no throw).
+    const requiresSku = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" } });
+    const preparedWithout = await codexRequestStorage.run(makeCodexContext(), () =>
+      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+    try {
+      expect(preparedWithout.mcpServers).toHaveLength(0); // header absent => connect rejected => dropped
+    } finally {
+      await preparedWithout.close();
+      requiresSku.close();
+    }
+  });
+
+  test("codex_apps: no ALS store => no auth => graceful best-effort drop (turn does not throw)", async () => {
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    // No codexRequestStorage.run wrapper: the bearer cannot be resolved, the
+    // server fails auth at connect, and because codex_apps is best-effort the
+    // call resolves with codex_apps simply absent (contrast the strict
+    // third-party test above, which throws).
+    const prepared = await prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]);
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop", async () => {
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    const prepared = await codexRequestStorage.run(makeCodexContext({ tokenError: new Error("needs_relogin") }), () =>
+      prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [{ kind: "mcp", id: "codex_apps" }]));
+    try {
+      expect(prepared.mcpServers).toHaveLength(0);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("codex_apps best-effort partition does NOT weaken strict guarantees for sibling servers", async () => {
+    // A required (non-codex) server that fails auth must still throw even when a
+    // codex_apps server rides alongside it in the same prepare call.
+    const required = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const apps = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    try {
+      await expect(codexRequestStorage.run(makeCodexContext(), () => prepareAgentTools(testSettings({
+        mcpServers: [
+          { id: "cap-secure", name: "Secure capability MCP", url: required.url, cacheToolsList: false }, // no headers => fails strict
+          CODEX_APPS_ENTRY(apps.url),
+        ],
+      }), [{ kind: "mcp", id: "cap-secure" }, { kind: "mcp", id: "codex_apps" }]))).rejects.toThrow();
+    } finally {
+      required.close();
+      apps.close();
     }
   });
 

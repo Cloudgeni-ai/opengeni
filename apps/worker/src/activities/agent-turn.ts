@@ -55,7 +55,7 @@ import {
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
-import { withFirstPartyTools } from "./goals";
+import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
@@ -446,7 +446,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // the session was created (API, scheduled task, or a pre-existing session
       // whose stored tools predate this) — so set_session_title and the rest are
       // always reachable. Idempotent: mergeToolRefs dedupes if already present.
-      const turnTools = withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools));
+      // Attach codex_apps (the ChatGPT/Codex connectors MCP) when the codex
+      // overlay injected it into runSettings.mcpServers (active subscription +
+      // connector scopes); no-op for every other turn. Its refreshing bearer is
+      // resolved at connect time from the codex ALS (see the withCodex-wrapped
+      // prepareTools call below).
+      const turnTools = withCodexAppsTool(runSettings, withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)));
       const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
       environmentId = workspaceEnvironment?.id ?? "";
       redact = createSecretRedactor(
@@ -587,7 +592,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const fileResourceDownloads = await sandboxFileDownloadsForRun(runSettings, db, objectStorage, input.workspaceId, turnResources);
       throwIfWorkerShuttingDown();
-      preparedTools = await runtime.prepareTools(runSettings, turnTools, {
+      // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
+      // (initialize + tools/list) can resolve the per-workspace bearer from
+      // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
+      // identity on every non-codex turn, so this is a no-op for existing paths.
+      preparedTools = await withCodex(() => runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
@@ -596,7 +605,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Manager-style sessions carry a creation-validated permission set
         // for their first-party MCP token; null keeps the fixed default.
         ...(session.firstPartyMcpPermissions?.length ? { firstPartyPermissions: session.firstPartyMcpPermissions } : {}),
-      });
+      }));
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
       // superseded rows after compaction), NOT a workflow counter (turnsThisRun

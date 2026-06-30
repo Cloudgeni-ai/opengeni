@@ -214,6 +214,20 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
 }
 
 /**
+ * Ensures a turn references the synthetic codex_apps connectors MCP server when
+ * the codex overlay injected it (active subscription + connector scopes). A
+ * registry entry is inert until a ToolRef references its id, so this wires the
+ * server into the run. No-op when the server is not configured (every non-codex
+ * turn), and idempotent via mergeToolRefs.
+ */
+export function withCodexAppsTool(settings: Settings, tools: ToolRef[]): ToolRef[] {
+  if (!settings.mcpServers.some((server) => server.id === "codex_apps")) {
+    return tools;
+  }
+  return mergeToolRefs(tools, [{ kind: "mcp", id: "codex_apps" }]);
+}
+
+/**
  * Non-throwing variant of the scheduled-run admission check: returns a human
  * readable reason when balance or monthly caps block another agent run.
  */
