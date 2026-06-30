@@ -1,3 +1,4 @@
+import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
@@ -288,9 +289,19 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   if (model === null || model === undefined) {
     return;
   }
-  if (!configuredAllowedModels(settings).includes(model)) {
-    throw new HTTPException(422, { message: `model is not available: ${model}` });
+  if (configuredAllowedModels(settings).includes(model)) {
+    return;
   }
+  // Codex subscription models (codex/<slug>) are injected per-workspace by the
+  // worker overlay at turn time, so they are never in the deployment-global
+  // allow-list. Accept them at the edge when the feature is enabled — the picker
+  // only surfaces them for a connected workspace, and the worker enforces the
+  // actual connection (an unconnected workspace fails the turn with a clear
+  // "no Codex subscription connected" error rather than a misleading 422 here).
+  if (settings.codexSubscriptionEnabled && model.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return;
+  }
+  throw new HTTPException(422, { message: `model is not available: ${model}` });
 }
 
 export async function requireQueuedTurnForApi(db: Database, workspaceId: string, sessionId: string, turnId: string): Promise<SessionTurn> {
