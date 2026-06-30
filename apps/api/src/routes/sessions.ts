@@ -61,16 +61,16 @@ import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
-import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
+import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-} from "../domain/resources";
+} from "@opengeni/core";
 import {
   acceptSessionUserMessage,
   assertConfiguredModel,
@@ -78,7 +78,7 @@ import {
   requireQueuedTurnForApi,
   updateSessionTitle,
   workflowIdForSession,
-} from "../domain/sessions";
+} from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
 

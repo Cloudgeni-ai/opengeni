@@ -16,10 +16,10 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import { createSessionForRequest } from "../src/domain/sessions";
+import { createSessionForRequest } from "@opengeni/core";
 import { attachViewer } from "../src/sandbox/viewer";
 import { registerSessionRoutes } from "../src/routes/sessions";
-import type { ApiRouteDeps, SessionWorkflowClient } from "../src/dependencies";
+import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
 // Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +

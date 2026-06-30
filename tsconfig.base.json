@@ -21,6 +21,7 @@
       "@opengeni/agent-proto": ["packages/agent-proto/src/index.ts"],
       "@opengeni/codex": ["packages/codex/src/index.ts"],
       "@opengeni/config": ["packages/config/src/index.ts"],
+      "@opengeni/core": ["packages/core/src/index.ts"],
       "@opengeni/db": ["packages/db/src/index.ts"],
       "@opengeni/db/schema": ["packages/db/src/schema.ts"],
       "@opengeni/db/migrate": ["packages/db/src/migrate.ts"],
@@ -31,8 +32,9 @@
       "@opengeni/sdk": ["packages/sdk/src/index.ts"],
       "@opengeni/storage": ["packages/storage/src/index.ts"],
       "@opengeni/testing": ["packages/testing/src/index.ts"],
-      "@opengeni/api": ["apps/api/src/index.ts"],
-      "@opengeni/worker": ["apps/worker/src/index.ts"]
+      "@opengeni/api-router": ["apps/api/src/index.ts"],
+      "@opengeni/api-router/app": ["apps/api/src/app.ts"],
+      "@opengeni/worker-bundle": ["apps/worker/src/index.ts"]
     }
   }
 }

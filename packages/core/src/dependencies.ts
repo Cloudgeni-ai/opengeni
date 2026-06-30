@@ -5,8 +5,8 @@ import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
-import type { ManagedAuth } from "./auth/managed-auth";
-import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox/access";
+import type { ManagedAuth } from "./managed-auth-type";
+import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 
 export type SessionWorkflowClient = {
   signalUserMessage: (input: { sessionId: string; eventId: string; workflowId: string }) => Promise<void>;

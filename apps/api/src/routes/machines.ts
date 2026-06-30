@@ -25,9 +25,9 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
-import { buildFleetContextForSession, swapActiveSandbox } from "../sandbox/fleet";
+import { requireAccessGrant } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import { listMachines, metricRowToSample } from "../sandbox/machines";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults

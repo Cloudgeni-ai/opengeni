@@ -20,8 +20,8 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import Stripe from "stripe";
-import { requireAccessContext } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessContext } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 export function registerBillingRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/billing", async (c) => {

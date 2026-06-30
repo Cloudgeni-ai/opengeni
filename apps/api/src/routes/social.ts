@@ -11,8 +11,8 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireAccessGrant } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {

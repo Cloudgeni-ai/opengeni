@@ -3,7 +3,7 @@ import {
   manualScheduledTaskTriggerUsageKey,
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskTriggerToken,
-} from "../src/domain/scheduled-tasks";
+} from "@opengeni/core";
 
 const WORKSPACE = "ws-1";
 const TASK = "task-1";

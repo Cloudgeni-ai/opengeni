@@ -10,7 +10,7 @@ import {
 } from "@opengeni/db";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { ManagedAuth } from "../auth/managed-auth";
+import type { ManagedAuth } from "../managed-auth-type";
 
 const bearerPrefix = "Bearer ";
 

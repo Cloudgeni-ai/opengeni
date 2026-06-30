@@ -25,7 +25,7 @@ import {
   waitFor,
   type TestServices,
 } from "@opengeni/testing";
-import { postUserMessageTurn } from "../../apps/api/src/domain/sessions";
+import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
 import { createActivities } from "../../apps/worker/src/activities";
 import { WORKER_SHUTDOWN_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";

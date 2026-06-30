@@ -20,10 +20,10 @@ import {
 import { getDocumentBase } from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import { requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
-import { validateEnvironmentAttachment } from "../domain/environments";
+import { requireAccessGrant } from "@opengeni/core";
+import { requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { validateEnvironmentAttachment } from "@opengeni/core";
 import {
   assertPackSandboxImageCompatible,
   buildMarketingDailyAnalysisAgentConfig,
@@ -31,11 +31,11 @@ import {
   listWorkspaceCapabilityPacks,
   MARKETING_SOCIAL_PACK_ID,
   resolveCapabilityPack,
-} from "../domain/packs";
+} from "@opengeni/core";
 import {
   createValidatedScheduledTask,
   syncCreatedScheduledTask,
-} from "../domain/scheduled-tasks";
+} from "@opengeni/core";
 
 export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, objectStorage, workflowClient } = deps;

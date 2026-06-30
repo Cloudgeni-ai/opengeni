@@ -90,10 +90,10 @@ function codexModelsForPicker(slugs: string[]): Array<{ id: string; label: strin
     }));
 }
 import { createSignedState, readSignedState } from "@opengeni/github";
-import type { ApiRouteDeps } from "../dependencies";
+import type { ApiRouteDeps } from "@opengeni/core";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
+import { requireAccessGrant } from "@opengeni/core";
 
 type CodexConnectState = { workspaceId?: string; deviceAuthId?: string; userCode?: string; iat?: number };
 

@@ -104,7 +104,20 @@ function checkUnscopedOperationalRoutes(file: string, text: string, out: Finding
 function checkForbiddenProviderImports(file: string, text: string, out: Finding[]): void {
   const normalized = file.replace(/\\/g, "/");
   const betterAuthImport = /(?:from\s+["']better-auth["']|import\s+["']better-auth["']|require\(["']better-auth["']\)|["@]better-auth\/)/.test(text);
-  if (betterAuthImport && !normalized.startsWith("apps/api/src/auth/") && normalized !== "apps/api/package.json") {
+  // `@opengeni/core`'s ManagedAuth alias is a documented, deliberate exception: a
+  // TYPE-ONLY `import type { Auth } from "better-auth"` that tsup fully erases at
+  // build time, so it adds NO runtime dependency and NO pg driver to the published
+  // core tarball (better-auth stays a typecheck-only devDependency). The real Better
+  // Auth CONSTRUCTION (which pulls pg) stays in apps/api/src/auth. This is the only
+  // better-auth reference permitted outside the managed auth module.
+  const isTypeOnlyManagedAuthAlias =
+    normalized === "packages/core/src/managed-auth-type.ts" && /import type \{[^}]*\} from ["']better-auth["']/.test(text);
+  if (
+    betterAuthImport &&
+    !normalized.startsWith("apps/api/src/auth/") &&
+    normalized !== "apps/api/package.json" &&
+    !isTypeOnlyManagedAuthAlias
+  ) {
     out.push({ file, message: "imports Better Auth outside the managed auth module" });
   }
   if (/from\s+["']stripe["']/.test(text)) {

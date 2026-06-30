@@ -10,6 +10,7 @@ COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/deployment/package.json packages/deployment/package.json
 COPY packages/documents/package.json packages/documents/package.json

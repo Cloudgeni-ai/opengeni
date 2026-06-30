@@ -23,7 +23,7 @@ import { testSettings } from "@opengeni/testing";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import * as dbMod from "@opengeni/db";
 import * as eventsMod from "@opengeni/events";
-import type { ApiRouteDeps } from "../src/dependencies";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 // ── recorded interactions of the mocked seams ────────────────────────────────
 type AppendCall = { workspaceId: string; sessionId: string; events: Array<{ type: string; payload?: unknown }> };

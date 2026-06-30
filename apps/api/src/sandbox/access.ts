@@ -13,53 +13,25 @@
 import { createSandboxClient } from "@opengeni/runtime/sandbox";
 import type { Settings } from "@opengeni/config";
 
-// The structural shape the API needs from a provider sandbox client. The leaf's
-// createSandboxClient returns `unknown` (it is provider-polymorphic); we narrow
-// to exactly the methods the API-direct control plane uses — resume-by-id and
-// the deserialize step that turns a stored resume_state envelope back into a
-// live SandboxSessionState. (Mirrors @openai/agents/sandbox's SandboxClient
+// The structural shapes the API needs from a provider sandbox client now live in
+// @opengeni/core (`sandbox-types.ts`) — `dependencies.ts` (also in core)
+// references them as the `sandboxClient` / `resumeBoxById` provider seams, so
+// core is their single owner. We re-export them from here so existing apps/api
+// importers (and the `@opengeni/runtime/sandbox` value implementation below)
+// keep the same import site. (Mirrors @openai/agents/sandbox's SandboxClient
 // without importing the agent-loop barrel.)
-export type ApiSandboxSession = {
-  state?: Record<string, unknown> & { sandboxId?: string };
-  running?(): Promise<boolean>;
-  exec?(args: { cmd: string; workdir?: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }): Promise<unknown>;
-  execCommand?(args: { cmd: string; workdir?: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }): Promise<string>;
-  shutdown?(options?: unknown): Promise<void>;
-  delete?(options?: unknown): Promise<void>;
-  close?(): Promise<void>;
-};
-
-export type ApiSandboxClient = {
-  backendId: string;
-  deserializeSessionState?(state: Record<string, unknown>): Promise<unknown>;
-  resume?(state: unknown, options?: unknown): Promise<ApiSandboxSession>;
-  delete?(state: unknown): Promise<void>;
-};
-
-export type ResumeBoxByIdInput = {
-  /**
-   * The backend the box was created on — the lease's `resume_backend_id`. Must
-   * match the API's configured sandbox client backendId, or the resume is
-   * rejected (a cross-backend envelope can never deserialize correctly).
-   */
-  backend: string;
-  /**
-   * The serialized resume-state envelope — the lease's `resume_state` jsonb
-   * (the record produced by `client.serializeSessionState(state)`). This is the
-   * box identity + reattach descriptor; resume() reattaches to the live box by
-   * id (warm reattach) or cold-restores from its snapshot.
-   */
-  resumeState: Record<string, unknown>;
-};
-
-/**
- * A live, resumed sandbox session for a SINGLE in-process op. The caller
- * resumes → uses (exec/readFile/resolvePort) → drops it; lifecycle/refcount is
- * the lease's job (P1.x), NOT this handle's. The session is non-owned by
- * construction (resume-by-id never owns the box), so dropping it does not
- * terminate the box.
- */
-export type ResumedSandboxSession = ApiSandboxSession;
+export type {
+  ApiSandboxSession,
+  ApiSandboxClient,
+  ResumeBoxByIdInput,
+  ResumedSandboxSession,
+} from "@opengeni/core";
+import type {
+  ApiSandboxClient,
+  ApiSandboxSession,
+  ResumeBoxByIdInput,
+  ResumedSandboxSession,
+} from "@opengeni/core";
 
 export class SandboxResumeError extends Error {
   constructor(message: string, readonly cause?: unknown) {

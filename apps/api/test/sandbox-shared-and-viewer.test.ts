@@ -17,9 +17,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { AccessGrant } from "@opengeni/contracts";
-import { createSessionForRequest } from "../src/domain/sessions";
+import { createSessionForRequest } from "@opengeni/core";
 import { attachViewer, detachViewer, heartbeatViewer } from "../src/sandbox/viewer";
-import type { ApiRouteDeps, SessionWorkflowClient } from "../src/dependencies";
+import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // P1.4 — the shared-sandbox MCP surface (create-session resolution) + the
 // API-direct viewer-holder lifecycle, driven through the REAL packages/db lease

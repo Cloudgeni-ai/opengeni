@@ -19,9 +19,9 @@ import {
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {

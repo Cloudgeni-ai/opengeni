@@ -65,7 +65,7 @@ import {
   type EstablishedSandboxSession,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "./routing";
+import { relayConfigFromSettings } from "@opengeni/core";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is

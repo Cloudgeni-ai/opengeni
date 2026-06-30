@@ -14,7 +14,7 @@
     "@opengeni/db": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/runtime": "workspace:*",
-    "@opengeni/worker": "workspace:*",
+    "@opengeni/worker-bundle": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openai/agents": "^0.11.6",
     "@temporalio/client": "^1.17.0",

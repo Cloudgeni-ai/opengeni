@@ -27,8 +27,8 @@ import {
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import type { AccessGrant } from "@opengeni/contracts";
-import { createSessionForRequest } from "../src/domain/sessions";
-import type { ApiRouteDeps, SessionWorkflowClient } from "../src/dependencies";
+import { createSessionForRequest } from "@opengeni/core";
+import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;

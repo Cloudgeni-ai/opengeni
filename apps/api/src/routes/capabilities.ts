@@ -5,8 +5,8 @@ import {
   EnableCapabilityRequest,
 } from "@opengeni/contracts";
 import type { Hono } from "hono";
-import { requireAccessGrant } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildCapabilityCatalog,
   createCatalogItem,
@@ -14,7 +14,7 @@ import {
   discoverMcpRegistryCapabilities,
   enableCapability,
   officialMcpRegistryUrl,
-} from "../domain/capabilities";
+} from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 
 export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
