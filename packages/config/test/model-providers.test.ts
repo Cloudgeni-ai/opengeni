@@ -32,6 +32,21 @@ const fireworksRegistry = JSON.stringify([
   },
 ]);
 
+// The synthetic codex-subscription provider the worker overlay injects into
+// runSettings for a workspace with an active Codex subscription (mirrors
+// apps/worker withCodexProvider). No apiKey — the per-request bearer is supplied
+// at call time by codexSubscriptionFetch.
+const codexRegistry = JSON.stringify([
+  {
+    kind: "codex-subscription",
+    id: "codex-subscription",
+    label: "Codex (ChatGPT subscription)",
+    api: "responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    models: [{ id: "codex/gpt-5.5", label: "gpt-5.5", reasoningEffort: true }],
+  },
+]);
+
 describe("parseModelProvidersJson", () => {
   test("returns an empty list for the default/empty value", () => {
     expect(parseModelProvidersJson("[]")).toEqual([]);
@@ -215,6 +230,62 @@ describe("configuredModels", () => {
       hostedWebSearch: false,
     });
     expect(model.contextWindowTokens).toBeUndefined();
+  });
+
+  test("the built-in never claims a codex/ id even when it is the turn's openaiModel — codex provider wins, no Azure shadow", () => {
+    // The staging defect: the worker overwrites settings.openaiModel with the
+    // turn's model ("codex/gpt-5.5") and injects the codex provider. Without the
+    // namespaced-id filter the built-in (Azure) allow-list claimed the id FIRST
+    // and the first-wins de-dup dropped the real codex entry → Azure 404. Mirror
+    // the worker's per-turn runSettings overlay by spread-overriding a validated
+    // base (matching production, which never re-validates the overlay).
+    const base = withEnv({
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+      OPENGENI_OPENAI_MODEL: "gpt-5.5",
+    }, () => getSettings());
+    const runSettings = { ...base, openaiModel: "codex/gpt-5.5", modelProvidersJson: codexRegistry };
+    const models = configuredModels(runSettings);
+    const codexEntries = models.filter((model) => model.id === "codex/gpt-5.5");
+    expect(codexEntries).toHaveLength(1);
+    expect(codexEntries[0]!.providerId).toBe("codex-subscription");
+    const resolved = resolveModelProvider(runSettings, "codex/gpt-5.5");
+    expect(resolved).toBeDefined();
+    expect(resolved!.provider.kind).toBe("codex-subscription");
+    expect(resolved!.provider.builtin).toBe(false);
+  });
+
+  test("a codex/ openaiModel with NO codex provider injected is unexposed (so the runtime fails loud, never Azure)", () => {
+    const base = withEnv({
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+      OPENGENI_OPENAI_MODEL: "gpt-5.5",
+    }, () => getSettings());
+    const runSettings = { ...base, openaiModel: "codex/gpt-5.5" };
+    expect(configuredModels(runSettings).some((model) => model.id === "codex/gpt-5.5")).toBe(false);
+    expect(resolveModelProvider(runSettings, "codex/gpt-5.5")).toBeUndefined();
+  });
+
+  test("a namespaced registry id (Fireworks) as the turn's openaiModel resolves to its registry provider, not the Azure built-in", () => {
+    // The same shadow class for registry providers (Investigation 3's flag):
+    // closing it routes a registry-model turn to its provider instead of Azure.
+    const base = withEnv({
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+      OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
+      OPENGENI_OPENAI_MODEL: "gpt-5.5",
+      OPENGENI_MODEL_PROVIDERS_JSON: fireworksRegistry,
+    }, () => getSettings());
+    const runSettings = { ...base, openaiModel: "accounts/fireworks/models/glm-5p2" };
+    const entries = configuredModels(runSettings).filter((model) => model.id === "accounts/fireworks/models/glm-5p2");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.providerId).toBe("fireworks");
+    expect(resolveModelProvider(runSettings, "accounts/fireworks/models/glm-5p2")!.provider.builtin).toBe(false);
   });
 
   test("de-dups by id with first (built-in) winning when a registry repeats it", () => {

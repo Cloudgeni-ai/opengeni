@@ -18,6 +18,10 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./machines": {
+      "types": "./src/machines.ts",
+      "default": "./src/machines.ts"
+    },
     "./styles.css": "./styles/index.css",
     "./tokens.css": "./styles/tokens.css"
   },

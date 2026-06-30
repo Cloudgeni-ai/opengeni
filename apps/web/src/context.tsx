@@ -475,10 +475,7 @@ export function RootRouteComponent() {
           : {}),
         // The targeted machine's per-session working directory — a top-level create
         // field (only valid alongside targetSandboxId; the backend 422s it solo).
-        // The SDK request type doesn't yet surface it, so cast the field through.
-        ...(options?.workingDir
-          ? ({ workingDir: options.workingDir } as { workingDir: string })
-          : {}),
+        ...(options?.workingDir ? { workingDir: options.workingDir } : {}),
       });
       // Success: release the key so the next distinct submit is independent.
       pendingCreateKey.current = null;

@@ -15,7 +15,8 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { useEnvironments, useMachines, type ComposerState, type MachineView } from "@opengeni/react";
+import { useEnvironments, type ComposerState } from "@opengeni/react";
+import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";

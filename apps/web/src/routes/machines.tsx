@@ -10,7 +10,7 @@ import {
   MachinesDashboard,
   useMachines,
   type DeviceFlowPhase,
-} from "@opengeni/react";
+} from "@opengeni/react/machines";
 import {
   AlertTriangleIcon,
   ArrowLeftIcon,

@@ -158,6 +158,7 @@
       "name": "@opengeni/config",
       "version": "0.1.0",
       "dependencies": {
+        "@opengeni/codex": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "zod": "^4.2.1",
       },

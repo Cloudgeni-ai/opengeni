@@ -1,9 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
 import { configuredProviders, resolveModelProvider, type ResolvedModelProvider } from "@opengeni/config";
+import { CODEX_MODEL_ID_PREFIX, CODEX_PROVIDER_BASE_URL, CODEX_PROVIDER_ID } from "@opengeni/codex";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
-import { buildModelInstance, buildOpenGeniAgent, buildProviderClient, CodexSubscriptionUnavailableError, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
+import { buildModelInstance, buildOpenGeniAgent, buildOpenAIClientFromSettings, buildProviderClient, CodexSubscriptionUnavailableError, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
+
+// The synthetic codex-subscription provider the worker overlay
+// (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
+// a workspace with an ACTIVE Codex subscription. Mirrors capabilities.ts.
+const CODEX_TURN_MODEL = `${CODEX_MODEL_ID_PREFIX}gpt-5.5`;
+function codexProviderJson(): string {
+  return JSON.stringify([
+    {
+      kind: "codex-subscription",
+      id: CODEX_PROVIDER_ID,
+      label: "Codex (ChatGPT subscription)",
+      api: "responses",
+      baseUrl: CODEX_PROVIDER_BASE_URL,
+      models: [{ id: CODEX_TURN_MODEL, label: "gpt-5.5", reasoningEffort: true }],
+    },
+  ]);
+}
 
 // A host exposing the built-in OpenAI provider plus Fireworks (the `chat` wire
 // API) serving GLM 5.2, mirroring the canonical example in
@@ -230,6 +248,78 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     expect((thrown as { code?: unknown }).code).toBeUndefined();
   });
 
+  test("codex × selfhosted/connected-machine: a codex/<slug> turn routes to the CODEX client, never Azure", async () => {
+    // The staging incident: a codex turn on workspace 3989dda7 (ACTIVE codex
+    // subscription) ran on the selfhosted/connected-machine backend and 404'd
+    // with Azure DeploymentNotFound. Model resolution is backend-agnostic — it
+    // runs in the worker through the one shared MultiProviderModelProvider(runSettings)
+    // path — so a `selfhosted` backend with the codex provider injected must
+    // resolve codex/gpt-5.5 to the codex-subscription client (baseUrl =
+    // chatgpt.com/backend-api, fetch: codexSubscriptionFetch), NOT the Azure
+    // built-in. runSettings.openaiModel is the codex id (the worker overwrites
+    // it per-turn) — exactly the input that used to trigger the built-in shadow.
+    const settings = multiProviderSettings({
+      sandboxBackend: "selfhosted",
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      openaiModel: CODEX_TURN_MODEL, // worker per-turn overwrite (runSettings)
+      modelProvidersJson: codexProviderJson(),
+    });
+    const resolved = resolveTurnModel(settings, CODEX_TURN_MODEL)!;
+    expect(resolved).not.toBeNull();
+    expect(resolved.provider.kind).toBe("codex-subscription");
+    expect(resolved.provider.builtin).toBe(false);
+    // The client points at the ChatGPT backend, NOT the Azure deployment URL.
+    expect(resolved.client.baseURL).toBe(CODEX_PROVIDER_BASE_URL);
+    expect(resolved.client.baseURL).not.toBe("https://example.openai.azure.com/openai/v1");
+    // It is a distinct client from the built-in (Azure) one configureOpenAI builds.
+    expect(resolved.client).not.toBe(buildOpenAIClientFromSettings(settings));
+    // The router (the load-bearing sandbox-path resolver) agrees.
+    const model = await new MultiProviderModelProvider(settings).getModel(CODEX_TURN_MODEL);
+    expect(model).toBeInstanceOf(OpenAIResponsesModel);
+  });
+
+  test("codex × in-process (sandboxBackend 'none') still routes to the codex client (unchanged by the fix)", async () => {
+    const settings = multiProviderSettings({
+      sandboxBackend: "none",
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      openaiModel: CODEX_TURN_MODEL,
+      modelProvidersJson: codexProviderJson(),
+    });
+    const resolved = resolveTurnModel(settings, CODEX_TURN_MODEL)!;
+    expect(resolved.provider.kind).toBe("codex-subscription");
+    expect(resolved.client.baseURL).toBe(CODEX_PROVIDER_BASE_URL);
+    const model = await new MultiProviderModelProvider(settings).getModel(CODEX_TURN_MODEL);
+    expect(model).toBeInstanceOf(OpenAIResponsesModel);
+  });
+
+  test("fail-loud floor: a codex/ id that resolves to a NON-codex provider is refused (never shipped to Azure)", async () => {
+    // Defense in depth (the getModel kind-guard): even if a future settings path
+    // re-introduced a shadow binding codex/gpt-5.5 to the built-in (Azure)
+    // provider, the router must refuse it rather than ship the id as an Azure
+    // deployment name. Construct exactly that pathological resolution by putting
+    // the codex id in the built-in allow-list WITHOUT the codex provider, then
+    // assert the router throws instead of returning an Azure-bound model.
+    // (configuredModels filters codex/ out of the built-in list, so this asserts
+    // the runtime guard independently of the config-layer fix.)
+    const settings = multiProviderSettings({
+      sandboxBackend: "selfhosted",
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      openaiModel: CODEX_TURN_MODEL,
+      openaiAllowedModels: CODEX_TURN_MODEL,
+      modelProvidersJson: "[]", // codex provider NOT injected → no real owner
+    });
+    // With the config fix, codex/ is filtered from the built-in list, so the id
+    // is unexposed and getModel throws via the no-resolution codex branch.
+    await expect(new MultiProviderModelProvider(settings).getModel(CODEX_TURN_MODEL))
+      .rejects.toBeInstanceOf(CodexSubscriptionUnavailableError);
+  });
+
   test("P0 regression: a codex-active run provider resolves codex/* even after the GLOBAL default is clobbered by a non-codex turn", async () => {
     // The staging incident: the worker runs ~100 activities concurrently. A codex
     // turn injects the codex provider into ITS settings, but a concurrent
@@ -292,14 +382,15 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
   });
 });
 
-describe("registry model shadowing — why the worker resolves gating against the deployment-default settings", () => {
+describe("registry model shadowing is closed — the built-in never claims a namespaced registry id", () => {
   // The worker overrides settings.openaiModel to the TURN's model. For a turn on
-  // a registry model that override makes the built-in provider claim the id
-  // (configuredModels derives the built-in's models from openaiModel) and shadow
-  // the registry entry — resolving the turn to built-in (Azure) gating while the
-  // global router routes the name to the registry provider, attaching web_search
-  // to a chat-only Fireworks model. So the worker MUST resolve against the
-  // default-model settings, asserted here.
+  // a registry model that override USED to make the built-in provider claim the
+  // id (configuredModels derived the built-in's models from openaiModel) and
+  // shadow the registry entry — resolving the turn to the built-in (Azure)
+  // client and 404'ing on a sandbox/connected-machine backend that re-resolves
+  // the model NAME. configuredModels now filters any `<provider>/<model>`-namespaced
+  // id a registry owns (and any `codex/` id) out of the built-in allow-list, so
+  // the registry provider wins even when its id is the turn's openaiModel.
   const azure = () => multiProviderSettings({
     openaiProvider: "azure",
     azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
@@ -313,9 +404,36 @@ describe("registry model shadowing — why the worker resolves gating against th
     expect(resolved.configured.hostedWebSearch).toBe(false);
   });
 
-  test("against turn-overridden settings (openaiModel = the registry id) the built-in shadows it — the trap the worker avoids", () => {
-    const shadowed = resolveTurnModel({ ...azure(), openaiModel: FIREWORKS_MODEL }, FIREWORKS_MODEL)!;
-    expect(shadowed.provider.builtin).toBe(true);
-    expect(shadowed.configured.hostedWebSearch).toBe(true);
+  test("against turn-overridden settings (openaiModel = the registry id) the registry provider STILL wins — no Azure shadow", () => {
+    const resolved = resolveTurnModel({ ...azure(), openaiModel: FIREWORKS_MODEL }, FIREWORKS_MODEL)!;
+    // Previously the built-in (Azure) shadowed this; the namespaced-id filter
+    // keeps it bound to its registry provider and a chat-completions Model.
+    expect(resolved.provider.builtin).toBe(false);
+    expect(resolved.provider.id).toBe("fireworks");
+    expect(resolved.provider.api).toBe("chat");
+    expect(resolved.configured.hostedWebSearch).toBe(false);
+    expect(resolved.model).toBeInstanceOf(OpenAIChatCompletionsModel);
+  });
+
+  test("a BARE id a registry merely redeclares (e.g. the built-in default) still resolves to the built-in — precedence preserved", () => {
+    // The registry below redeclares "gpt-5.5"; the built-in must still win it
+    // (only namespaced `<provider>/<model>` ids are ceded to the registry).
+    const settings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      openaiModel: "gpt-5.5",
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "shadow",
+          baseUrl: "https://api.shadow.test/v1",
+          apiKey: "shadow-key",
+          models: [{ id: "gpt-5.5", label: "Shadowed" }, { id: "shadow/only" }],
+        },
+      ]),
+    });
+    const resolved = resolveTurnModel(settings, "gpt-5.5")!;
+    expect(resolved.provider.builtin).toBe(true);
+    expect(resolved.provider.id).toBe("azure");
   });
 });

@@ -22,6 +22,7 @@ export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
+  options: { skipGitHubToken?: boolean } = {},
 ): Promise<Record<string, string>> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
@@ -30,7 +31,16 @@ export async function sandboxEnvironmentForRun(
   // workspace values from colliding with the platform-managed entries.
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment);
   const selection = githubRepositorySelection(resources);
-  if (!selection) {
+  // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
+  // a connected machine (selfhosted), the platform GitHub App installation token is
+  // INERT — exec routes over NATS to the user's machine, which uses ITS OWN git
+  // credentials, and the box that the token would auth is never created. So skip the
+  // (network) token mint entirely and return the STABLE base env. Env-parity holds:
+  // the SAME base object still feeds buildManifest + the SelfhostedSession manifest,
+  // so the SDK's per-turn provided-session env delta stays empty
+  // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
+  // token under this exact contract — proof a box runs fine without it.
+  if (!selection || options.skipGitHubToken) {
     return environment;
   }
   // Run-scoped sandbox preparation for GitHub App repository resources.

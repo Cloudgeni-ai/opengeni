@@ -1,4 +1,5 @@
-import { SessionStatus as SessionStatusBadge, useMachines, type SessionEventsConnectionState } from "@opengeni/react";
+import { SessionStatus as SessionStatusBadge, type SessionEventsConnectionState } from "@opengeni/react";
+import { useMachines } from "@opengeni/react/machines";
 import { CopyIcon, FileJsonIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
