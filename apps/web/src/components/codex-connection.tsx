@@ -85,7 +85,20 @@ export function CodexConnectionCard({ workspaceId, canManage }: { workspaceId: s
       const interval = Math.max(2, start.intervalSeconds) * 1000;
       const poll = async (): Promise<void> => {
         if (cancelled.current) return;
-        const result = await client.codexConnectPoll(workspaceId, start.state);
+        // The recursive poll runs detached via setTimeout, so a rejection here
+        // (a 500/502/400 from the poll route) would otherwise be swallowed,
+        // leaving the card stuck on "Waiting for authorization…" forever with no
+        // credential ever persisted. Catch it, surface a toast, and clear pending
+        // so the failure is visible and the user can retry instead of believing
+        // the (OpenAI-side) login worked.
+        let result: Awaited<ReturnType<typeof client.codexConnectPoll>>;
+        try {
+          result = await client.codexConnectPoll(workspaceId, start.state);
+        } catch (error) {
+          setPending(null);
+          toast.error(error instanceof Error ? error.message : "Failed to verify Codex authorization. Try again.");
+          return;
+        }
         if (result.status === "connected") {
           setPending(null);
           toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);

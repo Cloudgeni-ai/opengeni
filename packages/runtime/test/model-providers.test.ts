@@ -3,7 +3,7 @@ import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 import { configuredProviders, resolveModelProvider, type ResolvedModelProvider } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
-import { buildModelInstance, buildOpenGeniAgent, buildProviderClient, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
+import { buildModelInstance, buildOpenGeniAgent, buildProviderClient, CodexSubscriptionUnavailableError, MultiProviderModelProvider, resolveTurnModel } from "../src/index";
 
 // A host exposing the built-in OpenAI provider plus Fireworks (the `chat` wire
 // API) serving GLM 5.2, mirroring the canonical example in
@@ -200,6 +200,34 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     expect(glm).toBeInstanceOf(OpenAIChatCompletionsModel);
     const builtin = await provider.getModel("gpt-5.5");
     expect(builtin).toBeInstanceOf(OpenAIResponsesModel);
+  });
+
+  test("a codex/<slug> id with NO codex provider in settings throws the actionable error (NOT an Azure fallback)", async () => {
+    // The staging failure: codex_subscription_credentials empty → the worker
+    // overlay never injects the codex provider → resolveTurnModel returns null
+    // for "codex/gpt-5.5". The router must NOT fall through to the built-in
+    // (Azure) client (which 404'd with "DeploymentNotFound"); it must throw a
+    // user-actionable error telling the user to connect their subscription.
+    const settings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+    });
+    const provider = new MultiProviderModelProvider(settings);
+    let thrown: unknown;
+    try {
+      await provider.getModel("codex/gpt-5.5");
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(CodexSubscriptionUnavailableError);
+    expect((thrown as Error).message).toContain("codex/gpt-5.5");
+    expect((thrown as Error).message).toContain("Codex subscription");
+    expect((thrown as Error).message).toContain("Settings");
+    // No status/code → agentRunFailurePayload surfaces it as a non-retryable
+    // turn.failed (not a rate-limit retry).
+    expect((thrown as { status?: unknown }).status).toBeUndefined();
+    expect((thrown as { code?: unknown }).code).toBeUndefined();
   });
 
   test("falls back to the built-in default provider for a model in no provider's allow-list", async () => {

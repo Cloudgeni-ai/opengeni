@@ -75,7 +75,7 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
-import { codexSubscriptionFetch } from "@opengeni/codex";
+import { CODEX_MODEL_ID_PREFIX, codexSubscriptionFetch } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -416,12 +416,45 @@ export class MultiProviderModelProvider implements ModelProvider {
       if (resolved) {
         return resolved.model;
       }
+      // A `codex/<slug>` id only resolves when the per-workspace worker overlay
+      // (settingsWithCodexCredential) has injected the synthetic codex-subscription
+      // provider — which it does ONLY for a workspace with an *active* connected
+      // Codex subscription. If it did not resolve, the subscription is not
+      // connected for this workspace, so the codex provider is absent. Falling
+      // through to the built-in OpenAIProvider below would ship `codex/<slug>` to
+      // the global default (Azure) client as a deployment name and surface a
+      // misleading "DeploymentNotFound" 404. Throw a clear, user-actionable error
+      // instead; it propagates through the worker's agentRunFailurePayload as the
+      // turn.failed message the session UI shows. Mirrors the codex-prefix
+      // awareness of assertConfiguredModel at apps/api/src/domain/sessions.ts.
+      if (modelName.startsWith(CODEX_MODEL_ID_PREFIX)) {
+        throw new CodexSubscriptionUnavailableError(modelName);
+      }
     }
-    // A model in no provider's allow-list falls back to the SDK's default
-    // OpenAIProvider, which uses the global default client/key configureOpenAI
-    // set up (the built-in OpenAI/Azure provider).
+    // A non-codex model in no provider's allow-list falls back to the SDK's
+    // default OpenAIProvider, which uses the global default client/key
+    // configureOpenAI set up (the built-in OpenAI/Azure provider).
     this.fallback ??= new OpenAIProvider();
     return this.fallback.getModel(modelName);
+  }
+}
+
+/**
+ * A `codex/<slug>` turn reached the model router but the workspace has no active
+ * Codex subscription connected (the worker overlay never injected the synthetic
+ * provider, so resolveTurnModel returned nothing). Thrown instead of silently
+ * routing the id to the built-in Azure/OpenAI client — that produced an opaque
+ * "DeploymentNotFound" 404. The message is user-actionable (connect/reconnect)
+ * and carries no status/code, so agentRunFailurePayload surfaces it verbatim as
+ * a non-retryable turn.failed the session UI shows.
+ */
+export class CodexSubscriptionUnavailableError extends Error {
+  constructor(modelName: string) {
+    super(
+      `Codex subscription model "${modelName}" is unavailable: no active Codex subscription is connected for this workspace. `
+      + `Connect (or reconnect) your ChatGPT/Codex subscription in Settings, then retry.`,
+    );
+    this.name = "CodexSubscriptionUnavailableError";
   }
 }
 
