@@ -54,6 +54,21 @@ describe("normalizeCodexUsage", () => {
     expect(out.weekly?.percent).toBe(5); // the 604800 window
   });
 
+  test("positional fallback places windows whose limit_window_seconds is absent (primary=>5h, secondary=>weekly)", () => {
+    // No limit_window_seconds on either window — must fall back to position.
+    const body = liveBody({
+      rate_limit: {
+        allowed: true,
+        limit_reached: false,
+        primary_window: { used_percent: 33, reset_at: 1_700_000_000 },
+        secondary_window: { used_percent: 9, reset_at: 1_700_600_000 },
+      },
+    });
+    const out = normalizeCodexUsage(200, body);
+    expect(out.fiveHour?.percent).toBe(33); // primary => 5h
+    expect(out.weekly?.percent).toBe(9); // secondary => weekly
+  });
+
   test("a 200 carrying limit_reached:true is a limit_reached state (not assumed 404-only)", () => {
     const out = normalizeCodexUsage(200, liveBody({ rate_limit: { ...((liveBody().rate_limit) as object), limit_reached: true } }));
     expect(out.status).toBe("limit_reached");

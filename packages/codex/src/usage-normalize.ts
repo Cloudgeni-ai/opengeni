@@ -165,8 +165,11 @@ function normalizeWindow(w: RawWindow): CodexUsageWindow | null {
 function pickWindows(primary: RawWindow, secondary: RawWindow): { fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null } {
   let fiveHour: CodexUsageWindow | null = null;
   let weekly: CodexUsageWindow | null = null;
-  const unplaced: CodexUsageWindow[] = [];
-  for (const raw of [primary, secondary]) {
+  // Track each unplaced window with the slot it came from, so the positional
+  // fallback can place it (re-normalizing produces a fresh object that would
+  // never match by reference — the bug this replaces).
+  const unplaced: Array<{ slot: "primary" | "secondary"; window: CodexUsageWindow }> = [];
+  for (const [slot, raw] of [["primary", primary], ["secondary", secondary]] as const) {
     const nw = normalizeWindow(raw);
     if (!nw) continue;
     if (nw.limitWindowSeconds === CODEX_WEEKLY_WINDOW_SECONDS) {
@@ -174,14 +177,15 @@ function pickWindows(primary: RawWindow, secondary: RawWindow): { fiveHour: Code
     } else if (nw.limitWindowSeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS) {
       fiveHour = nw;
     } else {
-      unplaced.push(nw);
+      unplaced.push({ slot, window: nw });
     }
   }
-  // Positional fallback for windows whose limit_window_seconds was absent/unknown.
-  const primaryNorm = normalizeWindow(primary);
-  const secondaryNorm = normalizeWindow(secondary);
-  if (!fiveHour && primaryNorm && unplaced.includes(primaryNorm)) fiveHour = primaryNorm;
-  if (!weekly && secondaryNorm && unplaced.includes(secondaryNorm)) weekly = secondaryNorm;
+  // Positional fallback for windows whose limit_window_seconds was absent/unknown
+  // (primary ⇒ 5h, secondary ⇒ weekly).
+  for (const { slot, window } of unplaced) {
+    if (slot === "primary" && !fiveHour) fiveHour = window;
+    else if (slot === "secondary" && !weekly) weekly = window;
+  }
   return { fiveHour, weekly };
 }
 

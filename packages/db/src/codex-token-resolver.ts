@@ -216,13 +216,20 @@ export async function fetchCodexUsageForAccount(
     return errorUsagePayload(error instanceof CodexReloginRequired ? "needs_relogin" : undefined);
   }
 
-  const usage = await fetchCodexUsage({
-    accessToken: token.accessToken,
-    chatgptAccountId: token.chatgptAccountId,
-    isFedramp: token.isFedramp,
-    clientVersion: CODEX_CLIENT_VERSION,
-  });
-  const normalized = normalizeCodexUsage(usage.status, usage.payload);
+  let normalized: CodexUsagePayload;
+  try {
+    const usage = await fetchCodexUsage({
+      accessToken: token.accessToken,
+      chatgptAccountId: token.chatgptAccountId,
+      isFedramp: token.isFedramp,
+      clientVersion: CODEX_CLIENT_VERSION,
+    });
+    normalized = normalizeCodexUsage(usage.status, usage.payload);
+  } catch {
+    // A network throw on the /wham/usage read must surface as an error PAYLOAD
+    // ({status:"error"} at 200), never an unhandled 500 from the route.
+    return errorUsagePayload();
+  }
 
   if (normalized.fiveHour || normalized.weekly) {
     // Cache-write is best-effort: a disconnect under us (false) or a transient
