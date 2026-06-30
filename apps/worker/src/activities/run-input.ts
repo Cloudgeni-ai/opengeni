@@ -97,6 +97,25 @@ export function resumeRunStateForCodexAccount(
   return stripReasoningIdentityFromSerializedRunState(state.serializedRunState);
 }
 
+/**
+ * A prepared turn input plus the watermark-seed discriminator the reconcile pass
+ * needs (HOLE E). `modelHistoryFromItems` is TRUE iff `state.history` was seeded
+ * from the cross-account-STRIPPED active history items (the items read path) — so
+ * the turn-end reconcile must seed `persistedHistoryCount` from the SAME strip
+ * (HOLE D). It is FALSE when `state.history` was seeded from the run-state BLOB
+ * (approval resume, the items-mode run-state fallback, or run_state mode): there
+ * foreign reasoning is NEUTRALIZED-IN-PLACE by {@link resumeRunStateForCodexAccount}
+ * (the item is KEPT, only its id/encrypted_content go), so the blob's history
+ * length still COUNTS those items. Seeding the watermark with the strip on that
+ * path under-counts by K and the reconcile re-appends K already-persisted items at
+ * fresh positions — that is HOLE E. The watermark must therefore NOT strip on the
+ * blob path (count the raw sanitized active length, matching the blob).
+ */
+export type PreparedTurnInput = {
+  input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
+  modelHistoryFromItems: boolean;
+};
+
 export async function turnInput(
   db: Database,
   runtime: OpenGeniRuntime,
@@ -104,7 +123,7 @@ export async function turnInput(
   trigger: Awaited<ReturnType<typeof getSessionEvent>>,
   settings?: Settings,
   current: TurnCodexAccount = NON_CODEX_TURN,
-) {
+): Promise<PreparedTurnInput> {
   if (!trigger) {
     throw new Error("Missing trigger event");
   }
@@ -152,16 +171,23 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
-    return await runtime.prepareInput(agent, {
-      kind: "approval",
-      // Cross-account run-state strip (HOLE C): if the account resuming this
-      // frozen approval differs from the one that froze it, neutralize the
-      // blob's account-bound reasoning before replay (else byte-for-byte).
-      serializedRunState: resumeRunStateForCodexAccount(state, current),
-      approvalId: String(payload.approvalId ?? ""),
-      decision: payload.decision === "approve" ? "approve" : "reject",
-      ...(typeof payload.message === "string" ? { message: payload.message } : {}),
-    });
+    return {
+      input: await runtime.prepareInput(agent, {
+        kind: "approval",
+        // Cross-account run-state strip (HOLE C): if the account resuming this
+        // frozen approval differs from the one that froze it, neutralize the
+        // blob's account-bound reasoning before replay (else byte-for-byte).
+        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        approvalId: String(payload.approvalId ?? ""),
+        decision: payload.decision === "approve" ? "approve" : "reject",
+        ...(typeof payload.message === "string" ? { message: payload.message } : {}),
+      }),
+      // Model seeded from the run-state BLOB (neutralize-in-place), NOT stripped
+      // items: the reconcile watermark must NOT apply the cross-account strip
+      // (HOLE E) — else a cross-account approval resume re-appends K
+      // already-persisted items at fresh positions.
+      modelHistoryFromItems: false,
+    };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
 }
@@ -182,7 +208,7 @@ async function messageInput(
   text: string,
   settings?: Settings,
   current: TurnCodexAccount = NON_CODEX_TURN,
-) {
+): Promise<PreparedTurnInput> {
   // Read-path budget guard (the last-resort backstop behind best-effort pre-turn
   // compaction): supply B only when the client-side compaction path is active
   // (Azure). On the OpenAI server path the SDK manages the window, so we leave
@@ -203,32 +229,44 @@ async function messageInput(
       // with no codex reasoning (every producer == current) — those replay
       // byte-for-byte. Message and tool content is never touched.
       const historyItems = applyCodexHistoryStrip(stored, current);
-      return await runtime.prepareInput(
-        agent,
-        {
-          kind: "message",
-          text,
-          historyItems: historyItems as any,
-          sandboxEnvelope: envelope,
-        },
-        inputBudgetTokens ? { inputBudgetTokens } : {},
-      );
+      return {
+        input: await runtime.prepareInput(
+          agent,
+          {
+            kind: "message",
+            text,
+            historyItems: historyItems as any,
+            sandboxEnvelope: envelope,
+          },
+          inputBudgetTokens ? { inputBudgetTokens } : {},
+        ),
+        // state.history seeded from the cross-account-STRIPPED active items: the
+        // reconcile watermark must apply the SAME strip (HOLE D).
+        modelHistoryFromItems: true,
+      };
     }
   }
   const latestState = await getLatestRunState(db, trigger.workspaceId, trigger.sessionId);
-  return await runtime.prepareInput(
-    agent,
-    {
-      kind: "message",
-      text,
-      // Cross-account run-state strip (HOLE C): the items-mode fallback replays
-      // the RunState blob when no history rows exist yet. If the resuming turn's
-      // codex account differs from the one that froze the blob, neutralize its
-      // account-bound reasoning before replay (else byte-for-byte).
-      serializedRunState: latestState ? resumeRunStateForCodexAccount(latestState, current) : null,
-    },
-    inputBudgetTokens ? { inputBudgetTokens } : {},
-  );
+  return {
+    input: await runtime.prepareInput(
+      agent,
+      {
+        kind: "message",
+        text,
+        // Cross-account run-state strip (HOLE C): the items-mode fallback replays
+        // the RunState blob when no history rows exist yet. If the resuming turn's
+        // codex account differs from the one that froze the blob, neutralize its
+        // account-bound reasoning before replay (else byte-for-byte).
+        serializedRunState: latestState ? resumeRunStateForCodexAccount(latestState, current) : null,
+      },
+      inputBudgetTokens ? { inputBudgetTokens } : {},
+    ),
+    // state.history seeded from the run-state BLOB (or empty): NOT the stripped
+    // items, so the reconcile watermark must NOT apply the cross-account strip
+    // (HOLE E). On this fallback the active rows are empty anyway (the read above
+    // took the items branch when stored.length > 0), so strip-or-not both yield 0.
+    modelHistoryFromItems: false,
+  };
 }
 
 /**

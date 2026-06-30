@@ -68,7 +68,7 @@ import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
-import { applyCodexHistoryStrip, turnInput } from "./run-input";
+import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -224,6 +224,47 @@ export function historyRowsToAppend(
     item: item as Record<string, unknown>,
   }));
   return { rows, nextWatermark: sanitized.length, nextPosition: nextPosition + rows.length };
+}
+
+/**
+ * Seed the turn-end reconcile watermark (`persistedHistoryCount`) from EXACTLY the
+ * view `state.history` was seeded from, so the model-input length and the watermark
+ * can NEVER disagree. The watermark is the slice index the reconcile cuts the
+ * (re-sanitized) `state.history` at to find this turn's genuinely-new items, so it
+ * must equal the length of `state.history`'s already-persisted leading prefix.
+ *
+ * The cross-account reasoning strip drops foreign reasoning items, so the prefix
+ * length is PATH-DEPENDENT, captured by `modelHistoryFromItems`:
+ *
+ *  - items read path (`modelHistoryFromItems === true`) — `state.history` was seeded
+ *    from the cross-account-STRIPPED active items (foreign reasoning DROPPED), so it
+ *    starts K shorter than the raw active-row count. Seed from the SAME strip
+ *    (HOLE D); seeding from the un-stripped count would slice K genuinely-new items
+ *    off the reconcile and silently lose them (incl. the user's switch-turn message).
+ *
+ *  - run-state BLOB path (`modelHistoryFromItems === false`: approval resume, the
+ *    items-mode run-state fallback, run_state mode) — `state.history` was seeded
+ *    from the blob, where foreign reasoning is NEUTRALIZED-IN-PLACE (the item is
+ *    KEPT, only its id/encrypted_content go — see resumeRunStateForCodexAccount), so
+ *    the blob's history length still COUNTS those items. Applying the strip here
+ *    under-counts by K and the reconcile re-appends K already-persisted items at
+ *    fresh positions — HOLE E. So the blob path must NOT strip: count the raw
+ *    sanitized active length, which mirrors the blob's completed prefix.
+ *
+ * On a same-account / non-codex turn the strip is a no-op, so both branches reduce
+ * to the same raw sanitized count (byte-identical to the pre-strip behaviour).
+ * Pure; exported for unit testing the D/E seed invariant.
+ */
+export function reconcileSeedCount(
+  activeSeedRows: ReadonlyArray<{ item: Record<string, unknown>; producerCodexCredentialId: string | null }>,
+  modelHistoryFromItems: boolean,
+  current: TurnCodexAccount,
+): number {
+  return sanitizeHistoryItemsForModel(
+    modelHistoryFromItems
+      ? applyCodexHistoryStrip(activeSeedRows, current)
+      : activeSeedRows.map((row) => row.item),
+  ).length;
 }
 
 /**
@@ -864,7 +905,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // "current account" the single strip rule compares against (null is the
       // built-in/Azure account, so a non-codex turn still drops codex-produced
       // reasoning, and a no-codex-history session is a byte-for-byte no-op).
-      const runInput = await turnInput(
+      const { input: runInput, modelHistoryFromItems } = await turnInput(
         db,
         runtime,
         agent,
@@ -894,16 +935,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // orphan-free, so it is a stable prefix of the re-sanitized history and the
       // slice begins exactly at the first genuinely-new item.
       const activeSeedRows = await getActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
-      // Seed the reconcile watermark from the SAME cross-account-stripped view the
-      // model is seeded from (run-input applyCodexHistoryStrip), NOT the raw rows.
-      // The strip DROPS foreign-account reasoning items, so `state.history` starts K
-      // shorter; seeding from the un-stripped count would slice K genuinely-new
-      // items off the turn-end reconcile and silently lose them (incl. the user's
-      // switch-turn message). On a same-account / non-codex turn the strip is a
-      // no-op, so this is byte-identical to the raw count.
-      persistedHistoryCount = sanitizeHistoryItemsForModel(
-        applyCodexHistoryStrip(activeSeedRows, { currentCodexCredentialId: effectiveCodexCredentialId }),
-      ).length;
+      // Seed the reconcile watermark from EXACTLY the view the model's
+      // `state.history` was seeded from (items strip on the items path = HOLE D; NO
+      // strip on the run-state blob path, where foreign reasoning is neutralized but
+      // KEPT = HOLE E), so the model-input length and the watermark never disagree.
+      persistedHistoryCount = reconcileSeedCount(
+        activeSeedRows,
+        modelHistoryFromItems,
+        { currentCodexCredentialId: effectiveCodexCredentialId },
+      );
       historyCountAtTurnStart = persistedHistoryCount;
       nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
       let responseUsageCount = 0;
