@@ -16,6 +16,8 @@ import {
   listCodexAccountStatuses,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
+  setActiveCodexCredential,
+  setCodexCredentialExhausted,
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
@@ -49,6 +51,7 @@ import {
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
 import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { chooseRotationActive, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
   buildModelResolver,
@@ -547,18 +550,74 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           getSessionCodexState(db, input.workspaceId, input.sessionId),
         ]);
         const connectedIds = new Set(accounts.map((account) => account.id));
+        const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
+        // The off-path / P1 default: today's workspace active pointer. Untouched
+        // when rotation is off or the session is pinned (byte-identical to P1).
+        let chosenActive = rotation?.activeCredentialId ?? null;
+        let rotationDecision: RotationDecision | null = null;
+
+        // P3 auto-rotation: the ONLY new branch, gated on rotation_enabled and
+        // pin-guarded (a pinned session NEVER rotates). When skipped, chosenActive
+        // stays the active pointer and selectCodexCredentialForTurn is called with
+        // byte-identical arguments to today — zero added cost on non-rotation turns.
+        if (rotation?.rotationEnabled && sessionPin == null) {
+          rotationDecision = chooseRotationActive({
+            rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
+            activeCredentialId: rotation.activeCredentialId,
+            priorCredentialId: sessionCodex?.lastCredentialId ?? null,
+            accounts,
+            nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+            now: new Date(),
+          });
+          if (rotationDecision.kind === "active") {
+            if (rotationDecision.moved) {
+              // The single authoritative pointer-move site: persist the new active.
+              await setActiveCodexCredential(db, input.workspaceId, rotationDecision.credentialId);
+            }
+            chosenActive = rotationDecision.credentialId;
+          } else if (rotationDecision.kind === "allCapped" && publish && turnId) {
+            // Every eligible account is capped/cooling: idle the turn AT THE BOUNDARY
+            // (no wasted model/sandbox build) until the EARLIEST reset across all
+            // accounts — the multi-account generalization of #143's single-account
+            // idle-until-reset. No saveRunState: no model ran, nothing to freeze.
+            const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+            const goalActive = Boolean(goal && goal.status === "active");
+            const resumeMs = Math.min(
+              Math.max(0, rotationDecision.earliestResetAt.getTime() - Date.now()),
+              CODEX_USAGE_LIMIT_MAX_RESUME_MS,
+            );
+            const failurePayload = codexUsageLimitFailurePayload(
+              { resetsInSeconds: Math.ceil(resumeMs / 1000) },
+              "all connected Codex subscriptions are rate-limited",
+              { allAccounts: true },
+            );
+            await publish([
+              { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved: false } },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ], true);
+            await finishTurn(db, input.workspaceId, turnId, "failed");
+            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+            activityStatus = "idle";
+            return goalActive ? { status: "idle", continueDelayMs: resumeMs } : { status: "idle" };
+          }
+          // kind:"none" (no accounts) → chosenActive stays null → existing relogin path.
+        }
+
         effectiveCodexCredentialId = selectCodexCredentialForTurn({
-          sessionPinnedCredentialId: sessionCodex?.pinnedCredentialId ?? null,
-          activeCredentialId: rotation?.activeCredentialId ?? null,
+          sessionPinnedCredentialId: sessionPin,    // pin still wins, structurally
+          activeCredentialId: chosenActive,         // rotation-choice OR today's active
           connectedIds,
         });
         if (effectiveCodexCredentialId) {
           const priorAccountId = sessionCodex?.lastCredentialId ?? null;
           await recordSessionActiveCodexCredential(db, input.workspaceId, input.sessionId, effectiveCodexCredentialId);
           if (priorAccountId !== effectiveCodexCredentialId) {
+            // "rotation" only when the engine actually moved the pointer; otherwise the
+            // unchanged P1 "manual" literal (a manual active flip between turns).
+            const rotated = rotationDecision?.kind === "active" && rotationDecision.moved;
             await publish([{
               type: "codex.account.switched",
-              payload: { fromAccountId: priorAccountId, toAccountId: effectiveCodexCredentialId, reason: "manual" },
+              payload: { fromAccountId: priorAccountId, toAccountId: effectiveCodexCredentialId, reason: rotated ? "rotation" : "manual" },
             }]);
           }
         }
@@ -1395,9 +1454,67 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
-        const failurePayload = codexUsageLimitFailurePayload(usageLimit, error instanceof Error ? error.message : String(error));
+        // --- P3 reactive rotation (gated; re-fetch fresh state on this already-failed,
+        // already-idling path). Mark THIS account cooling until its reset, then CONSULT the
+        // engine over fresh accounts to decide continueDelayMs: a fast 0-delay re-dispatch
+        // when another account is available, or idle-until-earliest when all are capped. The
+        // catch deliberately does NOT move the active pointer — the re-dispatched turn's
+        // proactive seam (turn-start) is the single authoritative pointer-move + strip site.
+        let rotated = false;
+        let rotationResumeMs: number | null = null;     // 0 ⇒ a candidate is available; re-dispatch now
+        let allCappedResetAt: Date | null = null;       // set ⇒ every account capped; idle until this
+        if (effectiveCodexCredentialId) {
+          const [rotation, sessionCodex] = await Promise.all([
+            getCodexRotationSettings(db, input.workspaceId).catch(() => null),
+            getSessionCodexState(db, input.workspaceId, input.sessionId).catch(() => null),
+          ]);
+          const rotating = Boolean(rotation?.rotationEnabled) && (sessionCodex?.pinnedCredentialId == null);
+          if (rotating && rotation) {
+            const accounts = await listCodexAccountStatuses(db, input.workspaceId).catch(() => []);
+            const serving = accounts.find((a) => a.id === effectiveCodexCredentialId) ?? null;
+            // Cooldown end (invariant 5): authoritative resets_in_seconds from the 429; else
+            // the serving account's soonest cached window reset; else the 1h cap.
+            const cachedReset = [serving?.primaryResetAt, serving?.secondaryResetAt]
+              .filter((d): d is Date => d instanceof Date && d.getTime() > Date.now())
+              .sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+            const until = usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
+              ? new Date(Date.now() + Math.ceil(usageLimit.resetsInSeconds) * 1000)
+              : (cachedReset ?? new Date(Date.now() + CODEX_USAGE_LIMIT_MAX_RESUME_MS));
+            await setCodexCredentialExhausted(db, input.workspaceId, effectiveCodexCredentialId, until).catch(() => false);
+            // Re-rank over the fresh accounts; the in-memory list predates the cooldown
+            // write, so stamp the just-cooled account so the engine excludes it now. The
+            // serving account is thus walked AT MOST ONCE per turn (invariant 4: bounded).
+            const fresh = accounts.map((a) => (a.id === effectiveCodexCredentialId ? { ...a, exhaustedUntil: until } : a));
+            const decision = chooseRotationActive({
+              rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
+              activeCredentialId: rotation.activeCredentialId,
+              priorCredentialId: effectiveCodexCredentialId,
+              accounts: fresh,
+              nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+              now: new Date(),
+            });
+            if (decision.kind === "active") {
+              rotated = true;
+              rotationResumeMs = 0;  // re-dispatch immediately: skip BOTH the 1h hold AND the backpressure delay
+            } else if (decision.kind === "allCapped") {
+              rotated = true;
+              allCappedResetAt = decision.earliestResetAt;
+            }
+            // kind:"none" → fall through to today's single-account idle.
+          }
+        }
+
+        const failurePayload = allCappedResetAt
+          ? codexUsageLimitFailurePayload(
+              { resetsInSeconds: Math.ceil(Math.max(0, allCappedResetAt.getTime() - Date.now()) / 1000) },
+              error instanceof Error ? error.message : String(error),
+              { allAccounts: true },
+            )
+          : codexUsageLimitFailurePayload(usageLimit, error instanceof Error ? error.message : String(error));
         await publish([
-          { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved } },
+          // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to
+          // freeze autoContinuations (a rotation walk must not burn the goal's continuation budget).
+          { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved, ...(rotated ? { rotated: true } : {}) } },
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, turnId, "failed");
@@ -1405,9 +1522,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         activityError = error;
         if (goalActive) {
-          const resumeMs = usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
-            ? Math.min(Math.ceil(usageLimit.resetsInSeconds) * 1000, CODEX_USAGE_LIMIT_MAX_RESUME_MS)
-            : CODEX_USAGE_LIMIT_MAX_RESUME_MS;
+          // Rotation: a candidate is available → continue NOW (0). All-capped → idle until the
+          // earliest reset across all accounts (capped at 1h). Else the unchanged single-account idle.
+          if (rotationResumeMs !== null) {
+            return { status: "idle", continueDelayMs: rotationResumeMs };
+          }
+          const resumeMs = allCappedResetAt
+            ? Math.min(Math.max(0, allCappedResetAt.getTime() - Date.now()), CODEX_USAGE_LIMIT_MAX_RESUME_MS)
+            : (usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
+                ? Math.min(Math.ceil(usageLimit.resetsInSeconds) * 1000, CODEX_USAGE_LIMIT_MAX_RESUME_MS)
+                : CODEX_USAGE_LIMIT_MAX_RESUME_MS);
           return { status: "idle", continueDelayMs: resumeMs };
         }
         return { status: "idle" };
@@ -1648,10 +1772,17 @@ export function humanizeResetWindow(resetsInSeconds: number | null): string {
 export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
+  opts?: { allAccounts?: boolean },
 ): { error: string; code: string; retryable: boolean; detail?: string } {
+  // P3: when EVERY connected subscription is rate-limited the message names the
+  // earliest reset across accounts; the single-account message is unchanged.
+  const error = opts?.allAccounts
+    ? `All connected ChatGPT/Codex subscriptions are rate-limited. Access returns ${humanizeResetWindow(info.resetsInSeconds)}. `
+      + `You can switch this session to a different model in the meantime, or wait for a subscription to reset.`
+    : `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. `
+      + `You can switch this session to a different model in the meantime, or wait for the limit to reset.`;
   return {
-    error: `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. `
-      + `You can switch this session to a different model in the meantime, or wait for the limit to reset.`,
+    error,
     code: "codex_usage_limit_reached",
     retryable: false,
     ...(detail ? { detail } : {}),

@@ -37,8 +37,11 @@ import {
   loadCodexCredentialForRun,
   renameCodexAccount,
   setActiveCodexCredential,
+  updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
+  CODEX_ROTATION_STRATEGIES,
   type CodexAccountStatus,
+  type CodexRotationStrategy,
 } from "@opengeni/db";
 
 // The picker surfaces codex models under their own "no credits" provider group so
@@ -63,6 +66,8 @@ function codexAccountJson(row: CodexAccountStatus) {
     fiveHour: buildCodexUsageWindowFromCache(row.primaryUsedPercent, row.primaryResetAt, CODEX_FIVE_HOUR_WINDOW_SECONDS),
     weekly: buildCodexUsageWindowFromCache(row.secondaryUsedPercent, row.secondaryResetAt, CODEX_WEEKLY_WINDOW_SECONDS),
     usageCheckedAt: row.usageCheckedAt,
+    // P3 rotation cooldown: when set and in the future, this account is cooling-down.
+    exhaustedUntil: row.exhaustedUntil,
   };
 }
 
@@ -258,6 +263,37 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "codex account not found" });
     }
     return c.json({ activated: true, accountId });
+  });
+
+  // P3: update rotation settings (enable auto-rotation + pick the strategy). admin access.
+  // ensureCodexRotationSettings guarantees the row exists, then a one-cell patch.
+  app.patch("/v1/workspaces/:workspaceId/codex/settings", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const body = (await c.req.json().catch(() => ({}))) as { rotationEnabled?: unknown; rotationStrategy?: unknown };
+    const patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy } = {};
+    if (typeof body.rotationEnabled === "boolean") {
+      patch.rotationEnabled = body.rotationEnabled;
+    }
+    if (typeof body.rotationStrategy === "string") {
+      if (!CODEX_ROTATION_STRATEGIES.includes(body.rotationStrategy as CodexRotationStrategy)) {
+        throw new HTTPException(400, { message: "invalid rotation strategy" });
+      }
+      patch.rotationStrategy = body.rotationStrategy as CodexRotationStrategy;
+    }
+    if (patch.rotationEnabled === undefined && patch.rotationStrategy === undefined) {
+      throw new HTTPException(400, { message: "no settings to update" });
+    }
+    await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
+    const updated = await updateCodexRotationSettings(db, workspaceId, patch);
+    if (!updated) {
+      throw new HTTPException(404, { message: "codex rotation settings not found" });
+    }
+    return c.json({
+      rotationEnabled: updated.rotationEnabled,
+      rotationStrategy: updated.rotationStrategy,
+      activeCredentialId: updated.activeCredentialId,
+    });
   });
 
   // Rename an account (label only in P1).

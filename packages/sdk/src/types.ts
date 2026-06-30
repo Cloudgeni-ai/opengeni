@@ -740,6 +740,9 @@ export type CodexAccount = {
   fiveHour?: CodexUsageWindow | null;
   weekly?: CodexUsageWindow | null;
   usageCheckedAt?: string | null;
+  // P3 rotation cooldown: ISO timestamp until which this account is cooling-down
+  // (rotated-off after a usage cap). null/absent ⇒ not cooling.
+  exhaustedUntil?: string | null;
 };
 
 /** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */

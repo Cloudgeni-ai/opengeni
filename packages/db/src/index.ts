@@ -2452,6 +2452,9 @@ export type CodexAccountStatus = {
   secondaryUsedPercent: number | null;
   secondaryResetAt: Date | null;
   usageCheckedAt: Date | null;
+  // P3 rotation cooldown: when set and in the future, this account is cooling-down
+  // (rotated-off after a usage cap) and the engine skips it. null ⇒ not cooling.
+  exhaustedUntil: Date | null;
 };
 
 /**
@@ -2481,6 +2484,7 @@ export async function listCodexAccountStatuses(db: Database, workspaceId: string
       secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
       secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
       usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
+      exhaustedUntil: schema.codexSubscriptionCredentials.exhaustedUntil,
     }).from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.createdAt));
@@ -2581,6 +2585,70 @@ export async function setActiveCodexCredential(db: Database, workspaceId: string
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .returning({ id: schema.codexRotationSettings.id });
     return updated.length > 0;
+  });
+}
+
+/**
+ * P3 rotation cooldown writer: stamp `exhausted_until` on a SPECIFIC credential row so the
+ * rotation engine treats it as cooling-down (capped) until `until`. Pass `until = null` to
+ * clear the cooldown. Modeled EXACTLY on recordCodexAccountUsage: RLS-scoped, guarded by
+ * (id, workspace_id), and — critically — NO `version` bump and NO `updatedAt` touch, so it can
+ * never race the (id, version) token-refresh CAS in recordCodexTokenRefresh / setCodexCredentialStatus.
+ * Returns true iff a row was updated (false ⇒ the credential was disconnected under us).
+ */
+export async function setCodexCredentialExhausted(
+  db: Database,
+  workspaceId: string,
+  credentialId: string,
+  until: Date | null,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
+      .set({ exhaustedUntil: until })
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
+  });
+}
+
+/** The supported rotation strategies (P3). */
+export const CODEX_ROTATION_STRATEGIES = ["most_remaining", "round_robin", "drain_then_next"] as const;
+export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
+
+/**
+ * P3 rotation-settings write path: one-cell UPDATE of `rotation_enabled` and/or
+ * `rotation_strategy` on the per-workspace row. Validates the strategy enum (rejects unknown).
+ * Guarded by workspaceId; ensureCodexRotationSettings guarantees the row exists. Returns the
+ * effective settings after the patch (null when no row exists yet — caller should ensure first).
+ */
+export async function updateCodexRotationSettings(
+  db: Database,
+  workspaceId: string,
+  patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy },
+): Promise<CodexRotationSettings | null> {
+  if (patch.rotationStrategy !== undefined && !CODEX_ROTATION_STRATEGIES.includes(patch.rotationStrategy)) {
+    throw new Error(`invalid codex rotation strategy: ${patch.rotationStrategy}`);
+  }
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.rotationEnabled !== undefined) {
+      set.rotationEnabled = patch.rotationEnabled;
+    }
+    if (patch.rotationStrategy !== undefined) {
+      set.rotationStrategy = patch.rotationStrategy;
+    }
+    const [row] = await scopedDb.update(schema.codexRotationSettings)
+      .set(set)
+      .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
+      .returning({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+        rotationEnabled: schema.codexRotationSettings.rotationEnabled,
+        rotationStrategy: schema.codexRotationSettings.rotationStrategy,
+      });
+    return row ?? null;
   });
 }
 
@@ -6226,6 +6294,11 @@ export async function evaluateGoalContinuation(db: Database, input: {
     }
     let autoContinuations = row.autoContinuations;
     let noProgressStreak = row.noProgressStreak;
+    // P3: a 429-failover continuation (the last continuation turn carried the `rotated`
+    // marker) is a multi-account rotate, not goal progress OR a goal stall — it must not
+    // burn the auto-continuation budget while walking accounts. Freezes the increment below,
+    // mirroring the budget-pause precedent that a limits pause never consumes budget.
+    let rotatedFailover = false;
     if (row.lastContinuationTurnId) {
       const [lastFinished] = await tx.select({ id: schema.sessionTurns.id })
         .from(schema.sessionTurns)
@@ -6242,6 +6315,16 @@ export async function evaluateGoalContinuation(db: Database, input: {
         autoContinuations = 0;
         noProgressStreak = 0;
       } else if (lastFinished) {
+        const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx.select({
+          rotatedFailures: sql<number>`count(*)::int`,
+        }).from(schema.sessionEvents)
+          .where(and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.turnId, row.lastContinuationTurnId),
+            eq(schema.sessionEvents.type, "turn.failed"),
+            sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
+          ));
+        rotatedFailover = Number(rotatedFailures) > 0;
         const [{ toolCalls } = { toolCalls: 0 }] = await tx.select({
           toolCalls: sql<number>`count(*)::int`,
         }).from(schema.sessionEvents)
@@ -6315,13 +6398,16 @@ export async function evaluateGoalContinuation(db: Database, input: {
       }).where(eq(schema.sessionGoals.id, row.id)).returning();
       return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
     }
+    // Freeze the counter on a rotation failover (invariant: a rotation walk never
+    // consumes continuation budget); a normal continuation increments as before.
+    const nextAutoContinuations = autoContinuations + (rotatedFailover ? 0 : 1);
     const [updated] = await tx.update(schema.sessionGoals).set({
-      autoContinuations: autoContinuations + 1,
+      autoContinuations: nextAutoContinuations,
       noProgressStreak,
       versionAtLastContinuation: row.version,
       updatedAt: new Date(),
     }).where(eq(schema.sessionGoals.id, row.id)).returning();
-    return { decision: "continue", goal: mapSessionGoal(updated!), autoContinuation: autoContinuations + 1, cap } as const;
+    return { decision: "continue", goal: mapSessionGoal(updated!), autoContinuation: nextAutoContinuations, cap } as const;
   }));
 }
 

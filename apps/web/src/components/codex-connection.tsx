@@ -3,7 +3,7 @@
 // unpinned sessions use), inline rename, per-account refresh/disconnect, and
 // "connect another". A connected `codex/*` model run uses the active/pinned
 // subscription instead of spending API credits.
-import type { CodexAccount, CodexAccountsResponse, CodexUsage, CodexUsageMap, CodexUsageWindow } from "@opengeni/sdk";
+import type { CodexAccount, CodexAccountsResponse, CodexRotationSettings, CodexUsage, CodexUsageMap, CodexUsageWindow } from "@opengeni/sdk";
 import { ExternalLinkIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SparklesIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -261,6 +261,20 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
     }
   }, [client, workspaceId, refreshAccounts]);
 
+  // P3: enable/disable auto-rotation or change the strategy, then re-read settings.
+  const setRotation = useCallback(async (patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationSettings["rotationStrategy"] }) => {
+    setBusy(true);
+    try {
+      await client.setCodexRotationSettings(workspaceId, patch);
+      await refreshAccounts();
+      toast.success("Rotation settings updated");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to update rotation");
+    } finally {
+      setBusy(false);
+    }
+  }, [client, workspaceId, refreshAccounts]);
+
   const disconnect = useCallback(async (accountId: string) => {
     setBusy(true);
     try {
@@ -289,6 +303,13 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
 
   const accounts = data?.accounts ?? [];
   const activeAccountId = data?.activeAccountId ?? null;
+  const rotationEnabled = data?.settings?.rotationEnabled ?? false;
+  const rotationStrategy = data?.settings?.rotationStrategy ?? "most_remaining";
+  const ROTATION_STRATEGY_LABELS: Record<CodexRotationSettings["rotationStrategy"], string> = {
+    most_remaining: "most remaining quota",
+    round_robin: "round-robin",
+    drain_then_next: "drain then next",
+  };
 
   return (
     <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
@@ -309,6 +330,39 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
           </Button>
         ) : null}
       </div>
+
+      {accounts.length > 1 && canManage ? (
+        <div className="grid gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-3">
+          <label className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-xs">
+              <span className="font-medium">Auto-rotate subscriptions</span>
+              <span className="ml-1 text-[color:var(--color-fg-subtle)]">— fail over to another plan when one hits its cap, never mid-turn.</span>
+            </span>
+            <input
+              type="checkbox"
+              className="size-4 accent-[color:var(--color-brand)]"
+              checked={rotationEnabled}
+              disabled={busy}
+              onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
+            />
+          </label>
+          {rotationEnabled ? (
+            <label className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-[color:var(--color-fg-muted)]">Strategy</span>
+              <select
+                className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs"
+                value={rotationStrategy}
+                disabled={busy}
+                onChange={(e) => void setRotation({ rotationStrategy: e.target.value as CodexRotationSettings["rotationStrategy"] })}
+              >
+                <option value="most_remaining">Most remaining quota</option>
+                <option value="round_robin">Round-robin</option>
+                <option value="drain_then_next">Drain then next</option>
+              </select>
+            </label>
+          ) : null}
+        </div>
+      ) : null}
 
       {loading ? (
         <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-subtle)]"><Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…</div>
@@ -385,9 +439,26 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                       {account.plan} plan
                     </span>
                   ) : null}
-                  {isActive ? (
-                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">Active</span>
-                  ) : null}
+                  {(() => {
+                    const coolingSecs = account.exhaustedUntil
+                      ? Math.max(0, Math.round((new Date(account.exhaustedUntil).getTime() - now) / 1000))
+                      : 0;
+                    if (coolingSecs > 0) {
+                      return (
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300" title="Rotated off after hitting its cap; skipped until reset">
+                          cooling down · {resetLabel(coolingSecs)}
+                        </span>
+                      );
+                    }
+                    if (isActive) {
+                      return (
+                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+                          {rotationEnabled ? "Active · default when idle" : "Active"}
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
                 </div>
                 {needsRelogin ? (
                   <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
@@ -422,7 +493,11 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
             );
           })}
           <p className="text-[11px] text-[color:var(--color-fg-subtle)]">
-            The <span className="font-medium">active</span> subscription runs every session that isn't pinned to a specific one.
+            {rotationEnabled ? (
+              <>Auto-rotating across {accounts.length} subscriptions by <span className="font-medium">{ROTATION_STRATEGY_LABELS[rotationStrategy]}</span>. Pinned sessions stay on their pin.</>
+            ) : (
+              <>The <span className="font-medium">active</span> subscription runs every session that isn't pinned to a specific one.</>
+            )}
           </p>
         </div>
       )}

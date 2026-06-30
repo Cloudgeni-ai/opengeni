@@ -25,6 +25,21 @@ describe("codexUsageLimitFailurePayload", () => {
     expect(payload.error).toContain("in about 1h");
     expect(payload.detail).toBe("429 limit hit");
   });
+
+  test("P3 all-accounts variant names the earliest reset across subscriptions", () => {
+    const payload = codexUsageLimitFailurePayload({ resetsInSeconds: 2 * 3600 }, "all capped", { allAccounts: true });
+    expect(payload.code).toBe("codex_usage_limit_reached");
+    expect(payload.retryable).toBe(false);
+    expect(payload.error).toContain("All connected");
+    expect(payload.error).toContain("in about 2h");
+    expect(payload.detail).toBe("all capped");
+  });
+
+  test("the single-account message is unchanged when allAccounts is not set", () => {
+    const payload = codexUsageLimitFailurePayload({ resetsInSeconds: 3600 }, "x");
+    expect(payload.error).toContain("Your ChatGPT/Codex subscription usage limit has been reached");
+    expect(payload.error).not.toContain("All connected");
+  });
 });
 
 describe("agentRunFailurePayload — codex usage limit", () => {

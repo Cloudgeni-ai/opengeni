@@ -133,6 +133,10 @@ export const codexSubscriptionCredentials = pgTable("codex_subscription_credenti
   secondaryUsedPercent: integer("secondary_used_percent"),
   secondaryResetAt: timestamp("secondary_reset_at", { withTimezone: true }),
   usageCheckedAt: timestamp("usage_checked_at", { withTimezone: true }), // snapshot freshness → cache TTL clock
+  // P3 rotation cooldown (plaintext metadata; NEVER a token). Set when this account hit its
+  // usage cap on a rotation turn; the rotation engine treats `exhausted_until > now()` as
+  // capped/skip so it isn't immediately re-picked. Self-clears via the now() comparison.
+  exhaustedUntil: timestamp("exhausted_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({

@@ -62,6 +62,7 @@ function account(id: string, over: Partial<opengeniDb.CodexAccountStatus> = {}):
     secondaryUsedPercent: null,
     secondaryResetAt: null,
     usageCheckedAt: null,
+    exhaustedUntil: null,
     ...over,
   };
 }
@@ -189,5 +190,67 @@ describe("GET /codex/usage — back-compat, repointed through the refreshing wra
       headers: { authorization: await bearer(["workspace:read"]) },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+// P3: PATCH /codex/settings — the rotation toggle/strategy write path. db accessors
+// are spied (poison db), so the route's validation + permission gate is what's tested.
+describe("PATCH /codex/settings — rotation settings", () => {
+  function spySettings(): { ensure: ReturnType<typeof spyOn>; update: ReturnType<typeof spyOn> } {
+    const ensure = spyOn(opengeniDb, "ensureCodexRotationSettings").mockResolvedValue(undefined);
+    const update = spyOn(opengeniDb, "updateCodexRotationSettings").mockResolvedValue({
+      activeCredentialId: ID_A,
+      rotationEnabled: true,
+      rotationStrategy: "most_remaining",
+    });
+    restores.push(() => ensure.mockRestore());
+    restores.push(() => update.mockRestore());
+    return { ensure, update };
+  }
+
+  test("enables rotation and returns the effective settings", async () => {
+    const { ensure, update } = spySettings();
+    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+      method: "PATCH",
+      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      body: JSON.stringify({ rotationEnabled: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { rotationEnabled: boolean; rotationStrategy: string };
+    expect(body.rotationEnabled).toBe(true);
+    expect(body.rotationStrategy).toBe("most_remaining");
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith(expect.anything(), WS, { rotationEnabled: true });
+  });
+
+  test("rejects an unknown strategy with 400 (never reaches the db)", async () => {
+    const { update } = spySettings();
+    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+      method: "PATCH",
+      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      body: JSON.stringify({ rotationStrategy: "bogus" }),
+    });
+    expect(res.status).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test("an empty patch is a 400 (no settings to update)", async () => {
+    spySettings();
+    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+      method: "PATCH",
+      headers: { authorization: await bearer(["workspace:admin"]), "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("requires workspace:admin (read-only token is 403/401)", async () => {
+    spySettings();
+    const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
+      method: "PATCH",
+      headers: { authorization: await bearer(["workspace:read"]), "content-type": "application/json" },
+      body: JSON.stringify({ rotationEnabled: true }),
+    });
+    expect([401, 403]).toContain(res.status);
   });
 });

@@ -7,6 +7,7 @@ import type {
   BillingEntitlementsResponse,
   CodexAccount,
   CodexAccountsResponse,
+  CodexRotationSettings,
   CodexConnectionStatus,
   CodexConnectPoll,
   CodexConnectStart,
@@ -1224,6 +1225,14 @@ export class OpenGeniClient {
   /** Switch the workspace ACTIVE Codex account (the one unpinned sessions use). */
   async activateCodexAccount(workspaceId: string, accountId: string): Promise<{ activated: boolean; accountId: string }> {
     return await this.requestJson<{ activated: boolean; accountId: string }>("POST", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/activate`);
+  }
+
+  /** P3: enable/disable Codex auto-rotation and/or pick the strategy. Returns the effective settings. */
+  async setCodexRotationSettings(
+    workspaceId: string,
+    patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationSettings["rotationStrategy"] },
+  ): Promise<CodexRotationSettings> {
+    return await this.requestJson<CodexRotationSettings>("PATCH", `/v1/workspaces/${workspaceId}/codex/settings`, patch);
   }
 
   /** Disconnect ONE Codex account by id (re-picks active when the removed one was active). */

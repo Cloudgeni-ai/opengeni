@@ -218,6 +218,10 @@ const SettingsSchema = z.object({
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false),  // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
   codexProductSku: z.string().optional(),               // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
+  // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
+  // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
+  // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
+  codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -863,6 +867,7 @@ export function getSettings(): Settings {
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
+    codexRotationNearExhaustionPct: optional("OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
