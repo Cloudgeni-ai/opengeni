@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -284,6 +284,66 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // the key falls back to the positional value rather than throwing.
     expect(modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }))
       .toBe("aggregate");
+  });
+});
+
+describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)", () => {
+  const selfhostedPointer = async () => ({ activeSandboxId: "sbx_machine" });
+  const selfhostedKind = async () => "selfhosted";
+
+  test("returns 'selfhosted' when an active swap points at a connected machine", async () => {
+    // Home backend stays cloud (e.g. modal) but the active sandbox is a BYO
+    // machine — buildAgent must be told "selfhosted" so the repository clone hook
+    // is skipped (never `git clone` onto the user's real disk).
+    expect(await resolveActiveSandboxBackend(true, selfhostedPointer, selfhostedKind)).toBe("selfhosted");
+  });
+
+  test("returns undefined when routing is off (flag gated; home backend default)", async () => {
+    // The active pointer is only meaningful when the selfhosted feature is on; with
+    // it off we never even query, and the cloud home backend governs unchanged.
+    let queried = false;
+    const backend = await resolveActiveSandboxBackend(
+      false,
+      async () => {
+        queried = true;
+        return { activeSandboxId: "sbx_machine" };
+      },
+      selfhostedKind,
+    );
+    expect(backend).toBeUndefined();
+    expect(queried).toBe(false);
+  });
+
+  test("returns undefined when there is no active swap (null pointer == cloud group box)", async () => {
+    expect(await resolveActiveSandboxBackend(true, async () => null, selfhostedKind)).toBeUndefined();
+    expect(
+      await resolveActiveSandboxBackend(true, async () => ({ activeSandboxId: null }), selfhostedKind),
+    ).toBeUndefined();
+  });
+
+  test("returns undefined when the active swap target is itself a cloud (modal) box", async () => {
+    // A swap to a sibling cloud box is still cloud — the clone hook stays enabled.
+    expect(
+      await resolveActiveSandboxBackend(true, selfhostedPointer, async () => "modal"),
+    ).toBeUndefined();
+  });
+
+  test("never throws: a pointer-load failure falls back to the home backend default", async () => {
+    const backend = await resolveActiveSandboxBackend(
+      true,
+      async () => {
+        throw new Error("db unreachable");
+      },
+      selfhostedKind,
+    );
+    expect(backend).toBeUndefined();
+  });
+
+  test("never throws: a sandbox-kind-load failure falls back to the home backend default", async () => {
+    const backend = await resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
+      throw new Error("db unreachable");
+    });
+    expect(backend).toBeUndefined();
   });
 });
 

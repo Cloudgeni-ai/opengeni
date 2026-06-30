@@ -344,9 +344,29 @@ finish() {
   printf '%s\n' "opengeni-agent installed at: $_bin"
   printf '%s\n' ""
   printf '%s\n' "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
-  printf '%s\n' "  1. Enroll this machine:   $_bin enroll"
-  if [ -n "${OPENGENI_WORKSPACE_ID:-}" ] || [ -n "${OPENGENI_API_URL:-}" ]; then
-    printf '%s\n' "       (OPENGENI_WORKSPACE_ID / OPENGENI_API_URL in this environment are honored automatically.)"
+  # The interactive device-flow enroll needs the workspace id (and, for a
+  # non-default deployment, the api url). When this script ran as `curl | sh`,
+  # those env vars existed ONLY for this piped process — they do NOT survive
+  # into the user's interactive shell, and the pipe has no TTY so we cannot run
+  # the interactive enroll here. So a bare `enroll` they paste later would fail
+  # with "enrollment requires a workspace id". Bake the known values into the
+  # command we print so it is copy-paste correct.
+  _enroll_env=""
+  if [ -n "${OPENGENI_WORKSPACE_ID:-}" ]; then
+    _enroll_env="OPENGENI_WORKSPACE_ID=$OPENGENI_WORKSPACE_ID"
+  fi
+  if [ -n "${OPENGENI_API_URL:-}" ]; then
+    if [ -n "$_enroll_env" ]; then
+      _enroll_env="$_enroll_env OPENGENI_API_URL=$OPENGENI_API_URL"
+    else
+      _enroll_env="OPENGENI_API_URL=$OPENGENI_API_URL"
+    fi
+  fi
+  if [ -n "$_enroll_env" ]; then
+    printf '%s\n' "  1. Enroll this machine:"
+    printf '%s\n' "       $_enroll_env \"$_bin\" enroll"
+  else
+    printf '%s\n' "  1. Enroll this machine:   $_bin enroll"
   fi
   printf '%s\n' "  2. Run it (online while this runs, offline when you stop it):"
   printf '%s\n' "       $_bin run"

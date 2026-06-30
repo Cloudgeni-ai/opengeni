@@ -613,6 +613,19 @@ export type BuildAgentOptions = {
   encryptedReasoning?: boolean;
   contextWindowTokens?: number;
   sandboxEnvironment?: Record<string, string>;
+  // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
+  // is the session's HOME backend (the default cloud group box it was created
+  // with); when a session has swapped its active sandbox to a connected machine
+  // (active_sandbox_id → a selfhosted lease, while the home backend stays the
+  // cloud default), the worker passes that machine's backend here so
+  // filesystem-touching lifecycle hooks key off where the agent ACTUALLY runs,
+  // not where it was created. The one such hook today is the repository clone
+  // (sandboxRepositoryCloneHooks): a bring-your-own machine owns its real disk,
+  // so the platform must NEVER `git clone` onto it. Defaults to
+  // settings.sandboxBackend, so the legacy cloud paths are byte-for-byte
+  // unchanged and a session whose HOME backend is "selfhosted" is gated with no
+  // caller change.
+  activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
@@ -792,7 +805,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], { compactionMode, contextWindowTokens }),
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
-  agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources));
+  agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend));
   return agent;
 }
 
@@ -2227,9 +2240,13 @@ function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLif
   return agentRepositoryCloneHooks.get(agent) ?? [];
 }
 
-function sandboxRepositoryCloneHooks(settings: Settings, resources: ResourceRef[]): SandboxLifecycleHook[] {
+function sandboxRepositoryCloneHooks(
+  settings: Settings,
+  resources: ResourceRef[],
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
+): SandboxLifecycleHook[] {
   const repositories = resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => (
-    resource.kind === "repository" && repositoryUsesSandboxClone(settings, resource)
+    resource.kind === "repository" && repositoryUsesSandboxClone(settings, resource, activeSandboxBackend)
   ));
   if (repositories.length === 0) {
     return [];
@@ -2243,7 +2260,32 @@ function sandboxRepositoryCloneHooks(settings: Settings, resources: ResourceRef[
   }];
 }
 
-function repositoryUsesSandboxClone(settings: Settings, resource: Extract<ResourceRef, { kind: "repository" }>): boolean {
+/**
+ * Whether the platform should seed a repository resource by `git clone` inside
+ * the sandbox before the agent starts.
+ *
+ * SAFETY GATE (selfhosted/bring-your-own machine): the clone hook writes into
+ * `posixPath.join("/workspace", mountPath)`, which a selfhosted agent rewrites
+ * to a path under its REAL launch directory — so a platform-initiated clone
+ * lands on the user's actual disk. A connected machine already owns its
+ * filesystem; the platform must NEVER clone onto it. We therefore key the
+ * decision off the EFFECTIVE/active backend, not just the session's HOME backend
+ * (`settings.sandboxBackend`): a session can run on the cloud default while its
+ * active sandbox has been swapped to a connected machine (active_sandbox_id → a
+ * selfhosted lease), in which case the agent actually executes on the user's
+ * machine even though the home backend is e.g. "modal". `activeSandboxBackend`
+ * defaults to the home backend, so a session whose HOME backend is "selfhosted"
+ * is gated with no caller change, and every cloud path is byte-for-byte
+ * unchanged.
+ */
+export function repositoryUsesSandboxClone(
+  settings: Settings,
+  resource: Extract<ResourceRef, { kind: "repository" }>,
+  activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
+): boolean {
+  if (activeSandboxBackend === "selfhosted") {
+    return false;
+  }
   return settings.sandboxBackend === "modal" || Boolean(resource.githubInstallationId && resource.githubRepositoryId);
 }
 

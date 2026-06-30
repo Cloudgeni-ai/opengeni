@@ -4,6 +4,8 @@ import {
   applyCreditDebitUpToBalance,
   finishTurn,
   getBillingBalance,
+  getSandbox,
+  readActiveSandbox,
   requireFile,
   getSessionEvent,
   getSessionGoal,
@@ -193,6 +195,55 @@ export function historyRowsToAppend(
     item: item as Record<string, unknown>,
   }));
   return { rows, nextWatermark: sanitized.length, nextPosition: nextPosition + rows.length };
+}
+
+/**
+ * Resolve the EFFECTIVE/active compute backend a turn should gate
+ * filesystem-touching agent lifecycle hooks on (today: the repository clone).
+ *
+ * WHY (Case B — clone-onto-real-disk hazard): a session keeps its CLOUD HOME
+ * backend (`settings.sandboxBackend`, e.g. "modal") but its ACTIVE sandbox may
+ * have been swapped to a connected machine (`active_sandbox_id` → a selfhosted
+ * lease). `runtime.buildAgent`'s repository-clone hook keys off the backend it is
+ * told; if the worker passes nothing it defaults to the HOME backend and the hook
+ * would `git clone` a private GitHub-App repo onto the user's REAL disk — a
+ * bring-your-own machine owns its own filesystem and must NEVER be cloned onto. So
+ * we look at where the agent ACTUALLY runs, not where the session was created.
+ *
+ * Returns "selfhosted" ONLY when the selfhosted feature is on AND the session has
+ * a non-null active pointer whose sandbox `kind` is "selfhosted". Otherwise
+ * returns undefined so buildAgent falls back to the home backend — byte-for-byte
+ * unchanged cloud behavior.
+ *
+ * Total + best-effort by contract: it NEVER throws (a lookup failure is logged and
+ * falls back to the home default), so wiring it at turn start can't fail the turn.
+ * The DB I/O is injected (the real call site passes readActiveSandbox + getSandbox,
+ * the same helpers wrapTurnBoxWithRouting reuses) so the gate/decision/safety
+ * contract is unit-testable without a live database.
+ */
+export async function resolveActiveSandboxBackend(
+  routingOn: boolean,
+  loadPointer: () => Promise<{ activeSandboxId: string | null } | null>,
+  loadSandboxKind: (sandboxId: string) => Promise<string | null>,
+): Promise<Settings["sandboxBackend"] | undefined> {
+  // The active pointer + swap tools only exist when selfhosted routing is on; with
+  // the flag off there is nothing to resolve and we keep the home-backend default.
+  if (!routingOn) {
+    return undefined;
+  }
+  try {
+    const pointer = await loadPointer();
+    // A null pointer (no swap) means "use the session's own cloud group box" — the
+    // home backend already governs that path, so leave the override unset.
+    if (!pointer?.activeSandboxId) {
+      return undefined;
+    }
+    const kind = await loadSandboxKind(pointer.activeSandboxId);
+    return kind === "selfhosted" ? "selfhosted" : undefined;
+  } catch (error) {
+    console.error("active sandbox backend resolution failed (turn proceeds on home backend)", error);
+    return undefined;
+  }
 }
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
@@ -614,10 +665,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // trigger is goal.continuation/turn.preempted).
       const isGenesisTurn = triggerType === "user.message"
         && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+      // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
+      // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
+      // may have been swapped to a connected machine (active_sandbox_id → a
+      // selfhosted lease). buildAgent's repository-clone lifecycle hook keys off
+      // the EFFECTIVE backend; if we let it default to the home backend it would
+      // `git clone` a private GitHub-App repo onto the user's REAL disk. So resolve
+      // the session's effective backend here and pass "selfhosted" through when the
+      // active sandbox is a connected machine; otherwise leave it undefined so
+      // buildAgent defaults to the home backend (byte-for-byte unchanged cloud
+      // behavior). Reuse the SAME DB helpers wrapTurnBoxWithRouting uses:
+      // readActiveSandbox (the per-session pointer) + getSandbox (the sandboxes-by-id
+      // loader, for its `kind`). The gate (routingEnabled), best-effort try/catch,
+      // and decision live in resolveActiveSandboxBackend (tested in isolation);
+      // resolving once at turn start is correct because the clone hook runs at
+      // beforeAgentStart, so a mid-turn swap can't affect this decision.
+      const activeSandboxBackend = await resolveActiveSandboxBackend(
+        routingEnabled(settings),
+        () => readActiveSandbox(db, input.workspaceId, input.sessionId),
+        async (sandboxId) => (await getSandbox(db, input.workspaceId, sandboxId))?.kind ?? null,
+      );
       const agent = runtime.buildAgent(runSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         genesisTitleHint: isGenesisTurn,
         sandboxEnvironment,
+        ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         // Resolved-model routing + gating (legacy defaults when null). The model

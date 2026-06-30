@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -741,6 +741,60 @@ describe("runtime event normalization", () => {
     expect(command).not.toContain("githubRepositoryId");
     expect(command).not.toContain("x-access-token");
     expect(command).not.toContain("GH_TOKEN=");
+  });
+
+  test("never clones a repository onto a selfhosted (bring-your-own) machine", () => {
+    const githubRepo = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    };
+    const plainRepo = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/public.git",
+      ref: "main",
+    };
+
+    // Cloud home backend: the clone fires today (modal always clones; any
+    // backend clones a GitHub-App-connected repo). These are the unchanged
+    // cloud paths.
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo)).toBe(true);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), plainRepo)).toBe(true);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo)).toBe(true);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), plainRepo)).toBe(false);
+
+    // Home backend IS selfhosted: gated with no caller change (active backend
+    // defaults to the home backend).
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), githubRepo)).toBe(false);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "selfhosted" }), plainRepo)).toBe(false);
+
+    // Cloud home backend but ACTIVE sandbox swapped to a connected machine:
+    // the explicit active-backend signal suppresses the clone even though the
+    // home backend (modal/docker) would otherwise clone.
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "selfhosted")).toBe(false);
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "docker" }), githubRepo, "selfhosted")).toBe(false);
+
+    // Active backend is another cloud box (a sibling Modal swap): still clones.
+    expect(repositoryUsesSandboxClone(testSettings({ sandboxBackend: "modal" }), githubRepo, "modal")).toBe(true);
+  });
+
+  test("buildOpenGeniAgent accepts the activeSandboxBackend option for both cloud and selfhosted targets", () => {
+    const resources = [{
+      kind: "repository" as const,
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }];
+    // The gating itself is covered behaviourally by the predicate test above
+    // (the per-agent clone-hook set is held in a private WeakMap). Here we only
+    // guard that the new option is accepted on the SandboxAgent build path for a
+    // cloud home backend whether or not the active backend is swapped.
+    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, { activeSandboxBackend: "selfhosted" })).not.toThrow();
+    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, { activeSandboxBackend: "modal" })).not.toThrow();
+    expect(() => buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources)).not.toThrow();
   });
 
   test("runs repository clone hook as a sandbox lifecycle hook", async () => {
