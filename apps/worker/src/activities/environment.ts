@@ -3,9 +3,15 @@ import {
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
-import { type ResourceRef } from "@opengeni/contracts";
 import {
-  loadWorkspaceEnvironmentForRun,
+  type ConnectionCredentialsPort,
+  type GitCredentials,
+  type ResourceRef,
+  type SandboxSecrets,
+} from "@opengeni/contracts";
+import {
+  loadWorkspaceEnvironmentForRun as loadWorkspaceEnvironmentForRunFromDb,
+  type Database,
   type WorkspaceEnvironmentForRun,
 } from "@opengeni/db";
 import {
@@ -17,13 +23,88 @@ import {
 // attach paths can load the SAME decrypted workspace environment the turn
 // declares — keeping the box-manifest env and agent-manifest env identical).
 // Existing worker import sites (agent-turn) continue importing from here.
-export { loadWorkspaceEnvironmentForRun, type WorkspaceEnvironmentForRun };
+export {
+  loadWorkspaceEnvironmentForRunFromDb as loadWorkspaceEnvironmentForRun,
+  type WorkspaceEnvironmentForRun,
+};
+
+// §7.6 P4a — the run's workspace identity, threaded so the connection-credential
+// provider can be called with the run's tenant context AND so the FORK-7
+// cross-check has the run's workspace to assert the provider's echo against.
+export type ConnectionScope = {
+  accountId: string;
+  workspaceId: string;
+};
+
+// §7.6 P4a — load the run's workspace environment, delegating the DECRYPT to a
+// host `sandboxSecrets` provider when one is bound (the host owns the secret
+// vault + encryption key in embedded/separate topologies) and otherwise running
+// today's local `environmentsEncryptionKeyBytes`-keyed decrypt byte-for-byte.
+//
+// Unattached runs (environmentId === null) short-circuit identically in BOTH
+// modes: zero DB/provider work, returns null. When a provider IS bound it owns
+// the decrypt end-to-end (it reads the host's own store), so the local DB read
+// is skipped — the provider is the sole source of truth for that leg.
+export async function loadWorkspaceEnvironmentForRunWithCredentials(
+  db: Database,
+  settings: Settings,
+  scope: ConnectionScope,
+  environmentId: string | null,
+  sandboxSecrets?: ConnectionCredentialsPort["sandboxSecrets"],
+): Promise<WorkspaceEnvironmentForRun | null> {
+  if (!sandboxSecrets) {
+    // Standalone default: today's local decrypt, unchanged.
+    return loadWorkspaceEnvironmentForRunFromDb(db, settings, scope.workspaceId, environmentId);
+  }
+  if (!environmentId) {
+    return null;
+  }
+  const secrets: SandboxSecrets = await sandboxSecrets({
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    environmentId,
+  });
+  // FORK-7: the provider must echo THIS run's workspace before we apply its
+  // decrypted values into the sandbox.
+  assertWorkspaceEcho("sandboxSecrets", scope, secrets.workspaceId);
+  return {
+    id: secrets.id ?? environmentId,
+    name: secrets.name ?? environmentId,
+    description: secrets.description ?? null,
+    values: secrets.values,
+  };
+}
+
+// §7.6 FORK-7 cross-check. A credential provider echoes the workspace it scoped
+// the credential to; we ASSERT it equals the run's workspace BEFORE the caller
+// injects the credential. A host mapping bug returning tenant B's creds for a
+// tenant-A run hard-throws here instead of landing tenant B's token in tenant
+// A's sandbox. Account/workspace ids only in the message (never the credential).
+function assertWorkspaceEcho(
+  kind: string,
+  scope: ConnectionScope,
+  echoedWorkspaceId: string,
+): void {
+  if (echoedWorkspaceId !== scope.workspaceId) {
+    throw new Error(
+      `connection-credential provider (${kind}) scoped to workspace ${echoedWorkspaceId} but the run is workspace ${scope.workspaceId}`,
+    );
+  }
+}
 
 export async function sandboxEnvironmentForRun(
   settings: Settings,
   resources: ResourceRef[],
   workspaceEnvironment: Record<string, string> = {},
-  options: { skipGitHubToken?: boolean } = {},
+  // §7.6 P4a — optional host git-credential provider + the run scope it needs
+  // (unset, the standalone default → self-mint from `settings` byte-for-byte).
+  // `skipGitHubToken` (Stage D): a connected-machine turn skips the inert platform
+  // token mint entirely. `= {}` default so the non-optional reads below are safe.
+  options: {
+    skipGitHubToken?: boolean;
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
 ): Promise<{ environment: Record<string, string>; gitToken?: string }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
@@ -55,13 +136,32 @@ export async function sandboxEnvironmentForRun(
   if (!selection || options.skipGitHubToken) {
     return { environment };
   }
-  // Run-scoped sandbox preparation for GitHub App repository resources. A SINGLE mint
-  // per turn: the value is returned as `gitToken` (seeded to the box's token file by
-  // the caller's clone hook) — NOT layered into the manifest env.
-  const token = await createGitHubAppInstallationToken(settings, {
-    installationId: selection.installationId,
-    repositoryIds: selection.repositoryIds,
-  });
+  // Run-scoped sandbox preparation for GitHub App repository resources. When a
+  // host binds `gitCredentials`, the HOST mints the installation token (BYO
+  // GitHub App); otherwise OpenGeni self-mints from `settings` (today's path). A
+  // SINGLE token is minted per turn and returned as `gitToken` (seeded to the box's
+  // token file by the caller's clone hook) — NOT layered into the manifest env.
+  let token: string;
+  let identity: { name: string; email: string } | null;
+  if (options?.gitCredentials && options.scope) {
+    const minted: GitCredentials = await options.gitCredentials({
+      accountId: options.scope.accountId,
+      workspaceId: options.scope.workspaceId,
+      installationId: selection.installationId,
+      repositoryIds: selection.repositoryIds,
+    });
+    // FORK-7: assert the provider scoped the token to THIS run's workspace
+    // before accepting the token for clone seeding.
+    assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
+    token = minted.token;
+    identity = minted.identity ?? githubAppBotIdentity(settings);
+  } else {
+    token = await createGitHubAppInstallationToken(settings, {
+      installationId: selection.installationId,
+      repositoryIds: selection.repositoryIds,
+    });
+    identity = githubAppBotIdentity(settings);
+  }
   // TOKEN-BROKER (B2): the askpass helper is PROVISIONED AT SETUP (runtime) into a
   // per-box, user-writable path in the SAME dir as the token file, instead of a
   // baked image script at /usr/local/bin/opengeni-git-askpass. The clone-hook seed
@@ -72,7 +172,7 @@ export async function sandboxEnvironmentForRun(
   // surface (viewer attach, channel-A) declares the IDENTICAL env when it
   // cold-creates the box for a repo-attached session — an attach-warmed box
   // missing these keys kills the next repo turn on the SDK's manifest-env guard.
-  applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
+  applyGitAuthPointerEnvironment(environment, identity);
   return { environment, gitToken: token };
 }
 
