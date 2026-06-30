@@ -230,6 +230,51 @@ describe("MultiProviderModelProvider — routes a model NAME to its provider (th
     expect((thrown as { code?: unknown }).code).toBeUndefined();
   });
 
+  test("P0 regression: a codex-active run provider resolves codex/* even after the GLOBAL default is clobbered by a non-codex turn", async () => {
+    // The staging incident: the worker runs ~100 activities concurrently. A codex
+    // turn injects the codex provider into ITS settings, but a concurrent
+    // non-codex turn's configureOpenAI overwrote the PROCESS-GLOBAL default
+    // provider with settings that have NO codex provider. The fix pins a
+    // run-scoped provider built from the run's OWN settings, so name resolution is
+    // immune to the global clobber. This test simulates the clobber and asserts
+    // the per-run provider still resolves codex/<slug>.
+    const { configureOpenAI } = await import("../src/index");
+    const codexProvider = {
+      kind: "codex-subscription" as const,
+      id: "codex-subscription",
+      label: "Codex (ChatGPT subscription)",
+      api: "responses" as const,
+      baseUrl: "https://chatgpt.com/backend-api",
+      models: [{ id: "codex/gpt-5.5", label: "gpt-5.5", reasoningEffort: true }],
+    };
+    // The codex turn's OWN settings (codex provider injected).
+    const codexSettings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      modelProvidersJson: JSON.stringify([codexProvider]),
+    });
+    // A foreign, concurrent non-codex turn clobbers the process-global default.
+    const nonCodexSettings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+    });
+    // Build the run-scoped provider FIRST (as runScopedRunner does at run start)…
+    const runScopedProvider = new MultiProviderModelProvider(codexSettings);
+    // …then let the foreign turn overwrite the global default provider mid-run.
+    configureOpenAI(nonCodexSettings);
+    // The run-scoped provider resolves codex/* from its own settings — no throw.
+    const model = await runScopedProvider.getModel("codex/gpt-5.5");
+    expect(model).toBeInstanceOf(OpenAIResponsesModel);
+    // Proof the clobber matters: a provider built from the FOREIGN turn's
+    // (non-codex) settings — i.e. what the process-global default now points at —
+    // would throw on the very same name. The run-scoped provider's immunity is
+    // exactly what the fix buys.
+    const clobberedProvider = new MultiProviderModelProvider(nonCodexSettings);
+    await expect(clobberedProvider.getModel("codex/gpt-5.5")).rejects.toBeInstanceOf(CodexSubscriptionUnavailableError);
+  });
+
   test("falls back to the built-in default provider for a model in no provider's allow-list", async () => {
     // In production configureOpenAI sets a global default key/client; mirror that
     // so the SDK fallback OpenAIProvider can construct a model rather than erroring

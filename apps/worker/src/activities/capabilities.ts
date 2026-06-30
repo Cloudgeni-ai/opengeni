@@ -29,10 +29,14 @@ export async function settingsWithEnabledCapabilityMcpServers(db: Database, work
  * this overlay (metadata-only read); the per-request bearer is resolved later via
  * codexRequestStorage. Idempotent and a no-op when not applicable.
  */
-export async function settingsWithCodexCredential(db: Database, workspaceId: string, settings: Settings): Promise<Settings> {
+export async function settingsWithCodexCredential(db: Database, workspaceId: string, settings: Settings, activeOverride?: boolean): Promise<Settings> {
   // Same active-credential predicate the billing bypass uses, so provider
   // injection and billing can never disagree on what an "active codex" turn is.
-  if (!(await workspaceCodexSubscriptionActive(db, settings, workspaceId))) {
+  // The caller may pass `activeOverride` (a single, shared read; P2-b) so routing
+  // and billing decide from the exact same observation, immune to a concurrent
+  // disconnect/reconnect landing between two independent reads.
+  const active = activeOverride ?? await workspaceCodexSubscriptionActive(db, settings, workspaceId);
+  if (!active) {
     return settings; // disabled / not connected / needs_relogin / error -> leave settings unchanged
   }
   const withProvider = withCodexProvider(settings);

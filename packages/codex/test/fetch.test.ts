@@ -3,6 +3,7 @@ import {
   type CodexRequestContext,
   type CodexTokenSnapshot,
   type FetchLike,
+  classifyCodexUsageLimitError,
   codexRequestStorage,
   codexSubscriptionFetch,
 } from "../src";
@@ -124,5 +125,79 @@ describe("codexSubscriptionFetch", () => {
     expect(captures[0]?.url).toBe("https://api.openai.com/v1/responses"); // not rewritten
     expect(new Headers(captures[0]?.init?.headers).get("openai-beta")).toBe("x"); // not stripped
     expect(captures[0]?.init?.body).toBe('{"model":"gpt-5.5"}'); // not normalized
+  });
+
+  test("P1-d: a 429 usage_limit_reached is re-emitted as JSON with x-should-retry:false (preserving the body)", async () => {
+    const body = JSON.stringify({ error: { type: "usage_limit_reached", message: "limit hit", resets_in_seconds: 3600 } });
+    const base: FetchLike = async () => new Response(body, { status: 429, headers: { "content-type": "application/json" } });
+    const fetchImpl = codexSubscriptionFetch(base);
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+    );
+    expect(res.status).toBe(429);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(res.headers.get("x-should-retry")).toBe("false");
+    // The JSON error body survives so the SDK can reconstruct error.error (no
+    // "429 status code (no body)").
+    const parsed = JSON.parse(await res.text()) as { error?: { type?: string; resets_in_seconds?: number } };
+    expect(parsed.error?.type).toBe("usage_limit_reached");
+    expect(parsed.error?.resets_in_seconds).toBe(3600);
+  });
+
+  test("P1-d: a generic 5xx error body is preserved WITHOUT forcing x-should-retry", async () => {
+    const base: FetchLike = async () => new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), { status: 500, headers: { "content-type": "application/json" } });
+    const fetchImpl = codexSubscriptionFetch(base);
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+    );
+    expect(res.status).toBe(500);
+    expect(res.headers.get("x-should-retry")).toBeNull(); // only usage caps are pinned non-retryable
+    expect(JSON.parse(await res.text())).toEqual({ error: { type: "server_error", message: "boom" } });
+  });
+
+  test("the 401-refresh retry still fires; the final non-OK error is buffered", async () => {
+    let call = 0;
+    const base: FetchLike = async () => {
+      call += 1;
+      return call === 1
+        ? new Response("unauth", { status: 401, headers: { "content-type": "text/plain" } })
+        : new Response(JSON.stringify({ error: { type: "usage_limit_reached" } }), { status: 429, headers: { "content-type": "application/json" } });
+    };
+    const fetchImpl = codexSubscriptionFetch(base);
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: JSON.stringify({ model: "gpt-5.5", stream: true, input: [] }) }),
+    );
+    expect(call).toBe(2); // 401 → refresh → retry
+    expect(res.status).toBe(429);
+    expect(res.headers.get("x-should-retry")).toBe("false");
+  });
+});
+
+describe("classifyCodexUsageLimitError", () => {
+  test("detects an OpenAI-shaped 429 usage_limit_reached and extracts the reset window", () => {
+    const err = Object.assign(new Error("429 limit"), { status: 429, type: "usage_limit_reached", error: { type: "usage_limit_reached", resets_in_seconds: 1800 } });
+    expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: 1800 });
+  });
+
+  test("detects via the error body type when the top-level type is absent", () => {
+    const err = Object.assign(new Error("boom"), { status: 429, error: { type: "usage_limit_reached" } });
+    expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: null });
+  });
+
+  test("walks the cause chain (SDK re-wrap)", () => {
+    const inner = Object.assign(new Error("inner"), { status: 429, error: { type: "usage_limit_reached", resets_in_seconds: 60 } });
+    const outer = Object.assign(new Error("wrapped"), { cause: inner });
+    expect(classifyCodexUsageLimitError(outer)).toEqual({ resetsInSeconds: 60 });
+  });
+
+  test("returns null for a plain rate-limit (no usage cap)", () => {
+    const err = Object.assign(new Error("429 Too Many Requests"), { status: 429, code: "rate_limit_exceeded" });
+    expect(classifyCodexUsageLimitError(err)).toBeNull();
+  });
+
+  test("returns null for non-objects and unrelated errors", () => {
+    expect(classifyCodexUsageLimitError(new Error("nope"))).toBeNull();
+    expect(classifyCodexUsageLimitError("string")).toBeNull();
+    expect(classifyCodexUsageLimitError(null)).toBeNull();
   });
 });

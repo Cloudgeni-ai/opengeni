@@ -22,6 +22,30 @@ import type { FetchLike } from "./fetch";
 
 const VALID_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 
+// The Responses API rejects a function-tool name longer than 64 chars (it 400s
+// the WHOLE turn). Some namespaced connector tool names exceed this, and the
+// collision-disambiguation suffix only lengthens names, so the mapper must cap
+// length too — not just charset.
+const MAX_TOOL_NAME_LEN = 64;
+
+/** Short, stable, charset-legal hash of a string (djb2 → base36). Deterministic. */
+function shortHash(input: string): string {
+  let h = 5381;
+  for (let i = 0; i < input.length; i++) {
+    h = ((h << 5) + h + input.charCodeAt(i)) >>> 0; // h * 33 + c, kept unsigned
+  }
+  return h.toString(36);
+}
+
+/** Truncate to <= MAX_TOOL_NAME_LEN, appending `_<hash(original)>` so the result stays unique + deterministic. */
+function capLength(candidate: string, original: string): string {
+  if (candidate.length <= MAX_TOOL_NAME_LEN) {
+    return candidate;
+  }
+  const suffix = `_${shortHash(original)}`;
+  return candidate.slice(0, Math.max(0, MAX_TOOL_NAME_LEN - suffix.length)) + suffix;
+}
+
 /**
  * Maps connector tool names to a Responses-API-legal charset and back. One
  * instance per codex_apps transport (i.e. per turn): tools/list populates it,
@@ -31,18 +55,26 @@ export class ToolNameMapper {
   private readonly sanitizedToOriginal = new Map<string, string>();
   private readonly used = new Set<string>();
 
-  /** Return a legal, unique name for `original`, recording the reverse mapping. */
+  /** Return a legal, unique name (<= 64 chars) for `original`, recording the reverse mapping. */
   sanitize(original: string): string {
     let candidate = VALID_TOOL_NAME.test(original)
       ? original
       : original.replace(/[^a-zA-Z0-9_-]/g, "_") || "tool";
+    // Enforce the Responses-API 64-char cap (stable hash suffix keyed on the
+    // ORIGINAL → deterministic across repeat listings, distinct originals don't
+    // collide after truncation).
+    candidate = capLength(candidate, original);
     // Disambiguate a genuine collision with a DIFFERENT original (never with
-    // the same original — that keeps repeat listings stable/idempotent).
+    // the same original — that keeps repeat listings stable/idempotent). Re-cap
+    // after each suffix so disambiguation never re-breaches the 64-char limit.
     if (this.used.has(candidate) && this.sanitizedToOriginal.get(candidate) !== original) {
       const base = candidate;
       let n = 2;
       do {
-        candidate = `${base}_${n++}`;
+        const suffix = `_${n++}`;
+        candidate = (base.length + suffix.length > MAX_TOOL_NAME_LEN
+          ? base.slice(0, MAX_TOOL_NAME_LEN - suffix.length)
+          : base) + suffix;
       } while (this.used.has(candidate));
     }
     this.used.add(candidate);

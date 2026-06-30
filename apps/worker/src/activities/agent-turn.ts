@@ -11,6 +11,7 @@ import {
   getSessionGoal,
   getSessionTurn,
   isCodexBilledTurn,
+  workspaceCodexSubscriptionActive,
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
@@ -49,6 +50,7 @@ import {
   buildModelResolver,
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
+  classifyCodexUsageLimitError,
   codexRequestStorage,
   type CodexRequestContext,
 } from "@opengeni/codex";
@@ -366,7 +368,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let triggerType: string | null = null;
     try {
       const mcpSettings = await settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, settings);
-      const capabilitySettings = await settingsWithCodexCredential(db, input.workspaceId, mcpSettings);
+      // Read the active-credential flag ONCE (P2-b) and thread it through both the
+      // routing overlay (settingsWithCodexCredential) and the billed-turn predicate
+      // (isCodexBilledTurn below), so a concurrent disconnect/reconnect cannot make
+      // provider-injection and billing disagree about whether this is a codex turn.
+      const codexSubscriptionActive = await workspaceCodexSubscriptionActive(db, mcpSettings, input.workspaceId);
+      const capabilitySettings = await settingsWithCodexCredential(db, input.workspaceId, mcpSettings, codexSubscriptionActive);
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
       const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
@@ -395,7 +402,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // here (before resolvedModel at the routing step) because the pre-turn gate
       // below needs it; mirrors the same active-credential read the codex provider
       // overlay uses, so billing and routing agree on what "codex" is.
-      const isCodexTurn = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: turn.model });
+      const isCodexTurn = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: turn.model, active: codexSubscriptionActive });
       await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn);
       const activityContext = currentActivityContext();
       // Setup (environment load, MCP connects, sandbox restore) does not
@@ -1133,6 +1140,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return { status: "idle" };
       }
+      // A ChatGPT/Codex usage cap (429 usage_limit_reached) is account state,
+      // NOT an agent failure: surface the precise, actionable message (so the
+      // user sees the reset window) but idle the session — never go terminal,
+      // which would reject the user's next message after the cap lifts. The
+      // payload is retryable:false so the generic provider-backpressure auto-retry
+      // does not loop. For an active goal we hold the continuation for the reported
+      // reset window (capped) so it resumes itself when access returns, instead of
+      // hammering the capped backend.
+      const usageLimit = classifyCodexUsageLimitError(error);
+      if (usageLimit && publish && turnId && turnStartedPublished) {
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        const goalActive = Boolean(goal && goal.status === "active");
+        await batcher?.flush().catch(() => undefined);
+        await reconcileConversationTruth();
+        const serializedRunState = agentsErrorRunState(error);
+        const runStateSaved = Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
+        if (serializedRunState && settings.sessionHistorySource !== "items") {
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            serializedRunState,
+            pendingApprovals: [],
+          });
+        }
+        const failurePayload = codexUsageLimitFailurePayload(usageLimit, error instanceof Error ? error.message : String(error));
+        await publish([
+          { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved } },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ], true);
+        await finishTurn(db, input.workspaceId, turnId, "failed");
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+        activityStatus = "idle";
+        activityError = error;
+        if (goalActive) {
+          const resumeMs = usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
+            ? Math.min(Math.ceil(usageLimit.resetsInSeconds) * 1000, CODEX_USAGE_LIMIT_MAX_RESUME_MS)
+            : CODEX_USAGE_LIMIT_MAX_RESUME_MS;
+          return { status: "idle", continueDelayMs: resumeMs };
+        }
+        return { status: "idle" };
+      }
       // Budget/limit exhaustion between model calls is account state, not an
       // agent failure: idle the session for goal-bearing and goal-less runs
       // alike (a failed session would reject the user's next message after a
@@ -1322,6 +1372,15 @@ export function agentRunFailurePayload(error: unknown): { error: string; code?: 
   const code = typeof error === "object" && error !== null && "code" in error
     ? String((error as { code?: unknown }).code)
     : undefined;
+  // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
+  // must NOT be reported as a generic, retryable rate-limit (which would loop a
+  // goal against a capped backend). Surface a precise, actionable message with
+  // the humanized reset window and code, non-retryable. Checked BEFORE the
+  // generic 429 branch below (a usage cap is also a 429).
+  const usageLimit = classifyCodexUsageLimitError(error);
+  if (usageLimit) {
+    return codexUsageLimitFailurePayload(usageLimit, message);
+  }
   if (status === 429 || code === "rate_limit_exceeded" || /(?:too many requests|rate.?limit|\b429\b)/i.test(message)) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
@@ -1332,6 +1391,46 @@ export function agentRunFailurePayload(error: unknown): { error: string; code?: 
   }
   return { error: message };
 }
+
+/** Humanize a seconds duration into a short "2h 5m" / "9m" / "in under a minute" string. */
+export function humanizeResetWindow(resetsInSeconds: number | null): string {
+  if (resetsInSeconds === null || !Number.isFinite(resetsInSeconds) || resetsInSeconds <= 0) {
+    return "shortly";
+  }
+  const total = Math.ceil(resetsInSeconds);
+  if (total < 60) {
+    return "in under a minute";
+  }
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  if (hours > 0) {
+    return minutes > 0 ? `in about ${hours}h ${minutes}m` : `in about ${hours}h`;
+  }
+  return `in about ${minutes}m`;
+}
+
+/**
+ * Build the turn.failed payload for a ChatGPT/Codex usage cap: a precise,
+ * actionable message naming the reset window, the stable `codex_usage_limit_reached`
+ * code, and retryable:false (an auto-retry would just re-hit the cap).
+ */
+export function codexUsageLimitFailurePayload(
+  info: { resetsInSeconds: number | null },
+  detail: string,
+): { error: string; code: string; retryable: boolean; detail?: string } {
+  return {
+    error: `Your ChatGPT/Codex subscription usage limit has been reached. Access resets ${humanizeResetWindow(info.resetsInSeconds)}. `
+      + `You can switch this session to a different model in the meantime, or wait for the limit to reset.`,
+    code: "codex_usage_limit_reached",
+    retryable: false,
+    ...(detail ? { detail } : {}),
+  };
+}
+
+// A usage cap that won't reset for a long time should not pin a Temporal timer
+// open indefinitely for a goal-bearing session; cap the continuation hold so the
+// goal re-evaluates at most this far out (it will re-pause if still capped).
+const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
 /**
  * Recognize an SDK stream event that represents a COMPUTER-USE tool call actually

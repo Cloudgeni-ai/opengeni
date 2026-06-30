@@ -74,7 +74,16 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
       // so we must reconstruct it: collapse to one JSON Response for a non-streaming
       // caller, or repair the live stream's terminal event for a streaming caller.
       if (!res.ok) {
-        return res;
+        // Buffer the error body once and re-emit it as a concrete JSON Response.
+        // A streaming responses request whose error body is left as the raw
+        // (possibly SSE / already-streamed) Response makes the SDK throw
+        // "<status> status code (no body)" — the JSON error (type/message/
+        // resets_in_seconds) is lost, so a 429 usage cap surfaces as a generic,
+        // wrongly-retryable rate-limit. Re-emitting a clean application/json
+        // Response lets the SDK reconstruct error.error for EVERY codex error
+        // (401/400/5xx too). For a hard usage cap we also pin x-should-retry:false
+        // so the SDK does not burn its retry budget on a limit that won't lift.
+        return await bufferCodexErrorResponse(res);
       }
       return callerWantsStream ? repairCodexStream(res) : await sseToJsonResponse(res);
     };
@@ -85,6 +94,72 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     }
     return res;
   };
+}
+
+/** The codex backend's hard-cap error type (ChatGPT/Codex usage limit reached). */
+export const CODEX_USAGE_LIMIT_ERROR_TYPE = "usage_limit_reached";
+
+export type CodexUsageLimitInfo = {
+  /** Seconds until the usage cap resets, when the backend reported it. */
+  resetsInSeconds: number | null;
+};
+
+/**
+ * Classify a thrown error as a ChatGPT/Codex usage-cap (429 usage_limit_reached)
+ * and extract the reset window. The SDK surfaces the codex backend's 429 as an
+ * OpenAI APIError whose `.type` (and `.error.type`) is `usage_limit_reached` and
+ * whose `.error.resets_in_seconds` carries the cap reset. Walks the cause chain
+ * and tolerates the message-only shape so it survives any SDK re-wrapping.
+ * Returns null for anything that is not a usage cap.
+ */
+export function classifyCodexUsageLimitError(error: unknown): CodexUsageLimitInfo | null {
+  let cur: unknown = error;
+  for (let depth = 0; depth < 6 && cur && typeof cur === "object"; depth++) {
+    const e = cur as Record<string, unknown>;
+    const body = (e.error && typeof e.error === "object" ? e.error : undefined) as Record<string, unknown> | undefined;
+    const type = (typeof e.type === "string" ? e.type : undefined) ?? (typeof body?.type === "string" ? body.type : undefined);
+    const message = typeof e.message === "string" ? e.message : "";
+    const status = Number(e.status);
+    if (
+      type === CODEX_USAGE_LIMIT_ERROR_TYPE ||
+      message.includes(CODEX_USAGE_LIMIT_ERROR_TYPE) ||
+      (status === 429 && /usage limit/i.test(message))
+    ) {
+      const resets =
+        (typeof body?.resets_in_seconds === "number" ? body.resets_in_seconds : undefined) ??
+        (typeof e.resets_in_seconds === "number" ? (e.resets_in_seconds as number) : undefined) ??
+        null;
+      return { resetsInSeconds: resets };
+    }
+    cur = e.cause;
+  }
+  return null;
+}
+
+/**
+ * Buffer a non-OK codex Response and re-emit it as a clean `application/json`
+ * Response so the SDK can reconstruct `error.error` from the body. A 429 usage
+ * cap (`error.type === "usage_limit_reached"`) is a HARD limit, not transient
+ * backpressure, so we pin `x-should-retry: false` to stop the SDK retrying it.
+ * Reading the body here also drains the socket of a discarded 401 (no leak).
+ */
+async function bufferCodexErrorResponse(res: Response): Promise<Response> {
+  const bodyText = await res.text().catch(() => "");
+  const headers = new Headers(res.headers);
+  headers.set("content-type", "application/json");
+  headers.delete("content-length"); // body re-serialized
+  headers.delete("content-encoding"); // text() already decoded any gzip
+  let errorType: string | undefined;
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { type?: unknown } };
+    errorType = typeof parsed.error?.type === "string" ? parsed.error.type : undefined;
+  } catch {
+    /* non-JSON error body — leave as-is, no retry-header override */
+  }
+  if (errorType === CODEX_USAGE_LIMIT_ERROR_TYPE) {
+    headers.set("x-should-retry", "false");
+  }
+  return new Response(bodyText, { status: res.status, statusText: res.statusText, headers });
 }
 
 /**

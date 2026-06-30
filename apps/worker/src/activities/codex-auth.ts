@@ -22,9 +22,15 @@ import {
   refreshCodexToken,
 } from "@opengeni/codex";
 
-// Single-flight per workspace, process-module scope. One Temporal worker per
-// process makes this the right grain; concurrent cross-workspace turns are keyed
-// apart by workspaceId, and a refresh-token is one-time so we never double-spend it.
+// Single-flight per CREDENTIAL INSTANCE (row id + version), process-module scope.
+// One Temporal worker per process makes this the right grain. Keying by the
+// loaded credential's id+version — NOT by workspaceId alone (P1-b) — is what makes
+// a disconnect→reconnect safe: a post-reconnect getToken loads a DIFFERENT row
+// (new uuid id) and so gets a distinct key, instead of coalescing onto the OLD
+// in-flight refresh and writing stale rotated tokens over the freshly connected
+// credential (which would invalidate the new token family → 401 → needs_relogin →
+// a second, independent "no active subscription"). Concurrent calls for the SAME
+// credential still coalesce, so the one-time refresh token is never double-spent.
 const inflight = new Map<string, Promise<CodexTokenSnapshot>>();
 
 // Dependencies are injectable so the lifecycle logic (single-flight, staleness,
@@ -72,16 +78,35 @@ export function buildCodexTokenResolver(
       if (!key) {
         throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
       }
-      await deps.recordRefresh(db, {
+      // Compare-and-set on the loaded (id, version): if a disconnect→reconnect
+      // replaced the row mid-refresh, this writes 0 rows and we must NOT clobber
+      // the new credential with our now-defunct rotated tokens.
+      const persisted = await deps.recordRefresh(db, {
+        id: cred.id,
+        version: cred.version,
         workspaceId,
         credentialEncrypted: deps.encrypt(key, JSON.stringify(tokens)),
         expiresAt: accessTokenExpiry(tokens.access_token),
         lastRefreshAt: new Date(),
       });
+      if (!persisted) {
+        // The row changed under us. Our rotated tokens belong to a stale family;
+        // fall back to whatever is connected NOW (a reconnect leaves an active
+        // row). If nothing active remains, a relogin is genuinely required.
+        const current = await deps.loadCredential(db, settings, workspaceId);
+        if (current && current.status === "active") {
+          return snapshot(current);
+        }
+        throw new CodexReloginRequired("Codex credential changed during token refresh; reconnect required.");
+      }
       return { accessToken: tokens.access_token, chatgptAccountId: cred.chatgptAccountId, isFedramp: cred.isFedramp };
     } catch (error) {
       if (error instanceof CodexReloginRequired) {
-        await deps.setStatus(db, workspaceId, "needs_relogin", error.message);
+        // Stamp needs_relogin ONLY if the row we refreshed is STILL current
+        // (compare-and-set on the loaded id+version). A relogin triggered by the
+        // OLD token family must never stamp needs_relogin onto a freshly
+        // reconnected credential.
+        await deps.setStatus(db, workspaceId, "needs_relogin", error.message, { id: cred.id, version: cred.version });
       }
       throw error;
     }
@@ -92,16 +117,20 @@ export function buildCodexTokenResolver(
   // concurrent model calls in a turn can never double-spend the one-time refresh
   // token (which would trigger refresh_token_reused -> needs_relogin).
   const doRefresh = (cred: CodexCredentialForRun): Promise<CodexTokenSnapshot> => {
-    const existing = inflight.get(workspaceId);
+    // Key by the credential INSTANCE (id+version), so a reconnect's new row never
+    // coalesces onto the old row's in-flight refresh (P1-b). The row id is a uuid,
+    // globally unique across the delete+reinsert a disconnect→reconnect performs.
+    const key = `${cred.id}:${cred.version}`;
+    const existing = inflight.get(key);
     if (existing) {
       return existing;
     }
     const promise = performRefresh(cred).finally(() => {
-      if (inflight.get(workspaceId) === promise) {
-        inflight.delete(workspaceId);
+      if (inflight.get(key) === promise) {
+        inflight.delete(key);
       }
     });
-    inflight.set(workspaceId, promise);
+    inflight.set(key, promise);
     return promise;
   };
 

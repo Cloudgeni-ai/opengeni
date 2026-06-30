@@ -81,7 +81,22 @@ export type RlsContext = {
 };
 
 export function createDb(databaseUrl: string): DbClient {
-  const client = postgres(databaseUrl, { max: 10 });
+  // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
+  // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
+  // statements (`s_N`) are bound to one backend, but a transaction pooler hands
+  // each transaction a different backend, so a later `execute` intermittently
+  // throws `prepared statement "s_N" does not exist`. Every RLS read in this
+  // module (set_config + SELECT inside one db.transaction) rides on this pool, so
+  // the failure surfaces as a "worked, then didn't" credential/permission read.
+  // idle_timeout + max_lifetime recycle connections so a pooler-recycled backend
+  // is never reused indefinitely; application_name aids server-side diagnostics.
+  const client = postgres(databaseUrl, {
+    max: 10,
+    prepare: false,
+    idle_timeout: 30,
+    max_lifetime: 1800,
+    connection: { application_name: "opengeni" },
+  });
   return {
     db: drizzle(client, { schema }),
     close: async () => {
@@ -91,6 +106,13 @@ export function createDb(databaseUrl: string): DbClient {
 }
 
 export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
+  // Fail loud on an empty/blank account id: a "" account would set an RLS GUC
+  // that matches no tenant row, silently returning zero rows from every scoped
+  // read (a phantom "not found" / "no active subscription"). An RLS context with
+  // no account is always a bug at the call site, never a valid query scope.
+  if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
+    throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
+  }
   await db.execute(sql`select set_config('opengeni.account_id', ${context.accountId}, true)`);
   await db.execute(sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`);
 }
@@ -101,8 +123,27 @@ export async function withRlsContext<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
   return await db.transaction(async (tx) => {
-    await setRlsContext(tx as unknown as Database, context);
-    return await fn(tx as unknown as Database);
+    const scoped = tx as unknown as Database;
+    await setRlsContext(scoped, context);
+    // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
+    // the scoped query. The set_config and this read share one db.transaction,
+    // which a transaction pooler pins to a single backend — so a mismatch here
+    // means the context was genuinely lost (a torn transaction / pooler backend
+    // swap), not normal operation. Without this guard such an event runs the
+    // scoped read with an empty account_id and returns zero RLS-visible rows,
+    // manufacturing a phantom "no active subscription" from a credential that is
+    // in fact active. Convert that silent false into a loud, root-cause-bearing
+    // error so the caller can retry rather than permanently mis-decide.
+    const applied = await tx.execute<{ account_id: string | null }>(
+      sql`select current_setting('opengeni.account_id', true) as account_id`,
+    );
+    const appliedAccountId = applied[0]?.account_id ?? "";
+    if (appliedAccountId !== context.accountId) {
+      throw new Error(
+        `RLS context not applied on the active backend: expected account ${context.accountId}, got "${appliedAccountId}"`,
+      );
+    }
+    return await fn(scoped);
   });
 }
 
@@ -2015,6 +2056,8 @@ export async function loadWorkspaceEnvironmentForRun(
 export type CodexCredentialTokens = { accessToken: string; refreshToken: string; idToken: string };
 
 export type CodexCredentialForRun = {
+  id: string;                             // row id — for compare-and-set writes (P1-c)
+  version: number;                        // optimistic-concurrency version loaded with this snapshot
   workspaceId: string;
   tokens: CodexCredentialTokens;          // decrypted — never logged, never returned by a route
   chatgptAccountId: string | null;
@@ -2056,6 +2099,13 @@ export async function upsertCodexSubscriptionCredential(db: Database, input: {
     }).onConflictDoUpdate({
       target: [schema.codexSubscriptionCredentials.workspaceId],
       set: {
+        // account_id MUST be re-asserted on conflict. Omitting it leaves a stale
+        // account_id on a row whose owning account changed (e.g. a reconnect
+        // under a different grant), which makes the row RLS-INVISIBLE to every
+        // subsequent scoped read — a permanent phantom "no active subscription".
+        // The caller derives accountId from the workspace, so this keeps the row
+        // aligned with its tenant.
+        accountId: input.accountId,
         credentialEncrypted: input.credentialEncrypted,
         chatgptAccountId: input.chatgptAccountId,
         scopes: input.scopes,
@@ -2103,6 +2153,8 @@ export async function loadCodexCredentialForRun(
       throw new Error(`failed to decrypt codex credential for workspace ${workspaceId}: ${reason}`);
     }
     return {
+      id: row.id,
+      version: row.version,
       workspaceId,
       tokens,
       chatgptAccountId: row.chatgptAccountId,
@@ -2117,15 +2169,26 @@ export async function loadCodexCredentialForRun(
   });
 }
 
-/** Persist rotated tokens after a successful refresh. Caller pre-encrypts. */
+/**
+ * Persist rotated tokens after a successful refresh. Caller pre-encrypts.
+ *
+ * COMPARE-AND-SET (P1-c): the write is guarded by the (id, version) the resolver
+ * loaded. If a disconnect→reconnect replaced/rotated the row between the load and
+ * this write, the guard matches 0 rows and we DO NOT clobber the freshly
+ * reconnected credential with tokens from the now-defunct family. Returns true
+ * iff the guarded row was updated; false means "credential changed under me —
+ * the rotation is moot, drop it."
+ */
 export async function recordCodexTokenRefresh(db: Database, input: {
+  id: string;
+  version: number;
   workspaceId: string;
   credentialEncrypted: string;
   expiresAt: Date | null;
   lastRefreshAt: Date;
-}): Promise<void> {
-  await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    await scopedDb.update(schema.codexSubscriptionCredentials).set({
+}): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials).set({
       credentialEncrypted: input.credentialEncrypted,
       expiresAt: input.expiresAt,
       lastRefreshAt: input.lastRefreshAt,
@@ -2133,21 +2196,42 @@ export async function recordCodexTokenRefresh(db: Database, input: {
       lastError: null,
       version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
       updatedAt: new Date(),
-    }).where(eq(schema.codexSubscriptionCredentials.workspaceId, input.workspaceId));
+    }).where(and(
+      eq(schema.codexSubscriptionCredentials.id, input.id),
+      eq(schema.codexSubscriptionCredentials.version, input.version),
+    )).returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
   });
 }
 
-/** Surface a permanent or transient failure on the credential row. */
+/**
+ * Surface a permanent or transient failure on the credential row.
+ *
+ * Optionally COMPARE-AND-SET (P1-c): when `expected` is supplied, the status is
+ * stamped only if the row STILL matches the (id, version) the resolver loaded.
+ * This stops a refresh that began before a disconnect→reconnect from stamping
+ * `needs_relogin` on the brand-new, good credential. Returns true iff a row was
+ * updated. Without `expected` it falls back to the legacy workspace-scoped write.
+ */
 export async function setCodexCredentialStatus(
   db: Database,
   workspaceId: string,
   status: "active" | "needs_relogin" | "error",
   lastError: string | null,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    await scopedDb.update(schema.codexSubscriptionCredentials)
+  expected?: { id: string; version: number },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const where = expected
+      ? and(
+        eq(schema.codexSubscriptionCredentials.id, expected.id),
+        eq(schema.codexSubscriptionCredentials.version, expected.version),
+      )
+      : eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId);
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
       .set({ status, lastError, updatedAt: new Date() })
-      .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId));
+      .where(where)
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
   });
 }
 
@@ -2196,9 +2280,42 @@ export async function workspaceCodexSubscriptionActive(
   if (!settings.codexSubscriptionEnabled) {
     return false;
   }
-  const status = await getCodexCredentialStatus(db, workspaceId);
-  return status?.status === "active";
+  // Bounded re-read. A TRANSIENT read failure (a pooled-connection blip or a
+  // lost RLS GUC — now thrown loud by withRlsContext's read-back guard rather
+  // than silently returning zero rows) must never permanently decide a
+  // genuinely-active subscription is disconnected, which would throw the
+  // fail-loud CodexSubscriptionUnavailableError at model resolution and fail the
+  // turn. Retry only on a THROWN error (the transient signature); a cleanly
+  // returned status — a row (any status) or a confirmed absent row (null) — is
+  // authoritative and resolves immediately, so the common no-subscription turn
+  // pays no extra latency.
+  let lastError: unknown;
+  for (let attempt = 0; attempt < CODEX_ACTIVE_READ_ATTEMPTS; attempt++) {
+    try {
+      const status = await getCodexCredentialStatus(db, workspaceId);
+      return status?.status === "active";
+    } catch (error) {
+      lastError = error;
+      if (attempt < CODEX_ACTIVE_READ_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, CODEX_ACTIVE_READ_RETRY_MS * (attempt + 1)));
+      }
+    }
+  }
+  // Every attempt threw: this is a real, persistent read outage, not a one-off
+  // blip. Surface the underlying error (truthful + retryable) instead of
+  // silently denying an active subscription.
+  console.error(
+    `workspaceCodexSubscriptionActive: credential read failed for workspace ${workspaceId} after ${CODEX_ACTIVE_READ_ATTEMPTS} attempts`,
+    lastError,
+  );
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
+
+// Bounded re-read tuning for the codex active-credential check. A handful of
+// attempts with a short linear backoff rides out a transient pooler/RLS blip
+// without materially delaying a genuine outage's failure.
+const CODEX_ACTIVE_READ_ATTEMPTS = 3;
+const CODEX_ACTIVE_READ_RETRY_MS = 50;
 
 /**
  * CANONICAL "is this a Codex-billed turn?" predicate.
@@ -2218,9 +2335,20 @@ export async function isCodexBilledTurn(input: {
   settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
+  /**
+   * Precomputed `workspaceCodexSubscriptionActive` result (P2-b). When the caller
+   * already resolved the active flag for provider injection, pass it here so the
+   * billed-turn predicate and the routing overlay read the credential ONCE and
+   * cannot disagree across a concurrent disconnect/reconnect — a drift that would
+   * either wrongly debit OpenGeni credits for a ChatGPT-paid turn or the inverse.
+   */
+  active?: boolean;
 }): Promise<boolean> {
   if (!isCodexBilledModel(input.model)) {
     return false; // cheap; no db hit on the common path
+  }
+  if (input.active !== undefined) {
+    return input.active;
   }
   return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
 }

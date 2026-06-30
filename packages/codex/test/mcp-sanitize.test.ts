@@ -40,6 +40,34 @@ describe("ToolNameMapper", () => {
     expect(m.toOriginal(a)).toBe("x.y");
     expect(m.toOriginal(b)).toBe("x_y");
   });
+
+  test("P2-d: caps a >64-char name to <=64 with a stable hash suffix, reverse-mappable", () => {
+    const m = new ToolNameMapper();
+    const long = `connector.${"deploy_a_very_long_namespaced_tool_name_that_blows_the_limit".repeat(2)}`;
+    expect(long.length).toBeGreaterThan(64);
+    const out = m.sanitize(long);
+    expect(out.length).toBeLessThanOrEqual(64);
+    expect(out).toMatch(/^[a-zA-Z0-9_-]+$/); // still charset-legal
+    expect(m.toOriginal(out)).toBe(long); // reverse map keyed on the EMITTED name
+  });
+
+  test("P2-d: the 64-char cap is deterministic across repeat listings (idempotent)", () => {
+    const m = new ToolNameMapper();
+    const long = "ns." + "x".repeat(80);
+    expect(m.sanitize(long)).toBe(m.sanitize(long));
+  });
+
+  test("P2-d: two distinct long names that truncate alike stay distinct + <=64", () => {
+    const m = new ToolNameMapper();
+    const base = "ns." + "y".repeat(80);
+    const a = m.sanitize(`${base}_alpha`);
+    const b = m.sanitize(`${base}_beta`);
+    expect(a).not.toBe(b);
+    expect(a.length).toBeLessThanOrEqual(64);
+    expect(b.length).toBeLessThanOrEqual(64);
+    expect(m.toOriginal(a)).toBe(`${base}_alpha`);
+    expect(m.toOriginal(b)).toBe(`${base}_beta`);
+  });
 });
 
 describe("remapToolCallRequestBody", () => {

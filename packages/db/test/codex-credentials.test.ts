@@ -12,6 +12,7 @@ import {
   recordCodexTokenRefresh,
   setCodexCredentialStatus,
   upsertCodexSubscriptionCredential,
+  workspaceCodexSubscriptionActive,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -141,15 +142,76 @@ describe("codex_subscription_credentials accessors", () => {
       chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
       expiresAt: null, lastRefreshAt: null,
     });
-    await recordCodexTokenRefresh(db, {
+    const before = await loadCodexCredentialForRun(db, settings, ws.workspaceId);
+    const ok = await recordCodexTokenRefresh(db, {
+      id: before!.id, version: before!.version,
       workspaceId: ws.workspaceId,
       credentialEncrypted: encTokens({ access_token: "AC2", refresh_token: "RF2", id_token: "ID2" }),
       expiresAt: new Date(Date.now() + 3_600_000), lastRefreshAt: new Date(),
     });
+    expect(ok).toBe(true);
     const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId);
     expect(loaded?.tokens.accessToken).toBe("AC2");
     const [row] = await admin<{ version: number }[]>`select version from codex_subscription_credentials where workspace_id = ${ws.workspaceId}`;
     expect(row!.version).toBe(2);
+  });
+
+  test("P1-c: recordCodexTokenRefresh is compare-and-set — a stale (id,version) writes 0 rows", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await upsertCodexSubscriptionCredential(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
+      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
+      expiresAt: null, lastRefreshAt: null,
+    });
+    const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId);
+    // Wrong version → guard matches no row → false, and the blob is NOT clobbered.
+    const ok = await recordCodexTokenRefresh(db, {
+      id: loaded!.id, version: loaded!.version + 99,
+      workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "STALE", refresh_token: "x", id_token: "x" }),
+      expiresAt: null, lastRefreshAt: new Date(),
+    });
+    expect(ok).toBe(false);
+    const after = await loadCodexCredentialForRun(db, settings, ws.workspaceId);
+    expect(after?.tokens.accessToken).toBe("AC"); // untouched
+  });
+
+  test("P1-c: setCodexCredentialStatus honors an (id,version) guard", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    await upsertCodexSubscriptionCredential(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
+      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
+      expiresAt: null, lastRefreshAt: null,
+    });
+    const loaded = await loadCodexCredentialForRun(db, settings, ws.workspaceId);
+    // Stale guard → no stamp.
+    expect(await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x", { id: loaded!.id, version: loaded!.version + 1 })).toBe(false);
+    expect((await getCodexCredentialStatus(db, ws.workspaceId))?.status).toBe("active");
+    // Matching guard → stamps.
+    expect(await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "expired", { id: loaded!.id, version: loaded!.version })).toBe(true);
+    expect((await getCodexCredentialStatus(db, ws.workspaceId))?.status).toBe("needs_relogin");
+  });
+
+  test("P2-a: upsert ON CONFLICT re-asserts account_id (keeps the row RLS-visible)", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const input = {
+      workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
+      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
+      expiresAt: null, lastRefreshAt: null,
+    };
+    await upsertCodexSubscriptionCredential(db, { ...input, accountId: ws.accountId });
+    // Conflict-update path: account_id must be present in the SET so the row
+    // stays aligned with its tenant and RLS-visible.
+    await upsertCodexSubscriptionCredential(db, { ...input, accountId: ws.accountId });
+    const [row] = await admin<{ account_id: string }[]>`select account_id from codex_subscription_credentials where workspace_id = ${ws.workspaceId}`;
+    expect(row!.account_id).toBe(ws.accountId);
+    expect(await getCodexCredentialStatus(db, ws.workspaceId)).not.toBeNull();
   });
 
   test("setCodexCredentialStatus transitions to needs_relogin", async () => {
@@ -180,6 +242,27 @@ describe("codex_subscription_credentials accessors", () => {
     expect(await deleteCodexSubscriptionCredential(db, ws.workspaceId)).toBe(true);
     expect(await getCodexCredentialStatus(db, ws.workspaceId)).toBeNull();
     expect(await deleteCodexSubscriptionCredential(db, ws.workspaceId)).toBe(false); // already gone
+  });
+
+  test("workspaceCodexSubscriptionActive: true for an active row, false when absent or non-active", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const enabled = { codexSubscriptionEnabled: true } as Parameters<typeof workspaceCodexSubscriptionActive>[1];
+    // Absent → false (authoritative, no throw).
+    expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(false);
+    // Flag off → false regardless of row state.
+    expect(await workspaceCodexSubscriptionActive(db, { codexSubscriptionEnabled: false } as typeof enabled, ws.workspaceId)).toBe(false);
+    await upsertCodexSubscriptionCredential(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId,
+      credentialEncrypted: encTokens({ access_token: "AC", refresh_token: "RF", id_token: "ID" }),
+      chatgptAccountId: "acct_x", scopes: null, planType: "pro", isFedramp: false,
+      expiresAt: null, lastRefreshAt: null,
+    });
+    // Active → true (the path the bounded re-read protects).
+    expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(true);
+    // needs_relogin → false (authoritative negative).
+    await setCodexCredentialStatus(db, ws.workspaceId, "needs_relogin", "x");
+    expect(await workspaceCodexSubscriptionActive(db, enabled, ws.workspaceId)).toBe(false);
   });
 
   test("RLS: workspace B cannot read workspace A's credential", async () => {

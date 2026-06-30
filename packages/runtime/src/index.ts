@@ -23,6 +23,7 @@ import {
   RunState,
   isOpenAIResponsesRawModelStreamEvent,
   run,
+  Runner,
   setDefaultOpenAIClient,
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
@@ -400,10 +401,15 @@ export function resolveTurnModel(
  * `modelProvider` (or the global default). Without this router that re-resolution
  * hits the default client (e.g. Azure) and a registry model 404s
  * ("deployment does not exist"); with it the name resolves back to the right
- * provider. Installed both as the run-scoped `RunConfig.modelProvider` (see
- * runAgentStream) and as the process default (see configureOpenAI), so whichever
- * path the SDK takes, names route correctly. Falls back to the SDK default
- * provider for a model that is in no provider's allow-list.
+ * provider. Installed both as the run-scoped `Runner.config.modelProvider` (every
+ * run in runAgentStream goes through `runScopedRunner(settings)`, built from the
+ * per-turn settings) and as the process default (see configureOpenAI). The
+ * run-scoped instance is the load-bearing one: a `Runner` resolves string model
+ * names against ITS OWN modelProvider, not the lazy global default, so each
+ * concurrent turn routes codex/registry names against its own settings and a
+ * foreign turn's setDefaultModelProvider can never clobber this turn's routing.
+ * The process default remains only as a boot-time fallback. Falls back to the
+ * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
   private fallback: OpenAIProvider | undefined;
@@ -1497,7 +1503,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       session,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await run(agent, prepared.input, ownedRunOptions);
+    return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
   }
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
@@ -1552,7 +1558,29 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await run(agent, prepared.input, runOptions);
+  return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+}
+
+/**
+ * A per-run `Runner` whose `modelProvider` is built from THIS turn's settings.
+ *
+ * The standalone `run()` uses a process-global default Runner whose modelProvider
+ * is the lazy global default (whatever the last `configureOpenAI` /
+ * `setDefaultModelProvider` installed). The worker runs ~100 activities
+ * concurrently in one process, so a concurrently-starting turn for a DIFFERENT
+ * workspace can overwrite that global between this turn's `configure` and a
+ * per-call `getModel()` during the stream — leaving the global router with no
+ * codex provider and throwing CodexSubscriptionUnavailableError on a
+ * `codex/<slug>` name re-resolution (the SandboxAgent/Modal path drops the Model
+ * instance and re-resolves by NAME). Pinning a run-scoped Runner makes the
+ * mutable global irrelevant to correctness: each concurrent turn resolves names
+ * against its OWN settings (which carry the codex-subscription provider via
+ * withCodexProvider for an active workspace, and the registry providers). The
+ * Runner inherits the SDK's default config for everything else, identical to the
+ * default runner. setDefaultModelProvider remains only as a boot-time fallback.
+ */
+function runScopedRunner(settings: Settings): Runner {
+  return new Runner({ modelProvider: new MultiProviderModelProvider(settings) });
 }
 
 export { MaxTurnsExceededError } from "@openai/agents";
