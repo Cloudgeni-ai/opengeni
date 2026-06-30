@@ -129,7 +129,7 @@ export type AppContextValue = {
   startSession: (
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null },
+    options?: { targetSandboxId?: string | null; workingDir?: string | null },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
@@ -443,7 +443,7 @@ export function RootRouteComponent() {
   async function startSession(
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null },
+    options?: { targetSandboxId?: string | null; workingDir?: string | null },
   ): Promise<Session | null> {
     setBusy(true);
     // Reuse the in-flight key if one survives a prior failed/double-fired
@@ -469,6 +469,12 @@ export function RootRouteComponent() {
         // doesn't yet surface it, so cast the field through.
         ...(options?.targetSandboxId
           ? ({ targetSandboxId: options.targetSandboxId } as { targetSandboxId: string })
+          : {}),
+        // The targeted machine's per-session working directory — a top-level create
+        // field (only valid alongside targetSandboxId; the backend 422s it solo).
+        // The SDK request type doesn't yet surface it, so cast the field through.
+        ...(options?.workingDir
+          ? ({ workingDir: options.workingDir } as { workingDir: string })
           : {}),
       });
       // Success: release the key so the next distinct submit is independent.

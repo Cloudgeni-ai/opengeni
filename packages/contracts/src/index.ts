@@ -2571,6 +2571,12 @@ export const CreateSessionRequest = z.object({
   // machine (race-free: the pointer is committed before the worker turn
   // workflow can read it). An invalid/unowned/offline target fails the create.
   targetSandboxId: z.string().uuid().optional(),
+  // The working directory the targeted machine runs the session under — the
+  // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
+  // through: a launch-workspace_root-relative subdir or an absolute machine path
+  // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
+  // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
+  workingDir: z.string().min(1).optional(),
   // Workspace environment attachment is fixed at session creation; follow-up
   // user.message events cannot switch or add one.
   environmentId: z.string().uuid().optional(),

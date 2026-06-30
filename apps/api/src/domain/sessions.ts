@@ -84,7 +84,9 @@ export async function createAndStartSession(input: {
   // session row exists but BEFORE the first turn is enqueued/the workflow woken,
   // so the FIRST turn routes to the chosen machine. An invalid/unowned/offline
   // target fails the create (422) — never a silent fall-back to the default box.
-  seedTargetSandbox?: { sandboxId: string; settings: Settings } | null;
+  // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
+  // seeded alongside the pointer through the epoch-fenced CAS.
+  seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
 }) {
   const sessionMetadata = {
     ...input.metadata,
@@ -159,7 +161,7 @@ async function finishStartSession(input: {
   sandboxBackend: Settings["sandboxBackend"];
   environment?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
-  seedTargetSandbox?: { sandboxId: string; settings: Settings } | null;
+  seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
 }, session: Session): Promise<Session> {
   // The goal row is durable session state; the workflow picks it up from the
   // database once the first turn completes — no extra workflow plumbing here.
@@ -232,6 +234,9 @@ async function finishStartSession(input: {
       { db: input.db, settings: input.seedTargetSandbox.settings, bus: input.bus },
       ctx,
       input.seedTargetSandbox.sandboxId,
+      // The working dir is committed in the SAME epoch-fenced CAS that seeds the
+      // pointer, so the first turn routes to the machine AND lands in working_dir.
+      input.seedTargetSandbox.workingDir ?? null,
     );
     if (!seeded.swapped) {
       throw new HTTPException(422, {
@@ -535,6 +540,13 @@ export async function createSessionForRequest(
     inheritedBackend = member.sandboxBackend;
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
+  // A working dir is only meaningful for a TARGETED machine (it is the chosen
+  // box's path/cwd base). Present without a targetSandboxId is a malformed request
+  // — reject it at the edge (mirrors the backend:'none' guard) rather than silently
+  // dropping it, since the default group box has no working-dir seam yet.
+  if (payload.workingDir !== undefined && !payload.targetSandboxId) {
+    throw new HTTPException(422, { message: "workingDir requires targetSandboxId (it is the targeted machine's working directory)" });
+  }
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model });
   const session = await createAndStartSession({
     db,
@@ -563,7 +575,7 @@ export async function createSessionForRequest(
     // (after the row exists, before the first turn dispatches). Validation
     // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
     seedTargetSandbox: payload.targetSandboxId
-      ? { sandboxId: payload.targetSandboxId, settings }
+      ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
       : null,
   });
   await recordWorkspaceUsage(deps, {

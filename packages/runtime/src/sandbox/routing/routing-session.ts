@@ -36,6 +36,13 @@ import type { ExposedPortEndpoint } from "../stream-port";
 export interface ActivePointer {
   activeSandboxId: string | null;
   activeEpoch: number;
+  /** The session's working directory — the path/cwd base for a selfhosted backend
+   *  (threaded into the SelfhostedSession via the resolver). `null`/absent ⇒ the
+   *  default workspace_root behavior. Optional so the default-pointer fallback
+   *  (`{ activeSandboxId: null, activeEpoch: 0 }`) the readPointer wiring synthesizes
+   *  when no row exists needs no extra field. Only the selfhosted branch reads it;
+   *  the modal/default branches ignore it. */
+  workingDir?: string | null;
 }
 
 /**

@@ -4,7 +4,7 @@
 // in the left rail, not on this page.
 import { useEnvironments, useMachines, type ComposerState } from "@opengeni/react";
 import { useNavigate } from "@tanstack/react-router";
-import { BoxIcon, ChevronDownIcon, FlagIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
+import { BoxIcon, ChevronDownIcon, FlagIcon, FolderIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
@@ -25,6 +25,7 @@ import {
   emptyAdvancedSessionDraft,
   submissionExtrasFromAdvancedSessionDraft,
   targetSandboxIdFromAdvancedSessionDraft,
+  workingDirFromAdvancedSessionDraft,
   type AdvancedSessionDraft,
 } from "@/lib/session-create";
 import { cn } from "@/lib/utils";
@@ -83,7 +84,10 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           resources: attachments.readyResources,
           ...submissionExtrasFromAdvancedSessionDraft(advanced),
         },
-        { targetSandboxId: targetSandboxIdFromAdvancedSessionDraft(advanced) },
+        {
+          targetSandboxId: targetSandboxIdFromAdvancedSessionDraft(advanced),
+          workingDir: workingDirFromAdvancedSessionDraft(advanced),
+        },
       );
       if (!created) {
         return false;
@@ -264,6 +268,27 @@ function AdvancedSessionOptions(props: {
               <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
                 Run on one of your enrolled machines, or the default cloud sandbox.
               </p>
+              {/* Per-session working directory — only meaningful for a targeted
+                  machine (it is that box's path/cwd base). Hidden for the cloud
+                  sandbox; the create 422s a workingDir without a targetSandboxId. */}
+              {draft.targetSandboxId ? (
+                <div className="mt-1 grid gap-1.5">
+                  <Label className="flex items-center gap-1.5 text-xs">
+                    <FolderIcon className="size-3" />
+                    Working directory
+                  </Label>
+                  <Input
+                    value={draft.workingDir}
+                    disabled={props.disabled}
+                    onChange={(event) => update({ workingDir: event.target.value })}
+                    placeholder="Defaults to where the agent runs (e.g. ~/repos/myproject)"
+                    className="h-9 text-sm"
+                  />
+                  <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                    Where the agent, terminal, and file dock run. Relative paths resolve under the machine&apos;s workspace; absolute paths are used as-is.
+                  </p>
+                </div>
+              ) : null}
             </div>
             <div className="grid gap-1.5">
               <Label className="flex items-center gap-1.5 text-xs">

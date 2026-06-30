@@ -207,7 +207,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(reread?.activeEpoch).toBe(0);
 
     const pointer0 = await readActiveSandbox(db, workspaceId, session.id);
-    expect(pointer0).toEqual({ activeSandboxId: null, activeEpoch: 0 });
+    expect(pointer0).toEqual({ activeSandboxId: null, activeEpoch: 0, workingDir: null });
 
     const target = await createSandbox(db, { accountId, workspaceId, kind: "modal", name: "target" });
 
@@ -216,7 +216,7 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
       accountId, workspaceId, sessionId: session.id, targetSandboxId: target.id, expectedEpoch: 0,
     });
     expect(swap1.swapped).toBe(true);
-    expect(swap1.pointer).toEqual({ activeSandboxId: target.id, activeEpoch: 1 });
+    expect(swap1.pointer).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: null });
 
     // A concurrent double-swap reading the OLD epoch (0) loses — the fence rejects it.
     const stale = await setActiveSandbox(db, {
@@ -226,14 +226,14 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     expect(stale.pointer).toBeNull();
 
     // The pointer is unchanged by the losing swap.
-    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: target.id, activeEpoch: 1 });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: null });
 
     // Swap back to the group sandbox (NULL) at the current epoch -> wins, epoch 2.
     const swap2 = await setActiveSandbox(db, {
       accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 1,
     });
     expect(swap2.swapped).toBe(true);
-    expect(swap2.pointer).toEqual({ activeSandboxId: null, activeEpoch: 2 });
+    expect(swap2.pointer).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: null });
 
     // The full session re-read reflects the pointer (mapSession round-trip).
     const rereadAfter = await getSession(db, workspaceId, session.id);
@@ -249,6 +249,47 @@ describe("0024 sandboxes / enrollments / metrics DAOs + active-sandbox pointer",
     await admin`delete from sandboxes where id = ${target.id}`;
     const afterDelete = await readActiveSandbox(db, workspaceId, session.id);
     expect(afterDelete?.activeSandboxId).toBeNull();
+  }, 60_000);
+
+  test("active-sandbox pointer carries the per-session working_dir (create-time seed / leave-unchanged / clear)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId, workspaceId, initialMessage: "hi", resources: [], metadata: {},
+      model: "gpt", sandboxBackend: "modal",
+    });
+    const target = await createSandbox(db, { accountId, workspaceId, kind: "modal", name: "wd-target" });
+
+    // A fresh pointer has a NULL working_dir (today's default — byte-identical no-op).
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 0, workingDir: null });
+
+    // Seeding the pointer WITH a working_dir writes it in the SAME epoch-fenced CAS
+    // (the create-time machine-targeting path), and readActiveSandbox surfaces it.
+    const seed = await setActiveSandbox(db, {
+      accountId, workspaceId, sessionId: session.id, targetSandboxId: target.id, expectedEpoch: 0,
+      workingDir: "/home/u/proj",
+    });
+    expect(seed.swapped).toBe(true);
+    expect(seed.pointer).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: "/home/u/proj" });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: target.id, activeEpoch: 1, workingDir: "/home/u/proj" });
+
+    // A plain swap with workingDir OMITTED (undefined) leaves the column UNCHANGED —
+    // a live swap/attach never touches the working dir.
+    const plainSwap = await setActiveSandbox(db, {
+      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 1,
+    });
+    expect(plainSwap.swapped).toBe(true);
+    expect(plainSwap.pointer).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: "/home/u/proj" });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 2, workingDir: "/home/u/proj" });
+
+    // Explicit null clears it back to the default.
+    const cleared = await setActiveSandbox(db, {
+      accountId, workspaceId, sessionId: session.id, targetSandboxId: null, expectedEpoch: 2,
+      workingDir: null,
+    });
+    expect(cleared.swapped).toBe(true);
+    expect(cleared.pointer).toEqual({ activeSandboxId: null, activeEpoch: 3, workingDir: null });
+    expect(await readActiveSandbox(db, workspaceId, session.id)).toEqual({ activeSandboxId: null, activeEpoch: 3, workingDir: null });
   }, 60_000);
 
   test("metrics: last-sample upsert (one row per enrollment) + append-only series", async () => {

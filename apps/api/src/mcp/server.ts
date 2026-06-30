@@ -618,7 +618,7 @@ function registerWorkspaceOrchestrationTools(
 
   if (can("sessions:create")) {
     server.registerTool("session_create", {
-      description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and workspace environment attachment. Environment attachment happens at creation only — it cannot be added to a running session — and requires the environments:use permission.",
+      description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and workspace environment attachment. Environment attachment happens at creation only — it cannot be added to a running session — and requires the environments:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
       inputSchema: {
         initialMessage: z4.string().min(1),
         goal: z4.unknown().optional(),
@@ -634,6 +634,11 @@ function registerWorkspaceOrchestrationTools(
         // (race-free). Ownership + liveness are validated in the domain via the
         // same path as sandbox_swap; an unowned/offline/unknown target 422s.
         targetSandboxId: z4.string().uuid().optional(),
+        // The working directory (cwd) for a machine target: the path/cwd base the
+        // spawned session's agent exec, terminal, and file dock run under. A
+        // workspace_root-relative subdir or an absolute machine path. Only valid
+        // WITH targetSandboxId (workingDir alone 422s); omitted ⇒ workspace_root.
+        workingDir: z4.string().optional(),
         metadata: z4.record(z4.string(), z4.unknown()).optional(),
         // Workspace-scoped CREATE idempotency key: a retried session_create with
         // the same key returns the already-spawned worker instead of a duplicate.

@@ -58,22 +58,46 @@ const encoder = new TextEncoder();
  * (the live-swap exec crash: `spawn hostname: No such file or directory`).
  *
  * `toMachinePath` rewrites the virtual frame onto the machine's: the root itself
- * → "" (the agent substitutes its workspace_root); a child → its
- * workspace_root-relative remainder (the agent joins it onto workspace_root). A
- * path that is NOT under the virtual root — a genuine machine-absolute path the
- * model/agent chose ("/tmp/x"), or a real path echoed back by `listDir` — passes
- * through UNTOUCHED. This is the SOLE adapter rule between the SDK's virtual
- * space and the machine's real filesystem; it is applied at every NATS path/cwd
- * boundary below (exec cwd, fs read/write/list/stat, the editor's delete).
+ * → the session `workingDir` (empty by default ⇒ "", so the agent substitutes its
+ * workspace_root); a child → `workingDir`-rooted remainder (the agent joins it onto
+ * workspace_root). A genuine machine-ABSOLUTE path the model/agent chose ("/tmp/x"),
+ * or a real path echoed back by `listDir`, passes through UNTOUCHED. This is the
+ * SOLE adapter rule between the SDK's virtual space and the machine's real
+ * filesystem; it is applied at every NATS path/cwd boundary below (exec cwd, fs
+ * read/write/list/stat, the editor's delete, the terminal's pty cwd). The
+ * per-session `workingDir` (default "" ⇒ a byte-identical no-op) is the base.
  */
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
 
-function toMachinePath(p: string | undefined): string {
-  if (!p || p === SELFHOSTED_VIRTUAL_ROOT) return "";
+/**
+ * `workingDir` is the session's per-session working directory — the frame's BASE.
+ * It is the launch-workspace_root-relative subdir (or an absolute machine path)
+ * the agent/terminal/dock operate under. An EMPTY `workingDir` (the default) makes
+ * this byte-identical to before: `base === ""`, so every branch returns the
+ * original value (empty/virtual → "", virtual-child → its remainder, a relative or
+ * absolute path → itself). A trailing slash on `workingDir` is stripped so a join
+ * never doubles; relative stays relative and absolute stays absolute otherwise.
+ */
+function toMachinePath(p: string | undefined, workingDir: string): string {
+  const base = workingDir.replace(/\/$/, "");
+  if (!p || p === SELFHOSTED_VIRTUAL_ROOT) return base;
   if (p.startsWith(`${SELFHOSTED_VIRTUAL_ROOT}/`)) {
-    return p.slice(SELFHOSTED_VIRTUAL_ROOT.length + 1);
+    const rel = p.slice(SELFHOSTED_VIRTUAL_ROOT.length + 1);
+    return base ? `${base}/${rel}` : rel;
   }
-  return p;
+  // An ABSOLUTE machine path — a genuine path the model/agent chose ("/tmp/x") or
+  // a real path echoed back by `listDir` — points anywhere and passes through
+  // UNTOUCHED (the agent's `resolve_cwd` takes an absolute path as-is).
+  if (p.startsWith("/")) return p;
+  // A BARE-RELATIVE path is the structural Channel-A surface's frame: the file dock
+  // joins fs read/list/git sub-paths under an EMPTY workspaceRoot (yielding a bare
+  // relative), and a model-supplied relative exec workdir is bare too. Root it under
+  // the session working dir so those reads/stats stay in the SAME frame as the dock's
+  // working-dir-rooted listing/exec (which run with cwd = workingDir). The SDK agent
+  // loop never emits a bare-relative path — it anchors everything at the manifest
+  // root ("/workspace/…") — so this only re-homes the structural surface. With an
+  // empty workingDir it is a no-op (base === "" ⇒ returns the path unchanged).
+  return base ? `${base}/${p}` : p;
 }
 
 // ── The agent-turn provided-session contract (@openai/agents-core) ──────────
@@ -161,6 +185,14 @@ export interface SelfhostedSessionDeps {
    * which never applies a turn manifest, so there is no delta to validate).
    */
   environment?: Record<string, string>;
+  /**
+   * The session's working directory — the BASE every path/cwd is rooted under (see
+   * `toMachinePath` / SELFHOSTED_VIRTUAL_ROOT). A launch-workspace_root-relative
+   * subdir (resolved under workspace_root by the agent's `resolve_cwd`) or an
+   * absolute machine path. Omitted/empty (the default) ⇒ "" ⇒ today's behavior
+   * exactly (an empty cwd lets the agent substitute its workspace_root).
+   */
+  workingDir?: string;
 }
 
 /** The Channel-A `exec` result shape (a structural superset of the SDK's). */
@@ -204,6 +236,9 @@ export class SelfhostedSession {
   private readonly epoch: number;
   private readonly timeoutMs: number;
   private readonly subject: string;
+  /** The session working directory — the path/cwd base every op is rooted under
+   *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
+  private readonly workingDir: string;
 
   /**
    * The structural `state` slice consumers read. `agentId`/`instanceId` serve the
@@ -242,6 +277,7 @@ export class SelfhostedSession {
     this.epoch = deps.epoch ?? 0;
     this.timeoutMs = deps.timeoutMs ?? SELFHOSTED_DEFAULT_TIMEOUT_MS;
     this.subject = subjectFor(deps.workspaceId, deps.agentId);
+    this.workingDir = deps.workingDir ?? "";
     // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
     // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
     // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
@@ -300,8 +336,9 @@ export class SelfhostedSession {
       shell: true,
       // Rewrite a virtual-root cwd ("/workspace[/…]") onto the machine's frame —
       // an absolute "/workspace" would ENOENT on a real machine (see
-      // SELFHOSTED_VIRTUAL_ROOT). Empty → the agent runs in its workspace_root.
-      cwd: toMachinePath(args.workdir),
+      // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
+      // default ⇒ the agent runs in its workspace_root).
+      cwd: toMachinePath(args.workdir, this.workingDir),
       env: {},
       stdin: new Uint8Array(0),
       timeoutMs: 0,
@@ -396,12 +433,13 @@ export class SelfhostedSession {
     };
     const deletePath = async (path: string): Promise<void> => {
       // No fs-delete op in the proto; remove via the shell (the machine's own rm).
-      // The path arg is embedded in the command (not a cwd), so translate the
-      // virtual root onto the machine's frame BEFORE quoting: a "/workspace/…"
-      // path becomes its workspace_root-relative remainder, and the rm — which
-      // runs with the default (empty) cwd = workspace_root — targets the real
-      // file. A non-virtual absolute path passes through and rm uses it as-is.
-      await this.exec({ cmd: `rm -rf -- ${shellQuote(toMachinePath(path))}`, ...(runAs ? { runAs } : {}) });
+      // The path arg is embedded in the command, and this.exec runs it with the
+      // DEFAULT cwd = the session workingDir. So target the path RELATIVE to that
+      // cwd: strip the virtual root to its bare remainder (toMachinePath with an
+      // EMPTY base) — prefixing workingDir here too would DOUBLE it (the cwd is
+      // already workingDir). A non-virtual absolute path passes through and rm
+      // uses it as-is; an empty workingDir is byte-identical to before.
+      await this.exec({ cmd: `rm -rf -- ${shellQuote(toMachinePath(path, ""))}`, ...(runAs ? { runAs } : {}) });
     };
     return {
       async createFile(operation) {
@@ -433,7 +471,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsRead",
       fsRead: {
-        path: toMachinePath(args.path),
+        path: toMachinePath(args.path, this.workingDir),
         offset: "0",
         length: args.maxBytes ? String(args.maxBytes) : "0",
       },
@@ -450,7 +488,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsWrite",
       fsWrite: {
-        path: toMachinePath(args.path),
+        path: toMachinePath(args.path, this.workingDir),
         content,
         createParents: args.createParents ?? true,
         append: args.append ?? false,
@@ -467,7 +505,7 @@ export class SelfhostedSession {
   async listFiles(args: { path: string; recursive?: boolean }): Promise<NonNullable<ControlResponse["result"]> & { $case: "fsList" }> {
     const result = await this.call({
       $case: "fsList",
-      fsList: { path: toMachinePath(args.path), recursive: args.recursive ?? false },
+      fsList: { path: toMachinePath(args.path, this.workingDir), recursive: args.recursive ?? false },
     });
     if (result.$case !== "fsList") {
       throw new Error(`selfhosted listFiles: unexpected result ${result.$case}`);
@@ -477,7 +515,7 @@ export class SelfhostedSession {
 
   /** Stat a path on the machine. */
   async statFile(args: { path: string }): Promise<{ exists: boolean }> {
-    const result = await this.call({ $case: "fsStat", fsStat: { path: toMachinePath(args.path) } });
+    const result = await this.call({ $case: "fsStat", fsStat: { path: toMachinePath(args.path, this.workingDir) } });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
     }
@@ -539,7 +577,10 @@ export class SelfhostedSession {
       // the relay channel. Display-INDEPENDENT — works on a headless machine.
       const result = await this.call({
         $case: "ptyOpen",
-        ptyOpen: { command: [], cwd: "", env: {}, cols: 0, rows: 0, term: "xterm-256color" },
+        // Open the terminal in the session workingDir (default "" ⇒ the agent's
+        // workspace_root, byte-identical to before). A relative workingDir resolves
+        // under workspace_root; an absolute one is used as-is by the agent.
+        ptyOpen: { command: [], cwd: this.workingDir, env: {}, cols: 0, rows: 0, term: "xterm-256color" },
       });
       if (result.$case !== "ptyOpen") {
         throw new Error(`selfhosted resolveExposedPort(${port}): unexpected result ${result.$case}`);
@@ -596,6 +637,7 @@ export class SelfhostedSandboxClient {
   private readonly epoch: number | undefined;
   private readonly timeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
+  private readonly workingDir: string | undefined;
   private controlRpcMemo: ControlRpc | undefined;
 
   constructor(opts: {
@@ -613,6 +655,10 @@ export class SelfhostedSandboxClient {
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
      *  Omitted → `{}` (the negotiation-only path; no turn manifest is applied). */
     environment?: Record<string, string>;
+    /** The session working directory threaded into every bound session (the path/
+     *  cwd base; see SelfhostedSessionDeps.workingDir). Omitted/empty ⇒ the default
+     *  workspace_root behavior. */
+    workingDir?: string;
   }) {
     this.workspaceId = opts.workspaceId;
     this.relay = opts.relay;
@@ -621,6 +667,7 @@ export class SelfhostedSandboxClient {
     this.epoch = opts.epoch;
     this.timeoutMs = opts.timeoutMs;
     this.environment = opts.environment;
+    this.workingDir = opts.workingDir;
   }
 
   private controlRpc(): ControlRpc {
@@ -639,6 +686,7 @@ export class SelfhostedSandboxClient {
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
+      ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
     });
   }
 

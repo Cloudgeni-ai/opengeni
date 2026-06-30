@@ -4757,6 +4757,9 @@ export async function listSandboxes(db: Database, workspaceId: string): Promise<
 export type ActiveSandboxPointer = {
   activeSandboxId: string | null;
   activeEpoch: number;
+  // The session's working directory (the path/cwd base for a selfhosted backend),
+  // surfaced alongside the pointer. NULL ⇒ the default workspace_root behavior.
+  workingDir: string | null;
 };
 
 // Read the session's current pointer (the routing proxy re-reads this PER TOOL
@@ -4766,13 +4769,14 @@ export async function readActiveSandbox(db: Database, workspaceId: string, sessi
     const [row] = await scopedDb.select({
       activeSandboxId: schema.sessions.activeSandboxId,
       activeEpoch: schema.sessions.activeEpoch,
+      workingDir: schema.sessions.workingDir,
     }).from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!row) {
       return null;
     }
-    return { activeSandboxId: row.activeSandboxId ?? null, activeEpoch: Number(row.activeEpoch) };
+    return { activeSandboxId: row.activeSandboxId ?? null, activeEpoch: Number(row.activeEpoch), workingDir: row.workingDir ?? null };
   });
 }
 
@@ -4789,16 +4793,22 @@ export async function setActiveSandbox(db: Database, input: {
   sessionId: string;
   targetSandboxId: string | null;
   expectedEpoch: number;
+  // The session's working directory to write alongside the pointer. OMITTED
+  // (undefined) ⇒ the column is left UNCHANGED (a plain swap/attach never touches
+  // it); a string sets it; null clears it back to the default. Per-session
+  // working dir is seeded create-time through this CAS, not the row INSERT.
+  workingDir?: string | null;
 }): Promise<{ swapped: boolean; pointer: ActiveSandboxPointer | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
-    const rows = await scopedDb.execute<{ active_sandbox_id: string | null; active_epoch: number | string }>(sql`
+    const rows = await scopedDb.execute<{ active_sandbox_id: string | null; active_epoch: number | string; working_dir: string | null }>(sql`
       update sessions set
         active_sandbox_id = ${input.targetSandboxId},
         active_epoch      = active_epoch + 1,
+        working_dir       = ${input.workingDir === undefined ? sql`working_dir` : input.workingDir},
         updated_at        = now()
       where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
         and active_epoch = ${input.expectedEpoch}
-      returning active_sandbox_id, active_epoch
+      returning active_sandbox_id, active_epoch, working_dir
     `);
     const row = rows[0];
     if (!row) {
@@ -4806,7 +4816,7 @@ export async function setActiveSandbox(db: Database, input: {
     }
     return {
       swapped: true,
-      pointer: { activeSandboxId: row.active_sandbox_id ?? null, activeEpoch: Number(row.active_epoch) },
+      pointer: { activeSandboxId: row.active_sandbox_id ?? null, activeEpoch: Number(row.active_epoch), workingDir: row.working_dir ?? null },
     };
   });
 }

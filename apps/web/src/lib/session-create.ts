@@ -9,6 +9,13 @@ export type AdvancedSessionDraft = {
   // TurnSubmission extra: it's a top-level CreateSessionRequest field, threaded
   // separately into `startSession` (see `targetSandboxIdFromAdvancedSessionDraft`).
   targetSandboxId: string | null;
+  // The targeted machine's working directory — the path/cwd base its agent exec,
+  // terminal, and file dock run under. Free-form pass-through: a launch-
+  // workspace_root-relative subdir or an absolute machine path. Empty (the
+  // default) ⇒ the machine's default workspace_root (byte-identical to today).
+  // Only meaningful WITH `targetSandboxId`; like it, a top-level
+  // CreateSessionRequest field threaded into `startSession` separately.
+  workingDir: string;
   sandboxBackend: SandboxBackend | "";
   environmentId: string;
   goalText: string;
@@ -21,6 +28,7 @@ export type AdvancedSessionDraft = {
 export function emptyAdvancedSessionDraft(): AdvancedSessionDraft {
   return {
     targetSandboxId: null,
+    workingDir: "",
     sandboxBackend: "",
     environmentId: "",
     goalText: "",
@@ -36,6 +44,14 @@ export function emptyAdvancedSessionDraft(): AdvancedSessionDraft {
  *  TurnSubmission extras. */
 export function targetSandboxIdFromAdvancedSessionDraft(draft: AdvancedSessionDraft): string | null {
   return draft.targetSandboxId;
+}
+
+/** The picked machine's working directory (the top-level create field), or null
+ *  for the machine's default workspace_root. Like the target sandbox id, threaded
+ *  into `startSession` separately from the TurnSubmission extras. A blank/whitespace
+ *  value normalizes to null (omitted ⇒ no-op default). */
+export function workingDirFromAdvancedSessionDraft(draft: AdvancedSessionDraft): string | null {
+  return draft.workingDir.trim() || null;
 }
 
 /** The create-session payload extras from the advanced options card. */

@@ -267,6 +267,79 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
   });
 });
 
+describe("per-session workingDir → the toMachinePath frame BASE (create-time machine targeting)", () => {
+  // `toMachinePath` is the SOLE adapter rule between the SDK's virtual "/workspace"
+  // frame and the machine's real filesystem; the per-session `workingDir` is its
+  // BASE. The function is NOT exported, so probe it through the SAME public seam the
+  // agent observes — the wire `cwd` on an exec op (exec calls
+  // toMachinePath(workdir, workingDir)) and the wire `path` on an fs op. An EMPTY
+  // workingDir is byte-identical to today; a non-empty one roots the virtual frame
+  // under it; a trailing slash is normalized so the join never doubles.
+
+  function wireExecCwd(workingDir: string, workdir: string | undefined): Promise<string> {
+    const mock = new MockAgentResponder({ hostname: "vm" });
+    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir });
+    return session
+      .exec({ cmd: "hostname", ...(workdir !== undefined ? { workdir } : {}) })
+      .then(() => {
+        const op = mock.requests[0]?.req.op;
+        if (op?.$case !== "exec") throw new Error("expected an exec op on the wire");
+        return op.exec.cwd;
+      });
+  }
+
+  test("workingDir='' is byte-identical to today: '/workspace' → '', '/workspace/sub' → 'sub'", async () => {
+    expect(await wireExecCwd("", "/workspace")).toBe("");
+    expect(await wireExecCwd("", "/workspace/sub")).toBe("sub");
+  });
+
+  test("an ABSOLUTE workingDir roots the frame under it: '/workspace' → the base, '/workspace/sub' → base/sub", async () => {
+    expect(await wireExecCwd("/home/u/proj", "/workspace")).toBe("/home/u/proj");
+    expect(await wireExecCwd("/home/u/proj", "/workspace/sub")).toBe("/home/u/proj/sub");
+  });
+
+  test("a RELATIVE workingDir stays relative: 'proj' → 'proj', '/workspace/sub' → 'proj/sub'", async () => {
+    expect(await wireExecCwd("proj", "/workspace")).toBe("proj");
+    expect(await wireExecCwd("proj", "/workspace/sub")).toBe("proj/sub");
+  });
+
+  test("a trailing slash on workingDir is normalized (the join never doubles), absolute and relative", async () => {
+    expect(await wireExecCwd("/home/u/proj/", "/workspace")).toBe("/home/u/proj");
+    expect(await wireExecCwd("/home/u/proj/", "/workspace/sub")).toBe("/home/u/proj/sub");
+    expect(await wireExecCwd("proj/", "/workspace")).toBe("proj");
+    expect(await wireExecCwd("proj/", "/workspace/sub")).toBe("proj/sub");
+  });
+
+  test("the fs path boundary shares the SAME workingDir rewrite (fsWrite path on the wire)", async () => {
+    const mock = new MockAgentResponder();
+    const session = new SelfhostedSession({ workspaceId: WS, agentId: AGENT, controlRpc: mock, relay: RELAY, workingDir: "/home/u/proj" });
+    await session.writeFile({ path: "/workspace/sub/file.txt", content: "x" });
+    const op = mock.requests[0]?.req.op;
+    if (op?.$case !== "fsWrite") throw new Error("expected an fsWrite op on the wire");
+    expect(op.fsWrite.path).toBe("/home/u/proj/sub/file.txt");
+  });
+
+  test("SelfhostedSandboxClient threads workingDir into every bound session (the resolver→client→session chain)", async () => {
+    // makeActiveBackendResolver builds a SelfhostedSandboxClient with
+    // `workingDir: pointer.workingDir` then `client.resume(...)` (backend-resolver.ts).
+    // Mirror that exactly: a client constructed with a workingDir must bind sessions
+    // that root the virtual frame under it.
+    const rpc = new MockAgentResponder();
+    const client = new SelfhostedSandboxClient({
+      workspaceId: WS,
+      relay: RELAY,
+      controlRpcFactory: () => rpc,
+      agentId: AGENT,
+      workingDir: "/home/u/proj",
+    });
+    const resumed = await client.resume({ agentId: AGENT });
+    await resumed.writeFile({ path: "/workspace/notes.md", content: "hi" });
+    const op = rpc.requests.at(-1)?.req.op;
+    if (op?.$case !== "fsWrite") throw new Error("expected an fsWrite op on the wire");
+    expect(op.fsWrite.path).toBe("/home/u/proj/notes.md");
+  });
+});
+
 describe("AgentError → runtime reason mapping (the M3 ruling)", () => {
   const err = (code: ErrorCode, retryable = false): AgentError => ({ code, message: `e${code}`, retryable, detail: {} });
 

@@ -278,6 +278,10 @@ export async function swapActiveSandbox(
   services: FleetServices,
   ctx: FleetContext,
   target: string,
+  // The session's working directory to seed alongside the pointer (create-time
+  // machine targeting). OMITTED ⇒ the column is left unchanged (a live swap/attach
+  // never touches it); threaded straight into the epoch-fenced setActiveSandbox CAS.
+  workingDir?: string | null,
 ): Promise<FleetSwapResult> {
   const resolved = await resolveTarget(services, ctx, target);
   if (!resolved.ok) {
@@ -305,6 +309,7 @@ export async function swapActiveSandbox(
       sessionId: ctx.sessionId,
       targetSandboxId: resolved.targetSandboxId,
       expectedEpoch: pointer.activeEpoch,
+      ...(workingDir !== undefined ? { workingDir } : {}),
     });
     if (result.swapped && result.pointer) {
       return { swapped: true, activeSandboxId: result.pointer.activeSandboxId, activeEpoch: result.pointer.activeEpoch };

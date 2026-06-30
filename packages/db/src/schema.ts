@@ -170,6 +170,14 @@ export const sessions = pgTable("sessions", {
   // sandbox. integer (NOT bigint) — the lease-epoch spike: int8 reads back as a
   // JS string and breaks the strict fence; int4 returns a number.
   activeEpoch: integer("active_epoch").notNull().default(0),
+  // The session's WORKING DIRECTORY — the path/cwd base the (selfhosted) box's
+  // agent/terminal/file-dock operate under. A launch-workspace_root-relative
+  // subdir or an absolute machine path; surfaced alongside the active-sandbox
+  // pointer (readActiveSandbox) and written through the epoch-fenced
+  // setActiveSandbox CAS, NOT the row INSERT. NULL (the default) ⇒ today's
+  // behavior exactly — the agent substitutes its workspace_root for an empty cwd,
+  // so an unset working_dir is a byte-identical no-op. Create-time only (Stage A).
+  workingDir: text("working_dir"),
   environmentId: uuid("environment_id").references(() => workspaceEnvironments.id, { onDelete: "set null" }),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set in @opengeni/runtime.

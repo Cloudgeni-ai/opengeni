@@ -135,6 +135,9 @@ export function makeActiveBackendResolver(
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).
         ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
+        // The session's working directory (per-session pointer) → the path/cwd base
+        // for this selfhosted backend. Absent/empty ⇒ the default workspace_root.
+        ...(pointer.workingDir ? { workingDir: pointer.workingDir } : {}),
       });
       const session = (await client.resume({ agentId: sandbox.enrollmentId })) as RoutableBackendSession;
       return { session, sandboxId: sandbox.id, kind: "selfhosted" };
