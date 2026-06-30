@@ -18,6 +18,7 @@ import type { Settings } from "@opengeni/config";
 import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
+  buildSelfhostedBackendSession,
   makeActiveBackendResolver,
   NatsControlRpc,
   RoutingSandboxSession,
@@ -51,6 +52,17 @@ export type RoutingWiringIds = {
    * manifest environment variables." Optional → the resolver defaults to `{}`.
    */
   environment?: Record<string, string>;
+  /**
+   * Stage D machine-primary: PIN the already-established turn SelfhostedSession
+   * (the `established` arg's session) for THIS machine pointer `(sandboxId, epoch)`
+   * so the per-op resolver returns that SAME instance instead of building a fresh
+   * one — the turn-start manifest write + per-op reads then hit ONE
+   * SelfhostedSession/manifest. Set ONLY by the machine-primary establish branch
+   * (where `established.session` is the SelfhostedSession bound to this pointer);
+   * the group-box/swap path omits it (the default is the modal group box, and a
+   * swap target is built fresh).
+   */
+  pinnedSelfhosted?: { sandboxId: string; epoch: number };
 };
 
 /** Map the deployment relay URL to the leaf's `SelfhostedRelayConfig` shape
@@ -119,6 +131,19 @@ export function wrapTurnBoxWithRouting(
     // environment variables" throw when the turn pins to a vm). Mirrors the group
     // box, which is created WITH this same environment (resumeBoxForTurn).
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
+    // Stage D machine-primary: pin THIS established SelfhostedSession for the machine
+    // pointer so the resolver returns the SAME instance (no two-instance manifest
+    // divergence). `established.session` is the SelfhostedSession the establish branch
+    // bound to (sandboxId, epoch).
+    ...(ids.pinnedSelfhosted
+      ? {
+        pinnedSelfhosted: {
+          sandboxId: ids.pinnedSelfhosted.sandboxId,
+          epoch: ids.pinnedSelfhosted.epoch,
+          session: established.session as RoutableBackendSession,
+        },
+      }
+      : {}),
     // A modal swap target in the turn path would need its own lease resume-by-id;
     // that is a future cross-group-box concern. Until then a modal swap target is
     // unresolvable (the swap tool validates liveness, so this only triggers if a
@@ -146,6 +171,56 @@ export function wrapTurnBoxWithRouting(
   });
 
   return { ...established, session: proxy };
+}
+
+/**
+ * Stage D machine-primary establish: bind the live SelfhostedSession for a turn
+ * whose ACTIVE sandbox is a connected machine — WITHOUT establishing or leasing a
+ * phantom Modal home box. Reuses the SAME relay + ControlRpc wiring `wrapTurnBoxWithRouting`
+ * builds (so the turn session and a later swap target dial the machine identically),
+ * and the SAME `buildSelfhostedBackendSession` factory the routing resolver uses
+ * (one build shape). Returns an `EstablishedSandboxSession` whose:
+ *   - `client` is the SelfhostedSandboxClient (the OWNED-sandbox client the turn
+ *     injects; its `serializeSessionState` round-trips `{agentId}`);
+ *   - `session` is the live SelfhostedSession (the routing default + pin instance);
+ *   - `backendId` is "selfhosted" (drives recording's desktopCapableBackend gate +
+ *     the warm-rate keying) and `instanceId` is the enrollment/agent id.
+ * No NATS round-trip happens here — `resume()` just re-addresses the subject — so a
+ * headless/offline machine binds fine; its ops surface agent_offline lazily.
+ */
+export async function establishSelfhostedTurnSession(
+  services: RoutingWiringServices,
+  args: {
+    workspaceId: string;
+    /** The target machine's enrollment id == the agent subject id. */
+    agentId: string;
+    /** The active pointer's epoch — the control-op fence echoed to the agent. */
+    epoch: number;
+    /** The run's declared sandbox environment (the SAME object fed to buildAgent +
+     *  the manifest), threaded so the SDK's per-turn provided-session env delta is
+     *  empty. */
+    environment: Record<string, string>;
+    /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
+    workingDir: string | null;
+  },
+): Promise<EstablishedSandboxSession> {
+  const { settings, bus } = services;
+  const { client, session } = await buildSelfhostedBackendSession({
+    workspaceId: args.workspaceId,
+    agentId: args.agentId,
+    relay: relayConfigFromSettings(settings),
+    controlRpcFactory: controlRpcFactory(bus),
+    epoch: args.epoch,
+    environment: args.environment,
+    workingDir: args.workingDir,
+  });
+  return {
+    client,
+    session,
+    sessionState: { agentId: args.agentId },
+    instanceId: args.agentId,
+    backendId: "selfhosted",
+  };
 }
 
 /** Whether the routing proxy should wrap the turn box: the hot-swap feature is

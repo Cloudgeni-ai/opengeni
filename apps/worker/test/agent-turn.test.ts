@@ -345,6 +345,31 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     });
     expect(backend).toBeUndefined();
   });
+
+  test("reuse contract (Stage D hoist): pre-loaded pointer + record memoized closures are each read at most once", async () => {
+    // The activity loads the active pointer + its sandbox row ONCE at turn start and
+    // threads memoized closures into resolveActiveSandboxBackend, so the SAME values
+    // also feed the machine-primary establish branch (enrollmentId/epoch/workingDir)
+    // with no double read / no read-skew. This pins that single-read reuse contract:
+    // the gate reads each pre-loaded value at most once and still resolves selfhosted.
+    let pointerReads = 0;
+    let kindReads = 0;
+    const pointer = { activeSandboxId: "sbx_machine", activeEpoch: 3 };
+    const backend = await resolveActiveSandboxBackend(
+      true,
+      async () => {
+        pointerReads += 1;
+        return pointer;
+      },
+      async () => {
+        kindReads += 1;
+        return "selfhosted";
+      },
+    );
+    expect(backend).toBe("selfhosted");
+    expect(pointerReads).toBe(1);
+    expect(kindReads).toBe(1);
+  });
 });
 
 describe("worker shutdown preemption", () => {

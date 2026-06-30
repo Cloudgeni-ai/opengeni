@@ -76,8 +76,8 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./types";
-import { resumeBoxForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
-import { wrapTurnBoxWithRouting, routingEnabled } from "../sandbox-routing";
+import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
+import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
@@ -524,14 +524,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       redact = createSecretRedactor(
         Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
       );
+      // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
+      // D1-lite) and reused for EVERY downstream decision: the env mint (skip the
+      // inert GitHub token for a machine turn), the establish path (no phantom Modal
+      // home box for a machine-primary turn), buildAgent (skip the repository clone
+      // hook so a private repo is never `git clone`d onto the user's real disk), and
+      // the warm-rate (a machine accrues ZERO cloud warm-seconds). The active pointer
+      // + its sandbox row are loaded ONCE here (best-effort, never throwing) and the
+      // SAME values feed resolveActiveSandboxBackend (the tested gate) AND the
+      // machine-primary establish branch (enrollmentId/epoch/workingDir) below — no
+      // double read, no read-skew between the gate decision and the establish. With
+      // routing OFF this is byte-for-byte the legacy path: no reads, undefined backend.
+      const routingOn = routingEnabled(settings);
+      const activeSandboxPointer = routingOn
+        ? await readActiveSandbox(db, input.workspaceId, input.sessionId).catch(() => null)
+        : null;
+      const activeSandboxRecord = routingOn && activeSandboxPointer?.activeSandboxId
+        ? await getSandbox(db, input.workspaceId, activeSandboxPointer.activeSandboxId).catch(() => null)
+        : null;
+      const activeSandboxBackend = await resolveActiveSandboxBackend(
+        routingOn,
+        async () => activeSandboxPointer,
+        async () => activeSandboxRecord?.kind ?? null,
+      );
+      // A machine-primary turn = the effective backend is selfhosted AND we have the
+      // machine's enrollment (agent id) + a non-null pointer to bind it. Anything
+      // missing (should not happen — the DB enforces selfhosted⇒enrollmentId) falls
+      // back to the cloud establish path (a correct, if phantom, box) rather than
+      // crashing the turn.
+      const machinePrimary =
+        activeSandboxBackend === "selfhosted"
+        && Boolean(activeSandboxPointer?.activeSandboxId)
+        && Boolean(activeSandboxRecord?.enrollmentId);
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
       // run-scoped GitHub installation token on every call, so a second call would
       // yield a DIFFERENT token value and re-introduce the manifest-env delta the
       // SDK's provided-session guard throws on — the box and the agent MUST share
-      // this same object.
-      const sandboxEnvironment = await sandboxEnvironmentForRun(runSettings, turnResources, workspaceEnvironment?.values ?? {});
+      // this same object. A machine-primary turn skips the (inert) token mint entirely
+      // (the machine uses its own git creds); the SAME base env still feeds the box +
+      // the agent, so env-parity holds.
+      const sandboxEnvironment = await sandboxEnvironmentForRun(
+        runSettings,
+        turnResources,
+        workspaceEnvironment?.values ?? {},
+        { skipGitHubToken: activeSandboxBackend === "selfhosted" },
+      );
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
@@ -548,42 +587,96 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
         sandboxHolderId = dispatchId ?? `turn:${turnId}`;
         sandboxGroupId = session.sandboxGroupId;
-        resolvedSandbox = await resumeBoxForTurn(
-          { db, settings },
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sandboxGroupId: session.sandboxGroupId,
-            sessionId: input.sessionId,
-            backend: turn.sandboxBackend,
-            os: session.sandboxOs,
-            environment: sandboxEnvironment,
-          },
-          "turn",
-          sandboxHolderId,
-        );
-        // M7 hot-swap: when the selfhosted feature is on, wrap the established
-        // group box in the STABLE routing proxy before it is injected NON-OWNED
-        // into the run. The SDK binds to this ONE object once and calls its
-        // methods per tool call; the proxy re-reads (active_sandbox_id,
-        // active_epoch) per op and dispatches to the currently-active backend, so
-        // a sandbox_swap mid-turn lands the NEXT tool call on the new box. With
-        // the flag off the established group box is injected unchanged (today's
-        // path). The lease still owns the group box lifecycle — the proxy is a
-        // routing veneer, not an owner.
-        if (routingEnabled(settings)) {
+        if (machinePrimary) {
+          // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
+          // establish or lease a phantom Modal home box (today's path leased + BILLED
+          // a cloud box the turn never touched). Build the SelfhostedSession DIRECTLY
+          // (no Modal box created) and take the group lease with backend "selfhosted"
+          // (refcount/idle bookkeeping; the reaper drains it cold with NO provider
+          // stop, and bills ZERO warm-seconds). The session is a harmless in-memory
+          // bind (no NATS round-trip), so build it FIRST; if the lease then fences,
+          // there is nothing to clean up.
+          const established = await establishSelfhostedTurnSession(
+            { db, settings, bus },
+            {
+              workspaceId: input.workspaceId,
+              agentId: activeSandboxRecord!.enrollmentId!,
+              epoch: activeSandboxPointer!.activeEpoch,
+              environment: sandboxEnvironment,
+              workingDir: activeSandboxPointer!.workingDir,
+            },
+          );
+          const lease = await acquireSelfhostedLeaseForTurn(
+            { db, settings },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              sessionId: input.sessionId,
+            },
+            "turn",
+            sandboxHolderId,
+          );
           resolvedSandbox = {
-            ...resolvedSandbox,
+            // Wrap in the SAME routing proxy so a mid-turn swap (to another machine
+            // or back to the group box) still re-routes per op. PIN this established
+            // SelfhostedSession for the machine pointer so the turn-start manifest
+            // write (via the proxy's `state` getter) and the per-op reads hit ONE
+            // instance — no two-instance manifest divergence.
             established: wrapTurnBoxWithRouting(
               { db, settings, bus },
-              // Thread the SAME declared environment the group box was created with
-              // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
-              // carries it too — the SDK's per-turn manifest-env delta stays empty
-              // (no "cannot change manifest environment variables" throw).
-              { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
-              resolvedSandbox.established,
+              {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                environment: sandboxEnvironment,
+                pinnedSelfhosted: {
+                  sandboxId: activeSandboxPointer!.activeSandboxId!,
+                  epoch: activeSandboxPointer!.activeEpoch,
+                },
+              },
+              established,
             ),
+            leaseEpoch: lease.leaseEpoch,
+            release: lease.release,
           };
+        } else {
+          resolvedSandbox = await resumeBoxForTurn(
+            { db, settings },
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              sessionId: input.sessionId,
+              backend: turn.sandboxBackend,
+              os: session.sandboxOs,
+              environment: sandboxEnvironment,
+            },
+            "turn",
+            sandboxHolderId,
+          );
+          // M7 hot-swap: when the selfhosted feature is on, wrap the established
+          // group box in the STABLE routing proxy before it is injected NON-OWNED
+          // into the run. The SDK binds to this ONE object once and calls its
+          // methods per tool call; the proxy re-reads (active_sandbox_id,
+          // active_epoch) per op and dispatches to the currently-active backend, so
+          // a sandbox_swap mid-turn lands the NEXT tool call on the new box. With
+          // the flag off the established group box is injected unchanged (today's
+          // path). The lease still owns the group box lifecycle — the proxy is a
+          // routing veneer, not an owner.
+          if (routingEnabled(settings)) {
+            resolvedSandbox = {
+              ...resolvedSandbox,
+              established: wrapTurnBoxWithRouting(
+                { db, settings, bus },
+                // Thread the SAME declared environment the group box was created with
+                // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
+                // carries it too — the SDK's per-turn manifest-env delta stays empty
+                // (no "cannot change manifest environment variables" throw).
+                { workspaceId: input.workspaceId, sessionId: input.sessionId, environment: sandboxEnvironment },
+                resolvedSandbox.established,
+              ),
+            };
+          }
         }
         // Refresh the lease TTL on the activity-heartbeat cadence (10s, well
         // inside the 90s lease TTL). EPOCH-FENCED: a superseded owner's refresh
@@ -598,7 +691,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // box metered once); epoch-fenced (a stale tick no-ops). Warm-cost is
         // metered when a per-backend rate is configured. Best-effort: a metering
         // failure must never fail the turn.
-        const warmRate = sandboxWarmRateMicrosPerSecond(settings, turn.sandboxBackend);
+        //
+        // Keyed off the EFFECTIVE backend (Stage D): a machine-primary turn has NO
+        // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
+        // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
+        // cloud seconds for a box that does not exist (a real money bug). Non-machine
+        // turns fall back to turn.sandboxBackend (byte-for-byte today).
+        const warmRate = sandboxWarmRateMicrosPerSecond(settings, activeSandboxBackend ?? turn.sandboxBackend);
         leaseHeartbeatTimer = setInterval(() => {
           void heartbeatLeaseHolder(db, {
             accountId: input.accountId,
@@ -686,21 +785,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // may have been swapped to a connected machine (active_sandbox_id → a
       // selfhosted lease). buildAgent's repository-clone lifecycle hook keys off
       // the EFFECTIVE backend; if we let it default to the home backend it would
-      // `git clone` a private GitHub-App repo onto the user's REAL disk. So resolve
-      // the session's effective backend here and pass "selfhosted" through when the
-      // active sandbox is a connected machine; otherwise leave it undefined so
-      // buildAgent defaults to the home backend (byte-for-byte unchanged cloud
-      // behavior). Reuse the SAME DB helpers wrapTurnBoxWithRouting uses:
-      // readActiveSandbox (the per-session pointer) + getSandbox (the sandboxes-by-id
-      // loader, for its `kind`). The gate (routingEnabled), best-effort try/catch,
-      // and decision live in resolveActiveSandboxBackend (tested in isolation);
-      // resolving once at turn start is correct because the clone hook runs at
-      // beforeAgentStart, so a mid-turn swap can't affect this decision.
-      const activeSandboxBackend = await resolveActiveSandboxBackend(
-        routingEnabled(settings),
-        () => readActiveSandbox(db, input.workspaceId, input.sessionId),
-        async (sandboxId) => (await getSandbox(db, input.workspaceId, sandboxId))?.kind ?? null,
-      );
+      // `git clone` a private GitHub-App repo onto the user's REAL disk. So pass
+      // "selfhosted" through when the active sandbox is a connected machine;
+      // otherwise leave it undefined so buildAgent defaults to the home backend
+      // (byte-for-byte unchanged cloud behavior). `activeSandboxBackend` was
+      // resolved ONCE at turn start (above) via resolveActiveSandboxBackend (the
+      // tested gate) and is reused here — resolving once is correct because the
+      // clone hook runs at beforeAgentStart, so a mid-turn swap can't affect it.
       const agent = runtime.buildAgent(runSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         genesisTitleHint: isGenesisTurn,

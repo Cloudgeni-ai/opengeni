@@ -728,6 +728,66 @@ export class SelfhostedSandboxClient {
   }
 }
 
+/**
+ * The dependency shape `buildSelfhostedBackendSession` needs to bind a live
+ * selfhosted session to a target machine. A structural superset of the fields the
+ * routing resolver (backend-resolver.ts) reads off its deps + pointer, and the
+ * fields the WORKER turn's machine-primary establish branch threads in — so a
+ * SINGLE build shape is shared by both (never two divergent constructions of the
+ * same SelfhostedSandboxClient/resume pair).
+ */
+export interface SelfhostedSessionBuild {
+  /** The workspace the machine's control-plane subject is scoped to. */
+  workspaceId: string;
+  /** The enrollment id == the agent id `agent.<ws>.<id>.rpc` addresses. */
+  agentId: string;
+  /** The relay-URL shape for stream endpoints. */
+  relay: SelfhostedRelayConfig;
+  /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
+  controlRpcFactory: () => ControlRpc;
+  /** The lease/active epoch the session is fenced under (echoed on every op). */
+  epoch: number;
+  /** The run's declared sandbox environment → the session manifest.environment
+   *  (env-parity; see SelfhostedSessionDeps.environment). */
+  environment?: Record<string, string>;
+  /** The session working directory (the path/cwd base). Null/absent ⇒ workspace_root. */
+  workingDir?: string | null;
+  /** Override the control-op timeout (tests). */
+  timeoutMs?: number;
+}
+
+/**
+ * Build a live selfhosted session bound to a target machine: construct a request-
+ * scoped `SelfhostedSandboxClient` (fenced under `epoch`, carrying the run's env +
+ * working dir) and `resume()` it (= re-address the live subject — no provider box
+ * is created). Returns BOTH the client (the OWNED-sandbox client the turn injects,
+ * whose `serializeSessionState` round-trips `{agentId}`) and the live session.
+ *
+ * Shared by:
+ *   - the routing resolver (backend-resolver.ts) — a swap target, where only the
+ *     session is needed; and
+ *   - the worker turn's machine-primary establish branch — where the client is the
+ *     owned-sandbox client AND the session is the pinned routing default.
+ * Factoring it here keeps the two builds identical (no divergence in the fence
+ * epoch, env threading, or working-dir base).
+ */
+export async function buildSelfhostedBackendSession(
+  deps: SelfhostedSessionBuild,
+): Promise<{ client: SelfhostedSandboxClient; session: SelfhostedSession }> {
+  const client = new SelfhostedSandboxClient({
+    workspaceId: deps.workspaceId,
+    relay: deps.relay,
+    controlRpcFactory: deps.controlRpcFactory,
+    agentId: deps.agentId,
+    epoch: deps.epoch,
+    ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
+    ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
+    ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
+  });
+  const session = await client.resume({ agentId: deps.agentId });
+  return { client, session };
+}
+
 function readAgentId(state: unknown): string | undefined {
   if (state && typeof state === "object") {
     const candidate = (state as { agentId?: unknown }).agentId

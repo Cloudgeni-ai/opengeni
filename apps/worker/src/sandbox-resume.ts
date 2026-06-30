@@ -269,6 +269,101 @@ export async function resumeBoxForTurn(
 }
 
 /**
+ * Stage D machine-primary: acquire the group lease for a turn whose ACTIVE sandbox
+ * is a connected machine (selfhosted) WITHOUT establishing a provider box. The
+ * "box" is the user's physical machine reached over NATS; there is NOTHING to
+ * spawn, snapshot, expose, or serialize — so we take the lease (the SAME group-keyed
+ * refcount/idle/epoch bookkeeping resumeBoxForTurn uses) but skip every box step.
+ *
+ * The lease is keyed backend "selfhosted": the reaper's terminateProviderBox
+ * short-circuits a selfhosted lease (it is the user's machine — NEVER provider-stop),
+ * draining it to cold with no stop; and the reaper's warm-meter rate for "selfhosted"
+ * is 0 (no cloud seconds billed for a box that does not exist). Returns the lease
+ * epoch + an idempotent release so the turn's lease-heartbeat + `finally` release are
+ * identical to the cloud path.
+ *
+ * holderId is the unique-per-execution id (the Temporal activityId for a turn).
+ */
+export async function acquireSelfhostedLeaseForTurn(
+  services: SandboxResumeServices,
+  ids: { accountId: string; workspaceId: string; sandboxGroupId: string; sessionId: string },
+  kind: LeaseHolderKind,
+  holderId: string,
+): Promise<{ leaseEpoch: number; release: () => Promise<void> }> {
+  const { db, settings } = services;
+  const leaseTtlMs = settings.sandboxLeaseTtlMs;
+
+  let released = false;
+  const release = async (): Promise<void> => {
+    if (released) {
+      return;
+    }
+    released = true;
+    await releaseLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      kind,
+      holderId,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+  };
+
+  const acquired = await acquireLease(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sandboxGroupId: ids.sandboxGroupId,
+    kind,
+    holderId,
+    subjectId: ids.sessionId,
+    backend: "selfhosted",
+    os: "linux",
+    leaseTtlMs,
+  });
+
+  // FENCED: a newer epoch re-established the group concurrently. Release our
+  // just-registered holder + surface the supersession (the outer turn catch
+  // requeues, mirroring resumeBoxForTurn).
+  if (acquired.role === "fenced") {
+    await release();
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch);
+  }
+
+  // SPAWNER: we won the cold->warming CAS. There is NO box to establish — commit
+  // warm immediately so the lease does not linger in 'warming' (no box id, no
+  // resume_state; selfhosted is re-addressed by enrollment via the active pointer,
+  // never resumed from an envelope). resume_backend_id "selfhosted" keeps the
+  // reaper's never-provider-stop short-circuit correct.
+  if (acquired.role === "spawner") {
+    const expectedEpoch = acquired.lease.leaseEpoch;
+    const committed = await commitWarmingToWarm(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      expectedEpoch,
+      // No provider box id; stamp a clearly non-box marker for diagnostics.
+      instanceId: `selfhosted:${ids.sessionId}`,
+      resumeBackendId: "selfhosted",
+      resumeState: null,
+      leaseTtlMs,
+    });
+    if (!committed.committed || !committed.lease) {
+      // A reaper reset our warming row, or a sibling re-established + bumped the
+      // epoch. Release our holder; surface supersession (NEVER touch any box).
+      await release();
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+    }
+    return { leaseEpoch: committed.lease.leaseEpoch, release };
+  }
+
+  // ATTACHED / REARMED: the lease is live. There is no box to resume — just carry
+  // the lease epoch (same-session turns are serialized, so a concurrent 'warming'
+  // spawner on this group is not expected; the machine session is independent of the
+  // lease state regardless).
+  return { leaseEpoch: acquired.lease.leaseEpoch, release };
+}
+
+/**
  * Poll a warming lease until the spawner commits warm. If the warming row is
  * reset to cold (the spawner died and the reaper reset it), re-acquire — we may
  * now win the cold->warming CAS ourselves. Bounded by the warming TTL.

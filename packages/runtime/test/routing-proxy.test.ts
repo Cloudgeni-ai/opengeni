@@ -290,6 +290,50 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(manifest.root).toBe("/workspace");
   });
 
+  test("pinnedSelfhosted (Stage D machine-primary): the machine pointer returns the SAME pinned instance; an epoch move builds fresh", async () => {
+    // The instance-identity pin: a machine-primary turn pre-establishes ONE
+    // SelfhostedSession and pins it for the steady-state machine pointer so the
+    // turn-start manifest write (via the proxy's `state` getter) and the per-op reads
+    // hit that SAME object — never a second, divergent SelfhostedSession.
+    const pinnedInstance = new FakeBackend("pinned-machine");
+    let freshBuilds = 0;
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: pinnedInstance,
+      defaultKind: "selfhosted",
+      getSandbox: async (id) => {
+        freshBuilds += 1; // a fresh build always goes through getSandbox first
+        return sandboxes[id] ?? null;
+      },
+      controlRpcFactory: () => new MockAgentResponder({ hostname: "rebuilt" }),
+      relay: RELAY,
+      pinnedSelfhosted: { sandboxId: "sbx-self", epoch: 7, session: pinnedInstance },
+    });
+
+    // Steady state (sbx-self @ epoch 7) → the SAME pinned instance, twice, with NO
+    // getSandbox/build (the pin short-circuits BEFORE getSandbox).
+    const a = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
+    const b = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
+    expect(a.session).toBe(pinnedInstance);
+    expect(b.session).toBe(pinnedInstance);
+    expect(a.kind).toBe("selfhosted");
+    expect(a.sandboxId).toBe("sbx-self");
+    expect(freshBuilds).toBe(0);
+
+    // A swap-back at a MOVED epoch (8) no longer matches the pin → a fresh
+    // SelfhostedSession fenced under the new epoch (the stale pinned instance, fenced
+    // at epoch 7, must NOT be reused).
+    const c = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 8 });
+    expect(c.session).not.toBe(pinnedInstance);
+    expect(c.kind).toBe("selfhosted");
+    expect(freshBuilds).toBe(1);
+
+    // The null (group) pointer still routes to the default backend unchanged.
+    const d = await resolve({ activeSandboxId: null, activeEpoch: 7 });
+    expect(d.session).toBe(pinnedInstance);
+    expect(d.sandboxId).toBeNull();
+  });
+
   test("modal swap target with no establisher -> unresolvable (caller 409s)", async () => {
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,

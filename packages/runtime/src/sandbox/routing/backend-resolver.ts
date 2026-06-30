@@ -18,7 +18,7 @@
 // target is established via the injected `establishModalTarget` resolver (the
 // API/worker pass a resume-by-id closure for the sibling box's lease).
 
-import { SelfhostedSandboxClient, type SelfhostedRelayConfig } from "../selfhosted/session";
+import { buildSelfhostedBackendSession, type SelfhostedRelayConfig } from "../selfhosted/session";
 import type { ControlRpc } from "../selfhosted/control-rpc";
 import type {
   ActivePointer,
@@ -72,6 +72,20 @@ export interface ActiveBackendResolverDeps {
    * manifest environment variables". Omitted → `{}` (the test/negotiation path).
    */
   environment?: Record<string, string>;
+  /**
+   * A pre-established selfhosted session to PIN for the STEADY-STATE machine
+   * pointer (the worker turn's machine-primary path, Stage D). When the pointer
+   * targets THIS sandbox at THIS epoch, the resolver returns this SAME instance
+   * instead of building a fresh `SelfhostedSession`. This is the instance-identity
+   * pin: the SDK reads/writes `state.manifest` at turn START via the proxy's `state`
+   * getter (which reads the default/last-resolved backend's state) and then reads it
+   * per op via this resolver — those MUST land on ONE SelfhostedSession/manifest, or
+   * a turn-start manifest write is invisible to the per-op reads (two-instance
+   * divergence). A swap AWAY (a different sandbox id, or the same id at a moved epoch)
+   * falls through to a fresh build under the new epoch. Omitted for the API/live-swap
+   * path (which always builds fresh — it has no pre-established turn session).
+   */
+  pinnedSelfhosted?: { sandboxId: string; epoch: number; session: RoutableBackendSession };
 }
 
 /** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
@@ -107,6 +121,21 @@ export function makeActiveBackendResolver(
       return { session: deps.defaultBackend, sandboxId: null, kind: deps.defaultKind };
     }
 
+    // INSTANCE PIN (Stage D machine-primary): the steady-state machine pointer
+    // returns the pre-established turn session BY REFERENCE — never a fresh build —
+    // so the turn-start manifest write + the per-op reads land on ONE
+    // SelfhostedSession/manifest. Matched on BOTH the sandbox id AND the epoch: a
+    // swap away (different id) or a swap-back (same id, higher epoch) falls through
+    // to a fresh build fenced under the CURRENT epoch (the stale pinned instance is
+    // fenced at the old epoch and must not be reused).
+    if (
+      deps.pinnedSelfhosted
+      && pointer.activeSandboxId === deps.pinnedSelfhosted.sandboxId
+      && pointer.activeEpoch === deps.pinnedSelfhosted.epoch
+    ) {
+      return { session: deps.pinnedSelfhosted.session, sandboxId: pointer.activeSandboxId, kind: "selfhosted" };
+    }
+
     const sandbox = await deps.getSandbox(pointer.activeSandboxId);
     if (!sandbox) {
       throw new ActiveBackendUnresolvableError(
@@ -123,8 +152,9 @@ export function makeActiveBackendResolver(
       // Build a request-scoped selfhosted client bound to the target's workspace +
       // enrollment agentId, fenced under the swap's active_epoch. The agent echoes
       // the epoch and rejects a stale op with ERROR_CODE_FENCED → the proxy
-      // re-resolves + retries against the new active sandbox.
-      const client = new SelfhostedSandboxClient({
+      // re-resolves + retries against the new active sandbox. The SAME factory the
+      // worker turn's machine-primary establish branch uses (one build shape).
+      const { session } = await buildSelfhostedBackendSession({
         workspaceId: deps.workspaceId,
         relay: deps.relay,
         controlRpcFactory: deps.controlRpcFactory,
@@ -139,8 +169,7 @@ export function makeActiveBackendResolver(
         // for this selfhosted backend. Absent/empty ⇒ the default workspace_root.
         ...(pointer.workingDir ? { workingDir: pointer.workingDir } : {}),
       });
-      const session = (await client.resume({ agentId: sandbox.enrollmentId })) as RoutableBackendSession;
-      return { session, sandboxId: sandbox.id, kind: "selfhosted" };
+      return { session: session as RoutableBackendSession, sandboxId: sandbox.id, kind: "selfhosted" };
     }
 
     if (sandbox.kind === "modal") {
