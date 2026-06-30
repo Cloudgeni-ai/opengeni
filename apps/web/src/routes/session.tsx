@@ -45,7 +45,6 @@ import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
-import { isMidTurn } from "@/lib/queue";
 import { buildTools } from "@/lib/session-tools";
 import type { Session, SessionEvent } from "@/types";
 
@@ -159,10 +158,6 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     />
   );
 
-  if (!context.inspectorOpen) {
-    return <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">{chatPane}</div>;
-  }
-
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       <SessionDock
@@ -174,6 +169,8 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
         goal={goal}
         connectionState={connectionState}
         primary={chatPane}
+        dockCollapsed={!context.inspectorOpen}
+        onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
       />
     </div>
   );
@@ -201,6 +198,8 @@ function SessionDock(props: {
   goal: ReturnType<typeof useGoal>;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
+  dockCollapsed: boolean;
+  onDockCollapsedChange: (collapsed: boolean) => void;
 }) {
   // Track the dock's active tab so the Files surface can hold the box WARM only
   // while it's actually on screen (fast ~100ms Channel-A ops instead of a cold
@@ -210,7 +209,7 @@ function SessionDock(props: {
     workspaceId: props.workspaceId,
     sessionId: props.sessionId,
     events: props.events,
-    filesActive: activeTab === "files",
+    filesActive: !props.dockCollapsed && activeTab === "files",
   });
 
   const tabs: WorkspaceTab[] = [
@@ -241,6 +240,8 @@ function SessionDock(props: {
       autoSaveId="og.session.dock"
       activeTab={activeTab}
       onActiveTabChange={setActiveTab}
+      collapsed={props.dockCollapsed}
+      onCollapsedChange={props.onDockCollapsedChange}
     />
   );
 }
@@ -297,14 +298,6 @@ function SessionChatPane(props: {
     }),
     [context.client, props.session.workspaceId, props.session.id, props.session.status, workspacePermissions],
   );
-
-  // Steering needs something to interrupt: when the turn ends, fall back to
-  // the queue default so a stale steer toggle cannot surprise a later send.
-  useEffect(() => {
-    if (!isMidTurn(props.session.status) && composer.mode !== "queue") {
-      composer.setMode("queue");
-    }
-  }, [props.session.status, composer.mode, composer.setMode]);
 
   const renderMessageText = useCallback((text: string, item: AgentMessageItem | UserMessageItem) => {
     if (item.kind === "user-message") {

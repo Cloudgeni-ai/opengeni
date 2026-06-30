@@ -42,6 +42,8 @@ export type UseGoalResult = {
 export function useGoal(sessionId: string | null | undefined, options: UseGoalOptions = {}): UseGoalResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const sharedEvents = options.events;
+  const sharedFeed = sharedEvents !== undefined;
   const [goal, setGoal] = useState<SessionGoal | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
@@ -87,6 +89,12 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
       setLoading(false);
       return;
     }
+    if (sharedFeed) {
+      setLoading(false);
+      return () => {
+        generation.current += 1;
+      };
+    }
     setLoading(true);
     void load();
     const pollIntervalMs = options.pollIntervalMs;
@@ -100,12 +108,12 @@ export function useGoal(sessionId: string | null | undefined, options: UseGoalOp
       clearInterval(timer);
       generation.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs]);
+  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, sharedFeed]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
   useSessionEventTrigger(client, workspaceId, sessionId, isGoalEvent, scheduleRefresh, {
     enabled,
-    ...(options.events !== undefined ? { events: options.events } : {}),
+    ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
   });
 
   const pause = useCallback(

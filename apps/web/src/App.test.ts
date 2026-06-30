@@ -17,6 +17,7 @@ import {
   delegableApiKeyPermissions,
 } from "./lib/permissions";
 import { orgSettingsPath, parseCheckoutOutcome, workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath, workspaceSettingsPath } from "./lib/routes";
+import { sameSessionForContext } from "./lib/session-context";
 import { groupSessionsForRail, recencyGroupFor, relativeTimeLabel } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
@@ -118,6 +119,22 @@ describe("rail session grouping", () => {
     expect(relativeTimeLabel("2026-06-19T11:30:00.000Z", NOW)).toBe("30m");
     expect(relativeTimeLabel("2026-06-19T09:00:00.000Z", NOW)).toBe("3h");
     expect(relativeTimeLabel("2026-06-17T12:00:00.000Z", NOW)).toBe("2d");
+  });
+});
+
+describe("session context equality", () => {
+  test("treats equivalent live-status overlay objects as unchanged", () => {
+    const current = session({ status: "running" });
+    const next = { ...current };
+
+    expect(sameSessionForContext(current, next)).toBe(true);
+  });
+
+  test("detects meaningful session changes", () => {
+    const current = session({ status: "queued", activeTurnId: null });
+    const next = { ...current, status: "running" as const, activeTurnId: "turn-1" };
+
+    expect(sameSessionForContext(current, next)).toBe(false);
   });
 });
 

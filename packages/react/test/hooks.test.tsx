@@ -219,7 +219,7 @@ describe("useGoal", () => {
     const goal = fakeGoal({ autoContinuations: 7, noProgressStreak: 2 });
     const client = fakeClient({ getGoal: async () => goal });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
     await flush();
@@ -236,12 +236,31 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
     );
     await flush();
     expect(hook.result.current.goal).toBeNull();
     expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("shared empty event logs do not probe the goal endpoint", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(0);
+    expect(hook.result.current.goal).toBeNull();
     expect(hook.result.current.loading).toBe(false);
     await hook.unmount();
   });
@@ -280,7 +299,7 @@ describe("useGoal", () => {
     const client = fakeClient({
       getGoal: async () => {
         reads += 1;
-        return fakeGoal({ status: reads > 1 ? "paused" : "active" });
+        return fakeGoal({ status: "paused" });
       },
     });
     const hook = await renderHook(
@@ -288,11 +307,42 @@ describe("useGoal", () => {
       [] as SessionEvent[],
     );
     await flush();
-    expect(reads).toBe(1);
+    expect(reads).toBe(0);
     await hook.rerender([makeEvent(1, "goal.paused")]);
     await flush(250);
-    expect(reads).toBe(2);
+    expect(reads).toBe(1);
     expect(hook.result.current.isPaused).toBe(true);
+    await hook.unmount();
+  });
+
+  test("shared-feed goal refreshes are discarded after the session changes", async () => {
+    const initialSessionId: string = SESSION_ID;
+    const otherSessionId = "33333333-3333-4333-8333-333333333333";
+    const reads: string[] = [];
+    let resolveGoal: ((goal: ReturnType<typeof fakeGoal>) => void) | null = null;
+    const client = fakeClient({
+      getGoal: async (_workspaceId, sessionId) => {
+        reads.push(sessionId);
+        return await new Promise<ReturnType<typeof fakeGoal>>((resolve) => {
+          resolveGoal = resolve;
+        });
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useGoal(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      initialSessionId,
+    );
+    await flush();
+
+    const pendingRefresh = hook.result.current.refresh();
+    expect(reads).toEqual([SESSION_ID]);
+    await hook.rerender(otherSessionId);
+    await flushing(async () => {
+      resolveGoal!(fakeGoal({ text: "stale goal from the previous session" }));
+      await pendingRefresh;
+    });
+
+    expect(hook.result.current.goal).toBeNull();
     await hook.unmount();
   });
 });

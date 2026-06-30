@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useState } from "react";
 import {
   ChevronsLeftRightIcon,
   Maximize2Icon,
@@ -30,6 +30,9 @@ export type WorkspaceDockProps = {
   /** Controlled active tab. Falls back to the first tab. */
   activeTab?: string | undefined;
   onActiveTabChange?: ((id: string) => void) | undefined;
+  /** Controlled collapsed state for hosts that expose their own dock toggle. */
+  collapsed?: boolean | undefined;
+  onCollapsedChange?: ((collapsed: boolean) => void) | undefined;
   /** Persisted layout id (localStorage key) for react-resizable-panels. */
   autoSaveId?: string | undefined;
   /** Default dock width as a percent of the session area. */
@@ -47,11 +50,15 @@ export type WorkspaceDockProps = {
  * `autoSaveId`. Maximize is a mode ABOVE the Group (a `fixed inset-0` overlay) —
  * pushing a Panel to ~100% still fights min sizes and leaves a chat sliver.
  */
+const useDockLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
 export function WorkspaceDock({
   primary,
   tabs,
   activeTab,
   onActiveTabChange,
+  collapsed: collapsedProp,
+  onCollapsedChange,
   autoSaveId = "og.session.dock",
   defaultSize = 34,
   minSize = 22,
@@ -59,9 +66,10 @@ export function WorkspaceDock({
   className,
 }: WorkspaceDockProps) {
   const dockPanelRef = usePanelRef();
-  const [collapsed, setCollapsed] = useState(false);
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [internalTab, setInternalTab] = useState(tabs[0]?.id ?? "");
+  const collapsed = collapsedProp ?? internalCollapsed;
 
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -71,6 +79,8 @@ export function WorkspaceDock({
   } as Parameters<typeof useDefaultLayout>[0]);
 
   const current = activeTab ?? internalTab;
+  const tabIds = tabs.map((tab) => tab.id).join("\u0000");
+  const firstTabId = tabs[0]?.id ?? "";
   const setTab = useCallback(
     (id: string) => {
       setInternalTab(id);
@@ -78,13 +88,34 @@ export function WorkspaceDock({
     },
     [onActiveTabChange],
   );
+  const setCollapsed = useCallback(
+    (next: boolean) => {
+      setInternalCollapsed((previous) => (previous === next ? previous : next));
+      onCollapsedChange?.(next);
+    },
+    [onCollapsedChange],
+  );
+
+  useDockLayoutEffect(() => {
+    if (collapsedProp === undefined) {
+      return;
+    }
+    if (collapsedProp) {
+      dockPanelRef.current?.collapse();
+      setMaximized(false);
+    } else {
+      dockPanelRef.current?.expand();
+    }
+  }, [collapsedProp, dockPanelRef]);
 
   // Keep the active tab valid if the available tabs change.
   useEffect(() => {
-    if (tabs.length > 0 && !tabs.some((t) => t.id === current)) {
-      setTab(tabs[0]!.id);
+    if (firstTabId && !tabs.some((t) => t.id === current)) {
+      setTab(firstTabId);
     }
-  }, [tabs, current, setTab]);
+    // Depend on tab identity, not the tab content objects. Session live events
+    // rebuild tab JSX frequently; only id changes can invalidate the active tab.
+  }, [tabIds, firstTabId, current, setTab]);
 
   // Esc restores from maximize.
   useEffect(() => {
@@ -99,11 +130,11 @@ export function WorkspaceDock({
   const collapse = useCallback(() => {
     dockPanelRef.current?.collapse();
     setCollapsed(true);
-  }, [dockPanelRef]);
+  }, [dockPanelRef, setCollapsed]);
   const expand = useCallback(() => {
     dockPanelRef.current?.expand();
     setCollapsed(false);
-  }, [dockPanelRef]);
+  }, [dockPanelRef, setCollapsed]);
 
   const dockChrome = (
     <DockChrome
@@ -142,16 +173,19 @@ export function WorkspaceDock({
           defaultSize={`${defaultSize}%`}
           minSize={`${minSize}%`}
           maxSize={`${maxSize}%`}
-          onResize={(size) => {
+          onResize={(size, _id, previousSize) => {
             // `asPercentage` is 0..100; treat a near-zero panel as collapsed.
             const isCollapsed = size.asPercentage <= 1;
-            setCollapsed((prev) => (prev !== isCollapsed ? isCollapsed : prev));
+            const canInferCollapse = collapsedProp === undefined || previousSize !== undefined;
+            if (canInferCollapse && isCollapsed !== collapsed) {
+              setCollapsed(isCollapsed);
+            }
           }}
           className="min-h-0 min-w-0"
         >
           {/* Hidden behind the overlay while maximized (avoids double-mounting
               the surfaces). */}
-          {!maximized && (
+          {!collapsed && !maximized && (
             <div className="flex h-full min-h-0 min-w-0 flex-col border-l border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))]">
               {dockChrome}
             </div>

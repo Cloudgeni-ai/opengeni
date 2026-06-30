@@ -11,6 +11,7 @@ import {
   createContext,
   type Dispatch,
   type SetStateAction,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -35,6 +36,7 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { sameSessionForContext } from "@/lib/session-context";
 import {
   buildResources,
   buildTools,
@@ -152,7 +154,7 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 }
 
 export function RootRouteComponent() {
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSessionState] = useState<Session | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -209,6 +211,14 @@ export function RootRouteComponent() {
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
   const client = useMemo(() => createOpenGeniClient(), [accessKeyVersion]);
+  const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
+    setSessionState((current) => {
+      const next = typeof value === "function"
+        ? (value as (previous: Session | null) => Session | null)(current)
+        : value;
+      return sameSessionForContext(current, next) ? current : next;
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

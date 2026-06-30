@@ -148,8 +148,8 @@ the chat, not inside a fixed strip. It replaces the `grid-cols-[…390px]` aside
 - **Drag handle** sets the dock width (percent of the session area). `minSize` ~22 % keeps the tree
   legible; `maxSize` ~70 % lets the desktop/terminal dominate without hiding chat entirely.
 - **Collapse** to `collapsedSize={0}` hides the dock and gives chat the full width; a thin **rail
-  tab** on the right edge re-opens it (and the existing header toggle stays). State persists via
-  `autoSaveId`.
+  tab** on the right edge re-opens it, and the existing header toggle drives the same collapsed
+  state. Width persists via `autoSaveId`.
 - **Maximize-to-full-workspace** is a *mode above the PanelGroup*, not a panel size. A maximize
   button in the dock header flips a `maximized` boolean; when true the dock renders as an
   **`fixed inset-0 z-40`** overlay covering the whole session area (chat hidden behind it), with a
