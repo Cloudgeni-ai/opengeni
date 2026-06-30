@@ -3,7 +3,6 @@ import { parseModelProvidersJson } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
-  codexConnectorsAvailable,
   settingsWithCodexCredential,
   withCodexAppsMcpServer,
   withCodexProvider,
@@ -41,28 +40,13 @@ describe("withCodexProvider", () => {
   });
 });
 
-describe("codexConnectorsAvailable", () => {
-  test("true only when BOTH connector scopes are granted", () => {
-    expect(codexConnectorsAvailable(BOTH_SCOPES)).toBe(true);
-    expect(codexConnectorsAvailable("api.connectors.read")).toBe(false);
-    expect(codexConnectorsAvailable("api.connectors.invoke")).toBe(false);
-  });
-
-  test("tolerates extra scopes and arbitrary whitespace delimiters", () => {
-    expect(codexConnectorsAvailable("openid  api.connectors.read\tapi.connectors.invoke\nprofile")).toBe(true);
-  });
-
-  test("false for null, empty, or undefined scopes (device-code path gate)", () => {
-    expect(codexConnectorsAvailable(null)).toBe(false);
-    expect(codexConnectorsAvailable("")).toBe(false);
-    expect(codexConnectorsAvailable(undefined)).toBe(false);
-  });
-});
-
 describe("withCodexAppsMcpServer", () => {
+  // Connector access is gated SERVER-SIDE per ChatGPT account (chatgpt-account-id),
+  // NOT by token scopes — so injection is unconditional for any active credential
+  // and the actual tool set is discovered at runtime.
   test("appends exactly one codex_apps entry with the right metadata and NO headers", () => {
     const settings = testSettings({ mcpServers: [] });
-    const result = withCodexAppsMcpServer(settings, BOTH_SCOPES);
+    const result = withCodexAppsMcpServer(settings);
     const apps = result.mcpServers.filter((s) => s.id === "codex_apps");
     expect(apps).toHaveLength(1);
     const entry = apps[0]!;
@@ -74,23 +58,15 @@ describe("withCodexAppsMcpServer", () => {
   });
 
   test("is idempotent — a second call does not double-inject", () => {
-    const once = withCodexAppsMcpServer(testSettings({ mcpServers: [] }), BOTH_SCOPES);
-    const twice = withCodexAppsMcpServer(once, BOTH_SCOPES);
+    const once = withCodexAppsMcpServer(testSettings({ mcpServers: [] }));
+    const twice = withCodexAppsMcpServer(once);
     expect(twice).toBe(once); // same reference, no change
     expect(twice.mcpServers.filter((s) => s.id === "codex_apps")).toHaveLength(1);
   });
 
-  test("is a no-op when scopes are null, empty, or missing one connector scope", () => {
-    for (const scopes of [null, "", "api.connectors.read"]) {
-      const settings = testSettings({ mcpServers: [] });
-      const result = withCodexAppsMcpServer(settings, scopes);
-      expect(result).toBe(settings); // same reference, nothing injected
-    }
-  });
-
   test("preserves pre-existing mcp servers", () => {
     const settings = testSettings({ mcpServers: [{ id: "opengeni", name: "OpenGeni", url: "http://x/mcp", cacheToolsList: false }] });
-    const result = withCodexAppsMcpServer(settings, BOTH_SCOPES);
+    const result = withCodexAppsMcpServer(settings);
     const ids = result.mcpServers.map((s) => s.id);
     expect(ids).toContain("opengeni");
     expect(ids).toContain("codex_apps");
@@ -104,13 +80,14 @@ describe("settingsWithCodexCredential", () => {
     expect(result).toBe(settings); // same reference, no db access
   });
 
-  test("active credential WITHOUT connector scopes => provider injected, no codex_apps server", async () => {
+  test("active credential WITHOUT connector scopes => provider AND codex_apps server (scopes do not gate)", async () => {
     const restore = mockCredentialStatus({ status: "active", scopes: null });
     try {
       const settings = testSettings({ codexSubscriptionEnabled: true, modelProvidersJson: "[]", mcpServers: [] });
       const result = await settingsWithCodexCredential({} as unknown as Database, "ws_1", settings);
       expect(parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription")).toBe(true);
-      expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(false);
+      // Connectors are account-gated server-side; a scope-less pro token still lists tools.
+      expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
     } finally {
       restore();
     }

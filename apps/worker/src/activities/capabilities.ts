@@ -3,7 +3,6 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_APPS_MCP_SERVER_NAME,
   CODEX_APPS_MCP_URL,
-  CODEX_APPS_REQUIRED_SCOPES,
   CODEX_APPS_STARTUP_TIMEOUT_MS,
   CODEX_FALLBACK_MODEL_SLUGS,
   CODEX_MODEL_ID_PREFIX,
@@ -39,38 +38,30 @@ export async function settingsWithCodexCredential(db: Database, workspaceId: str
     return settings; // not connected / needs_relogin / error -> leave settings unchanged
   }
   const withProvider = withCodexProvider(settings);
-  // Additive: append the synthetic codex_apps connectors MCP server ONLY when
-  // the credential also carries the connector scopes (no-op otherwise). The
-  // bearer is NOT baked here — it is injected dynamically at connect time from
-  // codexRequestStorage (runtime/codexAppsMcpRequestInit).
-  return withCodexAppsMcpServer(withProvider, status.scopes);
+  // Additive: append the synthetic codex_apps connectors MCP server for ANY
+  // active credential. Connector access is gated SERVER-SIDE per ChatGPT account
+  // (via chatgpt-account-id), NOT by token scopes — confirmed live: a `pro` token
+  // whose only scopes are openid/profile/email/offline_access still lists all 217
+  // connector tools at .../ps/mcp. So we inject unconditionally and let
+  // runtime-discovery decide: an account with no connectors yields an empty
+  // tools/list, and a connect failure best-effort-drops the server without
+  // failing the turn. The bearer is injected dynamically at connect time
+  // (runtime/codexAppsMcpRequestInit).
+  return withCodexAppsMcpServer(withProvider);
 }
 
 /**
- * True only when BOTH connector scopes were granted (browser-authorize path).
- * Device-code logins generally lack them, so this returns false and the apps
- * MCP stays off. Tolerant of extra scopes and arbitrary whitespace delimiters.
+ * Pure: append the synthetic codex_apps MCP server, idempotently. Connector
+ * access is gated SERVER-SIDE per ChatGPT account (chatgpt-account-id), not by
+ * token scopes, so we inject for any active credential and let runtime-discovery
+ * resolve the actual tool set (empty list / dropped server when unavailable).
+ * No secrets here — the refreshing bearer is injected at connect time from
+ * codexRequestStorage (runtime/codexAppsMcpRequestInit). The connectors backend
+ * tolerates serial and parallel tool invocation, so no per-server serialization
+ * is enforced (the SDK exposes no per-server parallel-tool-calls flag in
+ * @openai/agents 0.11.6).
  */
-export function codexConnectorsAvailable(scopes: string | null | undefined): boolean {
-  if (!scopes) {
-    return false;
-  }
-  const granted = new Set(scopes.split(/\s+/).filter(Boolean));
-  return CODEX_APPS_REQUIRED_SCOPES.every((scope) => granted.has(scope));
-}
-
-/**
- * Pure: append the synthetic codex_apps MCP server, idempotently, ONLY when the
- * connector scopes are present. No secrets here — the refreshing bearer is
- * injected at connect time from codexRequestStorage (runtime/mcpServerRequestInit).
- * The connectors backend tolerates serial and parallel tool invocation, so no
- * per-server serialization is enforced (the SDK exposes no per-server
- * parallel-tool-calls flag in @openai/agents 0.11.6).
- */
-export function withCodexAppsMcpServer(settings: Settings, scopes: string | null | undefined): Settings {
-  if (!codexConnectorsAvailable(scopes)) {
-    return settings;
-  }
+export function withCodexAppsMcpServer(settings: Settings): Settings {
   if (settings.mcpServers.some((server) => server.id === CODEX_APPS_MCP_SERVER_ID)) {
     return settings; // already injected
   }

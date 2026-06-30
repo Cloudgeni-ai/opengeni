@@ -60,6 +60,54 @@ describe("normalizeCodexRequestBody", () => {
     expect(body.text).toEqual(original.text);
   });
 
+  test("allowlists top-level fields: strips everything the strict backend rejects", () => {
+    const body = normalizeCodexRequestBody({
+      model: "gpt-5.5",
+      instructions: "be helpful",
+      input: [{ type: "message", role: "user", content: [] }],
+      tools: [{ type: "function", name: "f" }],
+      tool_choice: "auto",
+      parallel_tool_calls: true,
+      reasoning: { effort: "medium" },
+      text: { verbosity: "low" },
+      prompt_cache_key: "thread_1",
+      // All of these are rejected by the ChatGPT/Codex backend (confirmed live:
+      // "Unsupported parameter: …" / "Unsupported service_tier") and MUST be stripped.
+      temperature: 0.7,
+      top_p: 0.9,
+      metadata: { a: "b" },
+      previous_response_id: "resp_123",
+      logprobs: true,
+      top_logprobs: 5,
+      service_tier: "auto",
+      user: "u",
+      safety_identifier: "s",
+      truncation: "auto",
+      max_tool_calls: 10,
+      background: false,
+      conversation: "conv_1",
+    }, identity);
+    for (const k of ["model", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls", "reasoning", "store", "stream", "include", "prompt_cache_key", "text"]) {
+      expect(k in body).toBe(true); // allowlisted -> kept
+    }
+    for (const k of ["temperature", "top_p", "metadata", "previous_response_id", "logprobs", "top_logprobs", "service_tier", "user", "safety_identifier", "truncation", "max_tool_calls", "background", "conversation"]) {
+      expect(k in body).toBe(false); // not on the allowlist -> stripped
+    }
+  });
+
+  test("drops hosted-MCP tool entries (Unsupported tool type: mcp), keeps function tools", () => {
+    const body = normalizeCodexRequestBody({
+      tools: [
+        { type: "function", name: "keep_me" },
+        { type: "mcp", server_label: "x", server_url: "https://x/mcp" },
+        { type: "function", name: "keep_me_too" },
+      ],
+    }, identity);
+    const tools = body.tools as Array<Record<string, unknown>>;
+    expect(tools.map((t) => t.type)).toEqual(["function", "function"]);
+    expect(tools.map((t) => t.name)).toEqual(["keep_me", "keep_me_too"]);
+  });
+
   test("applies the model resolver to body.model", () => {
     const body = normalizeCodexRequestBody({ model: "gpt-5.2-codex-high" }, buildModelResolver(["gpt-5.2-codex", "gpt-5.5"], "gpt-5.5"));
     expect(body.model).toBe("gpt-5.2-codex");

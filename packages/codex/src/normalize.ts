@@ -13,6 +13,28 @@
 
 const MINIMAL = "minimal";
 
+// The ChatGPT/Codex backend is a STRICT ALLOWLIST: it 400s on ANY top-level field
+// the Codex CLI itself does not send (confirmed live against the backend —
+// "Unsupported parameter: temperature / top_p / metadata / previous_response_id /
+// logprobs / service_tier / user / safety_identifier / truncation / max_tool_calls /
+// background / conversation", and "Unsupported tool type: mcp"). Our @openai/agents
+// stack adds several of these, so after our transforms we keep ONLY the codex
+// Responses payload fields (CODEX-SUBSCRIPTION-SPEC §1 field table).
+const CODEX_ALLOWED_TOP_LEVEL_KEYS = new Set<string>([
+  "model",
+  "instructions",
+  "input",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "reasoning",
+  "store",
+  "stream",
+  "include",
+  "prompt_cache_key",
+  "text",
+]);
+
 /** Mutates a parsed Responses request body in place and returns it. Pure + synchronous + unit-testable. */
 export function normalizeCodexRequestBody(
   body: Record<string, unknown>,
@@ -20,8 +42,6 @@ export function normalizeCodexRequestBody(
 ): Record<string, unknown> {
   body.store = false; // ChatGPT backend REQUIRES store=false (spec §1.3)
   body.stream = true; // ChatGPT backend REQUIRES stream=true (confirmed live: 400 "Stream must be set to true").
-  delete body.max_output_tokens; // rejected -> strip (spec §1.3)
-  delete body.max_completion_tokens;
 
   // include MUST contain reasoning.encrypted_content (stateless continuity, spec §1.6)
   const include = Array.isArray(body.include) ? (body.include as unknown[]).filter((v): v is string => typeof v === "string") : [];
@@ -47,6 +67,24 @@ export function normalizeCodexRequestBody(
       if (item && typeof item === "object" && "id" in item) {
         delete (item as Record<string, unknown>).id;
       }
+    }
+  }
+
+  // Drop hosted-MCP tool entries: the backend rejects them ("Unsupported tool
+  // type: mcp"). OpenGeni's MCP servers are client-connected, so their tools
+  // already arrive as `function` tools — this only sheds a stray `mcp` entry.
+  if (Array.isArray(body.tools)) {
+    body.tools = (body.tools as unknown[]).filter(
+      (t) => !(t && typeof t === "object" && (t as Record<string, unknown>).type === "mcp"),
+    );
+  }
+
+  // Final allowlist: shed every other top-level field our @openai/agents stack
+  // may have added (temperature, top_p, metadata, previous_response_id,
+  // max_output_tokens, truncation, …) so the strict backend does not 400.
+  for (const key of Object.keys(body)) {
+    if (!CODEX_ALLOWED_TOP_LEVEL_KEYS.has(key)) {
+      delete body[key];
     }
   }
   return body;

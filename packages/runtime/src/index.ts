@@ -75,7 +75,7 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
-import { CODEX_APPS_MCP_SERVER_ID, CODEX_MODEL_ID_PREFIX, codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
+import { CODEX_APPS_MCP_SERVER_ID, CODEX_MODEL_ID_PREFIX, CODEX_ORIGINATOR, codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -995,6 +995,13 @@ async function codexAppsMcpRequestInit(settings: Settings): Promise<{ requestIni
   }
   const headers: Record<string, string> = {
     authorization: `Bearer ${token.accessToken}`,
+    // The ChatGPT backend sits behind Cloudflare, which 403s requests bearing a
+    // default runtime User-Agent (confirmed live: an HTML bot-block page, NOT an
+    // auth failure). Send the codex client identity — the same originator/version/
+    // User-Agent the model fetch uses — so the MCP connect handshake passes the edge.
+    originator: CODEX_ORIGINATOR,
+    "user-agent": `${CODEX_ORIGINATOR}/${ctx.clientVersion}`,
+    version: ctx.clientVersion,
   };
   if (token.chatgptAccountId) {
     headers["chatgpt-account-id"] = token.chatgptAccountId;
