@@ -68,7 +68,7 @@ import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
-import { turnInput } from "./run-input";
+import { applyCodexHistoryStrip, turnInput } from "./run-input";
 import {
   createRuntimeBatcher,
   currentActivityContext,
@@ -894,8 +894,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // orphan-free, so it is a stable prefix of the re-sanitized history and the
       // slice begins exactly at the first genuinely-new item.
       const activeSeedRows = await getActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
+      // Seed the reconcile watermark from the SAME cross-account-stripped view the
+      // model is seeded from (run-input applyCodexHistoryStrip), NOT the raw rows.
+      // The strip DROPS foreign-account reasoning items, so `state.history` starts K
+      // shorter; seeding from the un-stripped count would slice K genuinely-new
+      // items off the turn-end reconcile and silently lose them (incl. the user's
+      // switch-turn message). On a same-account / non-codex turn the strip is a
+      // no-op, so this is byte-identical to the raw count.
       persistedHistoryCount = sanitizeHistoryItemsForModel(
-        activeSeedRows.map((row) => row.item),
+        applyCodexHistoryStrip(activeSeedRows, { currentCodexCredentialId: effectiveCodexCredentialId }),
       ).length;
       historyCountAtTurnStart = persistedHistoryCount;
       nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
