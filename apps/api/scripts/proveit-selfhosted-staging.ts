@@ -46,7 +46,7 @@ import { randomUUID } from "node:crypto";
 // ---- config (env-driven; the x5 orchestrator supplies the seeded ws/account) --
 function reqEnv(name: string): string {
   const v = process.env[name];
-  if (!v) throw new Error(`missing required env ${name}`);
+  if (!v) throw new Error(`missing required env ${name} — run via proveit-staging-x5.sh (it self-provisions the workspace + sources proveit.local.env)`);
   return v;
 }
 const NS = process.env.OGE_NS ?? "opengeni"; // staging namespace

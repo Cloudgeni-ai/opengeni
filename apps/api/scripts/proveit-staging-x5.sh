@@ -17,13 +17,18 @@
 #                OGE_TEARDOWN=1      reap the synthetic account after the runs
 set -euo pipefail
 
+# Operator config: source proveit.local.env (gitignored) if present, so a full run is a
+# single command. Copy proveit.local.env.example -> proveit.local.env and fill it in.
+HERE_EARLY="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$HERE_EARLY/proveit.local.env" ]; then set -a; . "$HERE_EARLY/proveit.local.env"; set +a; fi
+
 NS="${OGE_NS:-opengeni}"
-API="${OGE_API:?set OGE_API to the deployment base URL}"
-RELAY_HOST="${OGE_RELAY_HOST:?set OGE_RELAY_HOST to the relay hostname}"
+API="${OGE_API:?set OGE_API (copy apps/api/scripts/proveit.local.env.example -> proveit.local.env)}"
+RELAY_HOST="${OGE_RELAY_HOST:?set OGE_RELAY_HOST (see proveit.local.env.example)}"
 RUNS="${OGE_RUNS:-5}"
-VM_IP="${OGE_VM_IP:?set OGE_VM_IP to the external verification VM public IP}"
-VM_USER="${OGE_VM_USER:?set OGE_VM_USER to the SSH user on the verification VM}"
-VM_HOST="${OGE_VM_HOST:?set OGE_VM_HOST to the verification VM hostname}"
+VM_IP="${OGE_VM_IP:?set OGE_VM_IP (see proveit.local.env.example)}"
+VM_USER="${OGE_VM_USER:?set OGE_VM_USER (see proveit.local.env.example)}"
+VM_HOST="${OGE_VM_HOST:?set OGE_VM_HOST (see proveit.local.env.example)}"
 SSH_KEY="${OGE_SSH_KEY:-/tmp/staging-verify/vm_key}"
 DEPLOYED_SHA="${OGE_DEPLOYED_SHA:-unknown}"
 HERE="$(cd "$(dirname "$0")" && pwd)"

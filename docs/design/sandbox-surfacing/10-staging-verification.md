@@ -48,20 +48,22 @@ that closed the create-time machine-targeting gap by exposing `targetSandboxId` 
 `lease_cold` fix and the install-from-control-plane path (a baked, signed agent served from
 the API — no external download host).
 
-## Reproducing
+## Running it
 
-The harness lives at `apps/api/scripts/`:
+`proveit-staging-x5.sh` is the entry point. It **self-provisions** a throwaway account +
+workspace (you never supply a workspace id), runs the matrix N times, aggregates pass/fail,
+and — opt-in (`OGE_TEARDOWN=1`) — reaps the synthetic account. The single-run driver
+`proveit-selfhosted-staging.ts` is invoked by the orchestrator, which threads in every
+value; you don't run it directly.
 
-- `proveit-selfhosted-staging.ts` — the single-run matrix driver. Self-installs the agent on
-  a target VM over SSH, drives the MCP + REST + relay surfaces, and asserts each claim,
-  writing per-check evidence.
-- `proveit-staging-x5.sh` — orchestrates N consecutive runs against a seeded synthetic
-  account/workspace, aggregates pass/fail, and (opt-in) reaps the synthetic account.
+Configure your target **once**: copy `apps/api/scripts/proveit.local.env.example` →
+`proveit.local.env` (gitignored), fill in your values, then run `./proveit-staging-x5.sh`.
+The orchestrator sources that file automatically — no per-run flags needed.
 
-It is **deployment-agnostic**: point it at any managed-mode deployment via env
-(`OGE_API`, `OGE_RELAY_HOST`, `OGE_VM_IP`, `OGE_VM_USER`, `OGE_VM_HOST`, `OGE_NS`). The
-firewalled control-plane Postgres is reached through the API pod (the conventional
-firewalled-DB-via-pod pattern), using the role in `OPENGENI_DATABASE_URL`.
+This targets **an opengeni managed deployment you operate** — not a black-box client against
+an arbitrary URL. It reaches the firewalled control-plane Postgres *through the api pod*, so
+it needs `kubectl` access to that pod (it uses the in-pod `OPENGENI_DATABASE_URL`), and it
+mints a workspace-scoped token from the deployment's `OPENGENI_DELEGATION_SECRET`.
 
 ### RLS note (managed deployments)
 
