@@ -6,3 +6,4 @@ export * from "./normalize";
 export * from "./api-client";
 export * from "./request-context";
 export * from "./fetch";
+export * from "./mcp-sanitize";

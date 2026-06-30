@@ -75,7 +75,7 @@ import {
 } from "@openai/agents/sandbox";
 import { ModalCloudBucketMountStrategy } from "@openai/agents-extensions/sandbox/modal";
 import OpenAI from "openai";
-import { CODEX_APPS_MCP_SERVER_ID, CODEX_MODEL_ID_PREFIX, CODEX_ORIGINATOR, codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
+import { CODEX_APPS_MCP_SERVER_ID, CODEX_MODEL_ID_PREFIX, CODEX_ORIGINATOR, codexAppsSanitizingFetch, codexRequestStorage, codexSubscriptionFetch } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -904,6 +904,10 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       url,
       name: config.name ?? config.id,
       cacheToolsList: config.cacheToolsList,
+      // codex_apps returns connector tools with empty `outputSchema: {}` that the
+      // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+      // sanitize the response on the wire before validation.
+      ...(isCodexAppsMcpServer(config) ? { fetch: codexAppsSanitizingFetch(globalThis.fetch) } : {}),
       ...await mcpServerRequestInit(settings, config, options),
       ...(config.timeoutMs ? {
         timeout: config.timeoutMs,
