@@ -1,16 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { applyCodexHistoryStrip } from "../src/activities/run-input";
+import { applyCodexHistoryStrip, resumeRunStateForCodexAccount } from "../src/activities/run-input";
 
-// Cross-account encrypted-reasoning strip (multi-account codex, on top of P1):
-// a turn must NEVER replay reasoning.encrypted_content minted by a DIFFERENT
-// codex account than the one it runs on. applyCodexHistoryStrip is the read-path
-// selector — it drops the opaque blob from items whose producer != the turn's
-// current codex account, while preserving ALL message content.
+// Cross-account reasoning strip (multi-account codex, on top of P1, hardened by
+// the verify holes A/B/C): a turn must NEVER replay reasoning produced by a
+// DIFFERENT codex account than the one it runs on. The single rule across every
+// read path: DROP any reasoning item whose producing codex account differs from
+// the turn's current codex account (current = the resolved codex credential id on
+// a codex turn, or null on a non-codex turn). A FOREIGN reasoning item is dropped
+// WHOLE (id + blob), because the Responses backend validates the foreign rs_ id
+// and rejects it under store:false once the encrypted_content is gone. All
+// message/tool content is preserved.
 
-const reasoningRow = (producer: string | null, blob: string) => ({
+const reasoningRow = (producer: string | null, blob: string, id = `rs_${blob}`) => ({
   producerCodexCredentialId: producer,
   item: {
     type: "reasoning",
+    id,
     summary: [{ type: "summary_text", text: `cot-${blob}` }],
     providerData: { encrypted_content: blob },
   } as Record<string, unknown>,
@@ -25,11 +30,13 @@ const messageRow = (producer: string | null, text: string) => ({
   } as Record<string, unknown>,
 });
 
-const encOf = (item: Record<string, unknown>) =>
-  (item.providerData as { encrypted_content?: string } | undefined)?.encrypted_content;
+const toolCallRow = (producer: string | null, callId: string) => ({
+  producerCodexCredentialId: producer,
+  item: { type: "function_call", callId, name: "do_it", arguments: "{}" } as Record<string, unknown>,
+});
 
 describe("applyCodexHistoryStrip", () => {
-  test("cross-account: a turn on B strips A-minted encrypted reasoning, keeps B's", () => {
+  test("cross-account: a turn on B DROPS A-minted reasoning whole, keeps B's and all messages", () => {
     const rows = [
       reasoningRow("A", "blob-A"),
       messageRow("A", "A said hi"),
@@ -37,50 +44,145 @@ describe("applyCodexHistoryStrip", () => {
       messageRow("B", "B said hi"),
     ];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
-    // A's encrypted reasoning is gone…
-    expect(encOf(out[0])).toBeUndefined();
-    // …B's (the current account's) reasoning is preserved.
-    expect(encOf(out[2])).toBe("blob-B");
-    // Every message's content survives verbatim.
-    expect((out[1].content as any)[0].text).toBe("A said hi");
-    expect((out[3].content as any)[0].text).toBe("B said hi");
-    // The visible reasoning text (summary) survives even where the blob was dropped.
-    expect((out[0].summary as any)[0].text).toBe("cot-blob-A");
+    // A's reasoning item is gone ENTIRELY (id + blob) — not just blanked.
+    expect(out).toHaveLength(3);
+    expect(out.some((item) => item.type === "reasoning" && (item as any).id === "rs_blob-A")).toBe(false);
+    // B's (the current account's) reasoning survives untouched, blob intact.
+    const bReasoning = out.find((item) => item.type === "reasoning") as any;
+    expect(bReasoning.id).toBe("rs_blob-B");
+    expect(bReasoning.providerData.encrypted_content).toBe("blob-B");
+    // Every message's content survives verbatim, in order.
+    const messages = out.filter((item) => item.type === "message") as any[];
+    expect(messages.map((m) => m.content[0].text)).toEqual(["A said hi", "B said hi"]);
+  });
+
+  test("foreign reasoning item is fully dropped — its id leaves the history", () => {
+    const rows = [reasoningRow("A", "blob-A", "rs_foreign"), messageRow("A", "kept")];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
+    expect(out).toHaveLength(1);
+    expect(out[0].type).toBe("message");
+    // Prove the foreign rs_ id is nowhere in the output (the HOLE A vector).
+    expect(JSON.stringify(out)).not.toContain("rs_foreign");
   });
 
   test("same-account: nothing is stripped (continuity preserved, rows by reference)", () => {
     const rows = [reasoningRow("A", "blob-A"), messageRow("A", "hi")];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "A" });
-    expect(encOf(out[0])).toBe("blob-A");
+    expect(out).toHaveLength(2);
     // Untouched rows pass through by reference (byte-identical replay).
     expect(out[0]).toBe(rows[0].item);
     expect(out[1]).toBe(rows[1].item);
   });
 
-  test("non-codex turn (codexStrip null): every item is untouched, by reference", () => {
-    const rows = [reasoningRow("A", "blob-A"), reasoningRow(null, "azure-blob")];
-    const out = applyCodexHistoryStrip(rows, null);
-    expect(encOf(out[0])).toBe("blob-A");
-    expect(encOf(out[1])).toBe("azure-blob");
+  test("HOLE B — codex→non-codex: a non-codex turn (current=null) DROPS codex-produced reasoning", () => {
+    // Before the fix this no-op'd, replaying codex-minted encrypted reasoning into
+    // the Azure/built-in Responses call (which any responses provider 400s).
+    const rows = [reasoningRow("A", "codex-blob"), reasoningRow(null, "azure-blob"), messageRow("A", "answer")];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: null });
+    // The codex-produced reasoning (producer != null) is dropped…
+    expect(out.some((item) => (item as any).id === "rs_codex-blob")).toBe(false);
+    // …the non-codex reasoning (producer == null == current) survives by reference…
+    expect(out).toContain(rows[1].item);
+    // …and the message content is preserved.
+    expect(out.some((item) => item.type === "message")).toBe(true);
+  });
+
+  test("non-codex turn with NO codex history is a no-op (every item by reference)", () => {
+    const rows = [reasoningRow(null, "azure-blob"), messageRow(null, "hi")];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: null });
+    expect(out).toHaveLength(2);
     expect(out[0]).toBe(rows[0].item);
     expect(out[1]).toBe(rows[1].item);
   });
 
-  test("non-codex/legacy producer (null) is stripped on a codex turn — defensive", () => {
-    // Azure-produced or pre-column rows carry producer=null; replaying their
-    // (foreign / unknown-origin) blob to a codex account would 400.
-    const rows = [reasoningRow(null, "azure-or-legacy-blob"), messageRow(null, "content stays")];
-    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "A" });
-    expect(encOf(out[0])).toBeUndefined();
-    // Message content is never dropped.
-    expect((out[1].content as any)[0].text).toBe("content stays");
+  test("foreign tool call / message content is always preserved (only reasoning is dropped)", () => {
+    const rows = [
+      messageRow("A", "important user-visible answer"),
+      toolCallRow("A", "call_1"),
+      reasoningRow("A", "blob-A"),
+    ];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
+    // The foreign message + tool call survive by reference; only reasoning drops.
+    expect(out).toEqual([rows[0].item, rows[1].item]);
+    expect(out[0]).toBe(rows[0].item);
+    expect(out[1]).toBe(rows[1].item);
   });
 
-  test("message content is preserved across a switch even when its producer mismatches", () => {
-    const rows = [messageRow("A", "important user-visible answer")];
+  test("foreign compaction summary is kept; only its encrypted_content blob is stripped", () => {
+    const rows = [{
+      producerCodexCredentialId: "A",
+      item: { type: "compaction", encrypted_content: "comp-blob", summary: "the story so far" } as Record<string, unknown>,
+    }];
     const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
-    // A message has no encrypted reasoning to strip, so it passes through intact.
-    expect(out[0]).toBe(rows[0].item);
-    expect((out[0].content as any)[0].text).toBe("important user-visible answer");
+    expect(out).toHaveLength(1);
+    expect(out[0].type).toBe("compaction");
+    expect("encrypted_content" in out[0]).toBe(false);
+    // The summary (real conversation content) survives.
+    expect(out[0].summary).toBe("the story so far");
+  });
+});
+
+// HOLE C — the run-state REPLAY paths (approval resume + items-mode run-state
+// fallback). The blob carries no per-item producer tag, so the worker records the
+// FREEZING codex account on the run-state row and resumeRunStateForCodexAccount
+// neutralizes the blob's reasoning identity when the resuming turn's account
+// differs (else replays the blob byte-for-byte by reference).
+describe("resumeRunStateForCodexAccount", () => {
+  const blobWithReasoning = (accountTag: string) => JSON.stringify({
+    $schemaVersion: "1.12",
+    originalInput: [
+      { type: "reasoning", id: `rs_${accountTag}_orig`, content: [{ type: "input_text", text: "t" }], providerData: { encrypted_content: `enc-${accountTag}-orig` } },
+      { type: "message", role: "user", content: "hi" },
+    ],
+    modelResponses: [
+      { output: [{ type: "reasoning", id: `rs_${accountTag}_resp`, content: [], providerData: { encrypted_content: `enc-${accountTag}-resp` } }] },
+    ],
+    generatedItems: [
+      { type: "reasoning_item", rawItem: { type: "reasoning", id: `rs_${accountTag}_gen`, content: [], providerData: { encrypted_content: `enc-${accountTag}-gen` } } },
+      { type: "message_output_item", rawItem: { type: "message", role: "assistant", content: [{ type: "output_text", text: "answer" }] } },
+    ],
+  });
+
+  test("cross-account resume strips every reasoning item's id + encrypted_content from the blob", () => {
+    const out = resumeRunStateForCodexAccount(
+      { serializedRunState: blobWithReasoning("A"), frozenCodexCredentialId: "A" },
+      { currentCodexCredentialId: "B" },
+    );
+    // No encrypted reasoning blob and no foreign rs_ id survive anywhere…
+    expect(out).not.toContain("enc-A-orig");
+    expect(out).not.toContain("enc-A-resp");
+    expect(out).not.toContain("enc-A-gen");
+    expect(out).not.toContain("rs_A_orig");
+    expect(out).not.toContain("rs_A_resp");
+    expect(out).not.toContain("rs_A_gen");
+    // …while message content is preserved.
+    expect(out).toContain("answer");
+  });
+
+  test("codex→non-codex resume (current=null) also strips the codex-frozen reasoning", () => {
+    const out = resumeRunStateForCodexAccount(
+      { serializedRunState: blobWithReasoning("A"), frozenCodexCredentialId: "A" },
+      { currentCodexCredentialId: null },
+    );
+    expect(out).not.toContain("enc-A-gen");
+    expect(out).not.toContain("rs_A_gen");
+  });
+
+  test("same-account resume replays the blob byte-for-byte (same string reference)", () => {
+    const blob = blobWithReasoning("A");
+    const out = resumeRunStateForCodexAccount(
+      { serializedRunState: blob, frozenCodexCredentialId: "A" },
+      { currentCodexCredentialId: "A" },
+    );
+    expect(out).toBe(blob);
+  });
+
+  test("non-codex freeze + non-codex resume (null == null) is a byte-for-byte no-op", () => {
+    const blob = blobWithReasoning("A");
+    const out = resumeRunStateForCodexAccount(
+      { serializedRunState: blob, frozenCodexCredentialId: null },
+      { currentCodexCredentialId: null },
+    );
+    expect(out).toBe(blob);
   });
 });

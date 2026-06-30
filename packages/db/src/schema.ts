@@ -431,6 +431,22 @@ export const agentRunStates = pgTable("agent_run_states", {
   stateVersion: integer("state_version").notNull(),
   serializedRunState: text("serialized_run_state").notNull(),
   pendingApprovals: jsonb("pending_approvals").$type<unknown[]>().notNull().default([]),
+  // The Codex account that FROZE this run state: the turn's resolved codex
+  // credential id (pin > workspace-active), or NULL when frozen on the
+  // non-codex / Azure path (or before this column existed). The serialized
+  // RunState blob round-trips `reasoning.encrypted_content` minted by the
+  // ChatGPT/Codex backend — account/org-bound, so a foreign blob 400s — and the
+  // foreign reasoning ids the Responses backend validates; but the blob carries
+  // NO per-item producer tag (those live only on session_history_items). So we
+  // stamp the freezing account here: on a resume (approval decision, or the
+  // items-mode run-state fallback) whose codex account DIFFERS from this value,
+  // the replay path neutralizes every reasoning item's account-bound identity
+  // (encrypted_content + provider id) in the blob before it reaches the model.
+  // Deliberately NO FK: provenance must OUTLIVE the account's hard-disconnect (a
+  // stale-but-null tag still mismatches a live codex id, so the strip stays
+  // correct either way). NULL on both sides (non-codex freeze + non-codex
+  // resume) is a no-op, so single-account and non-codex sessions are unchanged.
+  frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

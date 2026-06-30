@@ -856,20 +856,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);
         }
       }
-      // Cross-account encrypted-reasoning strip: pass THIS turn's codex account
-      // so the history read path drops the account/org-bound
-      // reasoning.encrypted_content of any carried item produced by a DIFFERENT
-      // codex account (which the codex backend 400s). Non-null only for a
-      // codex-billed turn with a resolved account; null elsewhere makes the strip
-      // a no-op (non-codex turns, and the single-account / unchanged-account
-      // common path replay byte-for-byte).
+      // Cross-account reasoning strip: pass THIS turn's codex account so every
+      // history read path (items + run-state replay) drops reasoning produced by
+      // a DIFFERENT codex account. effectiveCodexCredentialId is the resolved
+      // codex credential on a codex turn (pin > workspace-active) and null on a
+      // non-codex turn OR a codex turn with no usable account — exactly the
+      // "current account" the single strip rule compares against (null is the
+      // built-in/Azure account, so a non-codex turn still drops codex-produced
+      // reasoning, and a no-codex-history session is a byte-for-byte no-op).
       const runInput = await turnInput(
         db,
         runtime,
         agent,
         trigger,
         runSettings,
-        isCodexTurn && effectiveCodexCredentialId ? { currentCodexCredentialId: effectiveCodexCredentialId } : null,
+        { currentCodexCredentialId: effectiveCodexCredentialId },
       );
       // Slice index = the length of the model-facing (active) history this turn
       // is seeded from; new items beyond it (the trigger message + this turn's
@@ -1025,6 +1026,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId,
           serializedRunState: stream.state.toString(),
           pendingApprovals: approvals,
+          // Record the account freezing this state so a resume on a DIFFERENT
+          // codex account strips its account-bound reasoning before replay (HOLE C).
+          frozenCodexCredentialId: effectiveCodexCredentialId,
         });
         await publish([
           { type: "session.requiresAction", payload: { approvals } },
@@ -1048,6 +1052,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           turnId,
           serializedRunState: stream.state.toString(),
           pendingApprovals: [],
+          frozenCodexCredentialId: effectiveCodexCredentialId,
         });
       }
       await publish([
@@ -1132,6 +1137,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 turnId: preemptTurnId,
                 serializedRunState: stream.state.toString(),
                 pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
+                frozenCodexCredentialId: effectiveCodexCredentialId,
               });
               resumeWithNotice = true;
             } catch {
@@ -1202,6 +1208,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             serializedRunState: maxTurns.serializedRunState,
             pendingApprovals: [],
+            frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
         await publish([
@@ -1247,6 +1254,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             serializedRunState,
             pendingApprovals: [],
+            frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
         const failurePayload = codexUsageLimitFailurePayload(usageLimit, error instanceof Error ? error.message : String(error));
@@ -1283,6 +1291,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             serializedRunState: error.serializedRunState,
             pendingApprovals: [],
+            frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
         await publish([
@@ -1332,6 +1341,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId,
             serializedRunState,
             pendingApprovals: [],
+            frozenCodexCredentialId: effectiveCodexCredentialId,
           });
         }
         await publish([

@@ -2928,6 +2928,11 @@ export async function getLatestRunState(db: Database, workspaceId: string, sessi
   id: string;
   serializedRunState: string;
   pendingApprovals: unknown[];
+  // The codex account that froze this state (pin > workspace-active), or null
+  // when frozen on the non-codex path / before the column existed. The replay
+  // path compares it to the resuming turn's codex account to decide whether the
+  // blob's account-bound reasoning must be neutralized before being replayed.
+  frozenCodexCredentialId: string | null;
 } | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.agentRunStates)
@@ -2938,6 +2943,7 @@ export async function getLatestRunState(db: Database, workspaceId: string, sessi
       id: row.id,
       serializedRunState: row.serializedRunState,
       pendingApprovals: row.pendingApprovals,
+      frozenCodexCredentialId: row.frozenCodexCredentialId ?? null,
     } : null;
   });
 }
@@ -5885,6 +5891,11 @@ export async function saveRunState(db: Database, input: {
   turnId?: string | null;
   serializedRunState: string;
   pendingApprovals: unknown[];
+  // The codex account freezing this state (the turn's resolved credential id),
+  // or null on a non-codex turn. Stamped so a resume on a DIFFERENT codex
+  // account can strip the blob's account-bound reasoning. Defaults null so
+  // every legacy caller (and the non-codex path) is byte-identical.
+  frozenCodexCredentialId?: string | null;
 }): Promise<void> {
   await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const [{ maxVersion } = { maxVersion: 0 }] = await scopedDb.select({
@@ -5898,6 +5909,7 @@ export async function saveRunState(db: Database, input: {
       stateVersion: Number(maxVersion) + 1,
       serializedRunState: input.serializedRunState,
       pendingApprovals: input.pendingApprovals,
+      frozenCodexCredentialId: input.frozenCodexCredentialId ?? null,
     });
   });
 }

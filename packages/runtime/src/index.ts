@@ -121,7 +121,7 @@ export * from "./sandbox";
 // rather than mis-editing. Runs at import time, before any turn binds a capability.
 setSelfhostedApplyDiff(applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string);
 
-export { sanitizeHistoryItemsForModel, stripReasoningEncryptedContent } from "./history-sanitizer";
+export { sanitizeHistoryItemsForModel, stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
 
 // The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
