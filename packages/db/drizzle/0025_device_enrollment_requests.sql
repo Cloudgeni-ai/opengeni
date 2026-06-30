@@ -93,7 +93,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'device_enrollment_requests' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'device_enrollment_requests' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "device_enrollment_requests";
   END IF;
@@ -125,7 +125,8 @@ CREATE OR REPLACE FUNCTION opengeni_private.resolve_device_enrollment_request(
 RETURNS TABLE (account_id uuid, workspace_id uuid)
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, opengeni_private
+-- EMBED-SAFE (see 0017): no pinned 'public' search_path -- inherit the caller's path so
+-- device_enrollment_requests resolves in public (standalone) OR the dedicated schema (embed).
 AS $$
   SELECT d.account_id, d.workspace_id
   FROM device_enrollment_requests d

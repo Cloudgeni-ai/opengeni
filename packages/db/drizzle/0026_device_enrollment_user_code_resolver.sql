@@ -27,7 +27,10 @@ CREATE OR REPLACE FUNCTION opengeni_private.resolve_pending_device_enrollment_by
 RETURNS TABLE (account_id uuid, workspace_id uuid)
 LANGUAGE sql
 SECURITY DEFINER
-SET search_path = public, opengeni_private
+-- EMBED-SAFE (see 0017/0025): no pinned 'public' search_path -- inherit the caller's path so
+-- device_enrollment_requests resolves in public (standalone) OR the dedicated schema (embed).
+-- A pinned `public` path also fails CREATE-time body validation (check_function_bodies) under
+-- the dedicated-schema migrate, since device_enrollment_requests lives in <schema>, not public.
 AS $$
   SELECT d.account_id, d.workspace_id
   FROM device_enrollment_requests d
