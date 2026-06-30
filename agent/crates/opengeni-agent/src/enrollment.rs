@@ -38,6 +38,11 @@ use thiserror::Error;
 /// constants beside the wire structs so a path rename is also a one-file change.
 const START_PATH: &str = "/v1/enrollments/device/start";
 const POLL_PATH: &str = "/v1/enrollments/device/poll";
+/// The non-interactive token-exchange endpoint (headless / fleet enroll). The
+/// caller-held enroll token IS the grant — there is no human approve step — so
+/// this exchanges it directly for the SAME credential shape the `poll` authorized
+/// branch returns (spec §A2.3).
+const EXCHANGE_PATH: &str = "/v1/enrollments/token/exchange";
 
 /// What the user offered at install time, sent in the start request so the
 /// consent page can present the right toggles.
@@ -249,6 +254,46 @@ async fn poll_until_resolved(
     }
 }
 
+/// Exchanges a non-interactive enroll token for credentials (headless / fleet
+/// path, spec §A2.3/§A2.4). The token IS the grant — there is no human approve —
+/// so this is a single `POST /v1/enrollments/token/exchange` carrying the SAME
+/// identity fields the device flow sends to `device/start` (`publicKey`, `os`,
+/// `arch`, `machineName?`, the display/screen-control offer), plus the opaque
+/// `token`. The workspace is NOT sent: it is encoded in (and authorized by) the
+/// token itself, so `req.workspace_id` is ignored on this path.
+///
+/// The response's `credentials` is the EXISTING [`wire::Credentials`] shape (the
+/// API's `EnrollmentCredentialsResponse`), reusing [`Credentials::into_proto`] —
+/// identical to the `poll` authorized branch.
+///
+/// # Errors
+///
+/// Returns an [`EnrollmentError`] on a transport failure, a non-success status
+/// (e.g. a 401 for an invalid/expired token), or a malformed response.
+pub async fn exchange_token(
+    req: &EnrollmentRequest,
+    identity: &InstallIdentity,
+    token: &str,
+) -> Result<EnrollmentCredentials, EnrollmentError> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("opengeni-agent/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let url = join_url(&req.api_base_url, EXCHANGE_PATH);
+    let body = wire::ExchangeRequest {
+        token: token.to_string(),
+        public_key: identity.public_key_base64(),
+        os: os_str(req.offer.os),
+        arch: arch_str(req.offer.arch),
+        machine_name: Some(req.machine_name.clone()),
+        can_offer_display: req.offer.offers_display,
+        requests_screen_control: req.offer.requests_screen_control,
+    };
+    let resp = client.post(&url).json(&body).send().await?;
+    let exchange = parse_json::<wire::ExchangeResponse>(resp, EXCHANGE_PATH).await?;
+    Ok(exchange.credentials.into_proto())
+}
+
 /// Joins a base URL and a path without doubling or dropping the separating slash.
 fn join_url(base: &str, path: &str) -> String {
     format!(
@@ -382,6 +427,44 @@ mod wire {
         pub state: PollState,
         #[serde(default)]
         pub credentials: Option<Credentials>,
+    }
+
+    /// Body of `POST /v1/enrollments/token/exchange` (spec §A2.3). Carries the
+    /// SAME identity fields as [`StartRequest`] — the agent's `publicKey`, `os`,
+    /// `arch`, optional `machineName`, and the display/screen-control offer —
+    /// plus the opaque enroll `token` that authorizes the exchange. The workspace
+    /// is NOT sent: it is encoded in the token. Like `StartRequest`, `exposure`
+    /// is omitted (the API defaults it to `whole-machine` server-side, the only
+    /// v1 exposure).
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct ExchangeRequest {
+        /// The opaque, short-TTL enroll token (the `oget_` token) — the grant.
+        pub token: String,
+        /// The agent's FULL ed25519 public key (base64) — the machine identity the
+        /// enrollment binds to (same as `StartRequest::public_key`).
+        pub public_key: String,
+        /// OS family (`linux`/`macos`/`windows`).
+        pub os: String,
+        /// CPU arch (`x86_64`/`aarch64`).
+        pub arch: String,
+        /// Human-friendly machine name (optional; serialized as `machineName`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub machine_name: Option<String>,
+        /// Whether this machine can offer a display (the API's `canOfferDisplay`).
+        pub can_offer_display: bool,
+        /// Whether the agent requests screen control (the API's
+        /// `requestsScreenControl`).
+        pub requests_screen_control: bool,
+    }
+
+    /// Response of `POST /v1/enrollments/token/exchange` (spec §A2.3). The
+    /// `credentials` object is the SAME [`Credentials`] shape (the API's
+    /// `EnrollmentCredentialsResponse`) the `poll` authorized branch returns, so
+    /// the exchange reuses [`Credentials::into_proto`].
+    #[derive(Debug, Deserialize)]
+    pub(super) struct ExchangeResponse {
+        pub credentials: Credentials,
     }
 
     /// The credentials sub-object on an authorized poll. Matches the API's
@@ -592,6 +675,74 @@ mod tests {
         assert!(value.get("installFingerprint").is_none());
         assert!(value.get("updateChannel").is_none());
         assert!(value.get("offersDisplay").is_none());
+    }
+
+    #[test]
+    fn exchange_request_serializes_camelcase_for_the_api() {
+        // The exchange body carries the same identity fields as start, plus the
+        // opaque enroll token, and the API reads camelCase keys (spec §A2.3).
+        let body = wire::ExchangeRequest {
+            token: "oget_secret".to_string(),
+            public_key: "pubkey-b64".to_string(),
+            os: "linux".to_string(),
+            arch: "x86_64".to_string(),
+            machine_name: Some("fleet-box".to_string()),
+            can_offer_display: false,
+            requests_screen_control: false,
+        };
+        let value: serde_json::Value = serde_json::to_value(&body).expect("serialize");
+        assert_eq!(value["token"], "oget_secret");
+        assert_eq!(value["publicKey"], "pubkey-b64");
+        assert_eq!(value["os"], "linux");
+        assert_eq!(value["arch"], "x86_64");
+        assert_eq!(value["machineName"], "fleet-box");
+        assert_eq!(value["canOfferDisplay"], false);
+        assert_eq!(value["requestsScreenControl"], false);
+        // The workspace is encoded in the token, never sent on the wire; and
+        // `exposure` is omitted (the API defaults it server-side).
+        assert!(value.get("workspaceId").is_none());
+        assert!(value.get("exposure").is_none());
+    }
+
+    #[test]
+    fn exchange_request_omits_machine_name_when_absent() {
+        let body = wire::ExchangeRequest {
+            token: "oget_secret".to_string(),
+            public_key: "pubkey-b64".to_string(),
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+            machine_name: None,
+            can_offer_display: false,
+            requests_screen_control: false,
+        };
+        let value: serde_json::Value = serde_json::to_value(&body).expect("serialize");
+        assert!(value.get("machineName").is_none());
+    }
+
+    #[test]
+    fn exchange_response_parses_credentials_into_proto() {
+        // The API returns `{ credentials: EnrollmentCredentialsResponse }` —
+        // identical to the poll authorized branch — so the exchange reuses the
+        // same wire::Credentials parsing + into_proto conversion (spec §A2.3).
+        let json = r#"{
+            "credentials": {
+                "agentId": "a", "workspaceId": "w", "bearer": "oge_bearer",
+                "subjectPrefix": "agent.w.a", "natsUrls": ["tls://x:4222"],
+                "relayUrl": "https://r", "relayToken": "ogr_x",
+                "natsAccountCreds": "oge_bearer", "updatePublicKey": "k",
+                "consentedWholeMachine": true, "consentedScreenControl": true
+            }
+        }"#;
+        let exchange: wire::ExchangeResponse = serde_json::from_str(json).expect("parse");
+        let proto = exchange.credentials.into_proto();
+        assert_eq!(proto.agent_id, "a");
+        assert_eq!(proto.workspace_id, "w");
+        assert_eq!(proto.nats_credentials, "oge_bearer");
+        assert_eq!(proto.nats_urls, vec!["tls://x:4222".to_string()]);
+        assert_eq!(proto.relay_token, "ogr_x");
+        assert_eq!(proto.update_pubkey, "k");
+        assert!(proto.consented_whole_machine);
+        assert!(proto.consented_screen_control);
     }
 
     #[test]

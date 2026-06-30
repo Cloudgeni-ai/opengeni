@@ -240,7 +240,7 @@ async fn enroll_command(
         let token = args.token.clone().ok_or_else(|| {
             string_err("--non-interactive requires --token (or $OPENGENI_ENROLL_TOKEN)".to_string())
         })?;
-        return enroll_with_token(&args, api_url, &token);
+        return enroll_with_token(&args, api_url, &token).await;
     }
 
     // The device flow binds to a workspace the API requires at start. The user
@@ -305,29 +305,55 @@ async fn enroll_command(
     Ok(stored)
 }
 
-/// Non-interactive token enrollment (the CI/automation path, dossier §23.1). The
-/// token→credentials EXCHANGE is the M5 enrollment endpoint; the install scripts
-/// pass `OPENGENI_ENROLL_TOKEN` and the CLI surface is stable, but the agent does
-/// not fabricate credentials — until the token-exchange endpoint is wired it
-/// returns a precise error so an unattended install fails loudly (never silently
-/// falling back to a device flow that would hang). The `_api_url`/`_token` are
-/// threaded so the reconciliation against the M5 endpoint is a one-function change.
-fn enroll_with_token(
+/// Non-interactive token enrollment (the CI/automation / fleet path, dossier
+/// §23.1, spec §A2.4). A workspace-scoped enroll token IS the grant — there is no
+/// human approve step — so this exchanges it directly at the control plane's
+/// `POST /v1/enrollments/token/exchange` for the SAME credentials the device flow
+/// receives, then persists them `0600` exactly like the device path
+/// ([`config::save_credentials`]). The workspace is encoded in the token, so none
+/// is required on the CLI here.
+async fn enroll_with_token(
     args: &EnrollArgs,
-    _api_url: &str,
-    _token: &str,
+    api_url: &str,
+    token: &str,
 ) -> anyhow_lite::ResultOf<StoredCredentials> {
-    warn!(
-        channel = %args.channel,
-        "non-interactive token enrollment requested; the token-exchange endpoint is the M5 enrollment seam"
-    );
-    Err(string_err(
-        "non-interactive token enrollment is not yet wired to the control-plane \
-         token-exchange endpoint (the M5 enrollment seam). Use the interactive \
-         `opengeni-agent enroll` device flow, or set OPENGENI_API_URL to a control \
-         plane exposing the token exchange."
-            .to_string(),
-    ))
+    let platform = NativePlatform::new();
+    let identity = platform.host_identity();
+    let machine_name = args
+        .machine_name
+        .clone()
+        .unwrap_or_else(supervisor::hostname_or_default);
+
+    // The exchange carries the same identity fields as the device flow; the
+    // workspace_id is unused on this path (it is encoded in the token) but the
+    // EnrollmentRequest shape requires it, so pass an empty placeholder.
+    let request = EnrollmentRequest {
+        api_base_url: api_url.to_string(),
+        workspace_id: String::new(),
+        machine_name,
+        offer: EnrollmentOffer {
+            // M6 has no live display surface yet (that is M8); offer false so the
+            // control plane does not record screen-control we cannot serve.
+            os: identity.os,
+            arch: identity.arch,
+            offers_display: false,
+            // The agent does not request screen control; the token's
+            // allow_screen_control (set at mint time) is the authoritative consent.
+            requests_screen_control: false,
+        },
+    };
+
+    info!(channel = %args.channel, "non-interactive token enrollment; exchanging token for credentials");
+    let install = InstallIdentity::generate();
+    let creds_proto = enrollment::exchange_token(&request, &install, token)
+        .await
+        .map_err(to_boxed)?;
+
+    let stored = StoredCredentials::from_proto(creds_proto, args.channel.clone());
+    let path = config::save_credentials(&stored).map_err(to_boxed)?;
+    info!(agent_id = %stored.agent_id, path = %path.display(), "enrollment complete; credentials persisted");
+    println!("Enrolled. This machine is now registered with OpenGeni.");
+    Ok(stored)
 }
 
 /// Spawns a task that triggers a clean shutdown on SIGINT or (unix) SIGTERM.

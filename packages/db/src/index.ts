@@ -4387,6 +4387,145 @@ export async function getPendingDeviceEnrollmentRequestByUserCode(db: Database, 
   });
 }
 
+// Look up the PENDING request for a user_code GLOBALLY (no workspace context) —
+// the click-Grant approve page lookup (design 11 §B.1). The user_code is globally
+// unique among LIVE (pending) rows, so — exactly like getDeviceEnrollmentRequestByDeviceCode
+// resolves a device_code — this resolves (account_id, workspace_id) via the 0026
+// SECURITY DEFINER resolver, then re-reads the FULL pending row under that
+// workspace's RLS scope. The ROUTE then re-checks the caller holds a grant in the
+// resolved workspace before returning anything. Returns null when no live pending
+// row matches (an unknown / terminal / expired code).
+export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(db: Database, userCode: string): Promise<DeviceEnrollmentRequestRecord | null> {
+  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+    select account_id, workspace_id from opengeni_private.resolve_pending_device_enrollment_by_user_code(${userCode})
+  `);
+  const ctx = resolved[0];
+  if (!ctx) {
+    return null;
+  }
+  return await withRlsContext(db, { accountId: ctx.account_id, workspaceId: ctx.workspace_id }, async (scopedDb) => {
+    const [row] = await scopedDb.select().from(schema.deviceEnrollmentRequests)
+      .where(and(
+        eq(schema.deviceEnrollmentRequests.userCode, userCode),
+        eq(schema.deviceEnrollmentRequests.status, "pending"),
+      ))
+      .limit(1);
+    return row ? mapDeviceEnrollmentRequest(row) : null;
+  });
+}
+
+// The SHARED finalize core (design 11 §A2.3 "reuse, don't fork"): "upsert the
+// enrollment (idempotent on (workspace_id, pubkey)) + ensure a kind='selfhosted'
+// sandbox row" — the exact end state BOTH the device approve and the headless
+// token exchange must produce. Takes an ALREADY-RLS-SCOPED `scopedDb` so the
+// caller controls the transaction boundary:
+//   * approveDeviceEnrollmentRequest calls it INSIDE its FOR-UPDATE txn (so the
+//     re-read fence + the request stamp stay in ONE txn — semantics unchanged), and
+//   * finalizeEnrollmentByToken calls it inside its OWN txn (no pending row exists
+//     for a stateless token).
+// Idempotent: a re-run for the same (workspace, pubkey) re-activates the existing
+// enrollment (M2 upsert) and REUSES its selfhosted sandbox — never a duplicate.
+async function finalizeEnrollmentInScope(scopedDb: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  os: EnrollmentOs;
+  arch: string;
+  sandboxName: string;
+  now: Date;
+}): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
+  // createEnrollment (idempotent upsert) — whole-machine is mandatory; display +
+  // screen-control come from the agent's offer + the consenting decision. We inline
+  // the insert here (rather than calling createEnrollment, which opens its OWN
+  // scope) so it shares the caller's transaction.
+  const [enrollmentRow] = await scopedDb.insert(schema.enrollments).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    pubkey: input.pubkey,
+    exposure: "whole-machine",
+    hasDisplay: input.hasDisplay,
+    allowScreenControl: input.allowScreenControl,
+    os: input.os,
+    arch: input.arch,
+    status: "active",
+  }).onConflictDoUpdate({
+    target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
+    set: {
+      exposure: "whole-machine",
+      hasDisplay: input.hasDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: input.os,
+      arch: input.arch,
+      status: "active",
+      revokedAt: null,
+      updatedAt: input.now,
+    },
+  }).returning();
+  if (!enrollmentRow) {
+    throw new Error("Failed to create enrollment during finalize");
+  }
+  const enrollment = mapEnrollment(enrollmentRow);
+
+  // Ensure a selfhosted sandbox for this enrollment. A re-finalize of the SAME
+  // machine reuses the existing sandbox rather than creating a duplicate.
+  const [existingSandbox] = await scopedDb.select().from(schema.sandboxes)
+    .where(and(
+      eq(schema.sandboxes.workspaceId, input.workspaceId),
+      eq(schema.sandboxes.enrollmentId, enrollment.id),
+    ))
+    .limit(1);
+  let sandbox: SandboxRecord;
+  if (existingSandbox) {
+    sandbox = mapSandbox(existingSandbox);
+  } else {
+    const [sandboxRow] = await scopedDb.insert(schema.sandboxes).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      kind: "selfhosted",
+      name: input.sandboxName,
+      enrollmentId: enrollment.id,
+    }).returning();
+    if (!sandboxRow) {
+      throw new Error("Failed to create sandbox during finalize");
+    }
+    sandbox = mapSandbox(sandboxRow);
+  }
+  return { enrollment, sandbox };
+}
+
+// FINALIZE a headless enroll-token exchange (design 11 §A2.3). Produces the SAME
+// end state as approveDeviceEnrollmentRequest — an enrollments row + a selfhosted
+// sandbox row — but WITHOUT a pending device-flow request (a stateless `oget_`
+// token carries the grant). Idempotent via the shared finalize core's upsert.
+export async function finalizeEnrollmentByToken(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  pubkey: string;
+  hasDisplay: boolean;
+  allowScreenControl: boolean;
+  os: EnrollmentOs;
+  arch: string;
+  sandboxName: string;
+  now?: Date;
+}): Promise<{ enrollment: EnrollmentRecord; sandbox: SandboxRecord }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    return await finalizeEnrollmentInScope(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      pubkey: input.pubkey,
+      hasDisplay: input.hasDisplay,
+      allowScreenControl: input.allowScreenControl,
+      os: input.os,
+      arch: input.arch,
+      sandboxName: input.sandboxName,
+      now,
+    });
+  });
+}
+
 // THE LOUD-CONSENT APPROVE (the user's POST /approve). In ONE transaction:
 //   1. re-read the pending row FOR UPDATE (fence against a double-approve / a
 //      concurrent expiry),
@@ -4435,64 +4574,23 @@ export async function approveDeviceEnrollmentRequest(db: Database, input: {
       return { approved: false, enrollment: null, sandbox: null };
     }
 
-    // createEnrollment (idempotent upsert) — whole-machine is mandatory; the
-    // display + screen-control consent come from the agent's offer + the user's
-    // decision. RLS already set on scopedDb's session; call the raw insert here so
-    // it shares the transaction (createEnrollment opens its own scope — re-entering
-    // withRlsContext is safe but we inline to keep ONE txn).
-    const [enrollmentRow] = await scopedDb.insert(schema.enrollments).values({
+    // The SHARED finalize core: upsert the enrollment (idempotent) + ensure a
+    // selfhosted sandbox. RLS is already set on scopedDb's session and this call
+    // runs INSIDE this FOR-UPDATE txn, so the re-read fence + the stamp below + the
+    // enrollment/sandbox writes all commit atomically (semantics unchanged from the
+    // pre-refactor inline block — acceptance #2 stays one machine). The headless
+    // token exchange (finalizeEnrollmentByToken) calls the SAME core.
+    const { enrollment, sandbox } = await finalizeEnrollmentInScope(scopedDb, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       pubkey: pending.pubkey,
-      exposure: "whole-machine",
       hasDisplay: pending.canOfferDisplay,
       allowScreenControl: input.allowScreenControl,
       os: pending.os as EnrollmentOs,
       arch: pending.arch,
-      status: "active",
-    }).onConflictDoUpdate({
-      target: [schema.enrollments.workspaceId, schema.enrollments.pubkey],
-      set: {
-        exposure: "whole-machine",
-        hasDisplay: pending.canOfferDisplay,
-        allowScreenControl: input.allowScreenControl,
-        os: pending.os as EnrollmentOs,
-        arch: pending.arch,
-        status: "active",
-        revokedAt: null,
-        updatedAt: now,
-      },
-    }).returning();
-    if (!enrollmentRow) {
-      throw new Error("Failed to create enrollment during device approve");
-    }
-    const enrollment = mapEnrollment(enrollmentRow);
-
-    // createSandbox (selfhosted, enrollment_id). A re-approve of the SAME machine
-    // reuses the existing selfhosted sandbox for this enrollment rather than
-    // creating a duplicate (idempotent re-enroll, acceptance #2 stays one machine).
-    const [existingSandbox] = await scopedDb.select().from(schema.sandboxes)
-      .where(and(
-        eq(schema.sandboxes.workspaceId, input.workspaceId),
-        eq(schema.sandboxes.enrollmentId, enrollment.id),
-      ))
-      .limit(1);
-    let sandbox: SandboxRecord;
-    if (existingSandbox) {
-      sandbox = mapSandbox(existingSandbox);
-    } else {
-      const [sandboxRow] = await scopedDb.insert(schema.sandboxes).values({
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        kind: "selfhosted",
-        name: input.sandboxName,
-        enrollmentId: enrollment.id,
-      }).returning();
-      if (!sandboxRow) {
-        throw new Error("Failed to create sandbox during device approve");
-      }
-      sandbox = mapSandbox(sandboxRow);
-    }
+      sandboxName: input.sandboxName,
+      now,
+    });
 
     // Stamp the request approved + the LOUD CONSENT record (who/when/what).
     await scopedDb.update(schema.deviceEnrollmentRequests)

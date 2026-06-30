@@ -32,6 +32,12 @@ import type {
   CreateSessionRequest,
   CreateWorkspaceEnvironmentRequest,
   CreateWorkspaceRequest,
+  // Enrollment UX (design 11): the click-Grant approve-page lookup/deny + headless
+  // enroll-token mint.
+  DeviceEnrollmentApproveResponse,
+  DeviceEnrollmentDenyResponse,
+  DeviceEnrollmentLookupResponse,
+  MintEnrollTokenResponse,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -224,6 +230,66 @@ export class OpenGeniClient {
       { ...(options.window !== undefined ? { window: options.window } : {}) },
     );
     return response.samples;
+  }
+
+  // --- Self-hosted enrollment UX (design 11) --------------------------------
+
+  /**
+   * Resolve a pending device-enrollment flow by its user_code for the click-Grant
+   * approve page (EnrollmentConsent). NO workspace in the path — the server
+   * resolves the workspace from the (globally-unique-among-pending) code, then
+   * authorizes the caller against it (enrollments:read). Rejects (404) when the
+   * code is unknown/expired OR the caller lacks the grant — the two are
+   * indistinguishable by design (no cross-workspace disclosure). Does not consume
+   * the request.
+   */
+  async lookupDeviceEnrollment(userCode: string): Promise<DeviceEnrollmentLookupResponse> {
+    return await this.requestJson<DeviceEnrollmentLookupResponse>("POST", "/v1/enrollments/device/lookup", { userCode });
+  }
+
+  /**
+   * Approve a pending device-enrollment flow (the LOUD consent step). `allowScreenControl`
+   * is the authoritative screen-control consent (whole-machine is mandatory/implicit).
+   * Lands an enrollment + a selfhosted sandbox and unblocks the agent's poll.
+   */
+  async approveDeviceEnrollment(
+    workspaceId: string,
+    request: { userCode: string; allowScreenControl?: boolean },
+  ): Promise<DeviceEnrollmentApproveResponse> {
+    return await this.requestJson<DeviceEnrollmentApproveResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/device/approve`,
+      { userCode: request.userCode, allowScreenControl: request.allowScreenControl ?? false },
+    );
+  }
+
+  /** Deny a pending device-enrollment flow (the explicit "no" at the approve page). */
+  async denyDeviceEnrollment(
+    workspaceId: string,
+    request: { userCode: string },
+  ): Promise<DeviceEnrollmentDenyResponse> {
+    return await this.requestJson<DeviceEnrollmentDenyResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/device/deny`,
+      { userCode: request.userCode },
+    );
+  }
+
+  /**
+   * Mint a short-TTL headless enroll token (the `oget_` token) for the fleet /
+   * non-interactive enroll path. The returned `token` is SECRET — surface it once
+   * with a copy-now warning; it cannot be re-read. `allowScreenControl` bakes the
+   * screen-control consent into the token.
+   */
+  async mintEnrollToken(
+    workspaceId: string,
+    request: { allowScreenControl?: boolean } = {},
+  ): Promise<MintEnrollTokenResponse> {
+    return await this.requestJson<MintEnrollTokenResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/token`,
+      { allowScreenControl: request.allowScreenControl ?? false },
+    );
   }
 
   /**

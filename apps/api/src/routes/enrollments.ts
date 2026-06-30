@@ -23,10 +23,18 @@
 import {
   DeviceEnrollmentApproveRequest,
   DeviceEnrollmentApproveResponse,
+  DeviceEnrollmentDenyRequest,
+  DeviceEnrollmentDenyResponse,
+  DeviceEnrollmentLookupRequest,
+  DeviceEnrollmentLookupResponse,
   DeviceEnrollmentPollRequest,
   DeviceEnrollmentStartRequest,
   EnrollmentSummary,
+  EnrollTokenExchangeRequest,
+  EnrollTokenExchangeResponse,
   ListEnrollmentsResponse,
+  MintEnrollTokenRequest,
+  MintEnrollTokenResponse,
   RevokeEnrollmentResponse,
   type EnrollmentArch,
   type EnrollmentOs,
@@ -42,8 +50,13 @@ import { requireAccessGrant } from "../access";
 import type { ApiRouteDeps } from "../dependencies";
 import {
   approveDeviceEnrollment,
+  denyDeviceEnrollment,
+  exchangeEnrollToken,
+  lookupDeviceEnrollment,
+  mintEnrollToken,
   pollDeviceEnrollment,
   startDeviceEnrollment,
+  toLookupResponse,
 } from "../sandbox/enrollment";
 
 export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -64,6 +77,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // acceptable for a bounded, access-key-gated, short-TTL flow.
   const startLimiter = new TokenBucket({ capacity: 10, refillPerSecond: 0.5 });
   const pollLimiter = new TokenBucket({ capacity: 60, refillPerSecond: 2 });
+  // The click-Grant approve-page lookup (authenticated, but capped against a
+  // user_code brute force — the lookup resolves a workspace from a short code).
+  const lookupLimiter = new TokenBucket({ capacity: 30, refillPerSecond: 1 });
+  // The headless token exchange (UNAUTHENTICATED — the token is the auth). Bounded
+  // against an enroll-token brute force; the `oget_` HMAC is the real boundary.
+  const exchangeLimiter = new TokenBucket({ capacity: 20, refillPerSecond: 0.5 });
 
   function rateLimit(c: Context, limiter: TokenBucket): void {
     const ip = clientIp(c);
@@ -114,6 +133,69 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(result, 200);
   });
 
+  // ── POST /enrollments/device/lookup (user-authed, NO workspace in path) ─────
+  // The click-Grant approve page reads machine details for a user_code WITHOUT
+  // consuming it. The user_code is globally unique among pending rows; we resolve
+  // its workspace, then assert the caller holds enrollments:read in THAT workspace.
+  // A failed grant OR no live pending row both → 404 (never reveal cross-workspace
+  // existence). Rate-limited against a user_code brute force.
+  app.post("/v1/enrollments/device/lookup", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, lookupLimiter);
+    const parsed = DeviceEnrollmentLookupRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid device-lookup request" });
+    }
+    const record = await lookupDeviceEnrollment({ db, settings }, { userCode: parsed.data.userCode });
+    if (!record) {
+      // Unknown / terminal / expired code → 404 (indistinguishable from an
+      // unauthorized one below, by design).
+      throw new HTTPException(404, { message: "no pending enrollment for that code" });
+    }
+    // Authorize the caller against the RESOLVED workspace. A missing grant throws
+    // 403/404 from requireAccessGrant; we normalize that to 404 so a caller cannot
+    // distinguish "code exists in a workspace I can't see" from "no such code".
+    try {
+      await requireAccessGrant(c, deps, record.workspaceId, "enrollments:read");
+    } catch {
+      throw new HTTPException(404, { message: "no pending enrollment for that code" });
+    }
+    return c.json(DeviceEnrollmentLookupResponse.parse(toLookupResponse(record)), 200);
+  });
+
+  // ── POST /enrollments/token/exchange (UNAUTHENTICATED — the token is the auth) ─
+  // The headless / fleet enroll path. The agent presents the same identity fields
+  // it sends to device/start plus the `oget_` enroll token. The token IS the grant
+  // (no human approve). On a valid token we perform the SAME finalize as approve and
+  // return the IDENTICAL EnrollmentCredentials shape the poll authorized branch
+  // returns. Rate-limited against an enroll-token brute force.
+  app.post("/v1/enrollments/token/exchange", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, exchangeLimiter);
+    const parsed = EnrollTokenExchangeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid enroll-token-exchange request" });
+    }
+    const body = parsed.data;
+    const result = await exchangeEnrollToken({ db, settings }, {
+      token: body.token,
+      publicKey: body.publicKey,
+      os: body.os as EnrollmentOs,
+      arch: body.arch as EnrollmentArch,
+      machineName: body.machineName ?? null,
+      canOfferDisplay: body.canOfferDisplay,
+    });
+    if (!result.ok) {
+      if (result.reason === "disabled") {
+        // The credential plane is off for this deployment (no signing secret).
+        throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
+      }
+      // An invalid / expired / wrong-typ token — the token is the auth, so 401.
+      throw new HTTPException(401, { message: "invalid or expired enroll token" });
+    }
+    return c.json(EnrollTokenExchangeResponse.parse({ credentials: result.credentials }), 201);
+  });
+
   // ── POST /workspaces/:workspaceId/enrollments/device/approve (user-authed) ──
   // The LOUD CONSENT step. requireAccessGrant BEFORE the Zod parse.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/approve", async (c) => {
@@ -144,6 +226,51 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       sandboxId: approved.sandboxId,
       allowScreenControl: approved.allowScreenControl,
     }), 201);
+  });
+
+  // ── POST /workspaces/:workspaceId/enrollments/device/deny (user-authed) ─────
+  // The explicit "no" at the approve page. Mirrors approve (enrollments:manage,
+  // requireAccessGrant BEFORE the parse). Idempotent: a non-pending code → denied:false.
+  app.post("/v1/workspaces/:workspaceId/enrollments/device/deny", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    assertSelfhostedEnabled();
+    const parsed = DeviceEnrollmentDenyRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid device-deny request" });
+    }
+    const result = await denyDeviceEnrollment({ db, settings }, {
+      accountId: grant.accountId,
+      workspaceId,
+      userCode: parsed.data.userCode,
+    });
+    return c.json(DeviceEnrollmentDenyResponse.parse({ denied: result.denied }), 200);
+  });
+
+  // ── POST /workspaces/:workspaceId/enrollments/token (user-authed) ───────────
+  // Mint a short-TTL headless enroll token. Mirrors approve (enrollments:manage,
+  // requireAccessGrant BEFORE the parse). The accountId comes from the grant. No
+  // signing secret → 503/disabled (mirror poll). The token is SECRET — never logged.
+  app.post("/v1/workspaces/:workspaceId/enrollments/token", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
+    assertSelfhostedEnabled();
+    // All fields are optional/defaulted, so an empty POST body is valid (default
+    // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
+    const parsed = MintEnrollTokenRequest.safeParse(await c.req.json().catch(() => ({})));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid mint-enroll-token request" });
+    }
+    const minted = await mintEnrollToken({ db, settings }, {
+      accountId: grant.accountId,
+      workspaceId,
+      allowScreenControl: parsed.data.allowScreenControl,
+    });
+    if (!minted) {
+      // The credential plane is off (no signing secret) — mirror poll's disabled path.
+      throw new HTTPException(503, { message: "enrollment credential plane is not configured" });
+    }
+    return c.json(MintEnrollTokenResponse.parse(minted), 201);
   });
 
   // ── GET /workspaces/:workspaceId/enrollments (user-authed) ──────────────────

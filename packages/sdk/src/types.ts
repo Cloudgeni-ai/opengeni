@@ -1601,3 +1601,102 @@ export type SwapActiveSandboxResponse = {
   activeEpoch: number;
   reason?: string;
 };
+
+// ── Self-hosted enrollment UX (design 11) ────────────────────────────────────
+// Hand-written mirrors of the `@opengeni/contracts` enrollment-UX request/response
+// shapes (the SDK keeps zero runtime deps). The click-Grant approve-page
+// lookup/deny + the headless enroll-token mint/exchange.
+
+/** Mirror of `@opengeni/contracts` EnrollmentOs. */
+export type EnrollmentOs = "linux" | "macos" | "windows";
+
+/** POST /v1/enrollments/device/lookup body. */
+export type DeviceEnrollmentLookupRequest = {
+  userCode: string;
+};
+
+/** The presentational machine details the consent screen renders. */
+export type DeviceEnrollmentLookupMachine = {
+  machineName: string | null;
+  os: EnrollmentOs;
+  arch: string;
+  canOfferDisplay: boolean;
+  requestsScreenControl: boolean;
+};
+
+/** POST /v1/enrollments/device/lookup response (no secrets, no device_code). */
+export type DeviceEnrollmentLookupResponse = {
+  workspaceId: string;
+  userCode: string;
+  machine: DeviceEnrollmentLookupMachine;
+  expiresAt: string;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/device/approve body. */
+export type DeviceEnrollmentApproveRequest = {
+  userCode: string;
+  allowScreenControl?: boolean;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/device/approve response. */
+export type DeviceEnrollmentApproveResponse = {
+  approved: boolean;
+  enrollmentId: string;
+  sandboxId: string;
+  allowScreenControl: boolean;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/device/deny body. */
+export type DeviceEnrollmentDenyRequest = {
+  userCode: string;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/device/deny response. */
+export type DeviceEnrollmentDenyResponse = {
+  denied: boolean;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/token body. */
+export type MintEnrollTokenRequest = {
+  allowScreenControl?: boolean;
+};
+
+/** POST /v1/workspaces/:ws/enrollments/token response. The `token` is SECRET. */
+export type MintEnrollTokenResponse = {
+  token: string;
+  expiresAt: string;
+  expiresInSeconds: number;
+};
+
+/** The credential payload the headless exchange returns (a subset of the agent's
+ *  EnrollmentCredentials — IDENTICAL to the device-flow poll authorized branch). */
+export type EnrollmentCredentials = {
+  agentId: string;
+  workspaceId: string;
+  bearer: string;
+  subjectPrefix: string;
+  natsUrls: string[];
+  relayUrl: string;
+  relayToken: string;
+  natsAccountCreds: string;
+  updatePublicKey: string;
+  consentedWholeMachine: boolean;
+  consentedScreenControl: boolean;
+};
+
+/** POST /v1/enrollments/token/exchange body (the headless / fleet enroll path). */
+export type EnrollTokenExchangeRequest = {
+  token: string;
+  publicKey: string;
+  os?: EnrollmentOs;
+  arch?: string;
+  machineName?: string;
+  exposure?: "whole-machine";
+  canOfferDisplay?: boolean;
+  requestsScreenControl?: boolean;
+};
+
+/** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
+export type EnrollTokenExchangeResponse = {
+  credentials: EnrollmentCredentials;
+};

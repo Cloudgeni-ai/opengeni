@@ -14,6 +14,7 @@
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
+//   /device?user_code=…                      → self-hosted enrollment approve page
 import {
   Navigate,
   RouterProvider,
@@ -26,6 +27,7 @@ import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 import { CapabilitiesRoute } from "@/routes/capabilities";
+import { DeviceRoute } from "@/routes/device";
 import { DocumentsRoute } from "@/routes/documents";
 import { EnvironmentsRoute } from "@/routes/environments";
 import { MachinesRoute } from "@/routes/machines";
@@ -59,6 +61,17 @@ const billingReturnRoute = createRoute({
     return checkout ? { checkout } : {};
   },
   component: BillingReturnRoute,
+});
+// Self-hosted device-flow APPROVE page (design 11 §B). Top-level (sibling of
+// /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
+// when it starts an enrollment; the page resolves the owning workspace from the
+// code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
+const deviceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "device",
+  validateSearch: (search: Record<string, unknown>): { user_code?: string } =>
+    typeof search.user_code === "string" && search.user_code ? { user_code: search.user_code } : {},
+  component: Device,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -153,6 +166,7 @@ const workspaceAccountRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   billingReturnRoute,
+  deviceRoute,
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -270,6 +284,11 @@ function AccountRedirect() {
       replace
     />
   );
+}
+
+function Device() {
+  const { user_code } = deviceRoute.useSearch();
+  return <DeviceRoute userCode={user_code} />;
 }
 
 function BillingReturnRoute() {

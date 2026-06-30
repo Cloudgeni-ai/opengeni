@@ -258,4 +258,19 @@ export type {
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
+  // Self-hosted enrollment UX (design 11): click-Grant approve-page lookup/deny +
+  // headless enroll-token mint/exchange.
+  EnrollmentOs,
+  DeviceEnrollmentLookupRequest,
+  DeviceEnrollmentLookupResponse,
+  DeviceEnrollmentLookupMachine,
+  DeviceEnrollmentApproveRequest,
+  DeviceEnrollmentApproveResponse,
+  DeviceEnrollmentDenyRequest,
+  DeviceEnrollmentDenyResponse,
+  MintEnrollTokenRequest,
+  MintEnrollTokenResponse,
+  EnrollmentCredentials,
+  EnrollTokenExchangeRequest,
+  EnrollTokenExchangeResponse,
 } from "./types";

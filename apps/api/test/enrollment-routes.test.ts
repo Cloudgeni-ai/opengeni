@@ -332,5 +332,245 @@ describe("M5 flag gate: selfhosted OFF -> routes 404", () => {
       body: JSON.stringify({ userCode: "AAAA-BBBB", allowScreenControl: false }),
     });
     expect(approveRes.status).toBe(404);
+
+    // The enrollment-UX additions are gated the same.
+    const lookupRes = await app.request("/v1/enrollments/device/lookup", {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ userCode: "AAAA-BBBB" }),
+    });
+    expect(lookupRes.status).toBe(404);
+    const denyRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ userCode: "AAAA-BBBB" }),
+    });
+    expect(denyRes.status).toBe(404);
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ allowScreenControl: false }),
+    });
+    expect(mintRes.status).toBe(404);
+    const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "oget_x.y", publicKey: "ed25519:OFF", os: "linux", arch: "x86_64" }),
+    });
+    expect(exchangeRes.status).toBe(404);
+  }, 60_000);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enrollment UX (design 11): the click-Grant approve-page lookup/deny + the
+// headless enroll-token mint/exchange, driven end-to-end through createApp + the
+// REAL db (same harness as the M5 device-flow tests above).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("design-11 B.1 lookup: resolve a pending flow by user_code (no workspace in path)", () => {
+  test("an authorized reader resolves the machine details WITHOUT consuming the request", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const readBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+
+    const start = await (await app.request("/v1/enrollments/device/start", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ publicKey: "ed25519:LOOKUP", os: "macos", arch: "aarch64", machineName: "mac-mini", canOfferDisplay: true, requestsScreenControl: true, workspaceId }),
+    })).json() as { deviceCode: string; userCode: string };
+
+    const lookupRes = await app.request("/v1/enrollments/device/lookup", {
+      method: "POST", headers: { "content-type": "application/json", authorization: readBearer },
+      body: JSON.stringify({ userCode: start.userCode }),
+    });
+    expect(lookupRes.status).toBe(200);
+    const lookup = await lookupRes.json() as {
+      workspaceId: string; userCode: string; expiresAt: string;
+      machine: { machineName: string | null; os: string; arch: string; canOfferDisplay: boolean; requestsScreenControl: boolean };
+    };
+    expect(lookup.workspaceId).toBe(workspaceId);
+    expect(lookup.userCode).toBe(start.userCode);
+    expect(lookup.machine.machineName).toBe("mac-mini");
+    expect(lookup.machine.os).toBe("macos");
+    expect(lookup.machine.arch).toBe("aarch64");
+    expect(lookup.machine.canOfferDisplay).toBe(true);
+    expect(lookup.machine.requestsScreenControl).toBe(true);
+
+    // The request was NOT consumed — a poll still says pending.
+    const poll = await (await app.request("/v1/enrollments/device/poll", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    })).json() as { state: string };
+    expect(poll.state).toBe("pending");
+  }, 90_000);
+
+  test("an unknown code → 404; an unauthenticated lookup of a REAL code → 404 (no disclosure)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const readBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+    const unknown = await app.request("/v1/enrollments/device/lookup", {
+      method: "POST", headers: { "content-type": "application/json", authorization: readBearer },
+      body: JSON.stringify({ userCode: "ZZZZ-ZZZZ" }),
+    });
+    expect(unknown.status).toBe(404);
+    // An unauthenticated caller looking up a REAL pending code: the route resolves
+    // the code, then requireAccessGrant rejects the anonymous caller — normalized
+    // to a flat 404 (never reveals the code exists). (An UNKNOWN code is also 404
+    // before auth is ever reached, so the two are indistinguishable — the intended
+    // no-disclosure property.)
+    const start = await (await app.request("/v1/enrollments/device/start", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ publicKey: "ed25519:NOAUTHLOOKUP", workspaceId }),
+    })).json() as { userCode: string };
+    const noAuth = await app.request("/v1/enrollments/device/lookup", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ userCode: start.userCode }),
+    });
+    expect(noAuth.status).toBe(404);
+  }, 90_000);
+
+  test("a workspace-B reader gets 404 for a code that lives in workspace A (no cross-workspace disclosure)", async () => {
+    if (!available) return;
+    const a = await freshWorkspace();
+    const b = await freshWorkspace();
+    const app = appFor();
+    const start = await (await app.request("/v1/enrollments/device/start", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ publicKey: "ed25519:XWSLOOKUP", workspaceId: a.workspaceId }),
+    })).json() as { userCode: string };
+    // The code resolves to workspace A; a user holding a grant only in B must get a
+    // flat 404 (indistinguishable from "no such code") — never a 403 that confirms
+    // the code exists somewhere.
+    const res = await app.request("/v1/enrollments/device/lookup", {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(b.accountId, b.workspaceId, ["enrollments:read"])}` },
+      body: JSON.stringify({ userCode: start.userCode }),
+    });
+    expect(res.status).toBe(404);
+  }, 90_000);
+});
+
+describe("design-11 B.2 deny: mark a pending flow denied", () => {
+  test("deny flips the pending row → a subsequent poll is denied; an unknown code → denied:false", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage"])}`;
+    const start = await (await app.request("/v1/enrollments/device/start", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ publicKey: "ed25519:DENY", workspaceId }),
+    })).json() as { deviceCode: string; userCode: string };
+
+    const denyRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ userCode: start.userCode }),
+    });
+    expect(denyRes.status).toBe(200);
+    expect((await denyRes.json() as { denied: boolean }).denied).toBe(true);
+
+    const poll = await (await app.request("/v1/enrollments/device/poll", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceCode: start.deviceCode }),
+    })).json() as { state: string };
+    expect(poll.state).toBe("denied");
+
+    // An unknown / already-terminal code is a no-op.
+    const denyAgain = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ userCode: start.userCode }),
+    });
+    expect((await denyAgain.json() as { denied: boolean }).denied).toBe(false);
+  }, 90_000);
+
+  test("deny without enrollments:manage is rejected (403)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const res = await app.request(`/v1/workspaces/${workspaceId}/enrollments/device/deny`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}` },
+      body: JSON.stringify({ userCode: "AAAA-BBBB" }),
+    });
+    expect(res.status).toBe(403);
+  }, 60_000);
+});
+
+describe("design-11 A2 headless: mint enroll token -> exchange -> identical credentials", () => {
+  test("mint + exchange lands an enrollment + sandbox and returns the SAME credential shape as poll", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:manage", "enrollments:read"])}`;
+
+    // 1. MINT (user-authenticated).
+    const mintRes = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: manageBearer },
+      body: JSON.stringify({ allowScreenControl: true }),
+    });
+    expect(mintRes.status).toBe(201);
+    const mint = await mintRes.json() as { token: string; expiresAt: string; expiresInSeconds: number };
+    expect(mint.token.startsWith("oget_")).toBe(true);
+    expect(mint.expiresInSeconds).toBe(3600);
+
+    // 2. EXCHANGE (UNAUTHENTICATED — the token is the auth).
+    const exchangeRes = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: mint.token, publicKey: "ed25519:HEADLESS", os: "linux", arch: "x86_64",
+        machineName: "fleet-node-1", canOfferDisplay: true, requestsScreenControl: false,
+      }),
+    });
+    expect(exchangeRes.status).toBe(201);
+    const exchange = await exchangeRes.json() as {
+      credentials: {
+        agentId: string; workspaceId: string; bearer: string; subjectPrefix: string;
+        natsUrls: string[]; relayUrl: string; natsAccountCreds: string; updatePublicKey: string;
+        consentedWholeMachine: boolean; consentedScreenControl: boolean;
+      };
+    };
+    const creds = exchange.credentials;
+    expect(creds.workspaceId).toBe(workspaceId);
+    expect(creds.agentId).toBeTruthy();
+    expect(creds.subjectPrefix).toBe(`agent.${workspaceId}.${creds.agentId}`);
+    expect(creds.natsUrls).toEqual(["nats://control.example:4222"]);
+    expect(creds.relayUrl).toBe("wss://relay.example/stream");
+    // Identical credential shape to the poll authorized branch: natsAccountCreds
+    // echoes the bearer, whole-machine consented, screen-control per the TOKEN.
+    expect(creds.natsAccountCreds).toBe(creds.bearer);
+    expect(creds.consentedWholeMachine).toBe(true);
+    expect(creds.consentedScreenControl).toBe(true);
+    // The signed bearer verifies + binds the identity.
+    const verified = await verifyEnrollmentBearer(SIGNING_SECRET, creds.bearer);
+    expect(verified).not.toBeNull();
+    expect(verified!.workspaceId).toBe(workspaceId);
+    expect(verified!.agentId).toBe(creds.agentId);
+
+    // The exchange landed a real machine (the SAME finalize as approve).
+    const list = await (await app.request(`/v1/workspaces/${workspaceId}/enrollments`, { headers: { authorization: manageBearer } })).json() as { enrollments: { id: string; status: string; allowScreenControl: boolean }[] };
+    expect(list.enrollments.length).toBe(1);
+    expect(list.enrollments[0]!.id).toBe(creds.agentId);
+    expect(list.enrollments[0]!.status).toBe("active");
+    expect(list.enrollments[0]!.allowScreenControl).toBe(true);
+  }, 120_000);
+
+  test("exchange with an invalid token → 401; an oge_ bearer is NOT accepted as an enroll token", async () => {
+    if (!available) return;
+    const app = appFor();
+    const bad = await app.request("/v1/enrollments/token/exchange", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "oget_garbage.sig", publicKey: "ed25519:BAD", os: "linux", arch: "x86_64" }),
+    });
+    expect(bad.status).toBe(401);
+  }, 60_000);
+
+  test("mint without enrollments:manage is rejected (403); unauthenticated mint → 401", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const app = appFor();
+    const noPerm = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}` },
+      body: JSON.stringify({ allowScreenControl: false }),
+    });
+    expect(noPerm.status).toBe(403);
+    const noAuth = await app.request(`/v1/workspaces/${workspaceId}/enrollments/token`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ allowScreenControl: false }),
+    });
+    expect(noAuth.status).toBe(401);
   }, 60_000);
 });

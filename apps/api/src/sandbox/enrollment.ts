@@ -37,18 +37,26 @@ import {
 import {
   DeviceEnrollmentState,
   signEnrollmentBearer,
+  signEnrollToken,
   signRelayToken,
+  verifyEnrollToken,
+  type DeviceEnrollmentLookupResponse,
   type DeviceEnrollmentPollResponse,
   type DeviceEnrollmentStartResponse,
   type EnrollmentCredentialsResponse,
+  type EnrollTokenExchangeResponse,
+  type MintEnrollTokenResponse,
 } from "@opengeni/contracts";
 import {
   approveDeviceEnrollmentRequest,
   consumeDeviceEnrollmentRequest,
   createDeviceEnrollmentRequest,
+  denyDeviceEnrollmentRequest,
+  finalizeEnrollmentByToken,
   getDeviceEnrollmentRequestByDeviceCode,
   getEnrollment,
   getPendingDeviceEnrollmentRequestByUserCode,
+  getPendingDeviceEnrollmentRequestByUserCodeGlobal,
   type Database,
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
@@ -78,6 +86,10 @@ export const ENROLLMENT_BEARER_TTL_SECONDS = 30 * 24 * 3600;
 // scope) on every StreamOpen; a revoked enrollment's machine goes offline at the
 // control plane regardless, so a long-lived relay token cannot reach a dead agent.
 export const RELAY_TOKEN_TTL_SECONDS = 30 * 24 * 3600;
+// The headless enroll token (`oget_`; design 11 §A2.1) TTL. 1h: long enough to
+// script a fleet rollout, short enough to bound exposure of a workspace-scoped
+// secret that IS the grant (no human approve). Re-mintable by an authorized user.
+export const ENROLL_TOKEN_TTL_SECONDS = 3600;
 
 export type EnrollmentServices = {
   db: Database;
@@ -210,6 +222,147 @@ export async function approveDeviceEnrollment(
     sandboxId: result.sandbox.id,
     allowScreenControl: result.enrollment.allowScreenControl,
   };
+}
+
+/** LOOK UP a pending flow by user_code GLOBALLY (the click-Grant approve page;
+ *  design 11 §B.1). Returns the resolved pending record (carrying its workspaceId)
+ *  or null when no live pending row matches the code. The ROUTE authorizes the
+ *  caller against the resolved workspaceId (enrollments:read) BEFORE exposing
+ *  anything — a failed grant OR a null here both surface as 404 so cross-workspace
+ *  existence is never revealed. This does NOT consume the request. */
+export async function lookupDeviceEnrollment(
+  services: EnrollmentServices,
+  input: { userCode: string },
+): Promise<DeviceEnrollmentRequestRecord | null> {
+  const { db } = services;
+  return await getPendingDeviceEnrollmentRequestByUserCodeGlobal(db, input.userCode);
+}
+
+/** Project a resolved pending record to the presentational lookup response (no
+ *  secrets, no device_code) the approve screen (EnrollmentConsent) renders. */
+export function toLookupResponse(record: DeviceEnrollmentRequestRecord): DeviceEnrollmentLookupResponse {
+  return {
+    workspaceId: record.workspaceId,
+    userCode: record.userCode,
+    machine: {
+      machineName: record.machineName,
+      os: record.os,
+      arch: record.arch,
+      canOfferDisplay: record.canOfferDisplay,
+      requestsScreenControl: record.requestsScreenControl,
+    },
+    expiresAt: record.expiresAt,
+  };
+}
+
+/** DENY a flow by user_code (the explicit "no" at the approve page; design 11
+ *  §B.2). Workspace-scoped (the route asserts the grant). Returns whether a pending
+ *  row was flipped to denied (false for an unknown / already-terminal code). */
+export async function denyDeviceEnrollment(
+  services: EnrollmentServices,
+  input: { accountId: string; workspaceId: string; userCode: string },
+): Promise<{ denied: boolean }> {
+  const { db } = services;
+  const pending = await getPendingDeviceEnrollmentRequestByUserCode(db, input.workspaceId, input.userCode);
+  if (!pending) {
+    return { denied: false };
+  }
+  return await denyDeviceEnrollmentRequest(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    requestId: pending.id,
+  });
+}
+
+/** MINT a headless enroll token (design 11 §A2.2). Signs an `oget_` token bound to
+ *  the workspace + account + the screen-control consent, with a 1h TTL. Returns
+ *  null when the credential plane is disabled (no signing secret) so the route can
+ *  mirror poll's "disabled" handling. The token value is NEVER logged. */
+export async function mintEnrollToken(
+  services: EnrollmentServices,
+  input: { accountId: string; workspaceId: string; allowScreenControl: boolean },
+): Promise<MintEnrollTokenResponse | null> {
+  const { settings } = services;
+  const secret = resolveEnrollmentSigningSecret(settings);
+  if (!secret) {
+    return null;
+  }
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const exp = nowSeconds + ENROLL_TOKEN_TTL_SECONDS;
+  const token = await signEnrollToken(secret, {
+    typ: "enroll",
+    workspaceId: input.workspaceId,
+    accountId: input.accountId,
+    allowScreenControl: input.allowScreenControl,
+    iat: nowSeconds,
+    exp,
+  });
+  return {
+    token,
+    expiresAt: new Date(exp * 1000).toISOString(),
+    expiresInSeconds: ENROLL_TOKEN_TTL_SECONDS,
+  };
+}
+
+/** Distinguishes the two exchange failure modes for the route. */
+export type ExchangeEnrollTokenResult =
+  | { ok: true; credentials: EnrollTokenExchangeResponse["credentials"] }
+  | { ok: false; reason: "disabled" }
+  | { ok: false; reason: "invalid" };
+
+/** EXCHANGE a headless enroll token (design 11 §A2.3) — the UNAUTHENTICATED path
+ *  where the token IS the auth. Verifies the `oget_` token, then performs the SAME
+ *  finalize as approve (upsert enrollment + ensure selfhosted sandbox,
+ *  consentedWholeMachine=true, consentedScreenControl=token.allowScreenControl) and
+ *  builds the IDENTICAL EnrollmentCredentials the poll authorized branch returns.
+ *  Returns reason "disabled" when no signing secret (mirror poll), "invalid" when
+ *  the token fails verification (the route 401s). */
+export async function exchangeEnrollToken(
+  services: EnrollmentServices,
+  input: {
+    token: string;
+    publicKey: string;
+    os: EnrollmentOs;
+    arch: string;
+    machineName?: string | null;
+    canOfferDisplay: boolean;
+  },
+): Promise<ExchangeEnrollTokenResult> {
+  const { db, settings } = services;
+  const secret = resolveEnrollmentSigningSecret(settings);
+  if (!secret) {
+    // The credential plane is off for this deployment — surface disabled, never a
+    // 500, never an unsigned credential (mirror poll's disabled handling).
+    return { ok: false, reason: "disabled" };
+  }
+  const claims = await verifyEnrollToken(secret, input.token);
+  if (!claims) {
+    // Bad prefix / signature / typ / expired — the token is not a valid grant.
+    return { ok: false, reason: "invalid" };
+  }
+
+  // The SAME finalize as approve, but driven by the token's claims (no pending row).
+  const sandboxName = (input.machineName?.trim() || `${input.os} machine`).slice(0, 256);
+  const { enrollment } = await finalizeEnrollmentByToken(db, {
+    accountId: claims.accountId,
+    workspaceId: claims.workspaceId,
+    pubkey: input.publicKey,
+    hasDisplay: input.canOfferDisplay,
+    // The token's allowScreenControl is the AUTHORITATIVE consent (NOT the agent's
+    // requestsScreenControl) — it was baked in at mint by the authorizing user.
+    allowScreenControl: claims.allowScreenControl,
+    os: input.os,
+    arch: input.arch,
+    sandboxName,
+  });
+
+  const credentials = await buildEnrollmentCredentials(services, {
+    secret,
+    workspaceId: claims.workspaceId,
+    agentId: enrollment.id,
+    consentedScreenControl: enrollment.allowScreenControl,
+  });
+  return { ok: true, credentials };
 }
 
 /**

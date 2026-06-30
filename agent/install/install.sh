@@ -30,12 +30,27 @@
 #                              URL is the documented fallback (see below).
 #   OPENGENI_INSTALL_DIR       Install dir. Default: ~/.local/bin (no sudo).
 #   OPENGENI_SYSTEM=1          Install to /usr/local/bin (needs sudo/root).
-#   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation): the
-#                              script runs `enroll --non-interactive` itself.
+#   OPENGENI_ENROLL_TOKEN      Non-interactive enroll token (CI/automation/fleet):
+#                              the script runs `enroll --token <tok>
+#                              --non-interactive` itself — the token IS the grant,
+#                              so there is NO device-approve step. The workspace is
+#                              encoded in the token; OPENGENI_WORKSPACE_ID is not
+#                              needed on this path.
 #   OPENGENI_NO_RUN=1          Do not start a foreground run; just print the
 #                              enroll+run command (the default when stdin is not
 #                              a TTY, e.g. piped from curl).
-#   OPENGENI_API_URL           Control-plane API base URL for enrollment.
+#   OPENGENI_API_URL           Control-plane API base URL for enrollment. Carried
+#                              into BOTH the non-interactive enroll (forwarded as
+#                              --api-url below) and the interactive `enroll`/`run`
+#                              (the agent reads $OPENGENI_API_URL via clap). Set it
+#                              to target a specific deployment instead of the
+#                              api.opengeni.ai default.
+#   OPENGENI_WORKSPACE_ID      The workspace (UUID) an INTERACTIVE device-flow
+#                              enroll binds to (the user who approves must hold a
+#                              grant in it). Honored by the agent's `enroll`/`run`
+#                              via clap ($OPENGENI_WORKSPACE_ID); the one-liner
+#                              from the Machines page sets it so no UUID is typed.
+#                              Not used on the OPENGENI_ENROLL_TOKEN path.
 #
 # Immutable-per-version + GH-Releases fallback. The edge serves the latest
 # release at $BASE/install.sh and immutable copies at $BASE/v/<ver>/install.sh.
@@ -312,7 +327,16 @@ finish() {
   echo ""
   if [ -n "${OPENGENI_ENROLL_TOKEN:-}" ]; then
     log "non-interactive enroll (OPENGENI_ENROLL_TOKEN set)"
-    "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+    # Forward OPENGENI_API_URL explicitly so the exchange targets THIS deployment
+    # (not the api.opengeni.ai default) even when the agent's env-inherit path is
+    # ever bypassed. The agent also reads $OPENGENI_API_URL via clap, so the env
+    # alone would suffice — this is belt-and-suspenders. The workspace is encoded
+    # in the token, so no --workspace-id is needed on this path.
+    if [ -n "${OPENGENI_API_URL:-}" ]; then
+      "$_bin" --api-url "$OPENGENI_API_URL" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+    else
+      "$_bin" enroll --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+    fi
     log "enrolled. Start the agent (foreground) with:  $_bin run"
     return 0
   fi
@@ -321,6 +345,9 @@ finish() {
   printf '%s\n' ""
   printf '%s\n' "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
   printf '%s\n' "  1. Enroll this machine:   $_bin enroll"
+  if [ -n "${OPENGENI_WORKSPACE_ID:-}" ] || [ -n "${OPENGENI_API_URL:-}" ]; then
+    printf '%s\n' "       (OPENGENI_WORKSPACE_ID / OPENGENI_API_URL in this environment are honored automatically.)"
+  fi
   printf '%s\n' "  2. Run it (online while this runs, offline when you stop it):"
   printf '%s\n' "       $_bin run"
   printf '%s\n' ""

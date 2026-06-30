@@ -41,13 +41,21 @@ const AGENT_ROUTES = [
 ];
 const USER_ROUTES = [
   { method: "post", path: "/v1/workspaces/:workspaceId/enrollments/device/approve" },
+  { method: "post", path: "/v1/workspaces/:workspaceId/enrollments/device/deny" },
+  { method: "post", path: "/v1/workspaces/:workspaceId/enrollments/token" },
   { method: "get", path: "/v1/workspaces/:workspaceId/enrollments" },
   { method: "post", path: "/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke" },
 ];
+// The enrollment-UX additions whose auth shape differs from the standard user
+// routes: lookup is authenticated but has NO workspace in the path (it authorizes
+// AGAINST the workspace it resolves from the code, so requireAccessGrant runs
+// AFTER the parse); exchange is UNAUTHENTICATED (the `oget_` token is the auth).
+const LOOKUP_ROUTE = { method: "post", path: "/v1/enrollments/device/lookup" };
+const EXCHANGE_ROUTE = { method: "post", path: "/v1/enrollments/token/exchange" };
 
 describe("M5 enrollment route discipline", () => {
   test("every handler asserts the selfhosted flag", () => {
-    for (const route of [...AGENT_ROUTES, ...USER_ROUTES]) {
+    for (const route of [...AGENT_ROUTES, ...USER_ROUTES, LOOKUP_ROUTE, EXCHANGE_ROUTE]) {
       const body = handlerBody(routesSrc, route.method, route.path);
       expect(body, `${route.method} ${route.path} must gate on the flag`).toContain("assertSelfhostedEnabled");
     }
@@ -97,5 +105,35 @@ describe("M5 enrollment route discipline", () => {
       expect(body).toContain(".safeParse(");
       expect(body).toContain("HTTPException(400");
     }
+  });
+
+  test("deny + token use enrollments:manage", () => {
+    const deny = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/device/deny");
+    expect(deny).toContain('"enrollments:manage"');
+    const token = handlerBody(routesSrc, "post", "/v1/workspaces/:workspaceId/enrollments/token");
+    expect(token).toContain('"enrollments:manage"');
+  });
+
+  test("lookup is rate-limited + authorizes against the resolved workspace (enrollments:read)", () => {
+    const body = handlerBody(routesSrc, LOOKUP_ROUTE.method, LOOKUP_ROUTE.path);
+    expect(body).toContain("rateLimit(");
+    expect(body).toContain("assertSelfhostedEnabled");
+    // It DOES authorize — but against the workspace it resolves from the code, so
+    // (unlike the standard user routes) the grant check follows the lookup.
+    expect(body).toContain("requireAccessGrant(");
+    expect(body).toContain('"enrollments:read"');
+    expect(body).toContain(".safeParse(");
+    expect(body).toContain("HTTPException(400");
+  });
+
+  test("exchange is UNAUTHENTICATED (the token is the auth) + rate-limited", () => {
+    const body = handlerBody(routesSrc, EXCHANGE_ROUTE.method, EXCHANGE_ROUTE.path);
+    expect(body).toContain("rateLimit(");
+    expect(body).toContain("assertSelfhostedEnabled");
+    // No user authentication — the `oget_` token verification inside the service is
+    // the auth. The CALL form must be absent.
+    expect(body.includes("requireAccessGrant("), "exchange must NOT user-authenticate").toBe(false);
+    expect(body).toContain(".safeParse(");
+    expect(body).toContain("HTTPException(400");
   });
 });

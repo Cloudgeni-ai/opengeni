@@ -661,6 +661,76 @@ export async function verifyEnrollmentBearer(secret: string, token: string, nowS
   return payload.data;
 }
 
+// --- Non-interactive enroll token (self-hosted enrollment UX §A2.1) ----------
+//
+// The SHORT-TTL, secret, workspace-scoped token the headless/fleet enroll path
+// presents to /v1/enrollments/token/exchange. The token IS the grant — there is
+// no human approve step — so it is stateless-signed (no DB row): the holder of an
+// unexpired token can enroll ONE machine identity into ONE workspace.
+//
+// It REUSES the SAME HMAC envelope as signEnrollmentBearer (base64Url payload +
+// hmacSha256Base64Url) with a DISTINCT `oget_` prefix and a `typ: "enroll"` claim.
+// DOMAIN SEPARATION: even though it shares the signing secret with the `oge_`
+// bearer, the prefix + typ claim make an enroll token unusable as an `oge_`
+// bearer (verifyEnrollmentBearer's `oge_` prefix check rejects it) and vice-versa
+// (verifyEnrollToken's `oget_` prefix + typ check rejects an `oge_` bearer). The
+// secret value is NEVER logged.
+export const EnrollTokenPayload = z.object({
+  // Domain-separation claim — fixed "enroll" so an `oge_`/`ogd_`/`ogs_` payload (no
+  // typ, or a different typ) can never satisfy verifyEnrollToken even past the prefix.
+  typ: z.literal("enroll"),
+  workspaceId: z.string().uuid(),
+  accountId: z.string().uuid(),
+  // The screen-control consent baked into the token at mint (the minting user's
+  // decision); the exchange records it as consentedScreenControl on the enrollment.
+  allowScreenControl: z.boolean(),
+  iat: z.number().int().nonnegative(),
+  exp: z.number().int().positive(),
+});
+export type EnrollTokenPayload = z.infer<typeof EnrollTokenPayload>;
+
+export async function signEnrollToken(secret: string, payload: EnrollTokenPayload): Promise<string> {
+  const encodedPayload = base64UrlEncode(JSON.stringify(EnrollTokenPayload.parse(payload)));
+  const signature = await hmacSha256Base64Url(secret, encodedPayload);
+  return `oget_${encodedPayload}.${signature}`;
+}
+
+/**
+ * Verify an enroll token: rejects (returns null) on a bad prefix (NOT `oget_`),
+ * a malformed envelope, a bad HMAC signature (constant-time), schema-invalid
+ * claims (which includes `typ !== "enroll"` — the `z.literal` rejects it), or an
+ * expired token (`exp < now`). Mirrors verifyEnrollmentBearer exactly. An `oge_`
+ * bearer fails the prefix gate; a same-secret token that lacks the typ claim fails
+ * the schema gate — both halves of the domain separation are enforced here.
+ */
+export async function verifyEnrollToken(secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000)): Promise<EnrollTokenPayload | null> {
+  if (!token.startsWith("oget_")) {
+    return null;
+  }
+  const withoutPrefix = token.slice("oget_".length);
+  const dot = withoutPrefix.lastIndexOf(".");
+  if (dot <= 0) {
+    return null;
+  }
+  const encodedPayload = withoutPrefix.slice(0, dot);
+  const signature = withoutPrefix.slice(dot + 1);
+  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  if (!constantTimeEqual(signature, expected)) {
+    return null;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = EnrollTokenPayload.safeParse(decoded);
+  if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  return payload.data;
+}
+
 // --- Scoped data-plane stream token (master-spine §C.3 / crosscut PART 1.3) ---
 //
 // REUSES the existing HMAC envelope (sign/verifyDelegatedAccessToken's
@@ -2938,6 +3008,99 @@ export const RevokeEnrollmentResponse = z.object({
   revoked: z.boolean(),
 });
 export type RevokeEnrollmentResponse = z.infer<typeof RevokeEnrollmentResponse>;
+
+// =============================================================================
+// Enrollment UX (self-hosted enrollment UX, design 11): the click-Grant approve
+// page lookup/deny + the headless enroll-token mint/exchange. These sit beside the
+// device-flow contracts above and REUSE EnrollmentCredentialsResponse for the
+// exchange's credential payload (identical shape to the poll authorized branch).
+// =============================================================================
+
+// POST /v1/enrollments/device/lookup (USER-authenticated, NO workspace in the
+// path). The approve page (EnrollmentConsent) needs the machine details for a
+// user_code WITHOUT consuming the request. The user_code is globally unique among
+// pending rows; the route resolves its workspace, authorizes (enrollments:read),
+// and returns the machine details — or 404 (never revealing cross-workspace
+// existence) when the grant check fails or no live pending row matches.
+export const DeviceEnrollmentLookupRequest = z.object({
+  userCode: z.string().min(1).max(64),
+});
+export type DeviceEnrollmentLookupRequest = z.infer<typeof DeviceEnrollmentLookupRequest>;
+
+// The presentational machine details the consent screen renders (a subset of the
+// pending request — NO secrets, NO device_code).
+export const DeviceEnrollmentLookupMachine = z.object({
+  machineName: z.string().nullable(),
+  os: EnrollmentOs,
+  arch: z.string(),
+  canOfferDisplay: z.boolean(),
+  requestsScreenControl: z.boolean(),
+});
+export type DeviceEnrollmentLookupMachine = z.infer<typeof DeviceEnrollmentLookupMachine>;
+
+export const DeviceEnrollmentLookupResponse = z.object({
+  workspaceId: z.string().uuid(),
+  userCode: z.string(),
+  machine: DeviceEnrollmentLookupMachine,
+  expiresAt: z.string(),
+});
+export type DeviceEnrollmentLookupResponse = z.infer<typeof DeviceEnrollmentLookupResponse>;
+
+// POST /v1/workspaces/:workspaceId/enrollments/device/deny (USER-authenticated,
+// enrollments:manage). The explicit "no" at the approve page — mirrors approve.
+export const DeviceEnrollmentDenyRequest = z.object({
+  userCode: z.string().min(1).max(64),
+});
+export type DeviceEnrollmentDenyRequest = z.infer<typeof DeviceEnrollmentDenyRequest>;
+
+export const DeviceEnrollmentDenyResponse = z.object({
+  denied: z.boolean(),
+});
+export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyResponse>;
+
+// POST /v1/workspaces/:workspaceId/enrollments/token (USER-authenticated,
+// enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
+// token). allowScreenControl bakes the screen-control consent into the token.
+export const MintEnrollTokenRequest = z.object({
+  allowScreenControl: z.boolean().default(false),
+});
+export type MintEnrollTokenRequest = z.infer<typeof MintEnrollTokenRequest>;
+
+export const MintEnrollTokenResponse = z.object({
+  // The `oget_` token. SECRET — the UI shows it once with a copy-now warning.
+  token: z.string(),
+  expiresAt: z.string(),
+  expiresInSeconds: z.number().int().positive(),
+});
+export type MintEnrollTokenResponse = z.infer<typeof MintEnrollTokenResponse>;
+
+// POST /v1/enrollments/token/exchange (UNAUTHENTICATED — the token IS the auth).
+// The agent presents the same identity fields it sends to device/start plus the
+// enroll token. On a valid token the control plane performs the SAME finalize as
+// approve and returns the IDENTICAL EnrollmentCredentialsResponse shape (so the
+// agent's existing credential parsing is reused).
+export const EnrollTokenExchangeRequest = z.object({
+  // The `oget_` enroll token (the auth + the workspace/account/consent grant).
+  token: z.string().min(1),
+  // The agent's ed25519 public key (the machine identity the enrollment binds to).
+  publicKey: z.string().min(1).max(1024),
+  os: EnrollmentOs.default("linux"),
+  arch: EnrollmentArch.default("x86_64"),
+  machineName: z.string().min(1).max(256).optional(),
+  // v1 only supports whole-machine; kept explicit so the consent is recorded.
+  exposure: z.literal("whole-machine").default("whole-machine"),
+  canOfferDisplay: z.boolean().default(false),
+  // The agent's REQUEST; the token's allowScreenControl is the AUTHORITATIVE consent.
+  requestsScreenControl: z.boolean().default(false),
+});
+export type EnrollTokenExchangeRequest = z.infer<typeof EnrollTokenExchangeRequest>;
+
+// The exchange wraps the EXISTING EnrollmentCredentialsResponse — IDENTICAL to the
+// poll authorized branch's `credentials` (NOT a redefined credential shape).
+export const EnrollTokenExchangeResponse = z.object({
+  credentials: EnrollmentCredentialsResponse,
+});
+export type EnrollTokenExchangeResponse = z.infer<typeof EnrollTokenExchangeResponse>;
 
 // ── Machines dashboard + per-machine metrics (M10, dossier §10.7) ────────────
 //
