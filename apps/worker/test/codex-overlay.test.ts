@@ -1,5 +1,6 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { parseModelProvidersJson } from "@opengeni/config";
+import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
@@ -118,26 +119,26 @@ describe("settingsWithCodexCredential", () => {
 });
 
 /**
- * Swaps @opengeni/db's getCodexCredentialStatus (the ONLY db read on the overlay
- * path) for a stub, so settingsWithCodexCredential can be exercised end-to-end
- * without a live Postgres. Returns a restorer that reinstates the real module.
+ * Spies on @opengeni/db's getCodexCredentialStatus (the ONLY db read on the
+ * overlay path) so settingsWithCodexCredential can be exercised end-to-end
+ * without a live Postgres. Uses spyOn (NOT mock.module) deliberately: mock.module
+ * registers a PROCESS-GLOBAL override that bleeds into other test files in the
+ * same `bun test` run (notably packages/db's codex_subscription_credentials
+ * integration test) and is NOT undone by mock.restore(). spyOn is scoped to the
+ * namespace and the returned restorer fully reinstates the real implementation.
  */
 function mockCredentialStatus(overrides: { status: string; scopes: string | null }): () => void {
-  const actual = require("@opengeni/db");
-  mock.module("@opengeni/db", () => ({
-    ...actual,
-    getCodexCredentialStatus: async () => ({
-      connected: overrides.status === "active",
-      chatgptAccountId: "acct-1",
-      scopes: overrides.scopes,
-      planType: "pro",
-      status: overrides.status,
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastError: null,
-    }),
-  }));
+  const spy = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
+    connected: overrides.status === "active",
+    chatgptAccountId: "acct-1",
+    scopes: overrides.scopes,
+    planType: "pro",
+    status: overrides.status,
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastError: null,
+  } as Awaited<ReturnType<typeof opengeniDb.getCodexCredentialStatus>>);
   return () => {
-    mock.module("@opengeni/db", () => actual);
+    spy.mockRestore();
   };
 }
