@@ -97,11 +97,11 @@ describe("get.<domain> install routes", () => {
   // An asset that is NEVER baked (mac universal) always falls through to the
   // GitHub-Releases redirect, so these assertions hold whether or not a Linux
   // binary happens to be baked into the local tree.
-  test("GET /agent/latest/<unbaked-asset> redirects to the GitHub latest-release alias", async () => {
+  test("GET /agent/latest/<unbaked-asset> redirects to the moving agent-latest release", async () => {
     const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://github.com/Cloudgeni-ai/opengeni/releases/latest/download/opengeni-agent-universal-apple-darwin",
+      "https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-latest/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -118,7 +118,7 @@ describe("get.<domain> install routes", () => {
     const res = await appFor(settings).request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(
-      "https://mirror.example.com/rel/latest/download/opengeni-agent-universal-apple-darwin",
+      "https://mirror.example.com/rel/download/agent-latest/opengeni-agent-universal-apple-darwin",
     );
   });
 
@@ -195,6 +195,8 @@ describe("get.<domain> install routes — baked binary serving", () => {
   test("an un-baked asset still 302s to GitHub Releases even while another asset is baked", async () => {
     const res = await appFor(testSettings()).request("/agent/latest/opengeni-agent-universal-apple-darwin");
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toContain("/releases/latest/download/opengeni-agent-universal-apple-darwin");
+    expect(res.headers.get("location")).toContain(
+      "/releases/download/agent-latest/opengeni-agent-universal-apple-darwin",
+    );
   });
 });

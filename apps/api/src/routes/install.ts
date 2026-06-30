@@ -178,13 +178,20 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     return new Response(null, { status: 302, headers: { location: redirectUrl } });
   }
 
-  // `latest` → the BAKED binary if present, else the GitHub "latest release" alias.
+  // `latest` → the BAKED binary if present, else the dedicated moving
+  // `agent-latest` GitHub Release. We deliberately do NOT use GitHub's
+  // repo-global `releases/latest` alias here: in this monorepo that alias is
+  // perpetually shadowed by the frequent changesets package releases (e.g.
+  // `@opengeni/contracts@x.y.z`), which carry no agent binaries → 404. The
+  // `agent-latest` release is maintained by .github/workflows/agent-release.yml
+  // as a moving tag that always points at the newest signed mac/windows
+  // binaries (+ checksums, install scripts, minisign pubkey).
   app.get("/agent/latest/:asset", async (c) => {
     const asset = c.req.param("asset");
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/latest/download/${asset}`);
+    return serveAsset(asset, `${releasesBase}/download/agent-latest/${asset}`);
   });
 
   // The version segment is the literal `v<ver>` (e.g. `v1.2.3`) — Hono cannot bind

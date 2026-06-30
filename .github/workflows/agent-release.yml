@@ -355,6 +355,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Maintain a MOVING `agent-latest` release pointing at the SAME assets as the
+      # per-version `agent-v<ver>` release above. The API's `/agent/latest/<asset>`
+      # redirect (apps/api/src/routes/install.ts) targets
+      # `releases/download/agent-latest/<asset>` rather than GitHub's repo-global
+      # `releases/latest` alias — in this monorepo that alias is shadowed by the
+      # frequent changesets package releases (no agent binaries → 404).
+      #
+      # softprops/action-gh-release updates an EXISTING release in place but does NOT
+      # move its tag to the new commit, so we delete+recreate via the gh CLI to force
+      # the tag to MOVE and the assets to refresh idempotently. `--latest=false` keeps
+      # it from stealing the repo-global "latest" away from changeset releases.
+      - name: Update the moving agent-latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Idempotent reset: drop any prior release AND its tag so the tag moves.
+          gh release delete agent-latest --cleanup-tag --yes || true
+          gh release create agent-latest \
+            dist/* \
+            agent/install/install.sh \
+            agent/install/install.ps1 \
+            agent/install/uninstall.sh \
+            agent/install/opengeni-agent-minisign.pub \
+            --target "$GITHUB_SHA" \
+            --title "opengeni-agent (latest)" \
+            --latest=false \
+            --prerelease=false \
+            --notes "Moving pointer to the newest opengeni-agent build (currently v${{ needs.guard.outputs.version }}).
+
+          Maintained automatically so that \`https://get.opengeni.ai/agent/latest/<asset>\` always resolves to the most recent signed agent binaries. For a pinned version, use the corresponding \`agent-v<ver>\` release instead."
+
       # Publish the signed channel manifest (the CONTROL surface OpenGeni flips to
       # promote a build). Promotion (5→25→50→100) + kill-switch are a re-run of this
       # step with new params — NO rebuild (dossier §23.2/§23.3).

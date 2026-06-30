@@ -218,6 +218,18 @@ fn parse_geometry(geometry: &str) -> (u32, u32) {
     (w, h)
 }
 
+/// Probes whether this host currently has a usable display surface (a real X11
+/// screen or an Xvfb virtual framebuffer), the value advertised as the offer's
+/// `offers_display` at enroll. Mirrors how [`Supervisor::capabilities`] derives the
+/// `desktop` capability: `probe()` does a synchronous x11rb connect, so run it on
+/// the blocking pool — a wedged X server must not stall this async enroll task.
+async fn probe_offers_display() -> bool {
+    let desktop = opengeni_agent_platform::resolve_desktop();
+    tokio::task::spawn_blocking(move || desktop.probe().is_some())
+        .await
+        .unwrap_or(false)
+}
+
 /// The `enroll` command: drive the device flow, persist the credentials, and
 /// return them (so `run` can chain straight into serving).
 async fn enroll_command(
@@ -262,6 +274,10 @@ async fn enroll_command(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
+    // Probe the live display surface so a display-capable host enrolls as such
+    // (rather than the old M6 hardcode that recorded every machine headless).
+    let offers_display = probe_offers_display().await;
+
     let request = EnrollmentRequest {
         api_base_url: api_url.to_string(),
         workspace_id,
@@ -269,9 +285,10 @@ async fn enroll_command(
         offer: EnrollmentOffer {
             os: identity.os,
             arch: identity.arch,
-            // M6 has no live display surface yet (that is M8); offer false so the
-            // consent page does not promise screen-control we cannot serve.
-            offers_display: false,
+            // Whether this host currently has a probeable display (a real screen or
+            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
+            // capability so the consent page only promises screen-control we can serve.
+            offers_display,
             // The agent does not request screen control by default (the user's
             // approve-time allow_screen_control is the authoritative consent anyway).
             requests_screen_control: false,
@@ -324,6 +341,10 @@ async fn enroll_with_token(
         .clone()
         .unwrap_or_else(supervisor::hostname_or_default);
 
+    // Probe the live display surface so a display-capable host enrolls as such
+    // (rather than the old M6 hardcode that recorded every machine headless).
+    let offers_display = probe_offers_display().await;
+
     // The exchange carries the same identity fields as the device flow; the
     // workspace_id is unused on this path (it is encoded in the token) but the
     // EnrollmentRequest shape requires it, so pass an empty placeholder.
@@ -332,11 +353,12 @@ async fn enroll_with_token(
         workspace_id: String::new(),
         machine_name,
         offer: EnrollmentOffer {
-            // M6 has no live display surface yet (that is M8); offer false so the
-            // control plane does not record screen-control we cannot serve.
             os: identity.os,
             arch: identity.arch,
-            offers_display: false,
+            // Whether this host currently has a probeable display (a real screen or
+            // an Xvfb virtual framebuffer) — mirrors the supervisor's `desktop`
+            // capability so the control plane only records screen-control we can serve.
+            offers_display,
             // The agent does not request screen control; the token's
             // allow_screen_control (set at mint time) is the authoritative consent.
             requests_screen_control: false,

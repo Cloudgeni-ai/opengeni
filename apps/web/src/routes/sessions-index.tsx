@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
+import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import {
   emptyAdvancedSessionDraft,
@@ -254,7 +255,7 @@ function AdvancedSessionOptions(props: {
               >
                 <option value="">Cloud sandbox</option>
                 {selfhostedMachines.map((machine) => (
-                  <option key={machine.sandboxId} value={machine.sandboxId} disabled={machine.state !== "online"}>
+                  <option key={machine.sandboxId} value={machine.sandboxId} disabled={!isMachineComputeSelectable(machine.state)}>
                     {machine.name}
                     {machine.state !== "online" ? ` (${machine.state})` : ""}
                   </option>

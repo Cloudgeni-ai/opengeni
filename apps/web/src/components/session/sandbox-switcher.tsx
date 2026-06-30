@@ -18,13 +18,14 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 
 const CLOUD_SANDBOX_LABEL = "Cloud sandbox";
 
 /** Whether a machine can be a swap target right now (the active one always can,
- *  since selecting it is a harmless no-op; otherwise it must be online). */
+ *  since selecting it is a harmless no-op; otherwise it must be compute-selectable). */
 function isSelectable(machine: MachineView): boolean {
-  return machine.active || machine.state === "online";
+  return machine.active || isMachineComputeSelectable(machine.state);
 }
 
 export function SessionSandboxSwitcher({
