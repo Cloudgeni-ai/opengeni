@@ -1,7 +1,66 @@
 import { describe, expect, test } from "bun:test";
-import { codexAppsSanitizingFetch, sanitizeMcpJsonBody, sanitizeMcpSseBody } from "../src/mcp-sanitize";
+import {
+  ToolNameMapper,
+  codexAppsSanitizingFetch,
+  remapToolCallRequestBody,
+  sanitizeMcpJsonBody,
+  sanitizeMcpSseBody,
+} from "../src/mcp-sanitize";
 
 const toolsListMsg = (tools: unknown[]) => ({ jsonrpc: "2.0", id: 2, result: { tools } });
+const toolCallMsg = (name: string) => JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name, arguments: {} } });
+
+describe("ToolNameMapper", () => {
+  test("sanitizes invalid chars (dots) and reverses them", () => {
+    const m = new ToolNameMapper();
+    expect(m.sanitize("vercel.deploy_to_vercel")).toBe("vercel_deploy_to_vercel");
+    expect(m.toOriginal("vercel_deploy_to_vercel")).toBe("vercel.deploy_to_vercel");
+  });
+
+  test("leaves already-valid names untouched (identity)", () => {
+    const m = new ToolNameMapper();
+    expect(m.sanitize("github_create_issue")).toBe("github_create_issue");
+    expect(m.toOriginal("github_create_issue")).toBe("github_create_issue");
+  });
+
+  test("is idempotent for the same original across repeat listings", () => {
+    const m = new ToolNameMapper();
+    const first = m.sanitize("a.b");
+    const second = m.sanitize("a.b");
+    expect(second).toBe(first);
+    expect(m.toOriginal(first)).toBe("a.b");
+  });
+
+  test("disambiguates a collision between two distinct originals", () => {
+    const m = new ToolNameMapper();
+    const a = m.sanitize("x.y"); // -> x_y
+    const b = m.sanitize("x_y"); // already valid, but x_y is taken -> x_y_2
+    expect(a).toBe("x_y");
+    expect(b).not.toBe(a);
+    expect(m.toOriginal(a)).toBe("x.y");
+    expect(m.toOriginal(b)).toBe("x_y");
+  });
+});
+
+describe("remapToolCallRequestBody", () => {
+  test("reverses a sanitized tools/call name to the original", () => {
+    const m = new ToolNameMapper();
+    m.sanitize("vercel.deploy_to_vercel"); // record the mapping (as tools/list would)
+    const rewritten = remapToolCallRequestBody(toolCallMsg("vercel_deploy_to_vercel"), m);
+    expect(JSON.parse(rewritten!).params.name).toBe("vercel.deploy_to_vercel");
+  });
+
+  test("returns null when the name needs no rewrite", () => {
+    const m = new ToolNameMapper();
+    m.sanitize("plain_name");
+    expect(remapToolCallRequestBody(toolCallMsg("plain_name"), m)).toBeNull();
+    expect(remapToolCallRequestBody(toolCallMsg("unknown"), m)).toBeNull();
+  });
+
+  test("ignores non-tools/call messages", () => {
+    expect(remapToolCallRequestBody(JSON.stringify({ method: "tools/list" }), new ToolNameMapper())).toBeNull();
+  });
+});
 
 describe("sanitizeMcpJsonBody", () => {
   test("drops empty + non-object outputSchemas, keeps valid object ones and all tools", () => {
@@ -49,6 +108,27 @@ describe("codexAppsSanitizingFetch", () => {
     const res = await codexAppsSanitizingFetch(base)("https://x/ps/mcp", { method: "POST" });
     const tool = (await res.json()).result.tools[0];
     expect("outputSchema" in tool).toBe(false);
+  });
+
+  test("round-trip: list sanitizes the dotted name, call reverses it (same fetch instance)", async () => {
+    const sent: string[] = [];
+    const base = async (_input: unknown, init?: RequestInit) => {
+      const body = init?.body as string | undefined;
+      if (body) sent.push(body);
+      const isList = body?.includes("tools/list") ?? true;
+      const payload = isList
+        ? toolsListMsg([{ name: "vercel.deploy_to_vercel", inputSchema: { type: "object" } }])
+        : { jsonrpc: "2.0", id: 3, result: { content: [] } };
+      return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const fetchImpl = codexAppsSanitizingFetch(base as never);
+    // 1. tools/list -> model sees the sanitized name
+    const listRes = await fetchImpl("https://x/ps/mcp", { method: "POST", body: JSON.stringify({ method: "tools/list" }) });
+    expect((await listRes.json()).result.tools[0].name).toBe("vercel_deploy_to_vercel");
+    // 2. tools/call with the sanitized name -> the server receives the ORIGINAL
+    await fetchImpl("https://x/ps/mcp", { method: "POST", body: toolCallMsg("vercel_deploy_to_vercel") });
+    const forwardedCall = JSON.parse(sent[sent.length - 1]!);
+    expect(forwardedCall.params.name).toBe("vercel.deploy_to_vercel");
   });
 
   test("passes through a GET (long-lived notification SSE) untouched", async () => {
