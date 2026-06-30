@@ -129,7 +129,7 @@ export type AppContextValue = {
   startSession: (
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null; workingDir?: string | null },
+    options?: { targetSandboxId?: string | null; workingDir?: string | null; omitWorkspaceResources?: boolean },
   ) => Promise<Session | null>;
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
@@ -443,7 +443,7 @@ export function RootRouteComponent() {
   async function startSession(
     workspaceId: string,
     submission: TurnSubmission,
-    options?: { targetSandboxId?: string | null; workingDir?: string | null },
+    options?: { targetSandboxId?: string | null; workingDir?: string | null; omitWorkspaceResources?: boolean },
   ): Promise<Session | null> {
     setBusy(true);
     // Reuse the in-flight key if one survives a prior failed/double-fired
@@ -454,7 +454,10 @@ export function RootRouteComponent() {
       const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
       const created = await client.createSession(workspaceId, {
         initialMessage: submission.text,
-        resources: [...currentResources, ...(submission.resources ?? [])],
+        // Workspace repo selection is excluded when the create targets a
+        // connected machine (D3: the machine uses its own checkout & git auth);
+        // uploaded file attachments (submission.resources) still flow through.
+        resources: [...(options?.omitWorkspaceResources ? [] : currentResources), ...(submission.resources ?? [])],
         tools: selectedTools,
         model: submission.model ?? model,
         reasoningEffort: submission.reasoningEffort ?? reasoningEffort,

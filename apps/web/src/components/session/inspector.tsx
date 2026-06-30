@@ -1,4 +1,4 @@
-import { SessionStatus as SessionStatusBadge, type SessionEventsConnectionState } from "@opengeni/react";
+import { SessionStatus as SessionStatusBadge, useMachines, type SessionEventsConnectionState } from "@opengeni/react";
 import { CopyIcon, FileJsonIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -23,6 +23,13 @@ export function SessionInspector(props: {
   connectionState: SessionEventsConnectionState;
 }) {
   const terminalSession = isTerminalSessionStatus(props.session.status);
+  // The session's ACTIVE compute, not its home backend: when a connected machine
+  // is active (live-swapped or targeted at create) show the machine name, so the
+  // inspector agrees with the "Run on" header instead of reading "modal" while a
+  // selfhosted box runs the turn. Degrades to the home backend when no machine is
+  // active (or selfhosted is disabled → the fleet 404s to empty).
+  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 10000 });
+  const activeMachine = fleet.machines.find((machine) => machine.active && machine.kind === "selfhosted") ?? null;
   const displayEvents = props.events.map((event) => sanitizeEventForDisplay(event, props.session.status));
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
@@ -69,7 +76,10 @@ export function SessionInspector(props: {
               <InspectorSection title="Runtime">
                 <InfoRow label="Model" value={props.session.model} />
                 <InfoRow label="Effort" value={String(props.session.metadata.reasoningEffort ?? "low")} />
-                <InfoRow label="Sandbox" value={props.session.sandboxBackend} />
+                <InfoRow
+                  label={activeMachine ? "Machine" : "Sandbox"}
+                  value={activeMachine ? activeMachine.name : props.session.sandboxBackend}
+                />
                 <InfoRow label="Environment" value={props.session.environmentId ? <CopyableMono value={props.session.environmentId} /> : "none"} />
                 <InfoRow label="Stream" value={<ConnectionPill state={props.connectionState} />} />
               </InspectorSection>

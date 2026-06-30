@@ -21,8 +21,10 @@ import { sameSessionForContext } from "./lib/session-context";
 import { groupSessionsForRail, recencyGroupFor, relativeTimeLabel } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
-  emptyAdvancedSessionDraft,
-  submissionExtrasFromAdvancedSessionDraft,
+  emptySessionDraft,
+  isSessionDraftComputeReady,
+  managedBackendOptions,
+  submissionFromSessionDraft,
 } from "./lib/session-create";
 import {
   buildTools,
@@ -252,15 +254,19 @@ describe("session MCP permission groups", () => {
   });
 });
 
-describe("advanced session create draft", () => {
-  test("an untouched draft adds nothing to the create payload", () => {
-    expect(submissionExtrasFromAdvancedSessionDraft(emptyAdvancedSessionDraft())).toEqual({});
+describe("session create draft", () => {
+  test("an untouched (managed sandbox) draft adds nothing to the create payload", () => {
+    expect(submissionFromSessionDraft(emptySessionDraft())).toEqual({
+      extras: {},
+      options: { targetSandboxId: null, workingDir: null },
+      omitWorkspaceResources: false,
+    });
   });
 
-  test("maps sandbox, environment, goal, and MCP scope into the payload", () => {
+  test("maps sandbox backend, environment, goal, and MCP scope into the payload", () => {
     const draft = {
-      ...emptyAdvancedSessionDraft(),
-      sandboxBackend: "docker" as const,
+      ...emptySessionDraft(),
+      compute: { kind: "sandbox" as const, backend: "docker" as const },
       environmentId: "env-1",
       goalText: "  Keep CI green  ",
       goalSuccessCriteria: "All checks pass for 7 days",
@@ -268,27 +274,84 @@ describe("advanced session create draft", () => {
       customMcpPermissions: true,
       mcpPermissions: new Set(["sessions:read", "goals:manage"]),
     };
-    expect(submissionExtrasFromAdvancedSessionDraft(draft)).toEqual({
-      sandboxBackend: "docker",
-      environmentId: "env-1",
-      goal: {
-        text: "Keep CI green",
-        successCriteria: "All checks pass for 7 days",
-        maxAutoContinuations: 12,
+    expect(submissionFromSessionDraft(draft)).toEqual({
+      extras: {
+        sandboxBackend: "docker",
+        environmentId: "env-1",
+        goal: {
+          text: "Keep CI green",
+          successCriteria: "All checks pass for 7 days",
+          maxAutoContinuations: 12,
+        },
+        firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
       },
-      firstPartyMcpPermissions: ["sessions:read", "goals:manage"],
+      options: { targetSandboxId: null, workingDir: null },
+      omitWorkspaceResources: false,
     });
   });
 
   test("ignores goal sub-fields without goal text and bad numbers", () => {
     const draft = {
-      ...emptyAdvancedSessionDraft(),
+      ...emptySessionDraft(),
       goalSuccessCriteria: "criteria without a goal",
       goalMaxAutoContinuations: "-3",
     };
-    expect(submissionExtrasFromAdvancedSessionDraft(draft)).toEqual({});
+    expect(submissionFromSessionDraft(draft).extras).toEqual({});
     const withGoal = { ...draft, goalText: "goal", goalMaxAutoContinuations: "not-a-number" };
-    expect(submissionExtrasFromAdvancedSessionDraft(withGoal)).toEqual({ goal: { text: "goal", successCriteria: "criteria without a goal" } });
+    expect(submissionFromSessionDraft(withGoal).extras).toEqual({ goal: { text: "goal", successCriteria: "criteria without a goal" } });
+  });
+
+  test("a connected machine sends targetSandboxId + workingDir, omits repos and env injection", () => {
+    const draft = {
+      ...emptySessionDraft(),
+      // Even with an environment set, a machine never injects it (D2).
+      environmentId: "env-1",
+      compute: {
+        kind: "machine" as const,
+        sandboxId: "sbx-machine-1",
+        folder: { kind: "path" as const, path: "  ~/repos/opengeni  " },
+      },
+    };
+    expect(submissionFromSessionDraft(draft)).toEqual({
+      extras: {},
+      options: { targetSandboxId: "sbx-machine-1", workingDir: "~/repos/opengeni" },
+      omitWorkspaceResources: true,
+    });
+  });
+
+  test("a connected machine at its root sends no workingDir", () => {
+    const draft = {
+      ...emptySessionDraft(),
+      compute: { kind: "machine" as const, sandboxId: "sbx-machine-2", folder: { kind: "root" as const } },
+    };
+    const submission = submissionFromSessionDraft(draft);
+    expect(submission.options).toEqual({ targetSandboxId: "sbx-machine-2", workingDir: null });
+    expect(submission.omitWorkspaceResources).toBe(true);
+  });
+
+  test("submit-gating: a managed sandbox is always ready; a connected machine needs a picked machine", () => {
+    // §3 transition rule: sandbox→machine blocks submit until a machine is chosen
+    // ("choose a machine"); machine→sandbox is immediately ready again.
+    expect(isSessionDraftComputeReady(emptySessionDraft())).toBe(true);
+    expect(isSessionDraftComputeReady({
+      ...emptySessionDraft(),
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    })).toBe(false);
+    expect(isSessionDraftComputeReady({
+      ...emptySessionDraft(),
+      compute: { kind: "machine", sandboxId: "sbx-1", folder: { kind: "root" } },
+    })).toBe(true);
+  });
+
+  test("managed backend options exclude selfhosted and lead with the deployment default", () => {
+    // §3 backend row: options = managed descriptors (backend !== "selfhosted");
+    // the Connected Machine kind is the selfhosted target, never a backend choice.
+    const options = managedBackendOptions();
+    expect(options[0]).toEqual({ value: "", label: "Deployment default", chips: [] });
+    const values = options.map((option) => option.value);
+    expect(values).not.toContain("selfhosted");
+    expect(values).toContain("modal");
+    expect(new Set(values).size).toBe(values.length);
   });
 });
 
