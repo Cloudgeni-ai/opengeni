@@ -11,6 +11,7 @@ import type {
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
+  CodexUsageMap,
   BillingSummary,
   BillingUsageResponse,
   CapabilityCatalogItem,
@@ -1195,9 +1196,19 @@ export class OpenGeniClient {
     return await this.requestJson<CodexConnectPoll>("POST", `/v1/workspaces/${workspaceId}/codex/connect/poll`, { state });
   }
 
-  /** Remaining usage / limits for the connected subscription. */
+  /** Remaining usage / limits for the connected (ACTIVE) subscription. Back-compat. */
   async codexUsage(workspaceId: string): Promise<CodexUsage> {
     return await this.requestJson<CodexUsage>("GET", `/v1/workspaces/${workspaceId}/codex/usage`);
+  }
+
+  /** Live per-account usage read (refreshes THIS account's bearer; writes the cache). */
+  async codexAccountUsage(workspaceId: string, accountId: string): Promise<CodexUsage> {
+    return await this.requestJson<CodexUsage>("GET", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/usage`);
+  }
+
+  /** Batched live refresh across every connected account, keyed by credential id. */
+  async refreshCodexUsage(workspaceId: string): Promise<{ usage: CodexUsageMap }> {
+    return await this.requestJson<{ usage: CodexUsageMap }>("POST", `/v1/workspaces/${workspaceId}/codex/usage/refresh`);
   }
 
   /** Disconnect ALL accounts (legacy workspace-wide). Prefer `disconnectCodexAccount`. */

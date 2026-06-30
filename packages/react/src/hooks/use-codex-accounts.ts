@@ -19,6 +19,8 @@ export type CodexAccountsClientLike = {
   listCodexAccounts: (workspaceId: string) => Promise<CodexAccountsResponse>;
   getSession?: (workspaceId: string, sessionId: string) => Promise<{ codexPinnedCredentialId?: string | null; codexLastCredentialId?: string | null }>;
   pinSessionCodexAccount?: (workspaceId: string, sessionId: string, target: string) => Promise<{ pinned: string }>;
+  /** Optional (absent ⇒ the card hides live refresh): batched live /wham/usage refresh. */
+  refreshCodexUsage?: (workspaceId: string) => Promise<{ usage: Record<string, unknown> }>;
 };
 
 export type UseCodexAccountsOptions = ClientOverride & SessionEventFeedOptions & {
@@ -42,6 +44,14 @@ export type UseCodexAccountsResult = {
   settings: CodexRotationSettings;
   loading: boolean;
   refresh: () => Promise<void>;
+  /**
+   * Trigger a LIVE batched /wham/usage refresh across all accounts, then re-read
+   * the cached metadata so the new windows land on `accounts`. Modeled on `pin`.
+   * No-op (resolves false) when the client can't refresh usage.
+   */
+  refreshUsage: () => Promise<boolean>;
+  /** True while a live usage refresh is in flight (drives the bar skeleton). */
+  refreshingUsage: boolean;
   /** Pin (or unpin via "auto") the session's account; returns true on success. */
   pin: (target: string) => Promise<boolean>;
   pinning: boolean;
@@ -98,6 +108,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
 
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled: options.enabled });
   const mutation = useMutationRunner();
+  const usageMutation = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
 
   // Live flip: a manual switch (P1) or a failover (P3) emits codex.account.switched;
@@ -128,6 +139,24 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     [codexClient, workspaceId, sessionId, mutation.run, state.refresh],
   );
 
+  // Live usage refresh: hit the batched provider read, then re-read cached
+  // metadata so the fresh windows land on `accounts`. The provider read writes the
+  // cache columns server-side; state.refresh() pulls them back.
+  const refreshUsage = useCallback(
+    async (): Promise<boolean> => {
+      if (!codexClient.refreshCodexUsage) {
+        return false;
+      }
+      const result = await usageMutation.run(async () => {
+        await codexClient.refreshCodexUsage!(workspaceId);
+        return true;
+      });
+      if (result) await state.refresh();
+      return result === true;
+    },
+    [codexClient, workspaceId, usageMutation.run, state.refresh],
+  );
+
   const data = state.data ?? EMPTY_STATE;
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;
 
@@ -140,6 +169,8 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     settings: data.settings,
     loading: state.loading,
     refresh: state.refresh,
+    refreshUsage,
+    refreshingUsage: usageMutation.mutating,
     pin,
     pinning: mutation.mutating,
     pinningTarget,

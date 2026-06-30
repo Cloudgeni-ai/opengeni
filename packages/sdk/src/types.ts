@@ -691,6 +691,38 @@ export type CodexConnectionStatus = {
   accountCount?: number;
 };
 
+/**
+ * One normalized Codex usage window (5h or weekly), camelCase end-to-end (the
+ * route normalizes server-side; the web layer never re-hand-types snake_case).
+ * `percent` is authoritative; used/limit/remaining are a synthesized 0–100 scale
+ * (limit = 100) because the provider gives only a percentage. `remaining =
+ * 100 - percent` is the P3 rotation key. Identify the window by `limitWindowSeconds`
+ * (18000 ⇒ 5h, 604800 ⇒ weekly), never by position.
+ */
+export type CodexUsageWindow = {
+  used: number;
+  limit: number;
+  remaining: number;
+  percent: number;
+  resetAt: string | null;
+  resetAfterSeconds: number | null;
+  limitWindowSeconds: number;
+};
+
+/** The normalized usage payload for one account — the P2/P3 contract. */
+export type CodexUsagePayload = {
+  status: "ok" | "limit_reached" | "error" | "no-data";
+  planType: string | null;
+  fiveHour: CodexUsageWindow | null;
+  weekly: CodexUsageWindow | null;
+  limitReached: boolean;
+  fetchedAt: string;
+  /** Present only on an auth/refresh failure path. */
+  reason?: "needs_relogin";
+  additionalLimits?: Array<{ limitName: string; meteredFeature: string; fiveHour: CodexUsageWindow | null; weekly: CodexUsageWindow | null }>;
+  credits?: { hasCredits: boolean; unlimited: boolean; overageLimitReached: boolean; balance: string };
+};
+
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
 export type CodexAccount = {
   id: string;
@@ -703,6 +735,11 @@ export type CodexAccount = {
   expiresAt?: string | null;
   lastRefreshAt?: string | null;
   lastError?: string | null;
+  // P2 CACHED usage (built from the persisted columns; renders bars off
+  // listCodexAccounts with no second call). null until the first live refresh.
+  fiveHour?: CodexUsageWindow | null;
+  weekly?: CodexUsageWindow | null;
+  usageCheckedAt?: string | null;
 };
 
 /** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */
@@ -740,8 +777,11 @@ export type CodexConnectPoll =
   | { status: "expired" }
   | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
 
-/** Remaining usage/limits. `usage` is the raw provider payload (windows, resets). */
-export type CodexUsage = { status: "ok" | "limit_reached" | "error"; usage: unknown };
+/** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
+export type CodexUsage = { status: "ok" | "limit_reached" | "error" | "no-data"; usage: CodexUsagePayload | null };
+
+/** Batched live-refresh response, keyed by credential id; each entry independently statused. */
+export type CodexUsageMap = Record<string, CodexUsage>;
 
 /**
  * How a deployment expects clients to authenticate to it, surfaced so a UI can

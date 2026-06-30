@@ -29,6 +29,9 @@
     "typecheck": "tsc --noEmit",
     "build": "tsup"
   },
+  "dependencies": {
+    "zod": "^4.2.1"
+  },
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"

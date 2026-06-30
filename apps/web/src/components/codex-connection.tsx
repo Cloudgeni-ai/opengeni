@@ -3,7 +3,7 @@
 // unpinned sessions use), inline rename, per-account refresh/disconnect, and
 // "connect another". A connected `codex/*` model run uses the active/pinned
 // subscription instead of spending API credits.
-import type { CodexAccount, CodexAccountsResponse, CodexUsage } from "@opengeni/sdk";
+import type { CodexAccount, CodexAccountsResponse, CodexUsage, CodexUsageMap, CodexUsageWindow } from "@opengeni/sdk";
 import { ExternalLinkIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SparklesIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -12,15 +12,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAppContext } from "@/context";
 
-type Window = { used_percent?: number; reset_after_seconds?: number; limit_window_seconds?: number };
-type UsagePayload = { plan_type?: string; rate_limit?: { primary_window?: Window; secondary_window?: Window } };
+// Cache TTL: a row whose cached snapshot is older than this (or never fetched)
+// triggers an on-mount LIVE refresh. The 5h/weekly windows move slowly, so a
+// short TTL is plenty and protects chatgpt.com from being hammered.
+const USAGE_TTL_MS = 3 * 60 * 1000;
 
-export function windowOf(usage: CodexUsage | null, key: "primary_window" | "secondary_window"): Window | null {
-  const payload = (usage?.usage ?? null) as UsagePayload | null;
-  return payload?.rate_limit?.[key] ?? null;
-}
-
-export function resetLabel(seconds: number | undefined): string {
+export function resetLabel(seconds: number | null | undefined): string {
   if (typeof seconds !== "number" || seconds <= 0) return "";
   const h = Math.floor(seconds / 3600);
   const d = Math.floor(h / 24);
@@ -29,19 +26,89 @@ export function resetLabel(seconds: number | undefined): string {
   return `resets in ~${Math.max(1, Math.round(seconds / 60))}m`;
 }
 
-export function UsageBar({ label, window }: { label: string; window: Window | null }) {
-  if (!window || typeof window.used_percent !== "number") return null;
-  const pct = Math.min(100, Math.max(0, window.used_percent));
+// Seconds until reset, computed CLIENT-SIDE off the absolute resetAt (skew-free,
+// preferred) and falling back to the snapshot's resetAfterSeconds. Driven by the
+// row's `now` tick so the countdown ticks without re-hitting the backend.
+function secondsUntilReset(window: CodexUsageWindow, now: number): number | null {
+  if (window.resetAt) {
+    const ms = new Date(window.resetAt).getTime() - now;
+    if (!Number.isNaN(ms)) return Math.max(0, Math.round(ms / 1000));
+  }
+  return window.resetAfterSeconds;
+}
+
+export function UsageBar({ label, window, now }: { label: string; window: CodexUsageWindow | null; now: number }) {
+  if (!window) return null;
+  const pct = Math.min(100, Math.max(0, window.percent));
   const danger = pct >= 90;
+  const limitReached = pct >= 100;
+  const secs = secondsUntilReset(window, now);
   return (
     <div className="grid gap-1">
       <div className="flex items-center justify-between text-xs text-[color:var(--color-fg-muted)]">
         <span>{label}</span>
-        <span>{pct}% used{window.reset_after_seconds ? ` · ${resetLabel(window.reset_after_seconds)}` : ""}</span>
+        <span>
+          {limitReached ? "limit reached" : `${pct}% used`}
+          {secs ? ` · ${resetLabel(secs)}` : ""}
+        </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-[color:var(--color-surface-2)]">
         <div className={`h-full rounded-full ${danger ? "bg-amber-500" : "bg-[color:var(--color-brand)]"}`} style={{ width: `${pct}%` }} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * A row's two usage bars (5h + weekly) with all four component states. Prefers the
+ * LIVE refresh payload (which carries an explicit status) over the cached windows.
+ */
+function AccountUsage({
+  account,
+  live,
+  now,
+  refreshing,
+  onRetry,
+}: {
+  account: CodexAccount;
+  live: CodexUsage | undefined;
+  now: number;
+  refreshing: boolean;
+  onRetry: () => void;
+}) {
+  const status = live?.status;
+  const fiveHour = live?.usage?.fiveHour ?? account.fiveHour ?? null;
+  const weekly = live?.usage?.weekly ?? account.weekly ?? null;
+
+  // loading — a live refresh is in flight and we have nothing cached yet.
+  if (refreshing && !fiveHour && !weekly) {
+    return <div className="h-3 w-2/3 animate-pulse rounded bg-[color:var(--color-surface-2)]" />;
+  }
+  // error — a refresh/needs_relogin or transient 401. Subtle inline, not a hard block.
+  if (status === "error" && !fiveHour && !weekly) {
+    return (
+      <div className="text-xs text-[color:var(--color-fg-subtle)]">
+        usage unavailable ·{" "}
+        <button type="button" className="underline hover:text-[color:var(--color-fg)]" onClick={onRetry}>
+          retry
+        </button>
+      </div>
+    );
+  }
+  // no-data — no windows and the call succeeded: render nothing (the plan badge stands in).
+  if (!fiveHour && !weekly) {
+    return null;
+  }
+  const limitReached = status === "limit_reached" || (fiveHour?.percent ?? 0) >= 100 || (weekly?.percent ?? 0) >= 100;
+  return (
+    <div className="grid gap-2">
+      <UsageBar label="5-hour" window={fiveHour} now={now} />
+      <UsageBar label="Weekly" window={weekly} now={now} />
+      {limitReached ? (
+        <div className="flex items-center gap-1.5 text-xs text-amber-500">
+          <TriangleAlertIcon className="size-3.5" /> Usage limit reached
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -58,7 +125,22 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
   const [pending, setPending] = useState<{ userCode: string; verificationUri: string } | null>(null);
   // The row whose label is being edited + its draft value.
   const [editing, setEditing] = useState<{ id: string; value: string } | null>(null);
+  // True while a LIVE batched usage refresh is in flight (drives the bar skeleton).
+  const [refreshingUsage, setRefreshingUsage] = useState(false);
+  // The latest LIVE usage per account (carries the explicit ok/limit/error/no-data
+  // status the cached columns can't). Merged over the cached windows for display.
+  const [usageMap, setUsageMap] = useState<CodexUsageMap>({});
+  // The row whose single-account live refresh is in flight (per-row spinner).
+  const [refreshingRow, setRefreshingRow] = useState<string | null>(null);
   const cancelled = useRef(false);
+  const usageRefreshedRef = useRef(false);
+  // A monotonic clock the rows tick off for the reset countdown — one timer for
+  // the whole card, never a backend re-hit.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
 
   const refreshAccounts = useCallback(async () => {
     try {
@@ -70,12 +152,57 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
     }
   }, [client, workspaceId]);
 
+  // LIVE batched usage refresh: hit the provider for every account (server writes
+  // the cache columns), capture the per-account statuses, then re-read the cached
+  // metadata so the fresh windows land on the accounts list too.
+  const refreshUsage = useCallback(async () => {
+    setRefreshingUsage(true);
+    try {
+      const result = await client.refreshCodexUsage(workspaceId);
+      if (!cancelled.current) setUsageMap(result.usage);
+    } catch {
+      /* per-account errors are surfaced as the row's "usage unavailable" state */
+    } finally {
+      await refreshAccounts();
+      if (!cancelled.current) setRefreshingUsage(false);
+    }
+  }, [client, workspaceId, refreshAccounts]);
+
+  // Per-row LIVE refresh (a single account): updates just that row's usage entry.
+  const refreshAccountUsage = useCallback(async (accountId: string) => {
+    setRefreshingRow(accountId);
+    try {
+      const usage = await client.codexAccountUsage(workspaceId, accountId);
+      if (!cancelled.current) setUsageMap((prev) => ({ ...prev, [accountId]: usage }));
+    } catch {
+      /* surfaced as the row's "usage unavailable" state */
+    } finally {
+      await refreshAccounts();
+      if (!cancelled.current) setRefreshingRow(null);
+    }
+  }, [client, workspaceId, refreshAccounts]);
+
   useEffect(() => {
     cancelled.current = false;
     setLoading(true);
     void refreshAccounts();
     return () => { cancelled.current = true; };
   }, [refreshAccounts]);
+
+  // On mount, trigger ONE live refresh when at least one row is stale (cache TTL),
+  // never a tighter poll. The `usageRefreshedRef` guard fires this at most once per
+  // mount regardless of re-renders.
+  useEffect(() => {
+    if (loading || !data || usageRefreshedRef.current) return;
+    const stale = data.accounts.some((account) => {
+      const checked = account.usageCheckedAt ? new Date(account.usageCheckedAt).getTime() : 0;
+      return Date.now() - checked > USAGE_TTL_MS;
+    });
+    if (stale) {
+      usageRefreshedRef.current = true;
+      void refreshUsage();
+    }
+  }, [loading, data, refreshUsage]);
 
   const connect = useCallback(async () => {
     setBusy(true);
@@ -266,11 +393,25 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                   <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
                     <TriangleAlertIcon className="size-3.5" /> {account.lastError ?? "Reconnect needed."}
                   </div>
-                ) : null}
+                ) : (
+                  <AccountUsage
+                    account={account}
+                    live={usageMap[account.id]}
+                    now={now}
+                    refreshing={refreshingUsage || refreshingRow === account.id}
+                    onRetry={() => void refreshAccountUsage(account.id)}
+                  />
+                )}
                 {canManage ? (
                   <div className="flex flex-wrap items-center gap-2">
-                    <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void refreshAccounts()}>
-                      <RefreshCwIcon className="size-3.5" /> Refresh
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={busy || refreshingRow === account.id}
+                      onClick={() => void refreshAccountUsage(account.id)}
+                    >
+                      {refreshingRow === account.id ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />} Refresh
                     </Button>
                     <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void disconnect(account.id)}>
                       <Trash2Icon className="size-3.5" /> Disconnect

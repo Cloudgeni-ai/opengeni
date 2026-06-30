@@ -30,6 +30,35 @@ function accountLabel(account: CodexAccount | undefined | null): string {
   return account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "Codex account";
 }
 
+// The tighter of the two windows' remaining %, off the CACHED fields (no live
+// provider read — the pill is cache-only). null when no usage is cached yet.
+function tighterRemaining(account: CodexAccount | undefined | null): number | null {
+  if (!account) return null;
+  const remainings = [account.fiveHour?.remaining, account.weekly?.remaining].filter(
+    (value): value is number => typeof value === "number",
+  );
+  return remainings.length > 0 ? Math.min(...remainings) : null;
+}
+
+/** A compact remaining-quota bar of the tighter window. Reads cache only. */
+function MiniBar({ account, className }: { account: CodexAccount | undefined | null; className?: string }) {
+  const remaining = tighterRemaining(account);
+  if (remaining == null) return null;
+  const pct = Math.min(100, Math.max(0, remaining));
+  const danger = pct <= 10;
+  return (
+    <span
+      className={`inline-block h-1 w-8 shrink-0 overflow-hidden rounded-full bg-[color:var(--color-surface-2)] ${className ?? ""}`}
+      title={`${pct}% remaining`}
+    >
+      <span
+        className={`block h-full rounded-full ${danger ? "bg-amber-500" : "bg-[color:var(--color-brand)]"}`}
+        style={{ width: `${pct}%` }}
+      />
+    </span>
+  );
+}
+
 export function CodexAccountIndicator({
   workspaceId: _workspaceId,
   sessionId,
@@ -72,6 +101,7 @@ export function CodexAccountIndicator({
           <span className="hidden truncate text-[color:var(--color-fg-subtle)] sm:inline">Account:</span>
           <span className="truncate font-medium text-[color:var(--color-fg)]">{triggerLabel}</span>
           {plan ? <span className="hidden shrink-0 text-[color:var(--color-fg-subtle)] md:inline">· {plan}</span> : null}
+          <MiniBar account={effective} className="hidden sm:inline-block" />
           {codex.pinning ? (
             <Loader2Icon className="size-3 shrink-0 animate-spin" />
           ) : (
@@ -127,6 +157,7 @@ export function CodexAccountIndicator({
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
             >
               <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
+              <MiniBar account={account} />
               {account.status !== "active" ? (
                 <span className="shrink-0 text-[10px] text-amber-500">{account.status === "needs_relogin" ? "relogin" : account.status}</span>
               ) : null}

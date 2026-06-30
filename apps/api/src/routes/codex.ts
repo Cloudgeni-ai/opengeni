@@ -10,23 +10,27 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   accessTokenExpiry,
+  buildCodexUsageWindowFromCache,
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
+  CODEX_FIVE_HOUR_WINDOW_SECONDS,
   CODEX_MODEL_ID_PREFIX,
   CODEX_PROVIDER_ID,
+  CODEX_WEEKLY_WINDOW_SECONDS,
   CodexDeviceError,
   exchangeDeviceCode,
   fetchCodexModels,
-  fetchCodexUsage,
   parseIdToken,
   pollDeviceCode,
   startDeviceCode,
+  type CodexUsagePayload,
 } from "@opengeni/codex";
 import {
   disconnectAllCodexAccounts,
   disconnectCodexAccount,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  fetchCodexUsageForAccount,
   getCodexCredentialStatus,
   getCodexRotationSettings,
   listCodexAccountStatuses,
@@ -42,6 +46,8 @@ import {
 const CODEX_PROVIDER_LABEL = "Codex subscription · no credits";
 
 // The wire shape for one Codex account (metadata only; never the secret column).
+// P2: fiveHour/weekly ride along, built from the CACHED usage columns (zero
+// provider calls, zero decrypts) so the bars render instantly off this read.
 function codexAccountJson(row: CodexAccountStatus) {
   return {
     id: row.id,
@@ -54,7 +60,17 @@ function codexAccountJson(row: CodexAccountStatus) {
     expiresAt: row.expiresAt,
     lastRefreshAt: row.lastRefreshAt,
     lastError: row.lastError,
+    fiveHour: buildCodexUsageWindowFromCache(row.primaryUsedPercent, row.primaryResetAt, CODEX_FIVE_HOUR_WINDOW_SECONDS),
+    weekly: buildCodexUsageWindowFromCache(row.secondaryUsedPercent, row.secondaryResetAt, CODEX_WEEKLY_WINDOW_SECONDS),
+    usageCheckedAt: row.usageCheckedAt,
   };
+}
+
+// The /codex/usage{,/refresh,/:id} wire wrapper: the rich normalized payload
+// carries its own `status`, surfaced at the top level for back-compat with the
+// existing CodexUsage = { status; usage } shape.
+function codexUsageJson(payload: CodexUsagePayload): { status: CodexUsagePayload["status"]; usage: CodexUsagePayload } {
+  return { status: payload.status, usage: payload };
 }
 
 function codexModelsForPicker(slugs: string[]): Array<{ id: string; label: string; provider: string; providerLabel: string; api: "responses" }> {
@@ -282,24 +298,60 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ disconnected: removed > 0 });
   });
 
-  // Remaining usage / limits from GET /wham/usage. A 404-with-body is a limits state.
+  // Back-compat: remaining usage / limits for the ACTIVE account only. Repointed
+  // through the refreshing wrapper (P2) so it no longer 401s on an idle account's
+  // stale access token. Deprecated in favor of the /accounts + /usage/refresh pair.
   app.get("/v1/workspaces/:workspaceId/codex/usage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const status = await getCodexCredentialStatus(db, workspaceId);
-    const cred = status?.credentialId ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId) : null;
-    if (!cred) {
+    if (!status?.credentialId) {
       throw new HTTPException(404, { message: "codex subscription is not connected" });
     }
-    const usage = await fetchCodexUsage({
-      accessToken: cred.tokens.accessToken,
-      chatgptAccountId: cred.chatgptAccountId,
-      isFedramp: cred.isFedramp,
-      clientVersion: CODEX_CLIENT_VERSION,
-    });
-    // 404 carries a usage-limit body; 2xx is a normal read; anything else is an error
-    // (don't mislabel a 401/500 as "ok").
-    const usageStatus = usage.status === 404 ? "limit_reached" : usage.status < 400 ? "ok" : "error";
-    return c.json({ status: usageStatus, usage: usage.payload });
+    const payload = await fetchCodexUsageForAccount(db, settings, workspaceId, status.credentialId);
+    return c.json(codexUsageJson(payload));
+  });
+
+  // Single-account LIVE usage read (per-row manual refresh): refresh THIS account's
+  // bearer, hit /wham/usage, write the cache columns, return the normalized payload.
+  app.get("/v1/workspaces/:workspaceId/codex/accounts/:accountId/usage", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const accountId = c.req.param("accountId");
+    // Constrain to a real account in this workspace (RLS already scopes, but a 404
+    // for an unknown id is friendlier than an opaque needs_relogin payload).
+    const accounts = await listCodexAccountStatuses(db, workspaceId);
+    if (!accounts.some((account) => account.id === accountId)) {
+      throw new HTTPException(404, { message: "codex account not found" });
+    }
+    const payload = await fetchCodexUsageForAccount(db, settings, workspaceId, accountId);
+    return c.json(codexUsageJson(payload));
+  });
+
+  // Batched LIVE refresh across every connected account, keyed by credential id.
+  // A small concurrency cap + Promise.allSettled so one account's 401/error/timeout
+  // can't sink the batch; each entry is independently statused. Writes the cache
+  // columns as a side effect. This is what the "Refresh" button and an on-mount
+  // staleness check call — NEVER a browser interval.
+  app.post("/v1/workspaces/:workspaceId/codex/usage/refresh", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const accounts = await listCodexAccountStatuses(db, workspaceId);
+    const usage: Record<string, { status: CodexUsagePayload["status"]; usage: CodexUsagePayload }> = {};
+    const queue = [...accounts];
+    const CONCURRENCY = 4;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const account = queue.shift();
+        if (!account) return;
+        const settled = await Promise.allSettled([fetchCodexUsageForAccount(db, settings, workspaceId, account.id)]);
+        const result = settled[0];
+        usage[account.id] = result.status === "fulfilled"
+          ? codexUsageJson(result.value)
+          : { status: "error", usage: { status: "error", planType: null, fiveHour: null, weekly: null, limitReached: false, fetchedAt: new Date().toISOString() } };
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, Math.max(1, accounts.length)) }, () => worker()));
+    return c.json({ usage });
   });
 }

@@ -2445,6 +2445,13 @@ export type CodexAccountStatus = {
   expiresAt: Date | null;
   lastRefreshAt: Date | null;
   lastError: string | null;
+  // P2 cached usage (plaintext metadata; rides along on this metadata-only read
+  // with ZERO provider calls and ZERO decrypts). null until the first refresh.
+  primaryUsedPercent: number | null;
+  primaryResetAt: Date | null;
+  secondaryUsedPercent: number | null;
+  secondaryResetAt: Date | null;
+  usageCheckedAt: Date | null;
 };
 
 /**
@@ -2468,10 +2475,60 @@ export async function listCodexAccountStatuses(db: Database, workspaceId: string
       expiresAt: schema.codexSubscriptionCredentials.expiresAt,
       lastRefreshAt: schema.codexSubscriptionCredentials.lastRefreshAt,
       lastError: schema.codexSubscriptionCredentials.lastError,
+      // P2 cached usage columns — metadata-only, ride along on this read.
+      primaryUsedPercent: schema.codexSubscriptionCredentials.primaryUsedPercent,
+      primaryResetAt: schema.codexSubscriptionCredentials.primaryResetAt,
+      secondaryUsedPercent: schema.codexSubscriptionCredentials.secondaryUsedPercent,
+      secondaryResetAt: schema.codexSubscriptionCredentials.secondaryResetAt,
+      usageCheckedAt: schema.codexSubscriptionCredentials.usageCheckedAt,
     }).from(schema.codexSubscriptionCredentials)
       .where(eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId))
       .orderBy(asc(schema.codexSubscriptionCredentials.createdAt));
     return rows.map((row) => ({ ...row, isActive: row.id === activeId }));
+  });
+}
+
+/** The P2 usage-cache snapshot written by the refreshing usage wrapper. */
+export type CodexAccountUsageSnapshot = {
+  primaryUsedPercent: number | null;
+  primaryResetAt: Date | null;
+  secondaryUsedPercent: number | null;
+  secondaryResetAt: Date | null;
+  checkedAt: Date;
+};
+
+/**
+ * Cache-write for P2 quota bars: persist the five plaintext usage columns on a
+ * SPECIFIC credential row. NEVER touches credential_encrypted. RLS-scoped, guarded
+ * by (id, workspace_id) so it can only write a row the workspace owns. Returns true
+ * iff a row was updated (false ⇒ the credential was disconnected under us — the
+ * snapshot is moot, drop it). This is the only writer of the usage_checked_at TTL
+ * clock that `listCodexAccountStatuses` reads back.
+ */
+export async function recordCodexAccountUsage(
+  db: Database,
+  workspaceId: string,
+  credentialId: string,
+  snapshot: CodexAccountUsageSnapshot,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const updated = await scopedDb.update(schema.codexSubscriptionCredentials)
+      .set({
+        primaryUsedPercent: snapshot.primaryUsedPercent,
+        primaryResetAt: snapshot.primaryResetAt,
+        secondaryUsedPercent: snapshot.secondaryUsedPercent,
+        secondaryResetAt: snapshot.secondaryResetAt,
+        usageCheckedAt: snapshot.checkedAt,
+        // NB: no `version` bump and no `updatedAt` touch — usage is non-credential
+        // metadata and must NOT race the (id, version) refresh CAS in
+        // recordCodexTokenRefresh / setCodexCredentialStatus.
+      })
+      .where(and(
+        eq(schema.codexSubscriptionCredentials.id, credentialId),
+        eq(schema.codexSubscriptionCredentials.workspaceId, workspaceId),
+      ))
+      .returning({ id: schema.codexSubscriptionCredentials.id });
+    return updated.length > 0;
   });
 }
 
@@ -7256,3 +7313,10 @@ function shortHash(value: string): string {
   }
   return (hash >>> 0).toString(36).padStart(7, "0").slice(0, 7);
 }
+
+// Shared, refreshing, id-addressed Codex token resolver + the per-account usage
+// wrapper (P2). Placed at the END so every accessor it orchestrates
+// (loadCodexCredentialForRun / recordCodexTokenRefresh / setCodexCredentialStatus /
+// recordCodexAccountUsage) is already initialized when its default-deps bag
+// evaluates under the index↔resolver module cycle.
+export * from "./codex-token-resolver";

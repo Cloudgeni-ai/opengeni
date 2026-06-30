@@ -149,6 +149,9 @@
     "packages/codex": {
       "name": "@opengeni/codex",
       "version": "0.1.0",
+      "dependencies": {
+        "zod": "^4.2.1",
+      },
       "devDependencies": {
         "tsup": "^8.5.0",
         "typescript": "^6.0.3",

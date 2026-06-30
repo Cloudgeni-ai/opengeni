@@ -125,6 +125,14 @@ export const codexSubscriptionCredentials = pgTable("codex_subscription_credenti
   version: integer("version").notNull().default(1),
   label: text("label"),                 // user-chosen nickname; null ⇒ derive from email/plan/account
   accountEmail: text("account_email"),  // email from the id_token (user's own email; non-secret)
+  // P2 usage cache (plaintext metadata; NEVER a token). Snapshotted from
+  // GET /wham/usage; drives the quota bars + the cache TTL. primary = 5h window
+  // (limit_window_seconds 18000), secondary = weekly (604800).
+  primaryUsedPercent: integer("primary_used_percent"),
+  primaryResetAt: timestamp("primary_reset_at", { withTimezone: true }),
+  secondaryUsedPercent: integer("secondary_used_percent"),
+  secondaryResetAt: timestamp("secondary_reset_at", { withTimezone: true }),
+  usageCheckedAt: timestamp("usage_checked_at", { withTimezone: true }), // snapshot freshness → cache TTL clock
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
