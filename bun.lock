@@ -180,6 +180,7 @@
       "name": "@opengeni/db",
       "version": "0.1.0",
       "dependencies": {
+        "@opengeni/codex": "workspace:*",
         "@opengeni/config": "workspace:*",
         "@opengeni/contracts": "workspace:*",
         "drizzle-orm": "^0.45.2",

@@ -11,8 +11,8 @@ import {
 } from "@opengeni/codex";
 import {
   decryptedCapabilityHeaders,
-  getCodexCredentialStatus,
   listEnabledMcpCapabilityServers,
+  workspaceCodexSubscriptionActive,
   type Database,
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
@@ -30,12 +30,10 @@ export async function settingsWithEnabledCapabilityMcpServers(db: Database, work
  * codexRequestStorage. Idempotent and a no-op when not applicable.
  */
 export async function settingsWithCodexCredential(db: Database, workspaceId: string, settings: Settings): Promise<Settings> {
-  if (!settings.codexSubscriptionEnabled) {
-    return settings;
-  }
-  const status = await getCodexCredentialStatus(db, workspaceId);
-  if (!status || status.status !== "active") {
-    return settings; // not connected / needs_relogin / error -> leave settings unchanged
+  // Same active-credential predicate the billing bypass uses, so provider
+  // injection and billing can never disagree on what an "active codex" turn is.
+  if (!(await workspaceCodexSubscriptionActive(db, settings, workspaceId))) {
+    return settings; // disabled / not connected / needs_relogin / error -> leave settings unchanged
   }
   const withProvider = withCodexProvider(settings);
   // Additive: append the synthetic codex_apps connectors MCP server for ANY

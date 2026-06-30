@@ -53,6 +53,10 @@ import type {
 } from "@opengeni/contracts";
 import { reasoningEffortForMetadata, CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import { isCodexBilledModel } from "@opengeni/codex";
+// Re-exported so consumers get the whole codex-billed detection surface (the pure
+// prefix test + the credential-aware predicates below) from a single import.
+export { isCodexBilledModel } from "@opengeni/codex";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -2174,6 +2178,51 @@ export async function getCodexCredentialStatus(db: Database, workspaceId: string
     }
     return { connected: row.status === "active", ...row };
   });
+}
+
+/**
+ * Single source of truth for "this workspace has an ACTIVE ChatGPT/Codex
+ * subscription connected AND the feature is enabled for this deployment."
+ *
+ * This is the SAME condition `settingsWithCodexCredential` (worker) uses to
+ * decide whether to inject the synthetic codex-subscription provider, so billing
+ * and provider-injection cannot drift. Metadata-only read (never the secret).
+ */
+export async function workspaceCodexSubscriptionActive(
+  db: Database,
+  settings: Pick<Settings, "codexSubscriptionEnabled">,
+  workspaceId: string,
+): Promise<boolean> {
+  if (!settings.codexSubscriptionEnabled) {
+    return false;
+  }
+  const status = await getCodexCredentialStatus(db, workspaceId);
+  return status?.status === "active";
+}
+
+/**
+ * CANONICAL "is this a Codex-billed turn?" predicate.
+ *
+ * True iff: the turn's model is a `codex/<slug>` id (`isCodexBilledModel`) AND
+ * the deployment flag is on AND the workspace has an ACTIVE credential. A true
+ * result means the turn is paid by the USER's ChatGPT/Codex plan and MUST consume
+ * ZERO OpenGeni credits: callers skip the credit-balance / model-cost / token
+ * gates and skip OpenGeni pricing + credit debit.
+ *
+ * The prefix ALONE never returns true: an unconnected user typing `codex/...`
+ * gets the normal gates (and the worker fails the turn for a missing credential),
+ * so there is no free/uncapped-run bypass.
+ */
+export async function isCodexBilledTurn(input: {
+  db: Database;
+  settings: Pick<Settings, "codexSubscriptionEnabled">;
+  workspaceId: string;
+  model: string | null | undefined;
+}): Promise<boolean> {
+  if (!isCodexBilledModel(input.model)) {
+    return false; // cheap; no db hit on the common path
+  }
+  return workspaceCodexSubscriptionActive(input.db, input.settings, input.workspaceId);
 }
 
 /** Disconnect: delete the workspace's codex credential. Returns true if a row was removed. */

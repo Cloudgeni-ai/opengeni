@@ -535,7 +535,7 @@ export async function createSessionForRequest(
     inheritedBackend = member.sandboxBackend;
   }
   // else "new": leave sandboxGroupId null → own singleton group (group ≡ id).
-  await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+  await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model });
   const session = await createAndStartSession({
     db,
     bus,
@@ -609,12 +609,21 @@ export async function acceptSessionUserMessage(
   const requestedTools = input.toolsProvided
     ? validatedTools
     : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, runtimeSettings);
-  await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+  // Hoisted above requireLimit so the codex-billed predicate can resolve the
+  // turn's effective model (a follow-up turn inherits the session's model). A
+  // pure read with no side effects.
+  const existingSession = await requireSession(db, workspaceId, sessionId);
+  await requireLimit(deps, {
+    accountId: grant.accountId,
+    workspaceId,
+    action: "agent_run:create",
+    quantity: 1,
+    model: input.model ?? existingSession.model,
+  });
   if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(db, workspaceId, requestedResources);
-  const existingSession = await requireSession(db, workspaceId, sessionId);
   await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
   const { accepted, turn } = await postUserMessageTurn({
     db,

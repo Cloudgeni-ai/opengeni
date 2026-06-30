@@ -337,7 +337,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     inputSchema: { id: z4.string().uuid(), triggerId: z4.string().min(1).max(128).optional() },
   }, async ({ id, triggerId }) => {
     const task = await requireScheduledTask(deps.db, grant.workspaceId, id);
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1 });
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId: grant.workspaceId, action: "agent_run:create", quantity: 1, model: task.agentConfig.model ?? deps.settings.openaiModel });
     const triggerToken = scheduledTaskTriggerToken(triggerId);
     const agentRunUsageIdempotencyKey = manualScheduledTaskTriggerUsageKey(grant.workspaceId, task.id, triggerToken);
     const triggerWorkflowId = manualScheduledTaskTriggerWorkflowId(task.id, triggerToken);

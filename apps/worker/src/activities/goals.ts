@@ -11,6 +11,7 @@ import {
   getBillingBalance,
   getSessionEvent,
   getSessionGoal,
+  isCodexBilledTurn,
   recordUsageEvent,
   requireSession,
   setSessionGoalLastContinuationTurn,
@@ -34,10 +35,18 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
     if (!existingGoal || existingGoal.status !== "active") {
       return { action: "none" };
     }
+    // Loaded before the budget check so the codex-billed predicate can read the
+    // continuation turn's model (session.model). Kept below the goal-less fast
+    // path above so a non-goal session still skips this read entirely.
+    const session = await requireSession(db, input.workspaceId, input.sessionId);
+    // A codex-model goal continuation is paid by the user's ChatGPT/Codex plan,
+    // so it must not be budget-paused for zero OpenGeni credits. This file uses
+    // BASE settings (no codex overlay); the predicate does its own credential read.
+    const isCodexRun = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: session.model });
     // Budget exhaustion pauses the goal visibly instead of failing the
     // session. Computed up front and applied inside the locked decision so a
     // limits pause never consumes continuation budget.
-    const budgetBlocked = await goalRunBudgetBlocked(settings, db, input.accountId, input.workspaceId);
+    const budgetBlocked = await goalRunBudgetBlocked(settings, db, input.accountId, input.workspaceId, isCodexRun);
     const decision = await evaluateGoalContinuation(db, {
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -62,7 +71,6 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       }]);
       return { action: "paused" };
     }
-    const session = await requireSession(db, input.workspaceId, input.sessionId);
     // Stop/continue race guard: a concurrent goal_complete/goal_pause/operator
     // PATCH between the locked decision and this synthesis must win. The
     // version check also catches a replace. A pause landing after this point
@@ -231,8 +239,11 @@ export function withCodexAppsTool(settings: Settings, tools: ToolRef[]): ToolRef
  * Non-throwing variant of the scheduled-run admission check: returns a human
  * readable reason when balance or monthly caps block another agent run.
  */
-async function goalRunBudgetBlocked(settings: Settings, db: Database, accountId: string, workspaceId: string): Promise<string | null> {
-  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+async function goalRunBudgetBlocked(settings: Settings, db: Database, accountId: string, workspaceId: string, isCodexRun: boolean): Promise<string | null> {
+  // Codex-billed continuations are paid by the user's ChatGPT/Codex plan: skip
+  // the credit-balance gate and the monthly model-cost cap. The agent-run COUNT
+  // cap below is a volume quota (not a credit/cost gate) and is intentionally kept.
+  if (!isCodexRun && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       return "insufficient OpenGeni credits";
@@ -240,7 +251,7 @@ async function goalRunBudgetBlocked(settings: Settings, db: Database, accountId:
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
-    if (limits.maxMonthlyCostMicrosPerAccount) {
+    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
       const used = await sumUsageQuantity(db, {
         accountId,
         eventType: "model.cost",

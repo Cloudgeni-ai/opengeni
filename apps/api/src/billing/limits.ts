@@ -5,6 +5,7 @@ import {
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
   getBillingBalance,
+  isCodexBilledTurn,
   recordUsageEvent,
   sumUsageQuantity,
 } from "@opengeni/db";
@@ -16,6 +17,13 @@ export type LimitCheckInput = {
   workspaceId?: string;
   action: LimitAction;
   quantity?: number;
+  // The turn's model id, when the action represents an agent turn. When this is a
+  // Codex-billed turn (codex/<slug> + feature enabled + active workspace
+  // credential) the turn is paid by the user's ChatGPT/Codex plan and consumes
+  // ZERO OpenGeni credits, so the credit-balance + model-cost + token gates are
+  // skipped. Non-model infra actions (workspace/api_key/schedule create) leave
+  // this undefined and are unaffected.
+  model?: string | null;
 };
 
 export async function requireLimit(deps: ApiRouteDeps, input: LimitCheckInput): Promise<void> {
@@ -27,17 +35,26 @@ export async function requireLimit(deps: ApiRouteDeps, input: LimitCheckInput): 
 }
 
 export async function checkLimit(deps: ApiRouteDeps, input: LimitCheckInput): Promise<LimitDecision> {
-  const creditDecision = await checkCreditBalance(deps, input);
+  // Resolve the canonical codex-billed predicate ONCE. Returns false for any
+  // action that carries no model (infra caps) or any codex/<slug> model without
+  // an active credential — so the bypass never triggers on the prefix alone.
+  const codexBilled = input.workspaceId
+    ? await isCodexBilledTurn({ db: deps.db, settings: deps.settings, workspaceId: input.workspaceId, model: input.model })
+    : false;
+  const creditDecision = await checkCreditBalance(deps, input, codexBilled);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return { allowed: true };
   }
-  return await checkStaticCaps(deps, input);
+  return await checkStaticCaps(deps, input, codexBilled);
 }
 
-async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput): Promise<LimitDecision> {
+async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput, codexBilled: boolean): Promise<LimitDecision> {
+  if (codexBilled) {
+    return { allowed: true }; // paid by the user's ChatGPT/Codex plan — zero OpenGeni credits
+  }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
@@ -48,9 +65,9 @@ async function checkCreditBalance(deps: ApiRouteDeps, input: LimitCheckInput): P
   return { allowed: false, code: "insufficient_credits", message: "insufficient OpenGeni credits" };
 }
 
-async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput): Promise<LimitDecision> {
+async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput, codexBilled: boolean): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
-  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action)) {
+  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !codexBilled) {
     const used = await sumUsageQuantity(deps.db, {
       accountId: input.accountId,
       eventType: "model.cost",
@@ -111,7 +128,7 @@ async function checkStaticCaps(deps: ApiRouteDeps, input: LimitCheckInput): Prom
         : blocked("max_monthly_agent_runs_per_workspace", `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
     }
     case "tokens:consume": {
-      if (!limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
+      if (codexBilled || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
         return { allowed: true };
       }
       const used = await sumUsageQuantity(deps.db, {

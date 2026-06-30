@@ -6,6 +6,7 @@ import {
   enqueueSessionTurn,
   getBillingBalance,
   getWorkspaceEnvironment,
+  isCodexBilledTurn,
   recordUsageEvent,
   requireScheduledTask,
   requireSession,
@@ -36,7 +37,13 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     dispatchScheduledTaskRun: async (input: DispatchScheduledTaskRunInput): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
-      await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId, input.agentRunUsageIdempotencyKey ? 0 : 1);
+      // The scheduled task's model can be codex/<slug>; resolve it here so the
+      // admission gate can skip the credit/cost gates for a codex-billed run
+      // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
+      // codex overlay), so the predicate does its own active-credential read.
+      const model = task.agentConfig.model ?? settings.openaiModel;
+      const isCodexRun = await isCodexBilledTurn({ db, settings, workspaceId: task.workspaceId, model });
+      await ensureScheduledRunAllowed(settings, db, task.accountId, task.workspaceId, input.agentRunUsageIdempotencyKey ? 0 : 1, isCodexRun);
       const run = await createScheduledTaskRun(db, {
         workspaceId: task.workspaceId,
         taskId: task.id,
@@ -55,7 +62,6 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       });
       let result: DispatchScheduledTaskRunResult;
       try {
-        const model = task.agentConfig.model ?? settings.openaiModel;
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
         const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
@@ -298,8 +304,12 @@ async function ensureScheduledRunAllowed(
   accountId: string,
   workspaceId: string,
   requestedAgentRuns: number,
+  isCodexRun: boolean,
 ): Promise<void> {
-  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+  // Codex-billed runs are paid by the user's ChatGPT/Codex plan: skip the
+  // credit-balance gate and the monthly model-cost cap. The agent-run COUNT cap
+  // below is a volume quota (not a credit/cost gate) and is intentionally kept.
+  if (!isCodexRun && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient OpenGeni credits");
@@ -307,7 +317,7 @@ async function ensureScheduledRunAllowed(
   }
 	  if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
 	    const limits = configuredStaticUsageLimits(settings);
-	    if (limits.maxMonthlyCostMicrosPerAccount) {
+	    if (!isCodexRun && limits.maxMonthlyCostMicrosPerAccount) {
 	      const used = await sumUsageQuantity(db, {
 	        accountId,
 	        eventType: "model.cost",

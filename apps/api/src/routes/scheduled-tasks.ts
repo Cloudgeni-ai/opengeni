@@ -82,8 +82,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1 });
+    // Load the task before the gate so a codex-model scheduled task can be
+    // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireScheduledTaskForApi(db, workspaceId, c.req.param("taskId"));
+    await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model: task.agentConfig.model ?? deps.settings.openaiModel });
     // Body is optional (a bare POST is still a valid trigger); only a present,
     // non-empty body must parse against the contract.
     const body = await c.req.json().catch(() => ({}));

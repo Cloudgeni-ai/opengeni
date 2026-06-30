@@ -8,6 +8,7 @@ import {
   getSessionEvent,
   getSessionGoal,
   getSessionTurn,
+  isCodexBilledTurn,
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
@@ -336,7 +337,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
-      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
+      // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
+      // workspace credential). Computed once and threaded through every billing
+      // gate + the usage recorder so a turn paid by the user's ChatGPT/Codex plan
+      // consumes ZERO OpenGeni credits and never feeds an OpenGeni cap. Resolved
+      // here (before resolvedModel at the routing step) because the pre-turn gate
+      // below needs it; mirrors the same active-credential read the codex provider
+      // overlay uses, so billing and routing agree on what "codex" is.
+      const isCodexTurn = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: turn.model });
+      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn);
       const activityContext = currentActivityContext();
       // Setup (environment load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
@@ -776,6 +785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               sessionId: input.sessionId,
               turnId,
               model: turn.model,
+              isCodexTurn,
               usage: responseUsage.usage,
               sourceKey: modelUsageSourceKey({
                 responseId: responseUsage.responseId,
@@ -785,7 +795,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             await reconcileConversationTruth();
             try {
-              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId);
+              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn);
             } catch (limitError) {
               // Capture the run state at the boundary so the budget valve in
               // the outer catch can end this segment gracefully with full
@@ -833,6 +843,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionId: input.sessionId,
           turnId,
           model: turn.model,
+          isCodexTurn,
           usage: stream.state.usage,
           sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
         });
@@ -1288,8 +1299,12 @@ class BudgetExhaustedError extends Error {
   }
 }
 
-async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], accountId: string, workspaceId: string): Promise<void> {
-  if (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed") {
+// Exported for unit testing the codex-billed bypass; not part of the activity surface.
+export async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], accountId: string, workspaceId: string, isCodexTurn: boolean): Promise<void> {
+  // Codex-billed turns are paid by the user's ChatGPT/Codex plan: skip the
+  // credit-balance gate and the monthly token cap. The agent-run COUNT cap below
+  // is a volume/fairness quota (not a credit/cost gate) and is intentionally kept.
+  if (!isCodexTurn && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient OpenGeni credits");
@@ -1310,7 +1325,7 @@ async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], 
           throw new Error(`monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`);
         }
     }
-    if (limits.maxMonthlyTokensPerWorkspace) {
+    if (!isCodexTurn && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",
@@ -1323,12 +1338,14 @@ async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], 
   }
 }
 
-async function recordModelUsageAndDebitCredits(settings: Settings, db: ActivityServices["db"], input: {
+// Exported for unit testing the codex-billed bypass; not part of the activity surface.
+export async function recordModelUsageAndDebitCredits(settings: Settings, db: ActivityServices["db"], input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
   turnId: string;
   model: string;
+  isCodexTurn: boolean;
   usage?: ModelUsageInput | null;
   sourceKey: string;
 }): Promise<void> {
@@ -1338,6 +1355,28 @@ async function recordModelUsageAndDebitCredits(settings: Settings, db: ActivityS
   const inputTokens = positiveInt(input.usage.inputTokens);
   const outputTokens = positiveInt(input.usage.outputTokens);
   const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
+  // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
+  // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
+  // codex/<slug> model has no entry in configuredModelPricing, so the normal path
+  // below would throw "Missing model pricing". We:
+  //   - do NOT emit the cap-feeding `model.tokens` event (ensureRunAllowed and
+  //     the API tokens:consume cap sum `model.tokens` with NO cost dimension, so
+  //     any row would count against maxMonthlyTokensPerWorkspace);
+  //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
+  //   - never look up pricing and never debit credits.
+  if (input.isCodexTurn) {
+    await recordUsageEvent(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      eventType: "model.cost",
+      quantity: 0,
+      unit: "usd_micros",
+      sourceResourceType: "model_response",
+      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
+    });
+    return;
+  }
   if (totalTokens > 0) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
