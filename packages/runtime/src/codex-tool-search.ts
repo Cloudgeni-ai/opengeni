@@ -43,13 +43,33 @@ export function isCodexAppsFunctionTool(tool: unknown): tool is Tool & { name: s
   );
 }
 
-/** Split snake_case/camelCase/dotted text into lowercase word tokens (len ≥ 2). */
+// Minimal English stopword set: query phrasings like "send an email to someone"
+// should match on capability words, not drown in glue words (parity with
+// codex-rs, whose search normalizes tokens server-side).
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "by", "at",
+  "is", "are", "be", "do", "does", "my", "me", "your", "you", "it", "its", "this",
+  "that", "from", "as", "up", "out", "all", "some", "any", "can", "will", "would",
+  "should", "want", "need", "please", "user", "users",
+]);
+
+/** Light suffix stemmer so "emails"/"email", "creating"/"create" co-match (min-stem guards, no over-stripping). */
+function stem(token: string): string {
+  if (token.length > 5 && token.endsWith("ing")) return token.slice(0, -3);
+  if (token.length > 4 && token.endsWith("ed")) return token.slice(0, -2);
+  if (token.length > 4 && token.endsWith("es")) return token.slice(0, -2);
+  if (token.length > 3 && token.endsWith("s") && !token.endsWith("ss")) return token.slice(0, -1);
+  return token;
+}
+
+/** Split snake_case/camelCase/dotted text into stemmed lowercase word tokens (len ≥ 2, stopwords removed). */
 function tokenize(text: string): string[] {
   return text
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .toLowerCase()
     .split(/[^a-z0-9]+/)
-    .filter((t) => t.length > 1);
+    .filter((t) => t.length > 1 && !STOPWORDS.has(t))
+    .map(stem);
 }
 
 /** The searchable text of a connector tool: name (weighted ×2) + description + param names. */
@@ -65,14 +85,15 @@ function toolSearchText(tool: Tool): string {
 /**
  * Rank connector tools against a plain-language query with BM25 (Okapi, k1=1.5,
  * b=0.75) over tokenized name+description+params. Returns the top `limit` tools
- * with a positive score, most-relevant first. An empty/no-match query returns
- * the first `limit` tools (never empty when tools exist) so a search always
- * discloses SOMETHING the model can act on or reject.
+ * with a positive score, most-relevant first. An empty or no-match query returns
+ * [] — matching codex-rs, whose search returns empty rather than arbitrary tools;
+ * disclosing unrelated (and thereby CALLABLE) tools on a miss feeds the model
+ * noise. The SDK normalizes an empty executor result into an empty
+ * tool_search_output, which the model reads as "nothing matched — rephrase".
  */
 export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool[] {
   const qTokens = Array.from(new Set(tokenize(query)));
-  if (tools.length === 0) return [];
-  if (qTokens.length === 0) return tools.slice(0, limit);
+  if (tools.length === 0 || qTokens.length === 0) return [];
 
   const docs = tools.map((tool) => {
     const tokens = tokenize(toolSearchText(tool));
@@ -99,8 +120,7 @@ export function bm25RankTools(tools: Tool[], query: string, limit: number): Tool
     return { tool: d.tool, score };
   });
   const hits = scored.filter((s) => s.score > 0).sort((a, b2) => b2.score - a.score);
-  if (hits.length === 0) return tools.slice(0, limit); // never strand the model with nothing
-  return hits.slice(0, limit).map((s) => s.tool);
+  return hits.slice(0, limit).map((s) => s.tool); // no hits ⇒ [] (codex-rs parity; see doc)
 }
 
 /** Parse `{query, limit}` from a tool_search_call's arguments (string or object). */
@@ -116,10 +136,26 @@ function parseSearchArgs(raw: unknown): { query: string; limit: number } {
   return { query, limit: Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.round(limitRaw))) };
 }
 
-const SEARCH_TOOL_DESCRIPTION =
-  "Search the user's connected app tools (Gmail, GitHub, Google Calendar, Slack, and more) by capability. "
-  + "Describe in plain language WHAT you need to do (for example: \"send an email\", \"create a calendar event\", "
-  + "\"list GitHub issues\") rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
+/**
+ * Render the search tool's description from the account's ACTUALLY-connected
+ * sources — codex-rs parity (its create_tool_search_tool builds "You have access
+ * to tools from the following sources:\n- <name>" from the live enabled-source
+ * list). With defer_loading stripping every connector schema (and name) from
+ * model context, this description is the model's ONLY signal of which apps
+ * exist, so a hardcoded list would both advertise absent connectors and hide
+ * present ones.
+ */
+export function renderSearchToolDescription(connectorNamespaces: ReadonlySet<string>): string {
+  const base =
+    "Search the user's connected app tools by capability. "
+    + "Describe in plain language WHAT you need to do (for example: \"send an email\", \"create a calendar event\") "
+    + "rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
+  const sources = Array.from(connectorNamespaces).filter((n) => typeof n === "string" && n.length > 0).sort();
+  if (sources.length === 0) {
+    return `${base}\nConnected sources: none currently available.`;
+  }
+  return `${base}\nYou have access to tools from the following sources:\n${sources.map((s) => `- ${s}`).join("\n")}`;
+}
 
 const SEARCH_TOOL_PARAMETERS = {
   type: "object",
@@ -144,11 +180,13 @@ function codexToolSearchExecutor(args: { availableTools?: Tool[]; toolCall?: { a
   return bm25RankTools(deferred, query, limit);
 }
 
+const NO_NAMESPACES: ReadonlySet<string> = new Set();
+
 /** Build the client-executed tool_search tool that discloses codex_apps connectors on demand. */
-export function buildCodexToolSearchTool(): Tool {
+export function buildCodexToolSearchTool(connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): Tool {
   return toolSearchTool({
     execution: "client",
-    description: SEARCH_TOOL_DESCRIPTION,
+    description: renderSearchToolDescription(connectorNamespaces),
     parameters: SEARCH_TOOL_PARAMETERS as unknown as Record<string, unknown>,
     execute: codexToolSearchExecutor as never,
   }) as unknown as Tool;
@@ -162,35 +200,68 @@ function isToolSearchTool(tool: unknown): boolean {
 
 /**
  * The transform applied to a turn's resolved tool list: tag every codex_apps
- * connector function tool `deferLoading = true`, and — only if we tagged at least
- * one and no tool_search tool is already present — append the client tool_search
- * tool. Pure (mutates the passed tools + returns the possibly-extended array); the
- * SDK's `getTools` gate requires a tool_search whenever a deferred tool is present,
- * which appending here satisfies in the same request. No-op (same array, untouched)
- * when the turn has no codex_apps tools.
+ * connector function tool `deferLoading = true`, and — unless one is already
+ * present — append the client tool_search tool. Pure (mutates the passed tools +
+ * returns the possibly-extended array); the SDK's `getTools` gate requires a
+ * tool_search whenever a deferred tool is present, which appending here satisfies
+ * in the same request.
+ *
+ * The search tool is appended UNCONDITIONALLY (even when the turn has no
+ * codex_apps tools, e.g. the best-effort codex_apps connect was dropped this
+ * turn): a prior turn's history may carry tool_search_call/output items, and
+ * replaying those without a tool_search tool in the request risks a backend
+ * reject; a search over an empty pool simply discloses nothing. The description
+ * reflects the LIVE connector namespaces, so an empty turn reads
+ * "none currently available".
  */
-export function applyCodexToolSearch(tools: Tool[]): Tool[] {
-  let tagged = 0;
+export function applyCodexToolSearch(tools: Tool[], connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): Tool[] {
   for (const tool of tools) {
     if (isCodexAppsFunctionTool(tool) && (tool as { deferLoading?: boolean }).deferLoading !== true) {
       (tool as { deferLoading?: boolean }).deferLoading = true;
-      tagged++;
     }
   }
-  if (tagged === 0 || tools.some(isToolSearchTool)) {
+  if (tools.some(isToolSearchTool)) {
     return tools;
   }
-  return [...tools, buildCodexToolSearchTool()];
+  return [...tools, buildCodexToolSearchTool(connectorNamespaces)];
 }
+
+type CloneCapableAgent = {
+  getAllTools: (runContext: unknown) => Promise<Tool[]>;
+  clone?: (config: unknown) => CloneCapableAgent;
+};
 
 /**
  * Install progressive connector disclosure on a codex-path agent by wrapping
- * `getAllTools` so every per-model-call tool resolution runs {@link applyCodexToolSearch}.
- * Idempotent-per-call (re-tags each freshly-materialized MCP tool under
- * cacheToolsList:false). Gated by the caller (flag + codex path); does nothing on a
- * turn with no codex_apps tools.
+ * `getAllTools` so every per-model-call tool resolution runs
+ * {@link applyCodexToolSearch}. Idempotent-per-call (re-tags each
+ * freshly-materialized MCP tool under cacheToolsList:false). Gated by the caller
+ * (flag + codex path).
+ *
+ * CLONE SURVIVAL (the part that makes this work on the REAL sandbox path): the
+ * SDK's sandbox runtime routes EVERY model call through
+ * `prepareSandboxAgent → agent.clone(...)` (agentPreparation.js), and
+ * `SandboxAgent.clone` constructs a FRESH agent from a fixed field list — an
+ * instance-own `getAllTools` override is NOT copied, so patching only this
+ * instance would silently no-op the whole feature on sandbox turns (the run
+ * loop resolves tools on the CLONE). We therefore also wrap `clone` to
+ * RE-INSTALL onto every clone, recursively — covering clone-of-clone and the
+ * RunState resume paths. `connectorNamespaces` is the LIVE, by-reference Set the
+ * codex_apps sanitizing transport fills during each turn's tools/list
+ * (prepareAgentTools), so by the time the wrapper post-processes getAllTools the
+ * current turn's connector sources are known.
  */
-export function installCodexToolSearch(agent: { getAllTools: (runContext: unknown) => Promise<Tool[]> }): void {
-  const original = agent.getAllTools.bind(agent);
-  agent.getAllTools = (async (runContext: unknown) => applyCodexToolSearch(await original(runContext))) as typeof agent.getAllTools;
+export function installCodexToolSearch(agent: CloneCapableAgent, connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES): void {
+  const originalGetAllTools = agent.getAllTools.bind(agent);
+  agent.getAllTools = (async (runContext: unknown) =>
+    applyCodexToolSearch(await originalGetAllTools(runContext), connectorNamespaces)) as typeof agent.getAllTools;
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    const cloneWithToolSearch: NonNullable<CloneCapableAgent["clone"]> = (config: unknown) => {
+      const cloned = originalClone(config);
+      installCodexToolSearch(cloned, connectorNamespaces);
+      return cloned;
+    };
+    agent.clone = cloneWithToolSearch;
+  }
 }

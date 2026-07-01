@@ -122,7 +122,7 @@ export * from "./sandbox";
 // rather than mis-editing. Runs at import time, before any turn binds a capability.
 setSelfhostedApplyDiff(applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string);
 
-export { sanitizeHistoryItemsForModel, stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState } from "./history-sanitizer";
+export { sanitizeHistoryItemsForModel, stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState, neutralizeToolSearchItemsInSerializedRunState } from "./history-sanitizer";
 export type { HistoryItem } from "./history-sanitizer";
 
 // The provider-bound Model classes used by buildModelInstance/resolveTurnModel.
@@ -643,6 +643,12 @@ export type BuildAgentOptions = {
   encryptedReasoning?: boolean;
   contextWindowTokens?: number;
   structuredToolTransport?: boolean;
+  // The LIVE, by-reference connector-namespace Set from prepareAgentTools
+  // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
+  // read per model call by the codex tool_search description so the model sees
+  // the account's ACTUALLY-connected sources (codex-rs parity). Only meaningful
+  // on the codex tool-search path.
+  codexConnectorNamespaces?: ReadonlySet<string>;
   sandboxEnvironment?: Record<string, string>;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
@@ -872,12 +878,16 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
  * flag is on. Gated on `structuredToolTransport === false` — the same signal that
  * identifies a codex-subscription turn (the ChatGPT backend that rejects hosted
  * tools) — so no non-codex turn is ever touched. On qualifying turns it wraps
- * `getAllTools` to defer codex_apps schemas + add the client tool_search tool; a
- * turn with no codex_apps tools is a no-op (see {@link applyCodexToolSearch}).
+ * `getAllTools` (clone-survivingly — see {@link installCodexToolSearch}) to defer
+ * codex_apps schemas + add the client tool_search tool, whose description renders
+ * the live connector namespaces threaded from prepareAgentTools.
  */
 function maybeInstallCodexToolSearch(agent: Agent<any, any>, settings: Settings, options: BuildAgentOptions): void {
   if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
-    installCodexToolSearch(agent as unknown as { getAllTools: (runContext: unknown) => Promise<any[]> });
+    installCodexToolSearch(
+      agent as unknown as Parameters<typeof installCodexToolSearch>[0],
+      options.codexConnectorNamespaces ?? new Set<string>(),
+    );
   }
 }
 
@@ -2028,6 +2038,33 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
         output: item.output,
+      },
+    });
+  } else if (item.type === "tool_search_call_item") {
+    // Progressive connector disclosure: surface the model's tool search as a
+    // regular tool-call event so the session stream shows the step (parity with
+    // the Codex CLI, which renders its searches). Arguments may be an object
+    // (the live wire shape) or a string.
+    const raw = item.rawItem ?? {};
+    out.push({
+      type: "agent.toolCall.created",
+      payload: {
+        id: raw.call_id ?? raw.callId ?? raw.id ?? item.id ?? null,
+        name: "tool_search",
+        arguments: raw.arguments ?? null,
+        raw,
+      },
+    });
+  } else if (item.type === "tool_search_output_item") {
+    const raw = item.rawItem ?? {};
+    const disclosed = Array.isArray(raw.tools)
+      ? raw.tools.map((tool: { name?: unknown }) => (typeof tool?.name === "string" ? tool.name : "")).filter(Boolean)
+      : [];
+    out.push({
+      type: "agent.toolCall.output",
+      payload: {
+        id: raw.call_id ?? raw.callId ?? item.id ?? null,
+        output: { type: "text", text: disclosed.length > 0 ? `Disclosed tools: ${disclosed.join(", ")}` : "No matching tools found." },
       },
     });
   } else if (item.type === "message_output_item") {

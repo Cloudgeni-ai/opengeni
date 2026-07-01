@@ -9,7 +9,7 @@ import {
   requireFile,
   type Database,
 } from "@opengeni/db";
-import { stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import { stripReasoningEncryptedContent, stripReasoningIdentityFromSerializedRunState, neutralizeToolSearchItemsInSerializedRunState, type OpenGeniRuntime } from "@opengeni/runtime";
 
 /**
  * The codex account THIS turn runs on, threaded into every history read path so a
@@ -106,7 +106,13 @@ export function resumeRunStateForCodexAccount(
   if (state.frozenCodexCredentialId === current.currentCodexCredentialId) {
     return state.serializedRunState;
   }
-  return stripReasoningIdentityFromSerializedRunState(state.serializedRunState);
+  // Cross-account: neutralize reasoning identity in place AND flip frozen
+  // tool_search pairs to execution:"server" in place (count-preserving — HOLE E
+  // forbids removing blob items). The server flip makes the SDK skip its
+  // client-executor rehydration (which would THROW when the resuming account's
+  // connector pool differs from the freezing account's); the flipped shape is
+  // live-verified wire-safe. The model can still re-search on this account.
+  return neutralizeToolSearchItemsInSerializedRunState(stripReasoningIdentityFromSerializedRunState(state.serializedRunState));
 }
 
 /**

@@ -1097,6 +1097,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
+        // LIVE by-reference connector namespaces (fills during this turn's
+        // codex_apps tools/list): the codex tool_search description reads it per
+        // model call so the model sees the account's real connected sources.
+        codexConnectorNamespaces: preparedTools.codexConnectorNamespaces,
         // Resolved-model routing + gating (legacy defaults when null). The model
         // is passed as the model *string* (agent.model = runSettings.openaiModel),
         // NOT a Model instance: an instance only survives the in-process

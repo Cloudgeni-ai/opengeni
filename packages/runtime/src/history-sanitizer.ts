@@ -389,6 +389,89 @@ export function stripReasoningIdentityFromSerializedRunState(serialized: string)
 }
 
 /**
+ * Neutralize tool_search items IN PLACE in a serialized RunState blob for a
+ * cross-account codex resume — the run-state sibling of
+ * `applyCodexHistoryStrip`'s tool_search rule, but COUNT-PRESERVING (HOLE E: the
+ * blob path's reconcile watermark counts the blob's history length, so items
+ * must never be removed — only mutated, exactly like the reasoning
+ * neutralization above).
+ *
+ * The hazard: on deserialize, the SDK re-runs the registered CLIENT tool_search
+ * execute callback per frozen pair (`rehydrateToolSearchRuntimeTools`) and
+ * THROWS a UserError when the re-run's runtime-tool keys mismatch the serialized
+ * expectation — which is exactly what happens when the RESUMING account's
+ * connector pool differs from the FREEZING account's. The SDK skips that
+ * rehydration entirely for `execution === 'server'` calls, so flipping the
+ * frozen pairs' `execution` to `"server"` in place defuses the throw without
+ * touching counts, ids, pairing, or content. The flipped shape is wire-safe:
+ * LIVE-VERIFIED against /codex/responses — a replayed server-execution pair is
+ * accepted (200) and its disclosure still holds. The account-bound `tsc_…` id is
+ * separately stripped by the codex transport normalizer (all input item ids).
+ *
+ * Walks the same blob locations as {@link stripReasoningIdentityFromSerializedRunState}:
+ * `originalInput` (array form), `generatedItems` (SDK run-item wrappers — the
+ * raw shape under `rawItem`), every `modelResponses[].output`, and
+ * `lastModelResponse.output`. Returns the input string unchanged when nothing
+ * matched.
+ */
+export function neutralizeToolSearchItemsInSerializedRunState(serialized: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch {
+    return serialized;
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return serialized;
+  }
+  let changed = false;
+  const neutralize = (candidate: unknown): void => {
+    if (!candidate || typeof candidate !== "object") {
+      return;
+    }
+    const record = candidate as Record<string, unknown>;
+    if (record.type !== "tool_search_call" && record.type !== "tool_search_output") {
+      return;
+    }
+    if (record.execution !== "server") {
+      record.execution = "server";
+      changed = true;
+    }
+  };
+  const neutralizeArray = (arr: unknown): void => {
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        neutralize(item);
+      }
+    }
+  };
+  const root = parsed as Record<string, unknown>;
+  neutralizeArray(root.originalInput);
+  if (Array.isArray(root.generatedItems)) {
+    for (const wrapper of root.generatedItems) {
+      if (wrapper && typeof wrapper === "object" && "rawItem" in (wrapper as Record<string, unknown>)) {
+        neutralize((wrapper as Record<string, unknown>).rawItem);
+      }
+    }
+  }
+  const neutralizeResponseOutput = (response: unknown): void => {
+    if (response && typeof response === "object") {
+      neutralizeArray((response as Record<string, unknown>).output);
+    }
+  };
+  if (Array.isArray(root.modelResponses)) {
+    for (const response of root.modelResponses) {
+      neutralizeResponseOutput(response);
+    }
+  }
+  neutralizeResponseOutput(root.lastModelResponse);
+  if (!changed) {
+    return serialized;
+  }
+  return JSON.stringify(parsed);
+}
+
+/**
  * Normalize `computer_call` items so each carries EXACTLY ONE of the two
  * mutually-exclusive action fields the provider accepts.
  *
