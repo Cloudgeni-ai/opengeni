@@ -105,7 +105,9 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
       session,
     });
     expect(caps.FileSystem.available).toBe(true);
-    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    // Selfhosted desktop is the RELAY framebuffer (PNG-per-frame), rendered by the
+    // "frames" canvas client — never noVNC/vnc-ws (that's Modal's x11vnc path).
+    expect(caps.DesktopStream.transport).toBe("relay-frames");
 
     // Flip offline → the surface degrades to agent_offline on the same session.
     mock.setOnline(false);
