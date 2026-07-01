@@ -857,8 +857,20 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
  * preserved.
  */
 function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem>): void {
-  const bindModel = capability.bindModel.bind(capability);
-  capability.bindModel = (model: string) => bindModel(model, undefined);
+  // Use `this` (NOT a captured reference to `capability`): the SandboxAgent binds
+  // via `cap.clone().bind(session).bindRunAs(runAs).bindModel(model, instance)` and
+  // runs tools() on the object the CHAIN returns. Capability.clone() copies this
+  // override onto the fresh per-run instance, so bindModel must operate on and
+  // RETURN `this` (the clone) — a version that mutated/returned the ORIGINAL
+  // capability leaves the clone (which .bind() set `_session` on) out of the chain,
+  // so tools() runs on the unbound original and throws "Filesystem capability is
+  // not bound to a SandboxSession". Dropping the model instance is all we need:
+  // supportsApplyPatchTransport(undefined) is false → the function apply_patch.
+  const forceFunctionTransport = function (this: Record<string, unknown>): unknown {
+    this._modelInstance = undefined;
+    return this;
+  };
+  (capability as unknown as { bindModel: typeof forceFunctionTransport }).bindModel = forceFunctionTransport;
 }
 
 /**

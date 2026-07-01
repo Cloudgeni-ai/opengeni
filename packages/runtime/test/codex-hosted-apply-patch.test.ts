@@ -18,18 +18,30 @@ import { buildAgentCapabilities } from "../src/index";
 // exactly like the real OpenAIResponsesModel our codex turns bind).
 class OpenAIResponsesModel {}
 
-/** Bind a stub sandbox session + a Responses-style model and return the emitted apply_patch tool's `type`. */
+// The exact bind chain the SandboxAgent runs: clone() a fresh per-run instance,
+// then bind → bindRunAs → bindModel, and call tools() on the object the CHAIN
+// RETURNS (not the original). Exercising clone() + the chain return is essential:
+// a bindModel override that returns the wrong `this` leaves the cloned+bound
+// instance out of the chain and makes tools() throw "not bound to a SandboxSession"
+// (the live regression this test now guards).
+type BindableCap = {
+  clone: () => BindableCap;
+  bind: (session: unknown) => BindableCap;
+  bindRunAs: (r?: unknown) => BindableCap;
+  bindModel: (m: string, i?: unknown) => BindableCap;
+  tools: () => Array<{ type?: string; name?: string }>;
+};
+
+/** Bind a stub sandbox session + a Responses-style model the way SandboxAgent does, return the emitted apply_patch tool's `type`. */
 function filesystemApplyPatchToolType(options: Parameters<typeof buildAgentCapabilities>[2]): string | undefined {
   const caps = buildAgentCapabilities(testSettings({ sandboxBackend: "docker" }), [], options);
-  const filesystemCap = caps.find((cap) => (cap as { type?: unknown }).type === "filesystem") as {
-    bind: (session: unknown) => { bindRunAs: (r?: unknown) => { bindModel: (m: string, i?: unknown) => unknown } };
-    tools: () => Array<{ type?: string; name?: string }>;
-  };
+  const filesystemCap = caps.find((cap) => (cap as { type?: unknown }).type === "filesystem") as unknown as BindableCap;
   // filesystem.tools() only needs createEditor() (truthy) at build time; viewImage
   // is referenced lazily by the view_image tool's execute, never invoked here.
   const stubSession = { createEditor: () => ({}), viewImage: async () => "img" };
-  filesystemCap.bind(stubSession).bindRunAs(undefined).bindModel("gpt-5.5", new OpenAIResponsesModel());
-  return filesystemCap.tools().find((tool) => tool.name === "apply_patch")?.type;
+  // MUST use the chain's return value (the cloned+bound instance), exactly as the SDK does.
+  const bound = filesystemCap.clone().bind(stubSession).bindRunAs(undefined).bindModel("gpt-5.5", new OpenAIResponsesModel());
+  return bound.tools().find((tool) => tool.name === "apply_patch")?.type;
 }
 
 describe("codex hosted-tool transport: apply_patch", () => {
