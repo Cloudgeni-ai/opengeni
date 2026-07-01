@@ -773,6 +773,10 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // session env; runStream reads it to build the clone hook context. Absent when
 // no repo is attached / on the selfhosted path.
 const agentGitTokenSeed = new WeakMap<object, string>();
+// The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
+// backend). Read by runStream's owned branch to keep platform box-setup hooks off
+// connected machines (a user's real computer).
+const agentActiveSandboxBackend = new WeakMap<object, Settings["sandboxBackend"]>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -858,6 +862,14 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
   agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend));
+  // Stash the EFFECTIVE backend so runStream's owned branch can skip the direct
+  // beforeAgentStart hook run on a connected machine: the box there is the user's
+  // REAL computer — the platform must not run setup (az login) against it. The
+  // clone hooks are already excluded for selfhosted at construction (above); this
+  // keeps the built-in hooks equally out.
+  if (options.activeSandboxBackend) {
+    agentActiveSandboxBackend.set(agent, options.activeSandboxBackend);
+  }
   // TOKEN-BROKER (B1): stash the per-turn seed off-manifest so runStream can seed the
   // clone hook without the token ever touching defaultManifest / sandboxEnvironment.
   if (options.gitTokenSeed) {
@@ -1659,7 +1671,12 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // seed OVERWRITES the file (the desired per-turn refresh), and az login is
     // idempotent. A turn resumed after preemption re-enters here and re-seeds the
     // freshly minted token — which is exactly what a >1h-old warm box needs.
-    await runBeforeAgentStartHooks(session as SandboxSessionLike, ownedHooks, ownedHookContext);
+    // EXCEPT on a connected machine (effective backend "selfhosted"): the box is the
+    // user's REAL computer — the platform must not run setup against it (the clone
+    // hooks are already empty there; this keeps az login off it too).
+    if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+      await runBeforeAgentStartHooks(session as SandboxSessionLike, ownedHooks, ownedHookContext);
+    }
     // Keep the decoration as a safety net for any session the SDK does create/resume
     // through the client during this run (it is inert for the provided session).
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);

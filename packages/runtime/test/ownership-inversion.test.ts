@@ -309,4 +309,53 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     expect(cloneExecs[0]!.cmd).toContain("seed-token-e2e");
     expect(cloneExecs[0]!.cmd).toContain("repos/example/repo");
   });
+
+  test("connected machine (effective backend selfhosted): NO platform setup exec touches the user's box", async () => {
+    // A connected machine is the user's real computer. The clone hooks are already
+    // excluded at construction for selfhosted; the direct owned-path hook run must
+    // skip the built-in hooks (az login) there too — even when the session carries
+    // an azure-credentialed workspace Environment.
+    const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+    const environment = {
+      HOME: "/workspace",
+      ARM_CLIENT_ID: "cid",
+      ARM_CLIENT_SECRET: "secret",
+      ARM_TENANT_ID: "tid",
+    };
+    const model = new ScriptedModel([{ output: [assistantMessage("done, no tools")] }]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      sandboxEnvironment: environment,
+      activeSandboxBackend: "selfhosted",
+    });
+
+    const execCalls: Array<{ cmd: string }> = [];
+    const providedSession = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        execCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      createEditor: () => ({}),
+      execCommand: async (args: { cmd: string }) => {
+        execCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      pathExists: async () => false,
+      materializeEntry: async () => undefined,
+    };
+
+    const result = await runAgentStream(agent, "just answer", settings, {
+      ownedSandbox: {
+        client: { backendId: "unix_local", serializeSessionState: async () => ({}) } as never,
+        session: providedSession as never,
+      },
+    });
+    for await (const _ of result.toStream()) {
+      void _;
+    }
+    await result.completed;
+
+    expect(execCalls.length).toBe(0);
+  });
 });
