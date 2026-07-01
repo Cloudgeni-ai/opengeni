@@ -818,7 +818,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // this same object. A machine-primary turn skips the (inert) token mint entirely
       // (the machine uses its own git creds); the SAME base env still feeds the box +
       // the agent, so env-parity holds.
-      const sandboxEnvironment = await sandboxEnvironmentForRun(
+      // TOKEN-BROKER (B1): sandboxEnvironmentForRun now returns the STABLE manifest
+      // env (no rotating GH_TOKEN/GITHUB_TOKEN/GIT_CONFIG_* extraheader) PLUS the
+      // run-scoped GitHub token minted ONCE per turn as `gitToken`. The env feeds BOTH
+      // the box manifest AND the agent (env-parity, as before); the token is threaded
+      // OFF-MANIFEST as the clone-seed `gitTokenSeed` to buildAgent (below) so the box
+      // never carries a rotating value on its manifest. gitToken is undefined on the
+      // selfhosted skip path (the machine uses its own git creds).
+      const { environment: sandboxEnvironment, gitToken: sandboxGitToken } = await sandboxEnvironmentForRun(
         runSettings,
         turnResources,
         workspaceEnvironment?.values ?? {},
@@ -1049,6 +1056,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         reasoningEffort: turn.reasoningEffort,
         genesisTitleHint: isGenesisTurn,
         sandboxEnvironment,
+        // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
+        // seed. ONLY when the effective backend is NOT selfhosted (the connected
+        // machine uses its own git creds — mirrors the skipGitHubToken gate above)
+        // AND the mint actually produced a token (repo resources present). The runtime
+        // seeds it to the box's token file before the repository-clone runs; it never
+        // touches the box/agent manifest env.
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,

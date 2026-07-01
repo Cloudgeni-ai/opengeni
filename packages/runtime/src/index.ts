@@ -646,6 +646,15 @@ export type BuildAgentOptions = {
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
+  // TOKEN-BROKER (B1): the run-scoped GitHub App installation token, minted ONCE
+  // per turn by the worker (sandboxEnvironmentForRun's `gitToken`). Threaded here
+  // OFF-MANIFEST — it is NOT part of sandboxEnvironment (the manifest env), so the
+  // token VALUE never triggers the SDK's provided-session env-delta guard even
+  // though it rotates every turn. buildAgent stashes it alongside the agent's
+  // repository-clone hooks; runStream forwards it into the clone hook context, which
+  // seeds it to the box's token FILE before the clone runs. Omitted on the
+  // selfhosted path (the machine uses its own git creds) — a NO-OP there.
+  gitTokenSeed?: string;
   // Genesis turn only: append a one-shot instruction to the agent's system
   // prompt telling it to title the session via opengeni__set_session_title
   // before responding. Delivered through the instructions channel (where the
@@ -744,6 +753,12 @@ export function composeAgentInstructions(template: string, workspaceEnvironment?
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
+// TOKEN-BROKER (B1): the per-turn git token seed, stashed alongside the agent's
+// repository-clone hooks (a parallel map keyed by the agent). Kept OFF the
+// manifest/defaultManifest so the rotating value never rides the SDK's provided-
+// session env; runStream reads it to build the clone hook context. Absent when
+// no repo is attached / on the selfhosted path.
+const agentGitTokenSeed = new WeakMap<object, string>();
 
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -823,6 +838,11 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
   agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend));
+  // TOKEN-BROKER (B1): stash the per-turn seed off-manifest so runStream can seed the
+  // clone hook without the token ever touching defaultManifest / sandboxEnvironment.
+  if (options.gitTokenSeed) {
+    agentGitTokenSeed.set(agent, options.gitTokenSeed);
+  }
   return agent;
 }
 
@@ -1504,6 +1524,9 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
         ...(runAs ? { runAs } : {}),
       })
       : (ownedClient as SandboxClient);
+    // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
+    // repository-clone hook seeds it to the box's token file before the clone.
+    const ownedGitTokenSeed = gitTokenSeedForAgent(agent);
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       ...sandboxRepositoryCloneHooksForAgent(agent),
@@ -1511,6 +1534,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
+      ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
     });
     const ownedFilter = composeCallModelInputFilters(
       [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
@@ -1542,6 +1566,9 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       ...(runAs ? { runAs } : {}),
     })
     : refreshedClient;
+  // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
+  // repository-clone hook seeds it to the box's token file before the clone.
+  const gitTokenSeed = gitTokenSeedForAgent(agent);
   const client = resourceClient
     ? withSandboxLifecycleHooks(resourceClient, [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
@@ -1550,6 +1577,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
+      ...(gitTokenSeed ? { gitTokenSeed } : {}),
     })
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState
@@ -2231,6 +2259,11 @@ export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   runAs?: string;
+  // TOKEN-BROKER (B1): the run-scoped GitHub token to seed into the box's token
+  // FILE before the repository clone runs. Threaded OFF-MANIFEST — it rides ONLY
+  // the clone exec's per-call env (OPENGENI_GIT_TOKEN_SEED), NEVER the box/agent
+  // manifest env (validateNoEnvironmentDelta must never see a rotating value).
+  gitTokenSeed?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -2296,6 +2329,13 @@ function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLif
   return agentRepositoryCloneHooks.get(agent) ?? [];
 }
 
+// TOKEN-BROKER (B1): the per-turn git token seed stashed for this agent (undefined
+// when no repo is attached / on the selfhosted path). Read into the clone hook
+// context at runStream so the token is seeded off-manifest.
+function gitTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
+  return agentGitTokenSeed.get(agent);
+}
+
 function sandboxRepositoryCloneHooks(
   settings: Settings,
   resources: ResourceRef[],
@@ -2350,6 +2390,19 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "set -eu",
     "export HOME=\"${HOME:-/workspace}\"",
     "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
+    // TOKEN-BROKER (B1): seed the run-scoped GitHub token into the STABLE token FILE
+    // BEFORE any clone runs, so GIT_ASKPASS reads it for the fetch below. The seed
+    // rides the per-exec env (OPENGENI_GIT_TOKEN_SEED) — NEVER the box/agent manifest
+    // (validateNoEnvironmentDelta must not see a rotating value), so this block is a
+    // no-op when the seed is absent (e.g. the selfhosted path, which uses its own git
+    // creds). The file lives at $OPENGENI_GIT_TOKEN_FILE (stable, from the shared base)
+    // with a $HOME/.opengeni/git-token fallback; chmod 600 keeps the token private.
+    "if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then",
+    "  git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"",
+    "  mkdir -p \"$(dirname \"$git_token_file\")\"",
+    "  printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file\"",
+    "  chmod 600 \"$git_token_file\"",
+    "fi",
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
     "    return 0",
@@ -2430,7 +2483,18 @@ export async function runRepositoryCloneHook(
   const payload = { name: "repository-clone", repositoryCount: resources.length };
   await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
   try {
-    const command = repositoryCloneCommand(resources);
+    // TOKEN-BROKER (B1): thread the run-scoped GitHub token PER-EXEC, never on the
+    // manifest. The SDK's ExecCommandArgs has no `environment` field (exec inherits
+    // the box's manifest env), so we can't hand the seed through an exec option — and
+    // we MUST NOT put it on the manifest (validateNoEnvironmentDelta would see a
+    // rotating value). We therefore inline it as an ephemeral `export` prefix on THIS
+    // exec's command text only: it lives in the command, not the box/agent manifest,
+    // and never persists. The clone command's gated seed block then writes it to the
+    // token FILE before the fetch, so GIT_ASKPASS reads it. Absent seed (e.g. the
+    // selfhosted path) -> no prefix, the clone runs byte-for-byte as before.
+    const command = context.gitTokenSeed
+      ? `export OPENGENI_GIT_TOKEN_SEED=${shellQuote(context.gitTokenSeed)}\n${repositoryCloneCommand(resources)}`
+      : repositoryCloneCommand(resources);
     if (session.exec) {
       const result = await session.exec({
         cmd: command,

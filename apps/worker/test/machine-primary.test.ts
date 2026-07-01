@@ -39,7 +39,9 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
     // skipGitHubToken (the effective backend is a connected machine) the mint is
     // skipped entirely — no network, no GH_TOKEN — and the STABLE base env is
     // returned. The machine uses its own git creds; exec routes over NATS.
-    const env = await sandboxEnvironmentForRun(settings, [repoResource()], {}, { skipGitHubToken: true });
+    // TOKEN-BROKER (B1): sandboxEnvironmentForRun returns { environment, gitToken }.
+    const { environment: env, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource()], {}, { skipGitHubToken: true });
+    expect(gitToken).toBeUndefined();
     expect(env.GH_TOKEN).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.GIT_ASKPASS).toBeUndefined();
@@ -65,7 +67,8 @@ describe("change B — sandboxEnvironmentForRun no-token skip for a machine turn
     const withSkip = await sandboxEnvironmentForRun(settings, [], {}, { skipGitHubToken: true });
     const withoutSkip = await sandboxEnvironmentForRun(settings, [], {}, { skipGitHubToken: false });
     expect(withSkip).toEqual(withoutSkip);
-    expect(withSkip.GH_TOKEN).toBeUndefined();
+    expect(withSkip.environment.GH_TOKEN).toBeUndefined();
+    expect(withSkip.gitToken).toBeUndefined();
   });
 });
 

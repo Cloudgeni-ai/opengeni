@@ -743,6 +743,30 @@ describe("runtime event normalization", () => {
     expect(command).not.toContain("GH_TOKEN=");
   });
 
+  test("TOKEN-BROKER (B1): the clone command emits the gated token-seed block that writes the token FILE before the clone", () => {
+    const command = repositoryCloneCommand([{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }]);
+
+    // The seed block is GATED on the per-exec OPENGENI_GIT_TOKEN_SEED (never on the
+    // manifest), writes the STABLE token file, and chmod 600s it.
+    expect(command).toContain("if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then");
+    expect(command).toContain("git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"");
+    expect(command).toContain("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file\"");
+    expect(command).toContain("chmod 600 \"$git_token_file\"");
+    // The seed write MUST come BEFORE the fetch that consumes it (order matters:
+    // GIT_ASKPASS reads the file during the fetch).
+    expect(command.indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\"")).toBeLessThan(
+      command.indexOf("git -C \"$tmp\" fetch"),
+    );
+    // The token VALUE is never literally in the command (only the env-var reference).
+    expect(command).not.toContain("x-access-token");
+  });
+
   test("never clones a repository onto a selfhosted (bring-your-own) machine", () => {
     const githubRepo = {
       kind: "repository" as const,
@@ -825,6 +849,59 @@ describe("runtime event normalization", () => {
     expect(String(calls[0]?.cmd)).toContain("git init");
     expect(String(calls[0]?.cmd)).not.toContain("secret-token");
     expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
+  });
+
+  test("TOKEN-BROKER (B1): the clone hook seeds the git token PER-EXEC (command prefix), never on the exec env/manifest", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    await runRepositoryCloneHook({
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+      },
+    } as any, [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }], {
+      environment: { HOME: "/workspace" },
+      runAs: "sandbox",
+      gitTokenSeed: "ghs_liveToken123",
+    });
+
+    expect(calls).toHaveLength(1);
+    // The seed is inlined as an ephemeral export PREFIX on the command text — it is
+    // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
+    // and NEVER lands on the box/agent manifest.
+    expect(calls[0]?.environment).toBeUndefined();
+    expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
+    // The prefix precedes the gated seed block that writes the file.
+    expect(String(calls[0]?.cmd).indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
+      String(calls[0]?.cmd).indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\""),
+    );
+  });
+
+  test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    await runRepositoryCloneHook({
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+      },
+    } as any, [{
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }], {
+      environment: { HOME: "/workspace" },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
+    expect(String(calls[0]?.cmd).startsWith("set -eu")).toBe(true);
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {

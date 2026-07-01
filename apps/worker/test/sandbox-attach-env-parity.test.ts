@@ -20,6 +20,7 @@
 import { describe, expect, test } from "bun:test";
 import { stableSandboxEnvironmentForRun } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
+import type { ResourceRef } from "@opengeni/contracts";
 import { sandboxEnvironmentForRun } from "../src/activities/environment";
 
 // The exact SDK delta predicate (validateNoEnvironmentDelta): true iff every key
@@ -46,7 +47,8 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     const settings = baseSettings();
 
     // The worker TURN's declared agent-manifest environment, no repo resources.
-    const turnEnv = await sandboxEnvironmentForRun(settings, [], {});
+    // TOKEN-BROKER (B1): sandboxEnvironmentForRun returns { environment, gitToken }.
+    const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], {});
     // The env the API-direct ATTACH paths now create a cold box with.
     const attachEnv = stableSandboxEnvironmentForRun(settings, {});
 
@@ -59,6 +61,10 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
     expect(attachEnv.GIT_AUTHOR_EMAIL).toBe("bot@opengeni.dev");
     expect(attachEnv.HOME).toBe("/workspace");
+    // TOKEN-BROKER (B1): the STABLE token FILE PATH rides the shared base, so it is
+    // present + IDENTICAL on both manifests (the token VALUE never does).
+    expect(attachEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
+    expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
   });
 
   test("the turn env (workspace environment attached) has NO delta against the attach env", async () => {
@@ -69,7 +75,7 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     // attach path loads the SAME workspace environment (loadWorkspaceEnvironmentForRun)
     // and threads it through the same stable helper. Here we feed both the same
     // decrypted values (the load+decrypt is exercised by the DB-backed paths).
-    const turnEnv = await sandboxEnvironmentForRun(settings, [], workspaceEnv);
+    const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], workspaceEnv);
     const attachEnv = stableSandboxEnvironmentForRun(settings, workspaceEnv);
 
     expect(attachEnv).toEqual(turnEnv);
@@ -87,12 +93,60 @@ describe("attach-vs-turn manifest-environment parity (no repo attached)", () => 
     // the git-identity + HOME keys the turn declares, so the SDK sees a delta and
     // throws. The assertion proves the parity test above is not vacuously green.
     const settings = baseSettings();
-    const turnEnv = await sandboxEnvironmentForRun(settings, [], {});
+    const { environment: turnEnv } = await sandboxEnvironmentForRun(settings, [], {});
 
     // The pre-fix attach env: NO git identity, NO HOME (just whatever the base
     // allowlist yields — empty in a clean test env).
     const oldAttachEnv: Record<string, string> = {};
 
     expect(hasNoEnvironmentDelta(oldAttachEnv, turnEnv)).toBe(false);
+  });
+});
+
+// TOKEN-BROKER (B1): a repo-attached turn no longer layers the rotating GitHub token
+// (or the extraheader) onto the manifest env — the token is returned as `gitToken`
+// (seeded off-manifest to the box token file). The manifest carries ONLY the stable
+// pointers (GIT_ASKPASS, GIT_TERMINAL_PROMPT, identity, and — from the shared base —
+// OPENGENI_GIT_TOKEN_FILE), so it stays attach-reproducible and the SDK sees no delta.
+describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PATH is on it", () => {
+  // A repo-attached turn mints a REAL GitHub App token via the network; the clean
+  // test env has no app configured, so we exercise the SKIP path (which returns the
+  // stable base with no gitToken) to assert the manifest shape without a live mint.
+  // The env shape a repo-attached turn declares is the SAME stable base + GIT_ASKPASS
+  // pointers; the rotating value is the only thing gated behind the live mint.
+  test("the stable base carries the token FILE PATH and NEVER the rotating token keys", async () => {
+    const settings = baseSettings();
+    const repoResource: ResourceRef = {
+      kind: "repository",
+      uri: "github.com/acme/repo",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    };
+    // Skip the (network) mint: returns the stable base env + no gitToken. This is the
+    // exact manifest a machine-effective repo turn declares; a cloud repo turn adds
+    // GIT_ASKPASS/GIT_TERMINAL_PROMPT on top but STILL no GH_TOKEN/GITHUB_TOKEN/
+    // GIT_CONFIG_* (those keys were removed by the token broker).
+    const { environment: turnEnv, gitToken } = await sandboxEnvironmentForRun(
+      settings,
+      [repoResource],
+      {},
+      { skipGitHubToken: true },
+    );
+
+    // The rotating token keys are ABSENT from the manifest env (the broker removed them).
+    expect(turnEnv.GH_TOKEN).toBeUndefined();
+    expect(turnEnv.GITHUB_TOKEN).toBeUndefined();
+    expect(turnEnv.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(turnEnv.GIT_CONFIG_KEY_0).toBeUndefined();
+    expect(turnEnv.GIT_CONFIG_VALUE_0).toBeUndefined();
+    // No token was minted on the skip path.
+    expect(gitToken).toBeUndefined();
+
+    // The STABLE token FILE PATH matches the attach base (parity-safe pointer).
+    const attachEnv = stableSandboxEnvironmentForRun(settings, {});
+    expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
+    expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe(attachEnv.OPENGENI_GIT_TOKEN_FILE);
+    expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
   });
 });

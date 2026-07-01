@@ -35,6 +35,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
+  createGitHubAppInstallationToken,
   createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
@@ -134,6 +135,12 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   registerEnvironmentTools(server, deps, grant, can, json);
   if (can("github:use")) {
     registerGitHubConnectTool(server, deps, grant, options, json);
+    // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
+    // worker-signed sessionId claim so it mints for THIS session's repos), gated on
+    // the same github:use capability as github_connect_link.
+    if (sessionId !== null) {
+      registerGitHubTokenTool(server, deps, grant, sessionId, json);
+    }
   }
 
   server.registerTool("files_get_download_url", {
@@ -810,6 +817,55 @@ function registerGitHubConnectTool(
       installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
       expiresInSeconds: stateMaxAgeSeconds,
       missing: [],
+    });
+  });
+}
+
+// TOKEN-BROKER (B1): mint a FRESH short-lived GitHub App installation token for the
+// session's repository resources. The agent calls this to refresh git auth before
+// the current token expires. The MCP server CANNOT write the box, so the tool RETURNS
+// the token as JSON; the agent writes it to the token file (via exec) to refresh
+// GIT_ASKPASS. Same github:use capability gate as github_connect_link.
+function registerGitHubTokenTool(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  json: JsonResult,
+): void {
+  server.registerTool("github_token", {
+    description: "Mint a fresh short-lived GitHub token for this session's repositories. Write it to $OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token) to refresh git auth before the current token expires.",
+    inputSchema: {},
+  }, async () => {
+    const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+    // Resolve the run-scoped installation + repository ids from THIS session's
+    // repository resources (same shape sandboxEnvironmentForRun mints against). Only
+    // private GitHub-App repos carry the installation/repository ids.
+    const selected = (session.resources ?? []).flatMap((resource) => {
+      if (resource.kind !== "repository") {
+        return [];
+      }
+      const installationId = resource.githubInstallationId;
+      const repositoryId = resource.githubRepositoryId;
+      return typeof installationId === "number" && installationId > 0
+        && typeof repositoryId === "number" && repositoryId > 0
+        ? [{ installationId, repositoryId }]
+        : [];
+    });
+    if (selected.length === 0) {
+      throw new Error("this session has no GitHub App repository resources to mint a token for");
+    }
+    const installationId = selected[0]!.installationId;
+    if (selected.some((item) => item.installationId !== installationId)) {
+      throw new Error("GitHub App repository resources must belong to one installation");
+    }
+    const token = await createGitHubAppInstallationToken(deps.settings, {
+      installationId,
+      repositoryIds: selected.map((item) => item.repositoryId),
+    });
+    return json({
+      token,
+      tokenFile: "$OPENGENI_GIT_TOKEN_FILE (default $HOME/.opengeni/git-token)",
     });
   });
 }

@@ -1366,14 +1366,19 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
  * at write time keeps workspace values from colliding with platform entries.
  *
  * DELIBERATELY EXCLUDES the per-run, ROTATING GitHub App installation token
- * (GH_TOKEN/GITHUB_TOKEN/GIT_ASKPASS/GIT_CONFIG_*) that `sandboxEnvironmentForRun`
- * layers on top when a repository resource is attached: that token is minted FRESH
- * per call, so it is not a stable, attach-reproducible value and must not be part
- * of the shared base. The attach surfaces have only the `Session` (no repo
- * resources) and so cannot reproduce it anyway; the BLOCKING attach-vs-turn error
- * this helper fixes is for the common (no-repo) and workspace-environment-attached
- * cases. (A repo-attached turn re-attaching to an attach-warmed box is a separate,
- * pre-existing rotating-secret concern — see sandboxEnvironmentForRun.)
+ * VALUE that `sandboxEnvironmentForRun` mints when a repository resource is
+ * attached: that token is minted FRESH per call, so it is not a stable, attach-
+ * reproducible value and must not be part of the shared base. Under the token-
+ * broker (B1) the token VALUE never rides the manifest at all — it is seeded to a
+ * FILE inside the box (agent-managed, refreshable mid-turn via the `github_token`
+ * MCP tool) and git auth flows through GIT_ASKPASS -> that file. What IS stable and
+ * lives here is the token FILE PATH (`OPENGENI_GIT_TOKEN_FILE`): a constant derived
+ * from HOME, so it appears IDENTICALLY on BOTH the turn AND every attach manifest
+ * (the SDK's per-turn provided-session env delta stays empty even as the token
+ * rotates). The attach surfaces have only the `Session` (no repo resources) and so
+ * never seed a token, but the file-path pointer is harmless (an unwritten file
+ * simply yields no auth); the BLOCKING attach-vs-turn error this helper fixes is
+ * for the common (no-repo) and workspace-environment-attached cases.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
@@ -1391,6 +1396,14 @@ export function stableSandboxEnvironmentForRun(
   if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
     environment.HOME ??= descriptor.workspaceRoot;
   }
+  // TOKEN-BROKER (B1): the STABLE token FILE PATH. A constant derived from the
+  // resolved HOME (falling back to the descriptor workspaceRoot), so it is
+  // parity-safe — it joins the shared base and therefore appears IDENTICALLY on
+  // BOTH the worker-turn manifest AND every API-direct attach manifest, keeping
+  // the SDK's provided-session env delta empty. Only the PATH is stable; the token
+  // VALUE lives exclusively in the file (agent-managed, refreshable mid-turn), never
+  // the manifest env.
+  environment.OPENGENI_GIT_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/git-token`;
   return environment;
 }
 
