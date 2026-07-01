@@ -1533,6 +1533,12 @@ export type RunAgentStreamOptions = {
     client: unknown;          // built by the per-turn resume path (the raw provider client)
     session: unknown;         // SandboxSessionLike — the live, NON-OWNED handle (never reaped)
     sessionState?: unknown;   // SandboxSessionState the box was resumed from
+    // The UN-PROXIED established box for platform setup (lifecycle hooks + file
+    // resource materialization). `session` may be the mid-turn routing proxy whose
+    // every exec re-reads the active pointer — platform-initiated setup must NOT
+    // follow a swap onto a connected machine (the user's real computer), so it
+    // runs against this pinned handle instead. Absent -> falls back to `session`.
+    setupSession?: unknown;
   };
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
@@ -1639,6 +1645,11 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   // block is skipped (byte-for-byte the legacy path).
   if (overrides.ownedSandbox) {
     const { client: ownedClient, session, sessionState } = overrides.ownedSandbox;
+    // Platform setup (hooks + file materialization) execs against the UN-PROXIED
+    // established box when the caller pinned one — never through the routing proxy,
+    // whose per-op pointer re-read could land these execs on a machine swapped in
+    // mid-turn.
+    const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
     const resourceClient = fileDownloads.length > 0
@@ -1675,7 +1686,19 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // user's REAL computer — the platform must not run setup against it (the clone
     // hooks are already empty there; this keeps az login off it too).
     if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-      await runBeforeAgentStartHooks(session as SandboxSessionLike, ownedHooks, ownedHookContext);
+      await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
+      // FILE RESOURCES: withSandboxFileDownloads below has the IDENTICAL provided-
+      // session blind spot (it too wraps only create/resume), so signed-URL file
+      // materialization must also run directly against the pinned box. The download
+      // command is idempotent (skips an existing file) and atomic (tmp + rename),
+      // so the per-turn re-run is safe; the turn re-signs URLs each run, so a
+      // re-warmed box always gets fresh links.
+      if (fileDownloads.length > 0) {
+        await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+          ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+          ...(runAs ? { runAs } : {}),
+        });
+      }
     }
     // Keep the decoration as a safety net for any session the SDK does create/resume
     // through the client during this run (it is inert for the provided session).
@@ -2573,21 +2596,30 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     // box/agent manifest (validateNoEnvironmentDelta must not see a rotating value), so
     // this whole block is a no-op when the seed is absent (e.g. the selfhosted path,
     // which uses its own git creds). The token file lives at $OPENGENI_GIT_TOKEN_FILE
-    // (stable, from the shared base) with a $HOME/.opengeni/git-token fallback; chmod 600
-    // keeps the token private. $GIT_ASKPASS is on the box manifest env (set by
+    // (stable, from the shared base) with a $HOME/.opengeni/git-token fallback.
+    // $GIT_ASKPASS is on the box manifest env (set by
     // sandboxEnvironmentForRun to $HOME/.opengeni/askpass), so it is available to this
     // exec; the askpass script we write is byte-identical to docker/opengeni-git-askpass
     // and is written via a QUOTED heredoc (<<'ASKPASS_EOF') so NOTHING inside it expands
     // ($1, $HOME, ${OPENGENI_GIT_TOKEN_FILE:-...}, and the literal \n in printf all land
     // verbatim), then chmod 0755 so git can exec it.
+    //
+    // ATOMIC REWRITE: this block now re-runs at the start of EVERY turn on a warm box
+    // that other turn holders may be actively using — an in-flight `git fetch` from a
+    // concurrent turn can invoke the askpass (which cats the token file) at any moment.
+    // Both files are therefore written to a pid-suffixed temp under umask 077 and
+    // renamed into place: rename is atomic, concurrent readers keep the old inode, and
+    // the token is never observable world-readable (no post-hoc chmod window).
     "if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then",
+    "  seed_umask=\"$(umask)\"",
+    "  umask 077",
     "  git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"",
     "  mkdir -p \"$(dirname \"$git_token_file\")\"",
-    "  printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file\"",
-    "  chmod 600 \"$git_token_file\"",
+    "  printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file.tmp.$$\"",
+    "  mv -f \"$git_token_file.tmp.$$\" \"$git_token_file\"",
     "  git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"",
     "  mkdir -p \"$(dirname \"$git_askpass\")\"",
-    "  cat > \"$git_askpass\" <<'ASKPASS_EOF'",
+    "  cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
     "#!/usr/bin/env sh",
     "case \"$1\" in",
     "  *Username*) printf '%s\\n' \"x-access-token\" ;;",
@@ -2595,7 +2627,9 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "  *) printf '\\n' ;;",
     "esac",
     "ASKPASS_EOF",
-    "  chmod 0755 \"$git_askpass\"",
+    "  chmod 0755 \"$git_askpass.tmp.$$\"",
+    "  mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"",
+    "  umask \"$seed_umask\"",
     "fi",
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
@@ -2618,16 +2652,30 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "  ref=\"$3\"",
     "  subpath=\"$4\"",
     "  if [ -e \"$target\" ] && { [ -f \"$target\" ] || [ -n \"$(find \"$target\" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)\" ]; }; then",
-    "    echo \"Repository resource already present at $target\"",
-    "    return 0",
+    // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
+    // proof of a completed materialization: an interrupted clone (worker crash /
+    // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
+    // this check forever. A full-repo target must actually BE a work tree to be
+    // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
+    // the mount path before the repo exists). Subpath extracts are not git repos —
+    // for those the plain non-empty check stands (no stronger signal available).
+    "    if [ -n \"$subpath\" ] || git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+    "      echo \"Repository resource already present at $target\"",
+    "      return 0",
+    "    fi",
+    "    echo \"Re-materializing partial repository resource at $target\" >&2",
+    "    find \"$target\" -mindepth 1 -maxdepth 1 -exec rm -rf {} +",
     "  fi",
     "  mkdir -p \"$(dirname \"$target\")\"",
     "  tmp=\"${target}.tmp.$$\"",
     "  rm -rf \"$tmp\"",
-    "  git init \"$tmp\" >/dev/null",
-    "  git -C \"$tmp\" remote add origin \"$uri\"",
-    "  git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"",
-    "  git -C \"$tmp\" checkout --detach FETCH_HEAD >/dev/null",
+    // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
+    // (set -eu would exit before any cleanup).
+    "  if ! { git init \"$tmp\" >/dev/null && git -C \"$tmp\" remote add origin \"$uri\" && git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\" && git -C \"$tmp\" checkout --detach FETCH_HEAD >/dev/null; }; then",
+    "    rm -rf \"$tmp\"",
+    "    echo \"Repository resource fetch failed for $target\" >&2",
+    "    exit 1",
+    "  fi",
     "  if [ -n \"$subpath\" ]; then",
     "    if [ ! -e \"$tmp/$subpath\" ]; then",
     "      echo \"Repository subpath not found: $subpath\" >&2",
@@ -2644,7 +2692,22 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "    rm -rf \"$tmp\"",
     "  else",
     "    rmdir \"$target\" 2>/dev/null || true",
-    "    mv \"$tmp\" \"$target\"",
+    // Two concurrent turn holders can race this install: without the existence
+    // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
+    // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
+    // accept it; a non-empty non-repo survivor here is a mount point the manifest
+    // re-filled — install into it by content copy instead of rename.
+    "    if [ -e \"$target\" ]; then",
+    "      if git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null 2>&1; then",
+    "        rm -rf \"$tmp\"",
+    "        echo \"Repository resource already present at $target\"",
+    "        return 0",
+    "      fi",
+    "      cp -a \"$tmp/.\" \"$target/\"",
+    "      rm -rf \"$tmp\"",
+    "    else",
+    "      mv \"$tmp\" \"$target\"",
+    "    fi",
     "    git -C \"$target\" rev-parse --is-inside-work-tree >/dev/null",
     "  fi",
     "  if [ ! -e \"$target\" ]; then",
@@ -2734,7 +2797,11 @@ export function azureCliLoginCommand(): string {
     "if [ -n \"$CLIENT_ID\" ] && [ -n \"$CLIENT_SECRET\" ] && [ -n \"$TENANT_ID\" ]; then",
     "  command -v az >/dev/null 2>&1 || { echo \"Azure CLI is not installed in the sandbox\" >&2; exit 127; }",
     "  az account show --only-show-errors >/dev/null 2>&1 || az login --service-principal --username \"$CLIENT_ID\" --password \"$CLIENT_SECRET\" --tenant \"$TENANT_ID\" --allow-no-subscriptions --only-show-errors --output none",
-    "  [ -n \"$SUBSCRIPTION_ID\" ] && az account set --subscription \"$SUBSCRIPTION_ID\" --only-show-errors",
+    // if/fi, NOT `[ -n ] && az`: this line ends the credentialed if-body, so with a
+    // no-subscription SP (an explicitly supported config — the login above passes
+    // --allow-no-subscriptions) the bare `[ -n ]` would exit the whole script 1 and
+    // fail the turn.
+    "  if [ -n \"$SUBSCRIPTION_ID\" ]; then az account set --subscription \"$SUBSCRIPTION_ID\" --only-show-errors; fi",
     "fi",
   ].join("\n");
 }

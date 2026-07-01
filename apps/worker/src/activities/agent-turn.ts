@@ -371,6 +371,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    // The UN-PROXIED established box session, captured BEFORE wrapTurnBoxWithRouting.
+    // Platform setup (beforeAgentStart hooks + file materialization) execs against
+    // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
+    // connected machine (the user's real computer).
+    let setupBoxSession: unknown = null;
     // The lease holder id (Temporal activityId, unique per scheduled execution)
     // + the group id, captured so the lease heartbeat can refresh the lease TTL
     // epoch-fenced (a superseded owner self-evicts) and finally can release.
@@ -891,6 +896,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "turn",
             sandboxHolderId,
           );
+          setupBoxSession = established.session;
           resolvedSandbox = {
             // Wrap in the SAME routing proxy so a mid-turn swap (to another machine
             // or back to the group box) still re-routes per op. PIN this established
@@ -942,6 +948,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             "turn",
             sandboxHolderId,
           );
+          setupBoxSession = resolvedSandbox.established.session;
           // M7 hot-swap: when the selfhosted feature is on, wrap the established
           // group box in the STABLE routing proxy before it is injected NON-OWNED
           // into the run. The SDK binds to this ONE object once and calls its
@@ -1253,6 +1260,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               client: resolvedSandbox.established.client,
               session: resolvedSandbox.established.session,
               sessionState: resolvedSandbox.established.sessionState,
+              // Pin platform setup (hooks + file materialization) to the un-proxied
+              // established box — never through the routing proxy, which would
+              // re-route those execs onto a machine swapped in mid-turn.
+              ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
             },
           }
           : {}),
