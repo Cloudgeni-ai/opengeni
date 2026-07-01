@@ -2390,18 +2390,40 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "set -eu",
     "export HOME=\"${HOME:-/workspace}\"",
     "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
-    // TOKEN-BROKER (B1): seed the run-scoped GitHub token into the STABLE token FILE
-    // BEFORE any clone runs, so GIT_ASKPASS reads it for the fetch below. The seed
-    // rides the per-exec env (OPENGENI_GIT_TOKEN_SEED) — NEVER the box/agent manifest
-    // (validateNoEnvironmentDelta must not see a rotating value), so this block is a
-    // no-op when the seed is absent (e.g. the selfhosted path, which uses its own git
-    // creds). The file lives at $OPENGENI_GIT_TOKEN_FILE (stable, from the shared base)
-    // with a $HOME/.opengeni/git-token fallback; chmod 600 keeps the token private.
+    // TOKEN-BROKER (B1/B2): seed the run-scoped GitHub token into the STABLE token FILE
+    // AND provision the git-askpass helper into the box AT SETUP (runtime) BEFORE any
+    // clone runs, so GIT_ASKPASS points at a per-box, user-writable script that reads
+    // that file for the fetch below. Provisioning the askpass here (rather than relying
+    // on a baked image script at /usr/local/bin/opengeni-git-askpass) removes the
+    // image-rebuild rollout gate: the askpass is correct on ANY box image, including
+    // pre-existing warm boxes on their next turn's clone hook, and no product image has
+    // to carry it. The seed rides the per-exec env (OPENGENI_GIT_TOKEN_SEED) — NEVER the
+    // box/agent manifest (validateNoEnvironmentDelta must not see a rotating value), so
+    // this whole block is a no-op when the seed is absent (e.g. the selfhosted path,
+    // which uses its own git creds). The token file lives at $OPENGENI_GIT_TOKEN_FILE
+    // (stable, from the shared base) with a $HOME/.opengeni/git-token fallback; chmod 600
+    // keeps the token private. $GIT_ASKPASS is on the box manifest env (set by
+    // sandboxEnvironmentForRun to $HOME/.opengeni/askpass), so it is available to this
+    // exec; the askpass script we write is byte-identical to docker/opengeni-git-askpass
+    // and is written via a QUOTED heredoc (<<'ASKPASS_EOF') so NOTHING inside it expands
+    // ($1, $HOME, ${OPENGENI_GIT_TOKEN_FILE:-...}, and the literal \n in printf all land
+    // verbatim), then chmod 0755 so git can exec it.
     "if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then",
     "  git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"",
     "  mkdir -p \"$(dirname \"$git_token_file\")\"",
     "  printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file\"",
     "  chmod 600 \"$git_token_file\"",
+    "  git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"",
+    "  mkdir -p \"$(dirname \"$git_askpass\")\"",
+    "  cat > \"$git_askpass\" <<'ASKPASS_EOF'",
+    "#!/usr/bin/env sh",
+    "case \"$1\" in",
+    "  *Username*) printf '%s\\n' \"x-access-token\" ;;",
+    "  *Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;",
+    "  *) printf '\\n' ;;",
+    "esac",
+    "ASKPASS_EOF",
+    "  chmod 0755 \"$git_askpass\"",
     "fi",
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",

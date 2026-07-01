@@ -739,11 +739,15 @@ describe("runtime event normalization", () => {
     expect(command).toContain("clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'");
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
-    expect(command).not.toContain("x-access-token");
+    // TOKEN-BROKER (B2): the provisioned askpass script legitimately references the
+    // "x-access-token" USERNAME constant (git's basic-auth username for an App token)
+    // — that is not a credential. The credential guard is that no token VALUE and no
+    // token-carrying env assignment ever rides the command text.
     expect(command).not.toContain("GH_TOKEN=");
+    expect(command).not.toContain("GITHUB_TOKEN=");
   });
 
-  test("TOKEN-BROKER (B1): the clone command emits the gated token-seed block that writes the token FILE before the clone", () => {
+  test("TOKEN-BROKER (B1/B2): the clone command emits the gated seed block that writes the token FILE and PROVISIONS the askpass before the clone", () => {
     const command = repositoryCloneCommand([{
       kind: "repository",
       uri: "https://github.com/acme/private.git",
@@ -758,13 +762,32 @@ describe("runtime event normalization", () => {
     expect(command).toContain("git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"");
     expect(command).toContain("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file\"");
     expect(command).toContain("chmod 600 \"$git_token_file\"");
-    // The seed write MUST come BEFORE the fetch that consumes it (order matters:
-    // GIT_ASKPASS reads the file during the fetch).
+
+    // TOKEN-BROKER (B2): the SAME gated block PROVISIONS the git-askpass helper at
+    // SETUP (runtime) into the per-box, user-writable $GIT_ASKPASS (a manifest env
+    // pointer, default $HOME/.opengeni/askpass), so auth is correct on ANY box image
+    // without a baked script. It mkdir -p's the dir, writes the helper via a QUOTED
+    // heredoc, and chmod 0755s it so git can exec it.
+    expect(command).toContain("git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"");
+    expect(command).toContain("cat > \"$git_askpass\" <<'ASKPASS_EOF'");
+    expect(command).toContain("chmod 0755 \"$git_askpass\"");
+    // The provisioned askpass' Password branch reads the token FILE (this is the
+    // load-bearing wiring: GIT_ASKPASS -> askpass -> token file).
+    expect(command).toContain("*Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;");
+    expect(command).toContain("*Username*) printf '%s\\n' \"x-access-token\" ;;");
+
+    // Both writes MUST come BEFORE the fetch that consumes them (order matters:
+    // GIT_ASKPASS execs the provisioned script, which reads the token file, during
+    // the fetch).
     expect(command.indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\"")).toBeLessThan(
       command.indexOf("git -C \"$tmp\" fetch"),
     );
-    // The token VALUE is never literally in the command (only the env-var reference).
-    expect(command).not.toContain("x-access-token");
+    expect(command.indexOf("cat > \"$git_askpass\"")).toBeLessThan(
+      command.indexOf("git -C \"$tmp\" fetch"),
+    );
+    // The token VALUE is never literally in the command (only the env-var reference);
+    // the "x-access-token" USERNAME constant is not a credential.
+    expect(command).not.toContain("OPENGENI_GIT_TOKEN_SEED=");
   });
 
   test("never clones a repository onto a selfhosted (bring-your-own) machine", () => {
@@ -880,6 +903,13 @@ describe("runtime event normalization", () => {
     expect(String(calls[0]?.cmd).indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
       String(calls[0]?.cmd).indexOf("printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\""),
     );
+    // TOKEN-BROKER (B2): the SAME per-exec command also provisions an EXECUTABLE git
+    // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
+    // box on ANY image gets a correct askpass at setup, no baked script required.
+    const cmd = String(calls[0]?.cmd);
+    expect(cmd).toContain("cat > \"$git_askpass\" <<'ASKPASS_EOF'");
+    expect(cmd).toContain("chmod 0755 \"$git_askpass\"");
+    expect(cmd).toContain("*Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;");
   });
 
   test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {
