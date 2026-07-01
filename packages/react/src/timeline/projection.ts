@@ -29,6 +29,7 @@ import type {
 /** Tool names on the first-party OpenGeni MCP server that operate on sessions. */
 const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
+const WORKER_INTERRUPT_TOOL = "session_interrupt";
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
@@ -159,6 +160,23 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
+        if (name === WORKER_INTERRUPT_TOOL) {
+          // stop (default) vs steer — the target keeps its goal on steer and
+          // picks up its next queued turn (pair with session_send_message).
+          items.push({
+            kind: "worker",
+            id: event.id,
+            turnId,
+            callId,
+            action: "interrupt",
+            prompt: null,
+            workerSessionId: extractSessionRef(args),
+            mode: workerInterruptMode(args),
+            status: "running",
+            occurredAt: event.occurredAt,
+          });
+          break;
+        }
         if (name === WORKER_SPAWN_TOOL || name === WORKER_MESSAGE_TOOL) {
           items.push({
             kind: "worker",
@@ -500,6 +518,12 @@ function workerPrompt(args: unknown): string | null {
     }
   }
   return null;
+}
+
+/** The interrupt mode from `session_interrupt` args; defaults to "stop". */
+function workerInterruptMode(args: unknown): "stop" | "steer" {
+  const record = asRecord(typeof args === "string" ? tryParseJson(args) : args);
+  return record.mode === "steer" ? "steer" : "stop";
 }
 
 /**

@@ -208,6 +208,40 @@ describe("buildTimeline", () => {
     expect(item.prompt).toBe("Status?");
   });
 
+  test("session_interrupt becomes a distinct interrupt worker item (default stop mode)", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_interrupt",
+        arguments: { sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d" },
+      }),
+    ]);
+    const item = items[0] as WorkerItem;
+    expect(item.kind).toBe("worker");
+    expect(item.action).toBe("interrupt");
+    expect(item.mode).toBe("stop");
+    expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
+    expect(item.status).toBe("running");
+  });
+
+  test("session_interrupt with mode 'steer' carries the steer mode and settles on its output", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_interrupt",
+        arguments: JSON.stringify({ sessionId: "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d", mode: "steer" }),
+      }),
+      event("agent.toolCall.output", { id: "call-1", output: { content: [{ type: "text", text: "{}" }] } }),
+    ]);
+    const item = items[0] as WorkerItem;
+    expect(item.action).toBe("interrupt");
+    expect(item.mode).toBe("steer");
+    expect(item.workerSessionId).toBe("7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d");
+    expect(item.status).toBe("complete");
+  });
+
   test("groups sandbox operations by name and appends command output deltas", () => {
     reset();
     const items = buildTimeline([

@@ -63,7 +63,7 @@ import {
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
 } from "../domain/scheduled-tasks";
-import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle } from "../domain/sessions";
+import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle, workflowIdForSession } from "../domain/sessions";
 import {
   buildFleetContextForSession,
   listFleet,
@@ -679,6 +679,33 @@ function registerWorkspaceOrchestrationTools(
         toolsProvided: false,
       });
       return json({ event: accepted, turnId: turn.id });
+    });
+
+    server.registerTool("session_interrupt", {
+      description:
+        "Interrupt a session in this workspace. mode='stop' (default) cancels the current turn AND pauses the session's active goal so it halts. mode='steer' cancels the current turn WITHOUT pausing the goal, so the session picks up its next queued turn — pair it with a preceding session_send_message to redirect a running session. Works whether the target is mid-turn or idle.",
+      inputSchema: {
+        sessionId: z4.string().uuid(),
+        mode: z4.enum(["stop", "steer"]).optional(),
+      },
+    }, async ({ sessionId, mode }) => {
+      await requireSession(deps.db, grant.workspaceId, sessionId);
+      const appended = await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+        type: "user.interrupt",
+        payload: mode === "steer" ? { reason: "steer" } : {},
+      }]);
+      const accepted = appended[0];
+      if (!accepted) {
+        throw new Error("failed to append interrupt event");
+      }
+      await deps.workflowClient.signalInterrupt({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId,
+        eventId: accepted.id,
+        workflowId: workflowIdForSession(sessionId),
+      });
+      return json({ event: accepted });
     });
 
     server.registerTool("set_other_session_title", {

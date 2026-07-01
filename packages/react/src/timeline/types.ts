@@ -69,11 +69,16 @@ export type WorkerItem = {
   id: string;
   turnId: string | null;
   callId: string | null;
-  action: "spawn" | "message";
+  action: "spawn" | "message" | "interrupt";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
+  /**
+   * For an `interrupt` action, whether it stops the target (default) or steers
+   * it (cancel the current turn, keep the goal). Absent on spawn/message.
+   */
+  mode?: "stop" | "steer";
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };

@@ -145,13 +145,19 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
           : cancelled
             ? "Worker interrupted"
             : "Worker spawned"
-      : running
-        ? "Messaging worker"
-        : failed
-          ? "Worker message failed"
-          : cancelled
-            ? "Worker interrupted"
-            : "Worker messaged";
+      : item.action === "interrupt"
+        ? (() => {
+            const verb = item.mode === "steer" ? "Steering" : "Stopping";
+            const done = item.mode === "steer" ? "Worker steered" : "Worker stopped";
+            return running ? `${verb} worker` : failed ? "Worker interrupt failed" : cancelled ? "Worker interrupted" : done;
+          })()
+        : running
+          ? "Messaging worker"
+          : failed
+            ? "Worker message failed"
+            : cancelled
+              ? "Worker interrupted"
+              : "Worker messaged";
   return (
     <div
       className={cn(
