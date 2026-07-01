@@ -4,8 +4,12 @@ import {
   availableAt,
   chooseRotationActive,
   computeIdleDelayMs,
+  computeReactiveRotationResume,
   DEFAULT_RESET_COOLDOWN_MS,
   MIN_IDLE_MS,
+  REACTIVE_CIRCUIT_BREAKER_IDLE_MS,
+  REACTIVE_PERSISTENCE_FAULT_FLOOR_MS,
+  REACTIVE_ROTATION_MARGIN,
 } from "../src/activities/codex-rotation";
 
 // Multi-account P3 — the PURE rotation ranker. All rotation correctness (most_remaining
@@ -372,5 +376,70 @@ describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => 
     ];
     expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts, usedConnectors: ["github", "linear"] }))
       .toEqual({ kind: "active", credentialId: "b", moved: true });
+  });
+});
+
+// Finding 1 (reactive-rotation boundedness). computeReactiveRotationResume bounds the
+// reactive 429 failover's otherwise-0-delay re-dispatch against two second-order faults
+// so a double-fault (cooldown write not persisted + a header-less cap 429 that re-picks
+// the SAME account every proactive rank) degrades to a positive, bounded retry instead
+// of a model-paced hot loop that hammers the capped backend + DB (invariant 4: NO THRASH).
+describe("computeReactiveRotationResume — the reactive failover is bounded", () => {
+  test("(4) happy path: a confirmed cooldown + first failover → 0-delay fast re-dispatch (byte-identical to P3)", () => {
+    // A single rotation onto a live candidate: the just-served account IS cooling, so
+    // the next rank cannot re-pick it. Re-dispatch NOW, no hold, no idleUntilReset.
+    expect(computeReactiveRotationResume({ cooldownPersisted: true, priorConsecutiveRotations: 0, connectedAccountCount: 3 }))
+      .toEqual({ continueDelayMs: 0, idleUntilReset: false });
+  });
+
+  test("(1a) persistence fault: cooldown NOT confirmed persisted → POSITIVE slow-retry floor, never 0", () => {
+    const resume = computeReactiveRotationResume({ cooldownPersisted: false, priorConsecutiveRotations: 0, connectedAccountCount: 3 });
+    expect(resume.continueDelayMs).toBe(REACTIVE_PERSISTENCE_FAULT_FLOOR_MS);
+    expect(resume.continueDelayMs).toBeGreaterThan(0);   // the crux: a persistence fault never yields a 0-delay hot loop
+    expect(resume.idleUntilReset).toBe(false);           // a slow retry, not a mandatory long hold
+  });
+
+  test("(1b) double-fault below the bound still floors positive (persistence fault dominates the 0)", () => {
+    // 2 prior + this = streak 3, bound = 2 accounts + margin(2) = 4 → in bounds, but the
+    // unpersisted cooldown still forces the positive floor rather than a 0.
+    const resume = computeReactiveRotationResume({ cooldownPersisted: false, priorConsecutiveRotations: 2, connectedAccountCount: 2 });
+    expect(resume.continueDelayMs).toBe(REACTIVE_PERSISTENCE_FAULT_FLOOR_MS);
+    expect(resume.continueDelayMs).toBeGreaterThan(0);
+  });
+
+  test("(1b) once consecutive failovers EXCEED accounts + margin → FIXED mandatory idle (circuit breaker), never another 0", () => {
+    const accounts = 2;
+    const bound = accounts + REACTIVE_ROTATION_MARGIN; // 4
+    // Walk the streak up to and past the bound; the double-fault keeps cooldown unpersisted.
+    const at = (prior: number) => computeReactiveRotationResume({ cooldownPersisted: false, priorConsecutiveRotations: prior, connectedAccountCount: accounts });
+    // streak = prior+1. In bounds (streak ≤ 4): positive slow-retry floor, not the breaker.
+    expect(at(bound - 1)).toEqual({ continueDelayMs: REACTIVE_PERSISTENCE_FAULT_FLOOR_MS, idleUntilReset: false }); // streak 4 == bound
+    // Over the bound (streak 5): the circuit breaker fires — a FIXED positive MANDATORY idle.
+    const broken = at(bound); // streak 5 > 4
+    expect(broken.continueDelayMs).toBe(REACTIVE_CIRCUIT_BREAKER_IDLE_MS);
+    expect(broken.continueDelayMs).toBeGreaterThan(0);
+    expect(broken.idleUntilReset).toBe(true);   // MANDATORY hold — session.ts can never collapse it to a 0-delay re-dispatch
+  });
+
+  test("(1b) the circuit breaker fires even when the cooldown DID persist (header-less caps can still re-pick)", () => {
+    // Boundedness must not depend on the persistence result: an unbounded streak trips the breaker regardless.
+    const broken = computeReactiveRotationResume({ cooldownPersisted: true, priorConsecutiveRotations: 10, connectedAccountCount: 2 });
+    expect(broken.idleUntilReset).toBe(true);
+    expect(broken.continueDelayMs).toBe(REACTIVE_CIRCUIT_BREAKER_IDLE_MS);
+  });
+
+  test("(2) a RESET streak (priorConsecutiveRotations back to 0 after a successful turn) returns to the 0-delay happy path", () => {
+    // The DB counter resets to 0 on a successful turn (turn.completed anchor); the pure
+    // decision must then behave exactly like a fresh first failover — no lingering hold.
+    expect(computeReactiveRotationResume({ cooldownPersisted: true, priorConsecutiveRotations: 0, connectedAccountCount: 1 }))
+      .toEqual({ continueDelayMs: 0, idleUntilReset: false });
+  });
+
+  test("more connected accounts raise the bound proportionally (a legit N-account walk never trips the breaker)", () => {
+    // With N accounts a legitimate walk cools one per failover; the bound N+margin absorbs it.
+    const accounts = 5;
+    // streak N (== accounts) with cooldowns persisting stays on the fast path.
+    expect(computeReactiveRotationResume({ cooldownPersisted: true, priorConsecutiveRotations: accounts - 1, connectedAccountCount: accounts }))
+      .toEqual({ continueDelayMs: 0, idleUntilReset: false });
   });
 });

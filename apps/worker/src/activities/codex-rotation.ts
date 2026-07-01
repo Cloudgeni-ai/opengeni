@@ -161,6 +161,74 @@ export function computeIdleDelayMs(earliestResetAt: Date, now: Date, maxMs: numb
   return Math.min(Math.max(delta, MIN_IDLE_MS), maxMs);
 }
 
+// --- P3 reactive-rotation boundedness (Finding 1). The reactive 429 catch, on a
+// LIVE failover candidate, normally returns continueDelayMs:0 (skip the hold and
+// re-dispatch NOW — the just-served account is cooling so the next rank cannot
+// re-pick it). Two independent second-order faults can break that "cannot
+// re-pick it" premise and turn the 0-delay re-dispatch into a hot loop, so this
+// pure decision applies two backstops before allowing the 0.
+
+/**
+ * Slow-retry floor (Finding 1a) for the double-fault where the just-served
+ * account's cooldown write could NOT be confirmed persisted: the next proactive
+ * rank might re-select the same capped account (stale-low cached usedPercent, not
+ * cooling). A positive floor degrades that to a SLOW retry instead of a
+ * model-paced hot loop. A few seconds — long enough to break the loop, short
+ * enough to stay responsive once the transient write fault clears.
+ */
+export const REACTIVE_PERSISTENCE_FAULT_FLOOR_MS = 5_000; // 5s
+/**
+ * Circuit-breaker slack (Finding 1b) added to the connected-account count to bound
+ * consecutive reactive failovers. Each legitimate failover cools one account, so
+ * after at most N failovers every account is capped and the reactive path takes the
+ * all-capped idle instead; the +margin absorbs benign re-ranks (a connector-covering
+ * pick order) without tripping the breaker in normal use.
+ */
+export const REACTIVE_ROTATION_MARGIN = 2;
+/**
+ * The FIXED positive idle the reactive path falls to once consecutive reactive
+ * failovers exceed the bound (a double-fault where cooldown writes are not sticking
+ * AND the 429s carry no usage headers, so the same account keeps getting re-picked).
+ * Mirrors the all-capped floor — a mandatory, bounded hold, never another 0-delay
+ * re-dispatch — so the loop can never hammer the capped backend + DB (invariant 4).
+ */
+export const REACTIVE_CIRCUIT_BREAKER_IDLE_MS = MIN_IDLE_MS; // 60s
+
+/** The reactive-resume shape returned to the goal-continuation caller. */
+export type ReactiveRotationResume = { continueDelayMs: number; idleUntilReset: boolean };
+
+/**
+ * Decide the continueDelayMs for a reactive 429 failover onto a LIVE candidate,
+ * bounding the (otherwise 0-delay) re-dispatch against two second-order faults:
+ *
+ *  1. Circuit breaker (1b): if the consecutive reactive-failover streak (prior
+ *     rotated 429 failovers since the last successful turn, PLUS this one) exceeds
+ *     `connectedAccountCount + REACTIVE_ROTATION_MARGIN`, fall to a FIXED positive,
+ *     MANDATORY idle. Covers the double-fault (cooldown write not persisted + a
+ *     header-less cap 429) where the same capped account is re-picked every turn.
+ *  2. Persistence-fault floor (1a): if the just-served account's cooldown could NOT
+ *     be confirmed persisted, use a positive floor (slow retry) instead of 0.
+ *
+ * Otherwise (a confirmed cooldown + an in-bounds streak) returns the unchanged
+ * 0-delay fast re-dispatch — the happy single-rotation path is byte-identical.
+ * Pure so the boundedness contract is unit-testable without a worker/db env.
+ */
+export function computeReactiveRotationResume(args: {
+  cooldownPersisted: boolean;
+  priorConsecutiveRotations: number; // reactive rotated failovers since last success (excludes this one)
+  connectedAccountCount: number;
+}): ReactiveRotationResume {
+  const streak = args.priorConsecutiveRotations + 1; // include the failover about to be published
+  const bound = args.connectedAccountCount + REACTIVE_ROTATION_MARGIN;
+  if (streak > bound) {
+    return { continueDelayMs: REACTIVE_CIRCUIT_BREAKER_IDLE_MS, idleUntilReset: true };
+  }
+  if (!args.cooldownPersisted) {
+    return { continueDelayMs: REACTIVE_PERSISTENCE_FAULT_FLOOR_MS, idleUntilReset: false };
+  }
+  return { continueDelayMs: 0, idleUntilReset: false };
+}
+
 /**
  * THE pure rotation ranker. `accounts` arrives in stable created_at order
  * (listCodexAccountStatuses), which deterministically breaks ranking ties.

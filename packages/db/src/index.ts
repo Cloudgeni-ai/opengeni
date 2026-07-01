@@ -2623,6 +2623,50 @@ export async function setCodexCredentialExhausted(
 }
 
 /**
+ * P3 reactive-rotation boundedness (Finding 1b): the number of CONSECUTIVE rotated
+ * 429-failover turns since the session last had a SUCCESSFUL turn. Counts
+ * `turn.failed` events carrying the `rotated` marker that occurred AFTER the most
+ * recent `turn.completed` event (the natural reset anchor — any successful turn
+ * moves the anchor past every prior failover, so the streak resets to 0). The
+ * reactive 429 catch consults this to bound its otherwise-0-delay re-dispatch:
+ * once the streak exceeds ~(connected accounts + margin) the path degrades to a
+ * fixed positive idle instead of another hot re-dispatch (invariant 4: NO THRASH),
+ * covering the double-fault where a cooldown write did not persist AND the 429
+ * carried no usage headers. Derived from persisted events so it is correct across
+ * the Temporal re-dispatch (each failover is a NEW turn, but its event survives).
+ */
+export async function countConsecutiveReactiveRotations(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [lastOk] = await scopedDb.select({ sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        eq(schema.sessionEvents.type, "turn.completed"),
+      ))
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const conditions = [
+      eq(schema.sessionEvents.workspaceId, workspaceId),
+      eq(schema.sessionEvents.sessionId, sessionId),
+      eq(schema.sessionEvents.type, "turn.failed"),
+      sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
+    ];
+    if (lastOk) {
+      conditions.push(sql`${schema.sessionEvents.sequence} > ${lastOk.sequence}`);
+    }
+    const [{ rotated } = { rotated: 0 }] = await scopedDb.select({
+      rotated: sql<number>`count(*)::int`,
+    }).from(schema.sessionEvents).where(and(...conditions));
+    return Number(rotated);
+  });
+}
+
+/**
  * P4 connector-set cache writer: persist the set of ORIGINAL-dotted connector
  * namespaces a SPECIFIC credential exposes via codex_apps (+ the freshness clock).
  * Modeled byte-for-byte on recordCodexAccountUsage / setCodexCredentialExhausted:

@@ -21,6 +21,7 @@ import {
   recordCodexAccountConnectors,
   setActiveCodexCredential,
   setCodexCredentialExhausted,
+  countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
   appendSessionHistoryItems,
@@ -54,7 +55,7 @@ import {
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
 import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { chooseRotationActive, computeIdleDelayMs, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
+import { chooseRotationActive, computeIdleDelayMs, computeReactiveRotationResume, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
 import type { CodexAccountStatus } from "@opengeni/db";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
@@ -658,7 +659,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               { allAccounts: true },
             );
             await publish([
-              { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved: false } },
+              // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
+              // rotation-wait state as the reactive all-capped path, so it must freeze
+              // autoContinuations identically (evaluateGoalContinuation reads this marker)
+              // — a goal waiting out a long reset must not burn its continuation budget on
+              // the proactive path while the reactive path spares it.
+              { type: "turn.failed", payload: { ...failurePayload, recovery: goalActive ? "goal_continuation" : "user_message", runStateSaved: false, rotated: true } },
               { type: "session.status.changed", payload: { status: "idle" } },
             ], true);
             await finishTurn(db, input.workspaceId, turnId, "failed");
@@ -1540,6 +1546,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // proactive seam (turn-start) is the single authoritative pointer-move + strip site.
         let rotated = false;
         let rotationResumeMs: number | null = null;     // 0 ⇒ a candidate is available; re-dispatch now
+        let rotationResumeIdleUntilReset = false;       // circuit-breaker fall (Finding 1b) ⇒ MANDATORY hold
         let allCappedResetAt: Date | null = null;       // set ⇒ every account capped; idle until this
         if (effectiveCodexCredentialId) {
           const [rotation, sessionCodex] = await Promise.all([
@@ -1558,7 +1565,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const until = usageLimit.resetsInSeconds !== null && Number.isFinite(usageLimit.resetsInSeconds) && usageLimit.resetsInSeconds > 0
               ? new Date(Date.now() + Math.ceil(usageLimit.resetsInSeconds) * 1000)
               : (cachedReset ?? new Date(Date.now() + CODEX_USAGE_LIMIT_MAX_RESUME_MS));
-            await setCodexCredentialExhausted(db, input.workspaceId, effectiveCodexCredentialId, until).catch(() => false);
+            // Finding 1a: INSPECT the cooldown-write result. A swallowed best-effort
+            // write whose failure went unnoticed is exactly what lets the next proactive
+            // rank re-pick this just-capped account (stale-low cached usedPercent, not
+            // cooling) — so capture whether it PERSISTED and feed it into the resume floor.
+            const cooldownPersisted = await setCodexCredentialExhausted(db, input.workspaceId, effectiveCodexCredentialId, until).catch(() => false);
             // Re-rank over the fresh accounts; the in-memory list predates the cooldown
             // write, so stamp the just-cooled account so the engine excludes it now. The
             // serving account is thus walked AT MOST ONCE per turn (invariant 4: bounded).
@@ -1576,7 +1587,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             if (decision.kind === "active") {
               rotated = true;
-              rotationResumeMs = 0;  // re-dispatch immediately: skip BOTH the 1h hold AND the backpressure delay
+              // Finding 1: a live candidate normally re-dispatches NOW (0). Two second-order
+              // faults would turn that 0 into a hot loop, so bound it. Count the consecutive
+              // reactive failovers since the last successful turn (this one is not yet
+              // published) and combine with the cooldown-persistence result.
+              const priorConsecutiveRotations = await countConsecutiveReactiveRotations(db, input.workspaceId, input.sessionId).catch(() => 0);
+              const resume = computeReactiveRotationResume({
+                cooldownPersisted,
+                priorConsecutiveRotations,
+                connectedAccountCount: accounts.length,
+              });
+              rotationResumeMs = resume.continueDelayMs;               // 0 (happy path), a slow-retry floor, or the circuit-breaker idle
+              rotationResumeIdleUntilReset = resume.idleUntilReset;    // true only on the circuit-breaker fall (MANDATORY hold)
             } else if (decision.kind === "allCapped") {
               rotated = true;
               allCappedResetAt = decision.earliestResetAt;
@@ -1606,10 +1628,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // Rotation: a candidate is available → continue NOW (0). All-capped → idle until the
           // earliest reset across all accounts (capped at 1h). Else the unchanged single-account idle.
           if (rotationResumeMs !== null) {
-            // A candidate IS available (the just-failed account is now cooling, so the
-            // ranker cannot re-pick it — at most N rotations per N accounts, invariant 4).
-            // 0 ⇒ re-dispatch NOW; this is the legitimate skip-the-hold case.
-            return { status: "idle", continueDelayMs: rotationResumeMs };
+            // A candidate IS available. Normally the just-failed account is now cooling so
+            // the ranker cannot re-pick it → 0 (re-dispatch NOW, the legitimate skip-the-hold
+            // case). Finding 1 bounds the two exceptions: a persistence fault yields a positive
+            // slow-retry floor, and once consecutive failovers exceed the account count + margin
+            // the circuit breaker returns a fixed MANDATORY idle (idleUntilReset) — never a 0-delay
+            // hot loop against a capped backend + DB.
+            return { status: "idle", continueDelayMs: rotationResumeMs, ...(rotationResumeIdleUntilReset ? { idleUntilReset: true } : {}) };
           }
           // All-capped: clamp to [MIN_IDLE_MS, max] — a POSITIVE, BOUNDED hold (never 0,
           // so session.ts can never tight-loop). The post-idle continuation re-dispatch
