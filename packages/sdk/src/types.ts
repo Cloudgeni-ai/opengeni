@@ -605,6 +605,13 @@ export type CreateSessionRequest = {
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
+  // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
+  // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
+  // (from inside a session → "shared" with the creator's box, top-level → "new").
+  //   - "shared":  join the CREATOR's box (requires a parent session; top-level → 422).
+  //   - "new":     mint a fresh singleton box (group ≡ the new session's id).
+  //   - {groupId}: join a SPECIFIC sibling group in THIS workspace (manager fan-out).
+  sandbox?: "shared" | "new" | { groupId: string } | undefined;
 };
 
 // --- Access, workspaces, API keys -------------------------------------------

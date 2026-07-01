@@ -20,6 +20,7 @@ import {
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
   getAnySessionInGroup,
+  getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
   getSessionTurn,
@@ -547,6 +548,35 @@ export async function createSessionForRequest(
   if (payload.workingDir !== undefined && !payload.targetSandboxId) {
     throw new HTTPException(422, { message: "workingDir requires targetSandboxId (it is the targeted machine's working directory)" });
   }
+  // Honest-label (Stage-D closure): a top-level session TARGETED at a Connected
+  // Machine (a selfhosted sandbox) runs machine-primary every turn, so its HOME
+  // sandbox_backend must read "selfhosted" — not the deployment cloud default —
+  // so the session row + first turn honestly reflect where the agent runs (the
+  // Machines dashboard, the turn's warm-metering, and the file-download plane all
+  // key off this). GUARDS: (1) only at a TOP-LEVEL create (inheritedBackend
+  // undefined) — a shared/{groupId} spawn is literally the creator's box and must
+  // NOT be relabeled; (2) only when the target's kind is actually "selfhosted" —
+  // targetSandboxId also accepts a first-class MODAL sandbox id (resolveTarget),
+  // which must never be mislabeled. A not-found / non-selfhosted / modal target
+  // falls through to the default; the seed swap in createAndStartSession still
+  // validates ownership/liveness and 422s a bad target. (3) only when the feature
+  // flags that make the worker actually take the machine-primary path are ON
+  // (sandboxOwnershipEnabled + sandboxSelfhostedEnabled/routing) — otherwise the
+  // worker ignores the active pointer and a home="selfhosted" turn would fall to
+  // the registry client with no bound agentId and throw; with the flags off we
+  // keep the cloud default and the machine layers as a (pre-honest-label) overlay.
+  let machineHomeBackend: Session["sandboxBackend"] | undefined;
+  if (
+    payload.targetSandboxId
+    && inheritedBackend === undefined
+    && settings.sandboxOwnershipEnabled
+    && settings.sandboxSelfhostedEnabled
+  ) {
+    const targetSandbox = await getSandbox(db, workspaceId, payload.targetSandboxId);
+    if (targetSandbox?.kind === "selfhosted") {
+      machineHomeBackend = "selfhosted";
+    }
+  }
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model });
   const session = await createAndStartSession({
     db,
@@ -561,8 +591,11 @@ export async function createSessionForRequest(
     model,
     reasoningEffort,
     // A shared spawn inherits the box's backend; a caller-supplied
-    // sandboxBackend on a shared spawn is ignored (it is the same box).
-    sandboxBackend: inheritedBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+    // sandboxBackend on a shared spawn is ignored (it is the same box). A
+    // machine-targeted top-level create labels the home "selfhosted"
+    // (machineHomeBackend), overriding the caller/deployment default so the row
+    // matches where the session actually runs.
+    sandboxBackend: inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
     sandboxGroupId,
     metadata: payload.metadata,
     environment: environment ? { id: environment.id, name: environment.name } : null,

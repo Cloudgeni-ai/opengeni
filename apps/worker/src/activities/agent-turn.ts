@@ -840,6 +840,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
         sandboxHolderId = dispatchId ?? `turn:${turnId}`;
         sandboxGroupId = session.sandboxGroupId;
+        // STAGE D honest-label guard: a machine-home session carries
+        // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY
+        // when a live machine pointer resolves (activeSandboxBackend==='selfhosted'
+        // + enrollmentId). When it is NOT primary — the agent swapped back to the
+        // group box (sandbox_swap 'session'/'default'/groupId clears the pointer) or
+        // selfhosted routing is flag-OFF (the pointer is ignored) — the else-branch
+        // must resume a REAL cloud group box, not a "selfhosted" one: the registry
+        // SelfhostedSandboxClient has no bound agentId and throws. Fall the group-box
+        // backend back to the deployment default cloud backend so swap-away / flag-off
+        // degrade to a genuine cloud box exactly like today (home=modal did).
+        const groupBoxBackend: Settings["sandboxBackend"] =
+          turn.sandboxBackend === "selfhosted" && !machinePrimary
+            ? settings.sandboxBackend
+            : turn.sandboxBackend;
         if (machinePrimary) {
           // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
           // establish or lease a phantom Modal home box (today's path leased + BILLED
@@ -900,7 +914,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sandboxGroupId: session.sandboxGroupId,
               sessionId: input.sessionId,
-              backend: turn.sandboxBackend,
+              // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+              // is not machine-primary resumes a real cloud group box (the
+              // deployment default), never a "selfhosted" box (which would throw
+              // for lack of a bound agentId).
+              backend: groupBoxBackend,
               os: session.sandboxOs,
               environment: sandboxEnvironment,
             },
@@ -949,8 +967,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Modal box, so it must accrue ZERO cloud warm-seconds — `selfhosted` has no
         // configured warm rate (0). Keying off turn.sandboxBackend (modal) would bill
         // cloud seconds for a box that does not exist (a real money bug). Non-machine
-        // turns fall back to turn.sandboxBackend (byte-for-byte today).
-        const warmRate = sandboxWarmRateMicrosPerSecond(settings, activeSandboxBackend ?? turn.sandboxBackend);
+        // turns fall back to groupBoxBackend (the REAL box that ran): for a machine-
+        // home turn that degraded to the cloud group box (swap-away / flag-off), that
+        // is the deployment default (modal), so the fallback box is warm-metered at
+        // the cloud rate instead of selfhosted's rate-0 (which would under-bill).
+        const warmRate = sandboxWarmRateMicrosPerSecond(settings, activeSandboxBackend ?? groupBoxBackend);
         leaseHeartbeatTimer = setInterval(() => {
           void heartbeatLeaseHolder(db, {
             accountId: input.accountId,
@@ -2139,6 +2160,16 @@ async function sandboxFileDownloadsForRun(
 }
 
 function requiresSignedFileResourceDownloads(settings: Settings): boolean {
+  // A selfhosted machine (bring-your-own-compute) can NEVER mount ANY object store
+  // — it is a remote user machine reached only over NATS, so file resources are
+  // ALWAYS delivered by exec-curling a pre-signed URL onto it. Without this a
+  // machine-home turn (sandbox_backend "selfhosted") would silently drop file
+  // resources on an azure-blob / s3-compatible store (nativeBucketMount=false),
+  // a regression from the pre-honest-label path where the same turn ran home=modal
+  // and modal's descriptor forced signed downloads.
+  if (settings.sandboxBackend === "selfhosted") {
+    return true;
+  }
   // A nativeBucketMount backend (modal) cannot mount Azure Blob entries, so it
   // needs pre-signed downloads for that store. Keying on the descriptor (not the
   // "modal" literal) keeps this correct as bucket-mount backends are added.
