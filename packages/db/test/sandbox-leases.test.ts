@@ -11,6 +11,7 @@ import {
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
   releaseLeaseHolder,
+  SandboxImageConflictError,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -392,4 +393,85 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.resume_state).toBeNull();
     expect(row?.resume_backend_id).toBeNull();
   }, 60_000);
+
+  // IMAGE IS SHARED STATE (B3): the lease stamps the image the box runs; a resume with
+  // a DIFFERENT image is a conflict (solo → recreate; N-holders → hard fail).
+  test("(9) image B3: cold-create stamps the image on the warming row", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "t", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("spawner");
+    const [row] = await admin<{ image: string | null; liveness: string }[]>`
+      select image, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.image).toBe("img-A");
+    expect(row?.liveness).toBe("warming");
+  });
+
+  test("(10) image B3: warm box + SAME image = plain attach (no recreate)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "spawner", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    // A SECOND holder arrives on the warm box with the SAME image -> attach, box intact.
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "v2", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("attached");
+    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null; refcount: number }[]>`
+      select liveness, image, instance_id, refcount from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("warm");        // never recreated
+    expect(row?.image).toBe("img-A");
+    expect(row?.instance_id).toBe("sb-live");   // live box untouched
+    expect(row?.refcount).toBe(2);
+  });
+
+  test("(11) image B3: warm box + SOLO holder + DIFFERENT image -> recreate (cold, re-stamped, spawner)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    // Warm on img-A, held by exactly ONE holder ("solo").
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" } } }, leaseTtlMs: 45_000 });
+    // The SAME solo holder re-arrives resolving a DIFFERENT image -> recreate. acquireLease
+    // resets to cold, re-stamps img-B, and CASes the holder back in as spawner.
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "solo", backend: "modal", image: "img-B", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("spawner");
+    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null; resume_state: unknown }[]>`
+      select liveness, image, instance_id, resume_state from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    // Warming (spawner will cold-create on the NEW image), image re-stamped, live-box
+    // fields cleared (a divergent image cannot replay the old box's live state).
+    expect(row?.liveness).toBe("warming");
+    expect(row?.image).toBe("img-B");
+    expect(row?.instance_id).toBeNull();
+    expect(row?.resume_state).toBeNull();
+  });
+
+  test("(12) image B3: warm box + OTHER holders + DIFFERENT image -> SandboxImageConflictError (box untouched)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    // Warm on img-A with a holder that STAYS on the box.
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    // A DIFFERENT holder resolves a DIFFERENT image while "keeper" still holds -> refuse.
+    await expect(
+      acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "newcomer", backend: "modal", image: "img-B", leaseTtlMs: 45_000 }),
+    ).rejects.toThrow(SandboxImageConflictError);
+    // The box is UNTOUCHED — the other session keeps running its filesystem.
+    const [row] = await admin<{ liveness: string; image: string | null; instance_id: string | null }[]>`
+      select liveness, image, instance_id from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.liveness).toBe("warm");
+    expect(row?.image).toBe("img-A");
+    expect(row?.instance_id).toBe("sb-live");
+  });
+
+  test("(13) image B3: a null input image (e.g. selfhosted) NEVER conflicts + never stamps", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "viewer", holderId: "keeper", backend: "modal", image: "img-A", leaseTtlMs: 45_000 });
+    await commitWarmingToWarm(db, { accountId, workspaceId, sandboxGroupId: groupId, expectedEpoch: 0, instanceId: "sb-live", resumeBackendId: "modal", resumeState: { backendId: "modal" }, leaseTtlMs: 45_000 });
+    // No image on this acquire -> attach, no conflict, image column unchanged.
+    const res = await acquireLease(db, { accountId, workspaceId, sandboxGroupId: groupId, kind: "turn", holderId: "no-image", backend: "modal", leaseTtlMs: 45_000 });
+    expect(res.role).toBe("attached");
+    const [row] = await admin<{ image: string | null; liveness: string }[]>`
+      select image, liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(row?.image).toBe("img-A");
+    expect(row?.liveness).toBe("warm");
+  });
 });

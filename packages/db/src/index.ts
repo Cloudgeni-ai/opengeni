@@ -4007,6 +4007,7 @@ type LeaseRow = {
   instance_id: string | null;
   backend: string;
   os: string;
+  image: string | null;
   data_plane_url: string | null;
   terminal_data_plane_url: string | null;
   lease_epoch: number | string;
@@ -4027,6 +4028,10 @@ export interface LeaseSnapshot {
   instanceId: string | null;
   backend: string;
   os: string;
+  // The container image the group box runs (Modal image ref / docker image). Null
+  // for a legacy/cold row (image unknown). Shared state: all the box's sessions run
+  // this image; a resume resolving a different image conflicts (B3).
+  image: string | null;
   dataPlaneUrl: string | null;
   // The cached ttyd pty-ws tunnel URL (7681), separate from dataPlaneUrl (the
   // 6080 desktop tunnel). Null until mintTerminalStream resolves + records it.
@@ -4048,6 +4053,12 @@ export interface AcquireLeaseInput {
   subjectId?: string | null;   // the attributing session within the group
   backend: string;             // sessions.sandbox_backend
   os?: string;                 // default 'linux'
+  // The container image this run resolves (Modal image ref / docker image). Stamped on
+  // the cold-create + folded onto a warming/CAS; a warm/draining/warming box already
+  // running a DIFFERENT image is a shared-state conflict (B3): a SOLO holder forces the
+  // box to recreate on this image, N-holders throw SandboxImageConflictError. Omitted
+  // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
+  image?: string | null;
   leaseTtlMs: number;          // refresh window for expires_at (turn-heartbeat cadence)
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
@@ -4076,6 +4087,26 @@ export class SandboxLeaseSupersededError extends Error {
   }
 }
 
+// IMAGE IS SHARED STATE (B3): thrown when a resume resolves an image DIFFERENT from
+// the one the live shared box was created with AND other holders are still on the box.
+// A shared box is ONE filesystem; recreating it on a new image would yank the running
+// filesystem out from under the OTHER sessions, so we refuse. The turn activity surfaces
+// this as an actionable error: spawn with sandbox:'new' or align the pack image. A SOLO
+// holder never hits this — acquireLease recreates the box on the new image instead.
+export class SandboxImageConflictError extends Error {
+  constructor(
+    public readonly sandboxGroupId: string,
+    public readonly currentImage: string,
+    public readonly requestedImage: string,
+  ) {
+    super(
+      `Sandbox group ${sandboxGroupId} runs image ${currentImage}; this run resolves image ${requestedImage}. `
+      + `A shared box requires one image — spawn with sandbox:'new' for an isolated box or align the pack image.`,
+    );
+    this.name = "SandboxImageConflictError";
+  }
+}
+
 function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
   return {
     id: row.id,
@@ -4087,6 +4118,7 @@ function mapLeaseRow(row: LeaseRow): LeaseSnapshot {
     instanceId: row.instance_id,
     backend: row.backend,
     os: row.os,
+    image: row.image ?? null,
     dataPlaneUrl: row.data_plane_url,
     terminalDataPlaneUrl: row.terminal_data_plane_url ?? null,
     // Defensive coercion: integer returns a number, but coerce regardless so the
@@ -4152,14 +4184,17 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) =>
     await scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
+      const image = input.image ?? null;
       // (1) Materialize the singleton row if absent. ON CONFLICT DO NOTHING + the
       // unique index = idempotent under a race; concurrent inserts collapse to
-      // one row. expires_at seeded so a never-warmed cold row has a valid TTL.
+      // one row. expires_at seeded so a never-warmed cold row has a valid TTL. The
+      // image (B3) is stamped on the cold-create so a fresh box records the image it
+      // will be built on; a conflict on an EXISTING live box is handled below.
       await tx.execute(sql`
         insert into sandbox_leases
-          (account_id, workspace_id, sandbox_group_id, liveness, backend, os, expires_at)
+          (account_id, workspace_id, sandbox_group_id, liveness, backend, os, image, expires_at)
         values
-          (${accountId}, ${workspaceId}, ${sandboxGroupId}, 'cold', ${backend}, ${os},
+          (${accountId}, ${workspaceId}, ${sandboxGroupId}, 'cold', ${backend}, ${os}, ${image},
            now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval)
         on conflict (workspace_id, sandbox_group_id) do nothing
       `);
@@ -4175,7 +4210,45 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
       const row = rows[0];
       if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
-      const liveness = row.liveness;
+      let liveness = row.liveness;
+
+      // -- IMAGE IS SHARED STATE (B3): a LIVE box (warm/draining/warming) already runs
+      // a specific image. If this run resolves a DIFFERENT image (both sides known),
+      // the shared filesystem cannot serve both. Under the held row lock we count the
+      // OTHER holders (holders that are not this exact (kind, holderId) — an idempotent
+      // retry of our own holder does not count as a rival):
+      //   - SOLO (no other holders): RECREATE. Reset the box to cold and re-stamp the
+      //     NEW image, then fall through to the cold branch below, which CASes us in as
+      //     the spawner. The spawner cold-creates a fresh box on the new image (the
+      //     archive replay in establishSandboxSessionFromEnvelope hydrates /workspace).
+      //   - OTHER holders present: REFUSE. Throw SandboxImageConflictError — recreating
+      //     would yank the running filesystem out from under the other sessions.
+      // Only enforced when BOTH images are known; a cold row / a legacy null-image box /
+      // an unset input image never conflicts (the selfhosted path passes no image).
+      if (liveness !== "cold" && image !== null && row.image !== null && row.image !== image) {
+        const others = await tx.execute<{ n: number }>(sql`
+          select count(*)::int as n from sandbox_lease_holders
+          where lease_id = ${row.id} and not (kind = ${kind} and holder_id = ${holderId})
+        `);
+        const otherHolders = Number(others[0]?.n ?? 0);
+        if (otherHolders > 0) {
+          throw new SandboxImageConflictError(sandboxGroupId, row.image, image);
+        }
+        // SOLO recreate: reset to cold + re-stamp the new image. Clear the live-box
+        // fields so no stale instance/tunnel survives the image roll (symmetric with
+        // failWarmingToCold). resume_state is nulled — a solo image change is an
+        // intentional fresh box (a divergent image cannot replay the old box's live
+        // state); the session envelope/archive still drives /workspace hydration on the
+        // cold re-create. Fall through to the cold branch, which CASes us in as spawner.
+        await tx.execute(sql`
+          update sandbox_leases set
+            liveness = 'cold', image = ${image}, instance_id = null,
+            data_plane_url = null, terminal_data_plane_url = null,
+            resume_backend_id = null, resume_state = null, updated_at = now()
+          where id = ${row.id}
+        `);
+        liveness = "cold";
+      }
 
       // -- draining: late arrival re-arms (D1). Box still alive (grace open).
       if (liveness === "draining") {
@@ -4186,9 +4259,14 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
 
       // -- cold: WIN the cold->warming CAS (C1). Exactly one winner under the
       // held row lock; concurrent arrivals serialize behind us and see warming.
+      // The image (B3) is (re-)stamped on the CAS so the box the spawner cold-creates
+      // records the image it runs — for a fresh cold row or a solo-recreate above.
       if (liveness === "cold") {
         const casRows = await tx.execute<{ id: string }>(sql`
-          update sandbox_leases set liveness = 'warming', updated_at = now()
+          update sandbox_leases set
+            liveness = 'warming',
+            ${image !== null ? sql`image = ${image},` : sql``}
+            updated_at = now()
           where id = ${row.id} and liveness = 'cold'
           returning id
         `);

@@ -28,6 +28,7 @@ import {
   createDb,
   heartbeatLeaseHolder,
   readLease,
+  SandboxImageConflictError,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -64,12 +65,12 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 
 async function readRow(workspaceId: string, groupId: string) {
   const [r] = await admin`
-    select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id, resume_backend_id
+    select liveness, refcount, turn_holders, viewer_holders, lease_epoch, instance_id, resume_backend_id, image
     from sandbox_leases
     where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
   return r as {
     liveness: string; refcount: number; turn_holders: number; viewer_holders: number;
-    lease_epoch: number; instance_id: string | null; resume_backend_id: string | null;
+    lease_epoch: number; instance_id: string | null; resume_backend_id: string | null; image: string | null;
   } | undefined;
 }
 
@@ -366,5 +367,59 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // Independent proof: nothing materialized a lease for this fresh group.
     const lease = await readLease(db, workspaceId, groupId);
     expect(lease).toBeNull();
+  }, 60_000);
+
+  // IMAGE IS SHARED STATE (B3): resumeBoxForTurn threads `image` into acquireLease.
+  test("(B3-a) resumeBoxForTurn stamps the resolved image on the box it spawns", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-A" },
+      "turn",
+      "activity-1",
+    );
+    try {
+      const warm = await readRow(workspaceId, groupId);
+      expect(warm?.liveness).toBe("warm");
+      expect(warm?.image).toBe("img-A");
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("(B3-b) resumeBoxForTurn PROPAGATES SandboxImageConflictError when another holder runs a different image", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    // A first turn warms the box on img-A and STAYS holding it (do not release).
+    const keeper = await resumeBoxForTurn(
+      { db, settings },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-A" },
+      "turn",
+      "keeper",
+    );
+    try {
+      // A second holder resolving a DIFFERENT image while keeper holds -> conflict
+      // propagates out of resumeBoxForTurn (the turn activity surfaces it as an
+      // actionable error).
+      await expect(
+        resumeBoxForTurn(
+          { db, settings },
+          { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux", environment: { HOME: "/workspace" }, image: "img-B" },
+          "turn",
+          "newcomer",
+        ),
+      ).rejects.toThrow(SandboxImageConflictError);
+      // The box is untouched — keeper's session keeps running.
+      const warm = await readRow(workspaceId, groupId);
+      expect(warm?.liveness).toBe("warm");
+      expect(warm?.image).toBe("img-A");
+    } finally {
+      await keeper.release();
+      await dropSession(keeper.established);
+    }
   }, 60_000);
 });

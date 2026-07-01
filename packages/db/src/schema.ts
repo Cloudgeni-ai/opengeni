@@ -550,6 +550,13 @@ export const sandboxLeases = pgTable("sandbox_leases", {
   instanceId: text("instance_id"),
   backend: text("backend").notNull(),
   os: text("os").notNull().default("linux"),
+  // The container IMAGE the group box runs (Modal image ref / docker image). A shared
+  // box is SHARED STATE: all its sessions run the SAME filesystem, so they must run the
+  // same image. This column stamps the image the live box was created with; a resume
+  // whose resolved image DIFFERS is a conflict (B3): a solo holder recreates the box on
+  // the new image, N-holders are rejected (SandboxImageConflictError). Nullable — a
+  // legacy/cold row reads NULL = "image unknown", which never conflicts.
+  image: text("image"),
   dataPlaneUrl: text("data_plane_url"),
   // The REAL PTY terminal (ttyd pty-ws) rides a SEPARATE provider tunnel (7681)
   // from the desktop noVNC (6080), so its resolved URL is cached independently.

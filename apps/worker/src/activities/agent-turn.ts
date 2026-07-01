@@ -910,6 +910,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               backend: turn.sandboxBackend,
               os: session.sandboxOs,
               environment: sandboxEnvironment,
+              // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+              // this run resolves. The lease stamps it + conflicts on a live shared box
+              // running a DIFFERENT image (solo → recreate on the new image; N-holders →
+              // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
+              // explicit Modal image ref, else the docker image. The selfhosted branch
+              // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
+              // an image — B3 lives only on this Modal else-branch.
+              ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
+                : {}),
             },
             "turn",
             sandboxHolderId,

@@ -81,6 +81,14 @@ export type ResumeBoxIds = {
    * (the legacy default; only the resume/spawn-without-an-agent callers rely on it).
    */
   environment?: Record<string, string>;
+  /**
+   * IMAGE IS SHARED STATE (B3): the container image this run resolves (Modal image ref
+   * / docker image). Threaded to acquireLease, which stamps it on the cold-create and
+   * conflicts on a live box already running a DIFFERENT image (solo holder recreates;
+   * N-holders throw SandboxImageConflictError). Omitted -> image is not enforced (the
+   * selfhosted path never passes it; a legacy/null-image box never conflicts).
+   */
+  image?: string;
 };
 
 /** What resumeBoxForTurn returns: the live NON-OWNED session to inject, the
@@ -150,6 +158,11 @@ export async function resumeBoxForTurn(
     subjectId: ids.sessionId,
     backend: ids.backend,
     os,
+    // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
+    // conflicts on a live box already running a different image. A SandboxImageConflictError
+    // propagates to the turn activity (an actionable error); a solo image change is handled
+    // by acquireLease recreating the box cold on the new image.
+    ...(ids.image ? { image: ids.image } : {}),
     leaseTtlMs,
   });
 
