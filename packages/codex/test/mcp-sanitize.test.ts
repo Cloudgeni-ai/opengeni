@@ -41,32 +41,51 @@ describe("ToolNameMapper", () => {
     expect(m.toOriginal(b)).toBe("x_y");
   });
 
-  test("P2-d: caps a >64-char name to <=64 with a stable hash suffix, reverse-mappable", () => {
+  // The runtime PrefixedMcpServer prepends `codex_apps__` (12) to the sanitized
+  // name; the Responses-API 64-char limit applies to THAT final name. So the real
+  // invariant is `("codex_apps__" + out).length <= 64`, i.e. out <= 52.
+  const CODEX_APPS_PREFIX = "codex_apps__";
+  const prefixed = (name: string) => `${CODEX_APPS_PREFIX}${name}`;
+
+  test("P2-d: caps a >64-char name so the PREFIXED name stays <=64, with a stable hash suffix, reverse-mappable", () => {
     const m = new ToolNameMapper();
     const long = `connector.${"deploy_a_very_long_namespaced_tool_name_that_blows_the_limit".repeat(2)}`;
     expect(long.length).toBeGreaterThan(64);
     const out = m.sanitize(long);
-    expect(out.length).toBeLessThanOrEqual(64);
+    expect(prefixed(out).length).toBeLessThanOrEqual(64); // the FINAL name the model sees
     expect(out).toMatch(/^[a-zA-Z0-9_-]+$/); // still charset-legal
     expect(m.toOriginal(out)).toBe(long); // reverse map keyed on the EMITTED name
   });
 
-  test("P2-d: the 64-char cap is deterministic across repeat listings (idempotent)", () => {
+  test("P2-d: the length cap is deterministic across repeat listings (idempotent)", () => {
     const m = new ToolNameMapper();
     const long = "ns." + "x".repeat(80);
     expect(m.sanitize(long)).toBe(m.sanitize(long));
   });
 
-  test("P2-d: two distinct long names that truncate alike stay distinct + <=64", () => {
+  test("P2-d: two distinct long names that truncate alike stay distinct + prefixed <=64", () => {
     const m = new ToolNameMapper();
     const base = "ns." + "y".repeat(80);
     const a = m.sanitize(`${base}_alpha`);
     const b = m.sanitize(`${base}_beta`);
     expect(a).not.toBe(b);
-    expect(a.length).toBeLessThanOrEqual(64);
-    expect(b.length).toBeLessThanOrEqual(64);
+    expect(prefixed(a).length).toBeLessThanOrEqual(64);
+    expect(prefixed(b).length).toBeLessThanOrEqual(64);
     expect(m.toOriginal(a)).toBe(`${base}_alpha`);
     expect(m.toOriginal(b)).toBe(`${base}_beta`);
+  });
+
+  test("reserves the runtime prefix: a 53–64 char name (passes the raw 64 cap) is capped so codex_apps__<name> <= 64", () => {
+    const m = new ToolNameMapper();
+    // 60 chars, already charset-legal — under the raw 64 cap, but 60 + 12 = 72 > 64
+    // would 400 the whole turn once PrefixedMcpServer prepends the namespace.
+    const name60 = "a".repeat(60);
+    expect(name60.length).toBeGreaterThan(52);
+    expect(name60.length).toBeLessThanOrEqual(64);
+    const out = m.sanitize(name60);
+    expect(prefixed(out).length).toBeLessThanOrEqual(64); // the regression: was 72
+    expect(out).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(m.toOriginal(out)).toBe(name60); // reverse mapping intact after the cap
   });
 });
 
