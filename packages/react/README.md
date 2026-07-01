@@ -3,7 +3,17 @@
 React hooks and styled components for OpenGeni, built on
 [`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
-session status badges, and fleet tiles for workspace overviews.
+session status badges, and fleet tiles for workspace overviews. Two opt-in
+surfaces layer on top: a **sandbox-surfacing** workbench (files, terminal, diff,
+and an optional desktop stream) and, at the
+[`@opengeni/react/machines`](#connected-machines-opengenireactmachines) subpath,
+the **Connected Machines** dashboard + enrollment flow.
+
+The default root import (`@opengeni/react`) is the clean sandbox-agnostic
+surface — the chat/timeline hooks and components plus the sandbox-surfacing
+suite. Connected-Machine UI lives under the `@opengeni/react/machines` subpath so
+consumers that never surface machines don't pull it in. (The root barrel still
+re-exports the machines island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
 (`styles/tokens.css`) — color, typography, radius, shadow, motion. Dark mode is
@@ -90,7 +100,16 @@ export function App() {
   events.
 - `useSessionControl(sessionId)` — `interrupt(reason?)` and
   `approve`/`reject(approvalId, message?)` for `requires_action` approvals.
-- `useSession(sessionId)` — fetch one session (optional polling).
+- `useSession(sessionId)` — fetch one session (optional polling) with
+  `updateTitle(title)` (rename) and live title-patching on `session.title_set`.
+- `useFileAttachments()` — the composer's attach flow: stages files, drives the
+  SDK's direct-to-blob upload, and yields the `resources` to send with a message.
+- `useAvailableModels()` — the deployment's provider-grouped selectable `models`
+  plus the `defaultModel` to preselect (from the client config) for a picker.
+- `useCodexAccounts()` — connected Codex (ChatGPT) accounts, the active/next-run
+  pointer, and per-session account pinning for multi-account subscriptions.
+- `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
+  handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
   fleet/manager views (optional polling).
 - `useEnvironments()` — workspace environments with create/update/remove and
@@ -132,6 +151,94 @@ with the same semantics.
   `renderMessageText` to plug a markdown renderer.
 - `SessionStatus` / `StatusDot` — status badges; live states breathe.
 - `FleetTile` — one session in a fleet grid: title, status, model, recency.
+- `ModelPicker` — a compact model dropdown for a composer slot, grouping the
+  host-exposed models by provider.
+- `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+- `CommandPalette` — the slash-command palette UI over `useSlashCommands`.
+
+The timeline is extensible: `createToolRegistry` / `defaultToolRegistry` plug
+per-tool renderers, and the rendering primitives (`ActivityDisclosure`,
+`ScreenshotFigure`, `TermBlock`, `LightboxProvider`, …) compose custom rows with
+the same semantics.
+
+## Sandbox surfacing
+
+An opt-in workbench that surfaces a session's live sandbox — files, terminal,
+diff, and (when available) a desktop pixel stream — driven by a negotiated
+capability document so every surface degrades to a reason instead of crashing.
+
+- `useSessionCapabilities(sessionId, { attachDesktop?, attachTerminal?, attachFiles? })`
+  — negotiates the per-session capability doc, tracks lease liveness
+  (`cold`/`warming`/`warm`), and acquires the viewer holder(s) that keep the box
+  warm. Desktop attach is gated behind the un-redacted-pixel acknowledgment.
+- `useSandboxFiles` / `useSandboxGit` — the Pierre file tree + git status/diff
+  feeds (the synchronous `fs*`/`git*` SDK point queries plus `fs.changed` /
+  `git.changed` live notifications).
+- `useSandboxTerminal` / `useTerminalStream` — the read-only command-output
+  firehose and the real interactive PTY over the minted `pty-ws` cell.
+- `useDesktopStream` — the noVNC socket, hot-swapped on box rollover via
+  `stream.url.rotated`.
+- Components: `WorkspaceDock` (the resizable/collapsible right-hand dock),
+  `FileBrowser` / `SandboxFiles`, `DiffView` / `PierreDiff` / `PierreFile`,
+  `CodeEditor`, `SandboxTerminal`, and `DesktopViewer`.
+
+These surfaces pull in [optional peer dependencies](#optional-peer-dependencies)
+— install only the ones for surfaces you actually mount.
+
+## Connected Machines (`@opengeni/react/machines`)
+
+Bring-your-own-compute UI: the Machines dashboard, per-machine metrics, the
+active-sandbox swap, and the enrollment flow. Imported from the
+`@opengeni/react/machines` subpath so consumers that never surface machines
+never pull it in.
+
+- `useMachines({ sessionId? })` — polls the fleet, exposes `attach(sandboxId)`
+  (wired to the SDK's active-sandbox swap when a `sessionId` is in scope),
+  `fetchSeries`, and the `activeSandboxId` / `activeEpoch` pointer.
+- `MachinesDashboard` / `MachineCard` / `MachineMetrics` — the fleet grid with
+  per-machine meters and an attach/swap affordance.
+- `MachineDockBar` / `SharedMachineDisclosure` — the backend-aware bar over the
+  sandbox dock naming which machine (Modal box or your machine) it is bound to.
+- `EnrollmentDeviceFlow` — the in-session device-flow panel (`userCode` +
+  `verificationUri`, pending → authorized/denied/expired).
+- `EnrollmentConsent` — the loud whole-machine approve page.
+- `MachineStatusPill` / `ConnectionStatusPill` / `ConnectionDot` — status chips,
+  plus the `MachineView` / `MachineState` / `MetricSample` view-model types.
+
+```tsx
+import { MachinesDashboard, useMachines } from "@opengeni/react/machines";
+
+function Fleet({ sessionId }: { sessionId: string }) {
+  const { machines, activeSandboxId, attach, attachingSandboxId, refresh } =
+    useMachines({ sessionId, pollIntervalMs: 5000 });
+  return (
+    <MachinesDashboard
+      machines={machines}
+      activeSandboxId={activeSandboxId}
+      attachingSandboxId={attachingSandboxId}
+      onAttach={(m) => attach(m.sandboxId)}
+      onRefresh={refresh}
+    />
+  );
+}
+```
+
+See the [Connected Machines guide](../../docs/connected-machines.md) for the
+end-to-end embedder story (create-on-machine, discover, swap, enroll, revoke).
+
+## Optional peer dependencies
+
+The chat/timeline surface has none. The sandbox-surfacing and diff surfaces pull
+their heavy libraries from **optional** `peerDependencies`, so you install only
+what the surfaces you mount need:
+
+- Terminal (`SandboxTerminal`): `@xterm/xterm`, `@xterm/addon-fit`,
+  `@xterm/addon-web-links`.
+- Desktop (`DesktopViewer`): `@novnc/novnc`.
+- Diff (`DiffView` / `PierreDiff` / `PierreFile`): `@pierre/diffs`.
+- Code editor (`CodeEditor`): `@uiw/react-codemirror` + the `@codemirror/lang-*`
+  language packs you need (`css`, `html`, `javascript`, `json`, `markdown`,
+  `python`).
 
 ## Demo harness
 

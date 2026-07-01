@@ -59,7 +59,7 @@ Prefer this shape, adjusted to the current contracts:
 2. **Fetch config**: get product access mode, default model, allowed models, reasoning efforts, MCP providers, and whether file uploads are enabled.
 3. **Resolve workspace**: call `/v1/access/me` and use `defaultWorkspaceId`, or list/create workspaces through `/v1/workspaces` if the grant allows it.
 4. **Prepare resources**: upload files under the workspace first; select repository resources from available repo/source picker; select MCP tool providers by id.
-5. **Create session**: send initial message plus selected resources/tools/model/sandbox options to `/v1/workspaces/:workspaceId/sessions`.
+5. **Create session**: send initial message plus selected resources/tools/model and the compute-target choice to `/v1/workspaces/:workspaceId/sessions`. The compute target is either a managed sandbox (optional `sandboxBackend`, plus the `sandbox` placement union `"shared" | "new" | { groupId }`) or an enrolled **Connected Machine** via `targetSandboxId` — plus an optional per-session `workingDir`, which is valid only alongside `targetSandboxId` (`workingDir` alone is a 422). Optionally pass a workspace-scoped `idempotencyKey` so a retried create collapses to one session.
 6. **Connect SSE**: stream events from `/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream`. Use the last event sequence as the reconnect cursor.
 7. **Render timeline**: display user messages, agent deltas/completions, reasoning, tool calls, sandbox operations, approvals, status changes, failures, and final output according to current event types.
 8. **Send follow-ups**: post a user message into the existing workspace-scoped session; the API queues another turn.
@@ -96,7 +96,7 @@ Client UX should distinguish:
 - **File attachments**: upload, then attach by file id.
 - **Repository attachments**: select repo URL/ref/mount information; GitHub App metadata may be needed for scoped token minting.
 - **Tool providers**: select configured MCP server ids, such as document search or custom enterprise search.
-- **Sandbox backend**: expose only if the product wants users to choose execution backend; otherwise use deployment defaults.
+- **Compute target**: expose only if the product wants users to choose where a session runs; otherwise use deployment defaults. Two distinct axes: a managed **sandbox backend** (a platform-owned ephemeral box; the `sandboxBackend` enum) versus an enrolled **Connected Machine** (user-owned compute addressed by `targetSandboxId` + an optional `workingDir`, run as first-class primary compute — no cloud box behind it, its own git auth, repos not cloned onto it). Do not conflate a **self-hosted deployment** (an operator running the whole OpenGeni service themselves — the `configured` product access mode) with a **Connected Machine** (an end user attaching their own machine as a session's compute, possible inside any deployment, managed or self-hosted). `selfhosted` is only the internal `sandboxBackend` enum value for a Connected Machine; prefer the product term in UI copy.
 
 ## Approvals And Interrupts
 
@@ -131,7 +131,7 @@ Use client-centered language:
 - "Attach files, repositories, and MCP tool providers to a run."
 - "Replay the event log after reloads or network drops."
 - "Handle approvals and interrupts as normal API events."
-- "Self-hosted configured deployments can use delegated bearer tokens or the deployment shared-key boundary without Better Auth."
+- "Self-hosted (operator-run) configured deployments can use delegated bearer tokens or the deployment shared-key boundary without Better Auth. This is the deployment topology, not the same thing as a Connected Machine (a user attaching their own compute to a session)."
 - "Managed deployments use Better Auth for browser sign-up and OpenGeni API keys for headless product integration."
 
 Avoid implying clients call Temporal, NATS, Postgres, the worker, or the sandbox directly.
@@ -146,4 +146,5 @@ Update this file when:
 - Auth/tenancy is added to the base API.
 - Client config capabilities change.
 - File upload or repository selection flow changes.
+- Compute-target selection (managed sandbox vs Connected Machine), the `targetSandboxId`/`workingDir`/`sandbox`/`idempotencyKey` create fields, active-sandbox swap, machine metrics, or the enrollment flow change.
 - New first-class client SDKs are added.

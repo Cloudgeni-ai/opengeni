@@ -101,6 +101,40 @@ const file = await client.uploadFile(workspaceId, {
 const { url } = await client.createFileDownloadUrl(workspaceId, file.id);
 ```
 
+## Connected Machines (bring-your-own-compute)
+
+A session can run on an enrolled **Connected Machine** — a user's own computer —
+instead of a platform-managed sandbox. Two `createSession` fields target one:
+
+- **`targetSandboxId`** (uuid) — the machine to run on (a `MachineView.sandboxId`
+  from `listMachines`). It seeds the session's active-sandbox pointer at
+  creation, so the first turn lands on that machine.
+- **`workingDir`** (host path) — the directory the agent runs under on that
+  machine. **Only valid together with `targetSandboxId`** — `workingDir` alone is
+  a **422**. Omit it and the session runs under the machine's default workspace
+  root. Repos attached to a machine session are **not cloned** (the machine uses
+  its own git auth).
+
+```ts
+const { machines } = await client.listMachines(workspaceId);
+const box = machines.find((m) => m.kind === "selfhosted" && m.state === "online");
+
+const session = await client.createSession(workspaceId, {
+  initialMessage: "Run the test suite and fix what's red",
+  targetSandboxId: box!.sandboxId, // seeds the active-sandbox pointer at create
+  workingDir: "/home/me/projects/app", // requires targetSandboxId, else 422
+});
+
+// Re-point a running session's active sandbox (or "session"/"default" to swap
+// back to its own managed box):
+await client.swapActiveSandbox(workspaceId, session.id, { target: box!.sandboxId });
+```
+
+Discovery (`listMachines`, `machineMetricsSeries`), the active-sandbox swap, and
+the enrollment methods (`mintEnrollToken`, `lookupDeviceEnrollment`,
+`approveDeviceEnrollment`, `denyDeviceEnrollment`) are covered in the
+[Connected Machines guide](../../docs/connected-machines.md).
+
 ## Full API coverage
 
 Every public endpoint group has typed methods:
@@ -108,7 +142,8 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
-| Sessions + events | `createSession`, `listSessions`, `getSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `interrupt`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `interrupt`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `listTurns`, `updateQueuedTurn`, `reorderQueuedTurns`, `deleteQueuedTurn` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
