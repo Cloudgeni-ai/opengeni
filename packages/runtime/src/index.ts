@@ -82,6 +82,7 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { installCodexToolSearch } from "./codex-tool-search";
 import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 import {
   createSandboxClient,
@@ -839,7 +840,9 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   } as const;
 
   if (settings.sandboxBackend === "none") {
-    return new Agent(baseConfig);
+    const agent = new Agent(baseConfig);
+    maybeInstallCodexToolSearch(agent, settings, options);
+    return agent;
   }
 
   const runAs = sandboxRunAs(settings);
@@ -860,7 +863,22 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   if (options.gitTokenSeed) {
     agentGitTokenSeed.set(agent, options.gitTokenSeed);
   }
+  maybeInstallCodexToolSearch(agent, settings, options);
   return agent;
+}
+
+/**
+ * Enable Codex-CLI-style progressive connector disclosure on a codex turn when the
+ * flag is on. Gated on `structuredToolTransport === false` — the same signal that
+ * identifies a codex-subscription turn (the ChatGPT backend that rejects hosted
+ * tools) — so no non-codex turn is ever touched. On qualifying turns it wraps
+ * `getAllTools` to defer codex_apps schemas + add the client tool_search tool; a
+ * turn with no codex_apps tools is a no-op (see {@link applyCodexToolSearch}).
+ */
+function maybeInstallCodexToolSearch(agent: Agent<any, any>, settings: Settings, options: BuildAgentOptions): void {
+  if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
+    installCodexToolSearch(agent as unknown as { getAllTools: (runContext: unknown) => Promise<any[]> });
+  }
 }
 
 /**
