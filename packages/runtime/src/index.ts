@@ -922,6 +922,13 @@ export function buildAgentCapabilities(
     settings.computerUseEnabled
     && settings.sandboxDesktopEnabled
     && desktopCapableBackend(settings.sandboxBackend)
+    // computer-use emits a HOSTED `computer`/`computer_use_preview` tool with NO
+    // function-transport fallback. The ChatGPT/Codex backend rejects hosted tool
+    // types (only function/custom/web_search are accepted), so on the codex path
+    // (structuredToolTransport === false) attaching it would 400 the ENTIRE turn.
+    // Suppress it there — driving the desktop via the agent is simply unavailable
+    // on that backend; every other backend keeps the desktop tier.
+    && options.structuredToolTransport !== false
   ) {
     caps.push(computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],

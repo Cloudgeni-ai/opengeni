@@ -276,4 +276,16 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     const t = types(testSettings({ sandboxBackend: "none", sandboxDesktopEnabled: true, computerUseEnabled: true }));
     expect(t).not.toContain("computer-use");
   });
+
+  test("codex path (structuredToolTransport:false): NO computer-use even with desktop fully on — the hosted computer tool has no function fallback and would 400 the whole turn", () => {
+    const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
+    // Same settings that DO attach computer-use on every other backend...
+    expect(buildAgentCapabilities(desktopOn, []).map((c) => (c as { type?: string }).type)).toContain("computer-use");
+    // ...are suppressed on the codex backend, which rejects the hosted computer tool.
+    const onCodex = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false }).map((c) => (c as { type?: string }).type);
+    expect(onCodex).not.toContain("computer-use");
+    // filesystem/shell/skills still present — only the unsupported hosted tool is dropped.
+    expect(onCodex).toContain("filesystem");
+    expect(onCodex).toContain("shell");
+  });
 });

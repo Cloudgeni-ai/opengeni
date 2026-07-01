@@ -18,6 +18,7 @@
 //     wrapper) fails the turn. We drop any non-object outputSchema before the
 //     validator sees it — safe, as outputSchema is an advisory hint only.
 
+import { CODEX_APPS_MCP_SERVER_ID } from "./constants";
 import type { FetchLike } from "./fetch";
 
 const VALID_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -28,6 +29,18 @@ const VALID_TOOL_NAME = /^[a-zA-Z0-9_-]+$/;
 // length too — not just charset.
 const MAX_TOOL_NAME_LEN = 64;
 
+// CRITICAL: this sanitizer runs on the codex_apps tools/list wire BEFORE OpenGeni's
+// PrefixedMcpServer (packages/runtime) prepends `<serverId>__` to every tool name
+// (prefixedMcpToolName). The 64-char limit applies to that FINAL prefixed name the
+// model sees, so a name we cap at 64 here becomes 64 + 12 = 76 after prefixing and
+// 400s the whole turn. Reserve the runtime prefix so `codex_apps__<sanitized>` is
+// always <= 64. The sanitizer owns the server id, so the reservation is exact and
+// stays self-contained (no runtime import). The reverse mapping is unaffected: the
+// mapper is keyed on the pre-prefix sanitized name, which is what tools/call carries
+// back after PrefixedMcpServer strips its prefix.
+const RUNTIME_TOOL_NAME_PREFIX_LEN = CODEX_APPS_MCP_SERVER_ID.length + "__".length; // `codex_apps__` = 12
+const EFFECTIVE_MAX_TOOL_NAME_LEN = MAX_TOOL_NAME_LEN - RUNTIME_TOOL_NAME_PREFIX_LEN; // 52
+
 /** Short, stable, charset-legal hash of a string (djb2 → base36). Deterministic. */
 function shortHash(input: string): string {
   let h = 5381;
@@ -37,13 +50,13 @@ function shortHash(input: string): string {
   return h.toString(36);
 }
 
-/** Truncate to <= MAX_TOOL_NAME_LEN, appending `_<hash(original)>` so the result stays unique + deterministic. */
+/** Truncate to <= EFFECTIVE_MAX_TOOL_NAME_LEN (reserving the runtime prefix), appending `_<hash(original)>` so the result stays unique + deterministic. */
 function capLength(candidate: string, original: string): string {
-  if (candidate.length <= MAX_TOOL_NAME_LEN) {
+  if (candidate.length <= EFFECTIVE_MAX_TOOL_NAME_LEN) {
     return candidate;
   }
   const suffix = `_${shortHash(original)}`;
-  return candidate.slice(0, Math.max(0, MAX_TOOL_NAME_LEN - suffix.length)) + suffix;
+  return candidate.slice(0, Math.max(0, EFFECTIVE_MAX_TOOL_NAME_LEN - suffix.length)) + suffix;
 }
 
 /**
@@ -55,7 +68,7 @@ export class ToolNameMapper {
   private readonly sanitizedToOriginal = new Map<string, string>();
   private readonly used = new Set<string>();
 
-  /** Return a legal, unique name (<= 64 chars) for `original`, recording the reverse mapping. */
+  /** Return a legal, unique name (<= EFFECTIVE_MAX_TOOL_NAME_LEN, so `<prefix>__name` <= 64) for `original`, recording the reverse mapping. */
   sanitize(original: string): string {
     let candidate = VALID_TOOL_NAME.test(original)
       ? original
@@ -66,14 +79,14 @@ export class ToolNameMapper {
     candidate = capLength(candidate, original);
     // Disambiguate a genuine collision with a DIFFERENT original (never with
     // the same original — that keeps repeat listings stable/idempotent). Re-cap
-    // after each suffix so disambiguation never re-breaches the 64-char limit.
+    // after each suffix so disambiguation never re-breaches the effective limit.
     if (this.used.has(candidate) && this.sanitizedToOriginal.get(candidate) !== original) {
       const base = candidate;
       let n = 2;
       do {
         const suffix = `_${n++}`;
-        candidate = (base.length + suffix.length > MAX_TOOL_NAME_LEN
-          ? base.slice(0, MAX_TOOL_NAME_LEN - suffix.length)
+        candidate = (base.length + suffix.length > EFFECTIVE_MAX_TOOL_NAME_LEN
+          ? base.slice(0, EFFECTIVE_MAX_TOOL_NAME_LEN - suffix.length)
           : base) + suffix;
       } while (this.used.has(candidate));
     }
