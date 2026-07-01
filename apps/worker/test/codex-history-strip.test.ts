@@ -37,6 +37,16 @@ const toolCallRow = (producer: string | null, callId: string) => ({
   item: { type: "function_call", callId, name: "do_it", arguments: "{}" } as Record<string, unknown>,
 });
 
+const toolSearchCallRow = (producer: string | null, callId: string) => ({
+  producerCodexCredentialId: producer,
+  item: { type: "tool_search_call", call_id: callId, status: "completed", execution: "client", arguments: { query: "send email" } } as Record<string, unknown>,
+});
+
+const toolSearchOutputRow = (producer: string | null, callId: string) => ({
+  producerCodexCredentialId: producer,
+  item: { type: "tool_search_output", call_id: callId, status: "completed", execution: "client", tools: [{ type: "function", name: "codex_apps__gmail_send_email" }] } as Record<string, unknown>,
+});
+
 describe("applyCodexHistoryStrip", () => {
   test("cross-account: a turn on B DROPS A-minted reasoning whole, keeps B's and all messages", () => {
     const rows = [
@@ -298,5 +308,45 @@ describe("cross-account reconcile-seed consistency (reconcileSeedCount)", () => 
     const nonCodexRows = [messageRow(null, "u1"), reasoningRow(null, "azure-blob"), messageRow(null, "a1")];
     expect(reconcileSeedCount(nonCodexRows, true, { currentCodexCredentialId: null }))
       .toBe(reconcileSeedCount(nonCodexRows, false, { currentCodexCredentialId: null }));
+  });
+});
+
+
+describe("applyCodexHistoryStrip: tool_search items (progressive connector disclosure)", () => {
+  test("cross-account: a turn on B drops A-minted tool_search_call AND tool_search_output whole", () => {
+    const rows = [
+      messageRow("A", "checking mail"),
+      toolSearchCallRow("A", "tsA"),
+      toolSearchOutputRow("A", "tsA"),
+      messageRow("B", "later"),
+    ];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
+    expect(out.map((i) => i.type)).toEqual(["message", "message"]);
+  });
+
+  test("same-account tool_search pair replays verbatim (by reference)", () => {
+    const rows = [toolSearchCallRow("B", "tsB"), toolSearchOutputRow("B", "tsB")];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe(rows[0]!.item);
+    expect(out[1]).toBe(rows[1]!.item);
+  });
+
+  test("a non-codex turn (current=null) drops codex-produced tool_search items", () => {
+    const rows = [toolSearchCallRow("A", "tsA"), toolSearchOutputRow("A", "tsA"), messageRow(null, "plain")];
+    const out = applyCodexHistoryStrip(rows, { currentCodexCredentialId: null });
+    expect(out.map((i) => i.type)).toEqual(["message"]);
+  });
+
+  test("a HALF-foreign pair (mixed producers) never leaves a stranded half after the downstream sanitizer", () => {
+    // Pathological: the call was A-minted, the output B-minted (should not occur,
+    // but rotation edge cases are exactly where invariants die). The strip drops
+    // A's call; the downstream history sanitizer must then drop B's now-orphaned
+    // output so the replay cannot 400.
+    const rows = [toolSearchCallRow("A", "tsX"), toolSearchOutputRow("B", "tsX"), messageRow("B", "hi")];
+    const stripped = applyCodexHistoryStrip(rows, { currentCodexCredentialId: "B" });
+    expect(stripped.map((i) => i.type)).toEqual(["tool_search_output", "message"]);
+    const sanitized = sanitizeHistoryItemsForModel(stripped);
+    expect(sanitized.map((i) => i.type)).toEqual(["message"]);
   });
 });

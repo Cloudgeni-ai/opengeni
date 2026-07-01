@@ -131,3 +131,50 @@ describe("buildModelResolver", () => {
     expect(resolve("o3-pro")).toBe("gpt-5.5");
   });
 });
+
+
+describe("normalizeCodexRequestBody: tool_search replay shapes", () => {
+  test("coerces a stringified tool_search_call.arguments to an object (backend 400s a string, verified live)", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-5.5",
+      input: [
+        { type: "tool_search_call", id: "tsc_x", call_id: "c1", status: "completed", execution: "client", arguments: JSON.stringify({ query: "send email", limit: 5 }) },
+        { type: "tool_search_output", call_id: "c1", status: "completed", execution: "client", tools: [] },
+      ],
+    };
+    const out = normalizeCodexRequestBody(body, (m) => m);
+    const call = (out.input as Array<Record<string, unknown>>)[0]!;
+    expect(call.arguments).toEqual({ query: "send email", limit: 5 });
+    expect("id" in call).toBe(false); // account-bound tsc_ id stripped like every item id
+    expect(call.call_id).toBe("c1"); // pairing key preserved
+  });
+
+  test("leaves an object tool_search_call.arguments untouched; unparseable string falls back to {}", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-5.5",
+      input: [
+        { type: "tool_search_call", call_id: "c1", arguments: { query: "x" } },
+        { type: "tool_search_call", call_id: "c2", arguments: "not json {" },
+      ],
+    };
+    const out = normalizeCodexRequestBody(body, (m) => m);
+    const items = out.input as Array<Record<string, unknown>>;
+    expect(items[0]!.arguments).toEqual({ query: "x" });
+    expect(items[1]!.arguments).toEqual({});
+  });
+
+  test("tools[] entries with defer_loading and the tool_search tool type pass the normalizer untouched", () => {
+    const body: Record<string, unknown> = {
+      model: "gpt-5.5",
+      tools: [
+        { type: "function", name: "codex_apps__gmail_send_email", defer_loading: true, parameters: { type: "object" } },
+        { type: "tool_search", execution: "client", parameters: { type: "object" } },
+        { type: "mcp", server_label: "x" }, // still dropped
+      ],
+    };
+    const out = normalizeCodexRequestBody(body, (m) => m);
+    const tools = out.tools as Array<Record<string, unknown>>;
+    expect(tools.map((t) => t.type)).toEqual(["function", "tool_search"]);
+    expect(tools[0]!.defer_loading).toBe(true);
+  });
+});

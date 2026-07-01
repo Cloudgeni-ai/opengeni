@@ -41,6 +41,13 @@ const RESULT_TYPE_BY_CALL_TYPE: Record<string, string> = {
   computer_call: "computer_call_result",
   shell_call: "shell_call_output",
   apply_patch_call: "apply_patch_call_output",
+  // Progressive connector disclosure (codex tool_search): a replayed
+  // `tool_search_call` must be settled by its `tool_search_output` exactly like a
+  // function call — an unpaired one 400s the store:false replay. The SDK pairs
+  // these OUTSIDE its own TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE (sessionPersistence's
+  // hasToolSearchCallId), so we mirror the semantics here; the correlation id can
+  // additionally ride providerData (see callIdOf).
+  tool_search_call: "tool_search_output",
 };
 
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
@@ -63,12 +70,25 @@ function callIdOf(item: unknown): string | undefined {
   if (!item || typeof item !== "object") {
     return undefined;
   }
-  const record = item as { callId?: unknown; call_id?: unknown };
-  if (typeof record.callId === "string") {
+  const record = item as { callId?: unknown; call_id?: unknown; providerData?: unknown };
+  if (typeof record.callId === "string" && record.callId.length > 0) {
     return record.callId;
   }
-  if (typeof record.call_id === "string") {
+  if (typeof record.call_id === "string" && record.call_id.length > 0) {
     return record.call_id;
+  }
+  // tool_search items may carry their correlation id ONLY in providerData
+  // (mirrors the SDK's getToolSearchProviderCallId: providerData.call_id ??
+  // providerData.callId ?? call_id ?? callId). Harmless for other item kinds —
+  // their ids never live there.
+  const provider = record.providerData as { call_id?: unknown; callId?: unknown } | null | undefined;
+  if (provider && typeof provider === "object") {
+    if (typeof provider.call_id === "string" && provider.call_id.length > 0) {
+      return provider.call_id;
+    }
+    if (typeof provider.callId === "string" && provider.callId.length > 0) {
+      return provider.callId;
+    }
   }
   return undefined;
 }

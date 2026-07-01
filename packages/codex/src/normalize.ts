@@ -62,10 +62,30 @@ export function normalizeCodexRequestBody(
   }
 
   // strip every item id; PRESERVE call_id. spec §1.6 / verdict §0(b)
+  // (This also covers tool_search items: the backend accepts an id-less
+  // tool_search_call/output pair correlated by call_id — verified live — and
+  // stripping the account-bound `tsc_…` id here sanitizes BOTH replay paths.)
   if (Array.isArray(body.input)) {
     for (const item of body.input as unknown[]) {
-      if (item && typeof item === "object" && "id" in item) {
-        delete (item as Record<string, unknown>).id;
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      if ("id" in record) {
+        delete record.id;
+      }
+      // A replayed tool_search_call must carry `arguments` as an OBJECT — the
+      // backend 400s a string ("Invalid type for 'input[N].arguments': expected
+      // an object", verified live). The live wire emits an object (the SDK's
+      // protocol schema is z.unknown() and round-trips it), so this only fires
+      // for a defensively-stringified row; unparseable strings fall back to {}.
+      if (record.type === "tool_search_call" && typeof record.arguments === "string") {
+        try {
+          const parsed = JSON.parse(record.arguments) as unknown;
+          record.arguments = parsed && typeof parsed === "object" ? parsed : {};
+        } catch {
+          record.arguments = {};
+        }
       }
     }
   }

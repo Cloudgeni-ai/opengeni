@@ -66,6 +66,18 @@ export function applyCodexHistoryStrip(
       // Foreign reasoning: drop the WHOLE item (id + blob) — see rule above.
       continue;
     }
+    if (type === "tool_search_call" || type === "tool_search_output") {
+      // Foreign tool_search items (progressive connector disclosure): drop WHOLE,
+      // like reasoning. The `tsc_…` id is minted by the producing account's
+      // backend, and the output's disclosure set reflects THAT account's
+      // connectors — replaying either into a different account risks a 400 /
+      // wrong-connector disclosure. Dropping both sides keeps the pair invariant
+      // (the history sanitizer would drop a stranded half anyway); the model
+      // simply re-searches on the new account, re-disclosing from the NEW
+      // account's own connector pool. Never any content loss — search items
+      // carry tool metadata, not conversation content.
+      continue;
+    }
     if (type === "compaction") {
       out.push(stripReasoningEncryptedContent(row.item));
       continue;

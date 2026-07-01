@@ -32,6 +32,14 @@ function functionCall(callId: string, name = "tool") {
 function functionResult(callId: string) {
   return { type: "function_call_result", callId, status: "completed", output: { type: "text", text: "ok" } };
 }
+// tool_search items (progressive connector disclosure). The SDK holds the wire
+// shape: snake_case call_id, arguments round-tripped as-is (an object).
+function toolSearchCall(callId: string) {
+  return { type: "tool_search_call", call_id: callId, status: "completed", execution: "client", arguments: { query: "send an email" } };
+}
+function toolSearchOutput(callId: string) {
+  return { type: "tool_search_output", call_id: callId, status: "completed", execution: "client", tools: [{ type: "function", name: "codex_apps__gmail_send_email" }] };
+}
 
 describe("sanitizeHistoryItemsForModel", () => {
   test("drops an orphaned function_call_result whose function_call is absent", () => {
@@ -646,5 +654,56 @@ describe("stripReasoningIdentityFromSerializedRunState", () => {
   test("forwards a non-JSON string unchanged (same reference)", () => {
     const sentinel = "not-json-cleared-state-sentinel";
     expect(stripReasoningIdentityFromSerializedRunState(sentinel)).toBe(sentinel);
+  });
+});
+
+
+describe("sanitizeHistoryItemsForModel: tool_search pairing (progressive connector disclosure)", () => {
+  test("keeps a well-formed tool_search_call -> tool_search_output pair byte-identical", () => {
+    const items = [userMessage("check mail"), toolSearchCall("ts1"), toolSearchOutput("ts1"), assistantMessage("ok")];
+    const out = sanitizeHistoryItemsForModel(items);
+    expect(out).toEqual(items);
+    expect(out[1]).toBe(items[1]); // same references
+  });
+
+  test("drops an orphaned tool_search_output whose call is absent (live 400: 'No tool call found for tool search output')", () => {
+    const items = [userMessage("check mail"), toolSearchOutput("ts1"), assistantMessage("ok")];
+    const out = sanitizeHistoryItemsForModel(items);
+    expect(out.map((i) => i.type)).toEqual(["message", "message"]);
+  });
+
+  test("drops a dangling tool_search_call with no output (live 400: 'No tool output found for tool search call')", () => {
+    const items = [userMessage("check mail"), toolSearchCall("ts1"), assistantMessage("ok")];
+    const out = sanitizeHistoryItemsForModel(items);
+    expect(out.map((i) => i.type)).toEqual(["message", "message"]);
+  });
+
+  test("drops a reasoning item stranded by a dropped dangling tool_search_call", () => {
+    const items = [userMessage("q"), reasoning("rs1"), toolSearchCall("ts1"), assistantMessage("a")];
+    const out = sanitizeHistoryItemsForModel(items);
+    expect(out.map((i) => i.type)).toEqual(["message", "message"]);
+  });
+
+  test("correlates a tool_search pair whose call id rides ONLY providerData (SDK getToolSearchProviderCallId shape)", () => {
+    const call = { type: "tool_search_call", status: "completed", execution: "client", arguments: { query: "x" }, providerData: { call_id: "tsP" } };
+    const output = { type: "tool_search_output", status: "completed", execution: "client", tools: [], providerData: { call_id: "tsP" } };
+    const items = [userMessage("q"), call, output];
+    expect(sanitizeHistoryItemsForModel(items)).toEqual(items);
+  });
+
+  test("tool_search pairing never disturbs function_call pairing in the same history", () => {
+    const items = [
+      userMessage("q"),
+      toolSearchCall("ts1"),
+      toolSearchOutput("ts1"),
+      functionCall("fc1", "codex_apps__gmail_send_email"),
+      functionResult("fc1"),
+      toolSearchOutput("ts-orphan"), // orphan output — only this drops
+      assistantMessage("done"),
+    ];
+    const out = sanitizeHistoryItemsForModel(items);
+    expect(out.map((i) => (i as { type: string }).type)).toEqual([
+      "message", "tool_search_call", "tool_search_output", "function_call", "function_call_result", "message",
+    ]);
   });
 });
