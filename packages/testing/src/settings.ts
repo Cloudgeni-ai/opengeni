@@ -82,6 +82,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     }),
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    codexToolSearchEnabled: false,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
     openaiReasoningEffort: "high",
