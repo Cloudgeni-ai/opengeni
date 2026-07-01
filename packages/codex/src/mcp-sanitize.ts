@@ -124,10 +124,18 @@ function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper, nam
     }
     const record = tool as Record<string, unknown>;
     if ("outputSchema" in record) {
-      const outputSchema = record.outputSchema as { type?: unknown } | null | undefined;
-      if (!outputSchema || typeof outputSchema !== "object" || outputSchema.type !== "object") {
-        delete record.outputSchema;
-      }
+      // Drop EVERY outputSchema, not just malformed/empty ones. The MCP SDK client
+      // caches a validator for any tool that declares an outputSchema and validates
+      // each tool CALL's `structuredContent` against it — and the codex_apps
+      // connectors return results that do NOT match their own declared schemas
+      // (e.g. the schema requires a `result` property the response omits), so the
+      // SDK throws `McpError -32602: Structured content does not match the tool's
+      // output schema` and EVERY such connector tool call fails (observed live:
+      // gmail_search_emails / gmail_get_profile / gmail_list_labels all -32602ed).
+      // outputSchema is advisory — the agent reads the text `content` regardless —
+      // so dropping it makes the connector tools usable. This also subsumes the
+      // empty-`{}` case the strict Tool schema rejected at tools/list time.
+      delete record.outputSchema;
     }
     if (typeof record.name === "string") {
       if (namespaceSink && record.name.includes(".")) {
