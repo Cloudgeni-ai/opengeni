@@ -3,10 +3,13 @@
 // keep goal → next queued turn runs) a workspace session it spawned.
 //
 // A mock-deps UNIT test (no live DB / Temporal): `@opengeni/db.requireSession`
-// and `@opengeni/events.appendAndPublishEvents` are module-mocked (spreading
-// the REAL module so every other export keeps working), and the workflow
-// client's `signalInterrupt` is a spy. That lets us build the real
-// `buildOpenGeniMcpServer` and drive the actual tool handler.
+// and `@opengeni/events.appendAndPublishEvents` are replaced with RESTORABLE
+// spies (spyOn + `mock.restore()` in afterAll), NOT a `mock.module` — the latter
+// is process-global and sticky in bun, so with no teardown it would leak these
+// mocked seams into every later test file in the suite. The workflow client's
+// `signalInterrupt` is a spy too. That lets us build the real
+// `buildOpenGeniMcpServer` and drive the actual tool handler, then tear the
+// spies back down before any other file runs.
 //
 // Proves:
 //   - REGISTRATION GATING: `session_interrupt` is registered iff the grant
@@ -15,12 +18,11 @@
 //     for mode:"steer" and {} otherwise, then signals the interrupt with the
 //     APPENDED event's id (mirroring the REST /events route).
 
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import * as realDb from "@opengeni/db";
-import * as realEvents from "@opengeni/events";
+import * as dbMod from "@opengeni/db";
+import * as eventsMod from "@opengeni/events";
 import type { ApiRouteDeps } from "../src/dependencies";
 
 // ── recorded interactions of the mocked seams ────────────────────────────────
@@ -38,30 +40,31 @@ const APPENDED_EVENT_ID = "11111111-2222-4333-8444-555555555555";
 let buildOpenGeniMcpServer: (typeof import("../src/mcp/server"))["buildOpenGeniMcpServer"];
 
 beforeAll(async () => {
-  // Spread the REAL modules so only the two DB-touching seams are replaced;
-  // every other export server.ts (and its transitive deps) rely on is untouched.
-  mock.module("@opengeni/db", () => ({
-    ...realDb,
-    requireSession: async (_db: unknown, workspaceId: string, sessionId: string) => {
-      requireSessionCalls.push({ workspaceId, sessionId });
-      return { id: sessionId, workspaceId, status: "running" } as unknown as ReturnType<typeof realDb.requireSession>;
-    },
-  }));
-  mock.module("@opengeni/events", () => ({
-    ...realEvents,
-    appendAndPublishEvents: async (
-      _db: unknown,
-      _bus: unknown,
-      workspaceId: string,
-      sessionId: string,
-      events: Array<{ type: string; payload?: unknown }>,
-    ) => {
-      appendCalls.push({ workspaceId, sessionId, events });
-      // Return a persisted-event shape carrying the id the handler must reuse.
-      return [{ id: APPENDED_EVENT_ID, workspaceId, sessionId, sequence: 1, type: events[0]?.type, payload: events[0]?.payload ?? {}, occurredAt: new Date().toISOString() }] as unknown as Awaited<ReturnType<typeof realEvents.appendAndPublishEvents>>;
-    },
-  }));
+  // Replace ONLY the two DB-touching seams with restorable spies. spyOn patches
+  // the named export in place, so server.ts's `import { requireSession } from
+  // "@opengeni/db"` (a live binding) calls through the spy — every other export
+  // it and its transitive deps rely on is the real thing, untouched. Crucially,
+  // spyOn is fully reverted by `mock.restore()` (see afterAll), unlike the
+  // process-global, non-restoring `mock.module`.
+  spyOn(dbMod, "requireSession").mockImplementation(async (_db, workspaceId, sessionId) => {
+    requireSessionCalls.push({ workspaceId, sessionId });
+    return { id: sessionId, workspaceId, status: "running" } as unknown as Awaited<ReturnType<typeof dbMod.requireSession>>;
+  });
+  spyOn(eventsMod, "appendAndPublishEvents").mockImplementation(async (_db, _bus, workspaceId, sessionId, events) => {
+    appendCalls.push({ workspaceId, sessionId, events: events as AppendCall["events"] });
+    // Return a persisted-event shape carrying the id the handler must reuse.
+    return [{ id: APPENDED_EVENT_ID, workspaceId, sessionId, sequence: 1, type: events[0]?.type, payload: events[0]?.payload ?? {}, occurredAt: new Date().toISOString() }] as unknown as Awaited<ReturnType<typeof eventsMod.appendAndPublishEvents>>;
+  });
   ({ buildOpenGeniMcpServer } = await import("../src/mcp/server"));
+});
+
+afterAll(() => {
+  // Restore the real requireSession / appendAndPublishEvents BEFORE any other
+  // test file in the suite runs. This is the whole point of the fix: without it
+  // the mocked seams leak (a mocked appendAndPublishEvents that returns a single
+  // fake event breaks the real-DB sandbox integration tests with a 500 "failed
+  // to append initial user event").
+  mock.restore();
 });
 
 beforeEach(() => {
