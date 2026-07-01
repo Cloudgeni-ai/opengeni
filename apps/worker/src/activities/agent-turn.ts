@@ -1092,6 +1092,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             hostedWebSearch: resolvedModel.configured.hostedWebSearch,
             encryptedReasoning: resolvedModel.provider.api === "responses" && runSettings.openaiReasoningEncryptedContent,
             contextWindowTokens: resolvedModel.configured.contextWindowTokens ?? runSettings.contextWindowTokens,
+            // The ChatGPT/Codex backend rejects the SDK's HOSTED sandbox tools —
+            // the `apply_patch` tool type ("Unsupported tool type: apply_patch")
+            // and structured tool output — which the OpenAIResponsesModel the SDK
+            // binds would otherwise select. Tell buildAgent to emit the function
+            // `apply_patch` + text `view_image` variants the backend accepts. Only
+            // the codex-subscription provider needs this; every other backend
+            // (built-in OpenAI/Azure = real hosted support; registry "chat"
+            // providers = the SDK's own ChatCompletions detection) keeps the SDK
+            // default.
+            structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
           }
           : {}),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),

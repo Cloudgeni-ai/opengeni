@@ -625,10 +625,23 @@ export type BuildAgentOptions = {
   // - contextWindowTokens: the model's effective window, used to derive the
   //   server-path compaction threshold. A registry model can declare its own
   //   (e.g. GLM 5.2's 1,048,576). Default: settings.contextWindowTokens.
+  // - structuredToolTransport: whether the backend supports the Responses
+  //   STRUCTURED/HOSTED sandbox-tool transport — the hosted `apply_patch` tool
+  //   type and structured `view_image` output. The SDK's sandbox capabilities
+  //   pick hosted-vs-function purely from the bound model instance's constructor
+  //   name (supportsApplyPatchTransport / supportsStructuredToolOutputTransport).
+  //   Our codex turns run the OpenAIResponsesModel — which the SDK reads as
+  //   hosted-capable — but route it to the ChatGPT/Codex backend, which REJECTS
+  //   the hosted `apply_patch` type ("Unsupported tool type: apply_patch",
+  //   verified live). Set false for that backend so filesystem emits the
+  //   function `apply_patch` + text `view_image` variants it accepts. Default
+  //   true (let the SDK decide from the model instance) — non-codex paths are
+  //   byte-for-byte unchanged.
   compactionMode?: ContextCompactionMode;
   hostedWebSearch?: boolean;
   encryptedReasoning?: boolean;
   contextWindowTokens?: number;
+  structuredToolTransport?: boolean;
   sandboxEnvironment?: Record<string, string>;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
@@ -819,11 +832,33 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     ...baseConfig,
     defaultManifest: buildManifest(settings, resources, options.sandboxEnvironment, options.fileResourceDownloads),
     ...(runAs ? { runAs } : {}),
-    capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], { compactionMode, contextWindowTokens }),
+    capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
+      compactionMode,
+      contextWindowTokens,
+      ...(options.structuredToolTransport !== undefined ? { structuredToolTransport: options.structuredToolTransport } : {}),
+    }),
   });
   agentFileDownloads.set(agent, normalizeSandboxFileDownloads(options.fileResourceDownloads ?? []).filter((download) => !download.content));
   agentRepositoryCloneHooks.set(agent, sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend));
   return agent;
+}
+
+/**
+ * Force a sandbox capability to emit its FUNCTION-transport tool variants instead
+ * of the hosted ones, by dropping the model instance the SDK's transport
+ * detection keys off. See {@link buildAgentCapabilities} for why (codex routes the
+ * OpenAIResponsesModel to the ChatGPT backend, which rejects the hosted
+ * `apply_patch` tool type). The SDK reads hosted-vs-function ONLY from
+ * `_modelInstance` (set via `bindModel`); overriding `bindModel` to discard the
+ * instance leaves `_modelInstance` undefined, so `supportsApplyPatchTransport` /
+ * `supportsStructuredToolOutputTransport` return false and `tools()` emits the
+ * function `apply_patch` + text `view_image`. `bindModel` still returns the
+ * capability so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is
+ * preserved.
+ */
+function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem>): void {
+  const bindModel = capability.bindModel.bind(capability);
+  capability.bindModel = (model: string) => bindModel(model, undefined);
 }
 
 /**
@@ -853,11 +888,24 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
 export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
-  options: { compactionMode?: ContextCompactionMode; contextWindowTokens?: number } = {},
+  options: { compactionMode?: ContextCompactionMode; contextWindowTokens?: number; structuredToolTransport?: boolean } = {},
 ): ReturnType<typeof Capabilities.default> {
   const mode = options.compactionMode ?? resolveContextCompactionMode(settings);
   const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
-  const caps: ReturnType<typeof Capabilities.default> = [filesystem(), shell()];
+  // The `filesystem()` capability picks hosted-vs-function tool variants from the
+  // bound model instance (supportsApplyPatchTransport / structured tool output).
+  // When the caller declares the backend does NOT support that structured/hosted
+  // transport (codex → the ChatGPT backend rejects the hosted `apply_patch` type),
+  // neutralize this capability's model binding so tools() falls to the function
+  // `apply_patch` + text `view_image` variants the backend accepts — the SDK
+  // handles their function_call round-trip natively, so no reimplementation.
+  // Scoped to filesystem: shell() (always function tools) and compaction() (a
+  // sampling param, dropped by the codex normalizer) are untouched.
+  const filesystemCapability = filesystem();
+  if (options.structuredToolTransport === false) {
+    neutralizeStructuredToolTransport(filesystemCapability);
+  }
+  const caps: ReturnType<typeof Capabilities.default> = [filesystemCapability, shell()];
   if (mode === "server") {
     caps.push(compaction({ policy: new StaticCompactionPolicy(contextServerCompactThreshold({ ...settings, contextWindowTokens })) }));
   }
