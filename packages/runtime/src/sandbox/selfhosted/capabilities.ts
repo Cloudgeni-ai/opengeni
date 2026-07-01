@@ -192,21 +192,21 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
   }
 
   // Online: FS/Terminal/Git stay as the base negotiated them (the machine is
-  // reachable). The desktop/computer-use plane carries the consent + display
-  // gates. Precedence on the desktop cell: a missing display (the machine is
-  // headless, no Xvfb) > missing consent. A headless online machine reports
-  // display_unavailable; a displayed-but-unconsented machine reports
-  // consent_required. (If the base already degraded the desktop for a policy
-  // reason — desktop disabled / no stream-token secret — that base reason wins
-  // and we leave it; we only stamp a selfhosted reason on a cell the base left
-  // AVAILABLE.)
-  const desktopGate: CapabilityUnavailableReason | null = !liveness.hasDisplay
-    ? "display_unavailable"
-    : !liveness.consented
-      ? "consent_required"
-      : null;
-
-  if (desktopGate) {
+  // reachable). The desktop plane splits VIEW from CONTROL:
+  //  - VIEW (a read-only DesktopStream, Recording) requires a DISPLAY only. The
+  //    agent already holds whole-machine shell exec (it can `screencapture` the
+  //    screen itself), so passive viewing is within the exposure the user already
+  //    consented to; a missing display (headless, no Xvfb / no macOS Screen
+  //    Recording grant) is the only blocker.
+  //  - CONTROL — driving input (ComputerUse) or an INTERACTIVE stream —
+  //    additionally requires the explicit allowScreenControl consent (`consented`).
+  // Precedence: a headless machine blocks everything (display_unavailable); a
+  // displayed-but-unconsented machine can be VIEWED (read-only) + RECORDED but not
+  // CONTROLLED (consent_required). (If the base already degraded a cell for a
+  // policy reason — desktop disabled / no stream-token secret — that base reason
+  // wins; we only stamp a selfhosted reason on a cell the base left AVAILABLE.)
+  if (!liveness.hasDisplay) {
+    const reason: CapabilityUnavailableReason = "display_unavailable";
     return {
       ...caps,
       DesktopStream: caps.DesktopStream.transport !== null
@@ -222,14 +222,29 @@ export async function negotiateSelfhostedCapabilities(input: SelfhostedNegotiati
           acknowledged: false,
           shared: false,
           sharedSessionIds: [],
-          reason: desktopGate,
+          reason,
         }
         : caps.DesktopStream,
       Recording: caps.Recording.available
-        ? { ...caps.Recording, available: false, modes: [], codecs: [], reason: desktopGate }
+        ? { ...caps.Recording, available: false, modes: [], codecs: [], reason }
         : caps.Recording,
       ComputerUse: caps.ComputerUse.available
-        ? { ...caps.ComputerUse, available: false, reason: desktopGate }
+        ? { ...caps.ComputerUse, available: false, reason }
+        : caps.ComputerUse,
+    };
+  }
+
+  if (!liveness.consented) {
+    // Displayed but no screen-CONTROL consent: VIEW (read-only) + Recording stay
+    // available; only CONTROL (input) is withheld. Force the stream to read-only
+    // so no input is forwarded even if the base offered an interactive mode.
+    return {
+      ...caps,
+      DesktopStream: caps.DesktopStream.transport !== null
+        ? { ...caps.DesktopStream, mode: "read-only" }
+        : caps.DesktopStream,
+      ComputerUse: caps.ComputerUse.available
+        ? { ...caps.ComputerUse, available: false, reason: "consent_required" }
         : caps.ComputerUse,
     };
   }

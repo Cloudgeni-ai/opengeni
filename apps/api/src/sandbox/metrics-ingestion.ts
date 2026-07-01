@@ -1,44 +1,71 @@
 // apps/api/src/sandbox/metrics-ingestion.ts — the M10 metrics INGESTION consumer
-// (dossier §10.7 + §10.6). The enrolled agent piggybacks a `MetricsSample` on its
-// ~5s heartbeat (an `AgentEvent` published one-way on `agent.<ws>.<id>.events`).
-// This consumer subscribes the wildcard `agent.*.*.events`, decodes the
-// AgentEvent, and on each HEARTBEAT:
-//   1. touchEnrollmentLastSeen  — the liveness cursor (online/reconnecting/offline
-//      derivation + the M3 probe disambiguation).
-//   2. ingestMachineMetricsSample — UPSERT machine_metrics_latest (the "now" row)
-//      + APPEND a machine_metrics_series row downsampled to ~1/min.
-// A GOING-OFFLINE event is not a metrics point — liveness flips via the lease/
-// probe path; we simply skip it here (no-op).
+// (dossier §10.7 + §10.6) + the connect-Hello DISPLAY-REFRESH consumer. The
+// enrolled agent piggybacks a `MetricsSample` on its ~5s heartbeat (an
+// `AgentEvent` published one-way on `agent.<ws>.<id>.events`) and publishes a
+// `Hello` (its live self-description) on `agent.<ws>.<id>.hello` on every connect
+// /reconnect. This module owns the two agent→control-plane inbound consumers:
 //
-// Ingestion is BEST-EFFORT and fail-soft: a decode/DB error for one event is
-// logged + swallowed (the bus subscription already swallows handler throws) so a
-// metrics blip never tears down the consumer or back-pressures the agent.
+//   `agent.*.*.events` (heartbeat) →
+//     1. touchEnrollmentLastSeen  — the liveness cursor (online/reconnecting/offline
+//        derivation + the M3 probe disambiguation).
+//     2. ingestMachineMetricsSample — UPSERT machine_metrics_latest (the "now" row)
+//        + APPEND a machine_metrics_series row downsampled to ~1/min.
+//     A GOING-OFFLINE event is not a metrics point — liveness flips via the lease/
+//     probe path; we skip it here (no-op).
+//
+//   `agent.*.*.hello` (connect) →
+//     refreshEnrollmentDisplay — reconcile `enrollments.has_display` to the LIVE
+//     capability the Hello reports. `has_display` was previously FROZEN at the
+//     enroll-time offer snapshot; a machine that GAINS a display later (a Mac that
+//     grants Screen Recording, a box whose Xvfb starts) or LOSES one never
+//     re-surfaced. Consuming the Hello's `capabilities.desktop` / `display` makes
+//     `has_display` track reality (both directions), which the desktop-capability
+//     gate (packages/runtime capabilities.ts) keys off.
+//
+// Both consumers are BEST-EFFORT and fail-soft: a decode/DB error for one message
+// is logged + swallowed (the bus subscription already swallows handler throws) so
+// a metrics blip / a display-refresh write failure never tears down the consumer,
+// back-pressures the agent, or breaks its connect.
 
 import {
   getEnrollment,
   ingestMachineMetricsSample,
+  setEnrollmentHasDisplay,
   touchEnrollmentLastSeen,
   type Database,
   type MachineMetricsSample,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
-import { AgentEvent, type MetricsSample } from "@opengeni/agent-proto";
+import { AgentEvent, Hello, type MetricsSample } from "@opengeni/agent-proto";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
 export const AGENT_EVENTS_SUBJECT = "agent.*.*.events";
 
+/** The wildcard subject the agent publishes its connect Hello on. */
+export const AGENT_HELLO_SUBJECT = "agent.*.*.hello";
+
 /**
- * Parse `agent.<ws>.<id>.events` → `{ workspaceId, agentId }`. Returns null for a
- * subject that does not match the shape (defensive — the subscription pattern
- * already constrains it).
+ * Parse `agent.<ws>.<id>.<tail>` → `{ workspaceId, agentId }`, requiring the
+ * expected tail token. Returns null for a subject that does not match the shape
+ * (defensive — the subscription pattern already constrains it).
  */
-export function parseAgentEventSubject(subject: string): { workspaceId: string; agentId: string } | null {
+function parseAgentSubject(subject: string, tail: "events" | "hello"): { workspaceId: string; agentId: string } | null {
   const parts = subject.split(".");
-  if (parts.length !== 4 || parts[0] !== "agent" || parts[3] !== "events") {
+  if (parts.length !== 4 || parts[0] !== "agent" || parts[3] !== tail) {
     return null;
   }
   return { workspaceId: parts[1]!, agentId: parts[2]! };
+}
+
+/** Parse `agent.<ws>.<id>.events` → `{ workspaceId, agentId }` (heartbeat plane). */
+export function parseAgentEventSubject(subject: string): { workspaceId: string; agentId: string } | null {
+  return parseAgentSubject(subject, "events");
+}
+
+/** Parse `agent.<ws>.<id>.hello` → `{ workspaceId, agentId }` (connect plane). */
+export function parseAgentHelloSubject(subject: string): { workspaceId: string; agentId: string } | null {
+  return parseAgentSubject(subject, "hello");
 }
 
 /**
@@ -159,5 +186,104 @@ export function startMetricsIngestion(deps: {
 }): () => void {
   return deps.bus.subscribeAgentEvents(AGENT_EVENTS_SUBJECT, (payload, subject) =>
     handleAgentEventPayload(deps.db, deps.observability, payload, subject),
+  );
+}
+
+// ── Connect-Hello display refresh ─────────────────────────────────────────────
+
+/**
+ * The LIVE display presence the agent's Hello reports: a desktop framebuffer is
+ * available (`capabilities.desktop`, which the agent sets true only when a display
+ * probes AND it can stream it) OR a `Display` detail is present. An unset
+ * Capabilities (or a headless machine) → false. This is what `has_display` should
+ * track, replacing the enroll-time snapshot.
+ */
+export function helloReportsDisplay(hello: Hello): boolean {
+  const caps = hello.capabilities;
+  if (!caps) {
+    return false;
+  }
+  return caps.desktop === true || caps.display != null;
+}
+
+/**
+ * Reconcile `enrollments.has_display` to the display presence a Hello reports.
+ * Resolves the enrollment (the accountId is the RLS principal + the existence
+ * check + the current value). A no-change Hello short-circuits BEFORE issuing any
+ * write (and the DB writer is itself change-guarded as a backstop), so a steady
+ * state never churns. An unknown/cross-workspace agentId is a no-op.
+ */
+export async function refreshEnrollmentDisplay(
+  db: Database,
+  input: { workspaceId: string; agentId: string; hasDisplay: boolean },
+): Promise<{ updated: boolean }> {
+  const enrollment = await getEnrollment(db, input.workspaceId, input.agentId);
+  if (!enrollment) {
+    return { updated: false };
+  }
+  if (enrollment.hasDisplay === input.hasDisplay) {
+    // Unchanged — do not even issue the UPDATE (no churn on a steady-state Hello).
+    return { updated: false };
+  }
+  return await setEnrollmentHasDisplay(db, {
+    accountId: enrollment.accountId,
+    workspaceId: input.workspaceId,
+    enrollmentId: input.agentId,
+    hasDisplay: input.hasDisplay,
+  });
+}
+
+/**
+ * Decode a raw `Hello` payload + refresh the enrollment's display cursor (the
+ * per-message handler for the hello plane). Decode failures + write failures are
+ * reported + swallowed — a display refresh must NEVER break the agent's connect.
+ */
+export async function handleHelloPayload(
+  db: Database,
+  observability: Observability | undefined,
+  payload: Uint8Array,
+  subject: string,
+): Promise<void> {
+  const ids = parseAgentHelloSubject(subject);
+  if (!ids) {
+    return;
+  }
+  let hello: Hello;
+  try {
+    hello = Hello.decode(payload);
+  } catch (error) {
+    observability?.warn?.("Failed to decode an agent Hello for display refresh", {
+      subject,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  try {
+    await refreshEnrollmentDisplay(db, {
+      workspaceId: ids.workspaceId,
+      agentId: ids.agentId,
+      hasDisplay: helloReportsDisplay(hello),
+    });
+  } catch (error) {
+    observability?.warn?.("Failed to refresh an enrollment's display from a Hello", {
+      subject,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Start the Hello display-refresh consumer: subscribe `agent.*.*.hello` and
+ * reconcile `has_display` to the live capability the agent reports on every
+ * connect. Gated by sandboxSelfhostedEnabled (the caller checks the flag). Returns
+ * the unsubscribe fn.
+ */
+export function startHelloIngestion(deps: {
+  db: Database;
+  bus: EventBus;
+  observability?: Observability;
+}): () => void {
+  return deps.bus.subscribeAgentEvents(AGENT_HELLO_SUBJECT, (payload, subject) =>
+    handleHelloPayload(deps.db, deps.observability, payload, subject),
   );
 }

@@ -7,7 +7,7 @@ import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOv
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
-import { startMetricsIngestion } from "./sandbox/metrics-ingestion";
+import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -198,6 +198,10 @@ export async function startApi() {
   // M10 — start the metrics-ingestion consumer (agent heartbeats → DB last-sample
   // + downsampled series), gated on the selfhosted flag. A no-op when disabled.
   let stopMetricsIngestion: (() => void) | undefined;
+  // Reconcile enrollments.has_display to the LIVE capability the agent reports in
+  // its connect Hello (has_display was frozen at the enroll-time snapshot). Gated
+  // on the same selfhosted flag.
+  let stopHelloIngestion: (() => void) | undefined;
   // M-AUTH — start the NATS auth-callout responder (the tenancy boundary): it
   // validates an agent's enrollment bearer presented at NATS connect and mints a
   // workspace-scoped user JWT. Gated on the selfhosted flag + a resolvable callout
@@ -207,7 +211,8 @@ export async function startApi() {
   let authCalloutResponder: ResponderConnection | undefined;
   if (settings.sandboxSelfhostedEnabled) {
     stopMetricsIngestion = startMetricsIngestion({ db: dbClient.db, bus, observability });
-    observability.info("OpenGeni machine-metrics ingestion consumer started", {});
+    stopHelloIngestion = startHelloIngestion({ db: dbClient.db, bus, observability });
+    observability.info("OpenGeni machine-metrics + hello ingestion consumers started", {});
 
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
@@ -239,6 +244,7 @@ export async function startApi() {
     close: async () => {
       server.stop(true);
       stopMetricsIngestion?.();
+      stopHelloIngestion?.();
       await Promise.allSettled([
         authCalloutResponder?.close(),
         bus.close(),

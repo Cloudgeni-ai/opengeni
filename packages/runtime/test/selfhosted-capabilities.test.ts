@@ -137,7 +137,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.ComputerUse.reason).toBe("agent_reconnecting");
   });
 
-  test("CONSENT_REQUIRED (online + displayed but not consented): desktop/computer-use gated, Channel-A stays available", async () => {
+  test("CONSENT_REQUIRED (online + displayed but not consented): VIEW (read-only) + Recording stay available, only CONTROL is gated", async () => {
     const caps = await negotiateSelfhostedCapabilities({
       sessionId: SESSION_ID,
       leaseEpoch: 1,
@@ -149,12 +149,17 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.FileSystem.available).toBe(true);
     expect(caps.Terminal.transport).toBe("pty-ws");
     expect(caps.Git.available).toBe(true);
-    // The desktop plane is consent-gated.
-    expect(caps.DesktopStream.transport).toBeNull();
-    expect(caps.DesktopStream.reason).toBe("consent_required");
+    // VIEW decouples from CONTROL: with a display alone the screen can be VIEWED
+    // (read-only stream) + RECORDED — the agent already has whole-machine exec, so
+    // passive viewing adds no capability. Only INPUT (ComputerUse / an interactive
+    // stream) requires the explicit allowScreenControl consent.
+    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.mode).toBe("read-only");
+    expect(caps.DesktopStream.reason).toBeNull();
+    expect(caps.Recording.available).toBe(true);
+    expect(caps.Recording.reason).toBeNull();
     expect(caps.ComputerUse.available).toBe(false);
     expect(caps.ComputerUse.reason).toBe("consent_required");
-    expect(caps.Recording.reason).toBe("consent_required");
   });
 
   test("DISPLAY_UNAVAILABLE (online but headless, no display): desktop degraded, Channel-A available", async () => {

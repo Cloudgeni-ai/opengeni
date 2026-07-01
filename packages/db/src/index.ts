@@ -57,7 +57,7 @@ import { isCodexBilledModel } from "@opengeni/codex";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
-import { and, asc, desc, eq, gt, gte, inArray, lt, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, lt, ne, sql, type SQL } from "drizzle-orm";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
@@ -4932,6 +4932,34 @@ export async function touchEnrollmentLastSeen(db: Database, input: {
         eq(schema.enrollments.workspaceId, input.workspaceId),
         eq(schema.enrollments.id, input.enrollmentId),
       ));
+  });
+}
+
+// Live display cursor: the agent's connect Hello reports whether a display is
+// present RIGHT NOW (a desktop framebuffer probes). Unlike `has_display` set once
+// at enroll time from the enroll-offer snapshot, this tracks REALITY across the
+// machine's life — a Mac that later grants Screen Recording, or a Linux box whose
+// Xvfb starts after enrollment, flips false→true on its next Hello (and a display
+// that goes away flips true→false). CHANGE-GUARDED at the SQL layer (the `ne`
+// predicate): a Hello that reports the same value the row already holds updates
+// zero rows, so a steady state never churns a write. Returns whether a row was
+// actually changed. Best-effort — the caller swallows failures so a display
+// refresh never breaks the agent's connect.
+export async function setEnrollmentHasDisplay(db: Database, input: {
+  accountId: string; workspaceId: string; enrollmentId: string; hasDisplay: boolean;
+}): Promise<{ updated: boolean }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    const rows = await scopedDb.update(schema.enrollments)
+      .set({ hasDisplay: input.hasDisplay, updatedAt: new Date() })
+      .where(and(
+        eq(schema.enrollments.workspaceId, input.workspaceId),
+        eq(schema.enrollments.id, input.enrollmentId),
+        // Only write on a CHANGE — an unchanged display must not churn a write on
+        // every reconnect Hello.
+        ne(schema.enrollments.hasDisplay, input.hasDisplay),
+      ))
+      .returning({ id: schema.enrollments.id });
+    return { updated: rows.length > 0 };
   });
 }
 

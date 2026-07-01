@@ -161,9 +161,12 @@ export class MockAgentResponder implements ControlRpc {
         return ok(req.requestId, { $case: "fsStat", fsStat: res });
       }
       case "desktopEnsure": {
-        if (!this.consented) {
-          return errorResponse(req.requestId, ErrorCode.ERROR_CODE_CONSENT_REQUIRED, "screen control not consented", false);
-        }
+        // The desktop STREAM (view) is DISPLAY-gated, not consent-gated: the real
+        // agent registers the channel + captures frames regardless of screen-control
+        // consent (`register_desktop` in hub.rs sets `allow_input` from consent and
+        // the pump captures anyway) — only INPUT injection is gated. This stub has a
+        // (mock) display and does not model input injection, so desktopEnsure always
+        // succeeds; `consented` only affects the computer-use INPUT plane.
         return ok(req.requestId, {
           $case: "desktopEnsure",
           desktopEnsure: {
