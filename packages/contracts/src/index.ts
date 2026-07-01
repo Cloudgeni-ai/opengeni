@@ -2635,6 +2635,11 @@ export const CreateSessionRequest = z.object({
   // A shared spawn inherits the box's (backend, os) — it is literally the same
   // box; the child cannot pick its own backend. Cross-workspace sharing is
   // forbidden by construction (the parent/group reads are RLS-workspace-scoped).
+  // ENV-AWARE: the box's environment is fixed at creation, so a share requires
+  // the SAME environmentId as the creator's box. On a mismatch the inherited
+  // default silently falls back to an own box; an explicit "shared"/{groupId}
+  // request 422s at create (instead of the first turn dying on the SDK's
+  // manifest-env guard).
   sandbox: z.union([
     z.literal("shared"),
     z.literal("new"),

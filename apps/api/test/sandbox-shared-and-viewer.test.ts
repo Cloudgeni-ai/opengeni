@@ -55,7 +55,17 @@ const settings = testSettings({
   sandboxLeaseTtlMs: 1_000,
   sandboxViewerHolderTtlMs: 1_000,
   sandboxIdleGraceMs: 500,
+  // env-aware grouping tests attach a workspace Environment at create.
+  environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
 });
+
+/** A workspace Environment row (no variables needed — grouping compares ids). */
+async function freshEnvironment(accountId: string, workspaceId: string): Promise<string> {
+  const [e] = await admin<{ id: string }[]>`
+    insert into workspace_environments (account_id, workspace_id, name)
+    values (${accountId}, ${workspaceId}, 'env') returning id`;
+  return e!.id;
+}
 
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [a] = await admin<{ id: string }[]>`
@@ -198,6 +208,78 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       initialMessage: "pin to a machine",
       targetSandboxId: crypto.randomUUID(),
     })).rejects.toMatchObject({ status: 422 });
+  }, 60_000);
+
+  test("ENV-AWARE: inherited default with a DIFFERENT environment falls back to an OWN box (break mode 1 dissolved)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    // A: credential-less manager (top-level, no environment).
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "manager",
+    });
+    // B: credentialed worker spawned FROM INSIDE A, sandbox OMITTED. The old
+    // env-blind default joined A's box and the first turn died on the SDK's
+    // manifest-env guard; env-aware grouping gives B its own box instead.
+    const g = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "worker",
+      environmentId,
+    });
+    expect(b.parentSessionId).toBe(a.id);
+    expect(b.sandboxGroupId).toBe(b.id); // own singleton box, NOT a's group
+    expect(b.sandboxGroupId).not.toBe(a.sandboxGroupId);
+  }, 60_000);
+
+  test("ENV-AWARE: inherited default with the SAME environment still shares", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const g0 = { ...grant(accountId, workspaceId), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    const a = await createSessionForRequest(deps(bus), g0, workspaceId, {
+      initialMessage: "credentialed founder",
+      environmentId,
+    });
+    const g1 = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    const b = await createSessionForRequest(deps(bus), g1, workspaceId, {
+      initialMessage: "same-env sibling",
+      environmentId,
+    });
+    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
+  }, 60_000);
+
+  test("ENV-AWARE: EXPLICIT 'shared' with a different environment ⇒ 422 at create (not a dead first turn)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "manager",
+    });
+    const g = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    await expect(createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "worker",
+      environmentId,
+      sandbox: "shared",
+    })).rejects.toThrow(/same environment/);
+  }, 60_000);
+
+  test("ENV-AWARE: {groupId} join with a different environment ⇒ 422 at create", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "founder",
+    });
+    const g = { ...grant(accountId, workspaceId), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    await expect(createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "joiner",
+      environmentId,
+      sandbox: { groupId: a.sandboxGroupId! },
+    })).rejects.toThrow(/different environment/);
   }, 60_000);
 
   test("{groupId} explicit join (I13/OD-S5) ⇒ same group as the sibling", async () => {

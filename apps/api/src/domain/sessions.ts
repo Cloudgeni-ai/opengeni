@@ -522,6 +522,21 @@ export async function createSessionForRequest(
   const sandboxChoice = payload.sandbox ?? (parentSessionId ? "shared" : "new");
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
+  // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace Environment is
+  // creation-time box state — the box's manifest env is fixed when it is cold-
+  // created, and the SDK's provided-session guard rejects any manifest-env delta
+  // at attach. A session carrying a DIFFERENT Environment than the box it joins
+  // is therefore a genuine shared-state conflict TODAY: its first turn on a warm
+  // box dies with "Live sandbox sessions cannot change manifest environment
+  // variables" (proven live, sessions 5aee77e9 + 63d18823). Until the Environment
+  // is evicted from the manifest (per-exec, like the git token), grouping must be
+  // env-aware: the INHERITED default falls back to an own box on mismatch (a
+  // credentialed worker spawned from a credential-less manager just works), and
+  // an EXPLICIT shared/{groupId} request with a mismatched Environment fails
+  // fast at create (422) instead of poisoning the session's first turn.
+  const requestedEnvironmentId = payload.environmentId ?? null;
+  const environmentMatchesGroup = (memberEnvironmentId: string | null): boolean =>
+    memberEnvironmentId === requestedEnvironmentId;
   if (sandboxChoice === "shared") {
     if (!parentSessionId) {
       throw new HTTPException(422, { message: "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create." });
@@ -530,12 +545,25 @@ export async function createSessionForRequest(
     if (!parent) {
       throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
     }
-    sandboxGroupId = parent.sandboxGroupId;
-    inheritedBackend = parent.sandboxBackend;
+    if (!environmentMatchesGroup(parent.environmentId ?? null)) {
+      if (payload.sandbox === "shared") {
+        // The caller explicitly asked to share while carrying a different
+        // Environment — surface the conflict at create time, not turn time.
+        throw new HTTPException(422, { message: "sandbox:'shared' requires the same environment as the creator's box (the box environment is fixed at creation); omit sandbox or pass 'new' when attaching a different environment." });
+      }
+      // Inherited default: deterministic separation on the genuine shared-state
+      // conflict — the worker gets its own box and its turn runs.
+    } else {
+      sandboxGroupId = parent.sandboxGroupId;
+      inheritedBackend = parent.sandboxBackend;
+    }
   } else if (typeof sandboxChoice === "object") {
     const member = await getAnySessionInGroup(db, workspaceId, sandboxChoice.groupId);
     if (!member) {
       throw new HTTPException(404, { message: `sandbox group not found in workspace: ${sandboxChoice.groupId}` });
+    }
+    if (!environmentMatchesGroup(member.environmentId ?? null)) {
+      throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.` });
     }
     sandboxGroupId = sandboxChoice.groupId;
     inheritedBackend = member.sandboxBackend;

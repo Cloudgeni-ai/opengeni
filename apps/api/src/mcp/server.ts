@@ -655,20 +655,26 @@ function registerWorkspaceOrchestrationTools(
         firstPartyMcpPermissions: z4.array(z4.string()).optional(),
         // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
         // creator's box — one filesystem/repo/desktop, N independent conversations;
-        // this is the SAFE DEFAULT and env vars are per-exec, NOT a reason to split.
-        // Pass "new" for a fresh isolated box (a different repo set or a genuinely
-        // separate filesystem), or {groupId} (a sibling session's `sandboxGroupId`
-        // from a prior session_create response) to join that specific sibling's box.
-        // A shared box requires the SAME image; a conflicting image is rejected (B3).
+        // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different
+        // repo set or a genuinely separate filesystem), or {groupId} (a sibling
+        // session's `sandboxGroupId` from a prior session_create response) to join
+        // that specific sibling's box.
+        // Shared state must be compatible: a shared box requires the SAME image
+        // (rejected at the lease layer, B3) and — because the box's environment is
+        // fixed at creation under the current mechanics — the SAME workspace
+        // Environment. The domain layer is env-aware: an inherited default with a
+        // different environmentId silently gets its OWN box (the spawn still works),
+        // while an explicit shared/{groupId} with a mismatched environment 422s at
+        // create. When the Environment is eventually evicted from the box manifest
+        // (per-exec, like the git token), the env check dissolves on its own.
         // The description below is what the AGENT sees (this comment is invisible to
-        // it); keep the two in sync. Grouping stays env-blind (correct) — the only
-        // shared-state hard-fail is the image conflict at the lease layer.
+        // it); keep the two in sync.
         sandbox: z4.union([
           z4.literal("shared"),
           z4.literal("new"),
           z4.object({ groupId: z4.string().uuid() }),
         ]).describe(
-          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default and env vars are per-exec, not a reason to split. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box. A shared box requires the same image; a conflicting image is rejected.",
+          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT environment than the creator's box, the platform automatically gives it its own box (the box environment is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same image and the same environment; a conflict is rejected at create.",
         ).optional(),
         // The parent (manager) session is auto-inferred from the caller's
         // worker-signed sessionId claim, so a spawned worker's completion wakes
