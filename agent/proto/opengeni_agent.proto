@@ -507,6 +507,32 @@ message DesktopEnsureResponse {
   Display display = 2;
 }
 
+// Inject one synthetic computer-use input event on the machine's desktop — the
+// CONTROL-PLANE twin of the relay DesktopInput (the agent drives its OWN screen
+// for computer-use; there is no human viewer channel). Reuses the relay
+// DesktopInput event shapes; there is no channel_id (this goes straight to the
+// display, not a relay channel). Injection is gated on consented_screen_control:
+// an ungated call fails with ERROR_CODE_CONSENT_REQUIRED and never touches the OS.
+message DesktopInputRequest {
+  oneof event {
+    PointerEvent pointer = 1;
+    KeyEvent key = 2;
+    ScrollEvent scroll = 3;
+  }
+}
+message DesktopInputResponse {}
+
+// Capture a single screenshot of the machine's desktop as a PNG. A VIEW op: it
+// needs a display, NOT screen-control consent (the view/control decoupling), so
+// it is not consent-gated. Returns the encoded image plus its geometry so the
+// caller can size a canvas without decoding.
+message DesktopScreenshotRequest {}
+message DesktopScreenshotResponse {
+  bytes png = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+}
+
 // =============================================================================
 // Heartbeat + metrics
 // =============================================================================
@@ -708,6 +734,8 @@ message ControlRequest {
     DesktopEnsureRequest desktop_ensure = 26;
     MetricsRequest metrics = 27;
     UpdateMayProceedRequest update_may_proceed = 28;
+    DesktopInputRequest desktop_input = 29;
+    DesktopScreenshotRequest desktop_screenshot = 30;
   }
 }
 
@@ -736,6 +764,8 @@ message ControlResponse {
     DesktopEnsureResponse desktop_ensure = 26;
     MetricsSample metrics = 27;
     UpdateMayProceedResponse update_may_proceed = 28;
+    DesktopInputResponse desktop_input = 29;
+    DesktopScreenshotResponse desktop_screenshot = 30;
   }
 }
 

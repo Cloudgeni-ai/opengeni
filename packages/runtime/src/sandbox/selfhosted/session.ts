@@ -20,6 +20,7 @@ import {
   ControlResponse,
   FsEntryKind,
   StreamKind,
+  type DesktopInputRequest,
   type ExecRequest,
   type ExecResponse,
   type StreamChannel,
@@ -520,6 +521,41 @@ export class SelfhostedSession {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
     }
     return { exists: result.fsStat.exists };
+  }
+
+  // ── Computer-use control plane (the agent drives its OWN screen) ──────────────
+  // The CONTROL-PLANE twin of the relay DesktopInput/desktop stream: instead of a
+  // human viewer channel, the agent injects synthetic input into — and captures —
+  // its own display for the model's computer-use loop. Both route over the SAME
+  // `call()` primitive, so a consent/epoch rejection surfaces as the mapped
+  // `SelfhostedControlError` exactly like every other op. `NativeDesktopComputer`
+  // (sandbox-computer.ts) is the sole consumer.
+
+  /** Computer-use WRITE op: inject one synthetic desktop input event (pointer/key/
+   *  scroll) on the machine's OWN display. The agent injects via CGEvent (macOS) /
+   *  XTEST (Linux) and CONSENT-GATES it — an unconsented call never touches the OS
+   *  and surfaces the mapped control error (ERROR_CODE_CONSENT_REQUIRED) via `call()`. */
+  async desktopInput(event: DesktopInputRequest["event"]): Promise<void> {
+    const result = await this.call({ $case: "desktopInput", desktopInput: { event } });
+    if (result.$case !== "desktopInput") {
+      throw new Error(`selfhosted desktopInput: unexpected result ${result.$case}`);
+    }
+  }
+
+  /** Computer-use VIEW op: capture a single PNG screenshot of the machine's desktop
+   *  plus its geometry (via ScreenCaptureKit / x11). NOT consent-gated (a view op —
+   *  the view/control decoupling), so it works with a display but no screen-control
+   *  consent. Returns the raw encoded bytes + width/height. */
+  async screenshot(): Promise<{ png: Uint8Array; width: number; height: number }> {
+    const result = await this.call({ $case: "desktopScreenshot", desktopScreenshot: {} });
+    if (result.$case !== "desktopScreenshot") {
+      throw new Error(`selfhosted screenshot: unexpected result ${result.$case}`);
+    }
+    return {
+      png: result.desktopScreenshot.png,
+      width: result.desktopScreenshot.width,
+      height: result.desktopScreenshot.height,
+    };
   }
 
   /** A cheap liveness probe — request a Ping on the subject; returns true iff a

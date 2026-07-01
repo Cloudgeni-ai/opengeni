@@ -43,6 +43,11 @@ pub struct DispatchContext {
     pub epoch: u32,
     /// Process start instant, for the ping/heartbeat monotonic clock.
     pub started: std::time::Instant,
+    /// Whether the operator consented to SCREEN CONTROL at enrollment (the same
+    /// grant the relay framebuffer pump's `allow_input` gates on). The
+    /// [`Op::DesktopInput`] arm refuses synthetic input with
+    /// [`ErrorCode::ConsentRequired`] when this is `false`, BEFORE touching the OS.
+    pub consented_screen_control: bool,
 }
 
 impl DispatchContext {
@@ -189,6 +194,11 @@ async fn dispatch_future<P: Platform>(
             platform.desktop_ensure(&req).await,
             RespResult::DesktopEnsure,
         ),
+
+        // --- computer-use control ops: the AGENT drives its own desktop --------
+        // Extracted to helpers so this dispatch match stays compact + readable.
+        Op::DesktopInput(req) => desktop_input(request_id, req, platform, ctx).await,
+        Op::DesktopScreenshot(_req) => desktop_screenshot(request_id, platform).await,
         Op::PtyWrite(req) => result(
             request_id,
             platform.pty_write(&req).await,
@@ -205,6 +215,68 @@ async fn dispatch_future<P: Platform>(
             RespResult::PtyClose,
         ),
     }
+}
+
+/// Handles [`Op::DesktopInput`] — the computer-use INJECT op the agent runs
+/// against its own desktop.
+///
+/// SECURITY: synthetic input REQUIRES the operator to have consented to screen
+/// control at enrollment. When consent was not granted, this returns
+/// [`ErrorCode::ConsentRequired`] and DOES NOT inject — the platform is never
+/// touched.
+async fn desktop_input<P: Platform>(
+    request_id: String,
+    req: v1::DesktopInputRequest,
+    platform: &Arc<P>,
+    ctx: &DispatchContext,
+) -> ControlResponse {
+    if ctx.consented_screen_control {
+        // The event oneof types (Pointer/Key/Scroll) are SHARED with the relay
+        // `DesktopInput`, so the map is a 1:1 rename of the wrapper. A control-plane
+        // input has no relay channel, so `channel_id` is empty (it goes straight to
+        // the display).
+        let input = v1::DesktopInput {
+            channel_id: String::new(),
+            event: req.event.map(|event| match event {
+                v1::desktop_input_request::Event::Pointer(p) => {
+                    v1::desktop_input::Event::Pointer(p)
+                }
+                v1::desktop_input_request::Event::Key(k) => v1::desktop_input::Event::Key(k),
+                v1::desktop_input_request::Event::Scroll(s) => v1::desktop_input::Event::Scroll(s),
+            }),
+        };
+        result(
+            request_id,
+            platform
+                .desktop_input(&input)
+                .await
+                .map(|()| v1::DesktopInputResponse {}),
+            RespResult::DesktopInput,
+        )
+    } else {
+        consent_required_error(request_id, "screen control not consented")
+    }
+}
+
+/// Handles [`Op::DesktopScreenshot`] — a one-shot desktop capture.
+///
+/// NO consent gate: a screenshot is a VIEW op — it needs a DISPLAY, not
+/// screen-control consent (the view/control decoupling). A headless host surfaces
+/// `Unsupported` from the backend, mapped like any other error.
+async fn desktop_screenshot<P: Platform>(request_id: String, platform: &Arc<P>) -> ControlResponse {
+    result(
+        request_id,
+        platform
+            .desktop()
+            .capture()
+            .await
+            .map(|frame| v1::DesktopScreenshotResponse {
+                png: frame.png.into(),
+                width: frame.width,
+                height: frame.height,
+            }),
+        RespResult::DesktopScreenshot,
+    )
 }
 
 /// Wraps a successful typed result into a `ControlResponse`.
@@ -258,6 +330,22 @@ fn fenced_error(op_epoch: u32, held_epoch: u32) -> AgentError {
     }
 }
 
+/// A `ERROR_CODE_CONSENT_REQUIRED` response for a screen-control op the operator
+/// did not consent to at enrollment. Built here (not via the platform) because the
+/// gate is enforced BEFORE the platform is reached — no input is injected.
+fn consent_required_error(request_id: String, message: &str) -> ControlResponse {
+    ControlResponse {
+        request_id,
+        error: Some(AgentError {
+            code: ErrorCode::ConsentRequired as i32,
+            message: message.to_string(),
+            retryable: false,
+            detail: std::collections::HashMap::new(),
+        }),
+        result: None,
+    }
+}
+
 /// A `ERROR_CODE_PROTOCOL` error response for a malformed/misused request.
 fn protocol_error(request_id: String, message: &str) -> ControlResponse {
     ControlResponse {
@@ -279,11 +367,50 @@ mod tests {
     use opengeni_agent_platform::{HostIdentity, PlatformResult};
     use prost::Message as _;
 
+    /// A fake desktop backend that records every injected input and hands back a
+    /// canned screenshot, so the computer-use control ops can be exercised without
+    /// a real display.
+    #[derive(Default)]
+    struct FakeDesktop {
+        injected: std::sync::Mutex<Vec<v1::DesktopInput>>,
+    }
+
+    impl FakeDesktop {
+        /// The canned screenshot bytes/geometry the `capture()` fake returns.
+        const PNG: &'static [u8] = b"fake-png-bytes";
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+    }
+
+    #[async_trait]
+    impl opengeni_agent_platform::DesktopBackend for FakeDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            Some(v1::Display {
+                id: ":0".to_string(),
+                width: Self::WIDTH,
+                height: Self::HEIGHT,
+                r#virtual: false,
+            })
+        }
+        async fn capture(&self) -> PlatformResult<opengeni_agent_platform::CapturedFrame> {
+            Ok(opengeni_agent_platform::CapturedFrame {
+                png: Self::PNG.to_vec(),
+                width: Self::WIDTH,
+                height: Self::HEIGHT,
+            })
+        }
+        async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
+            self.injected.lock().unwrap().push(input.clone());
+            Ok(())
+        }
+    }
+
     /// A fake platform recording the last op it saw and returning canned results,
     /// so the dispatch table can be exercised without touching the real host.
     #[derive(Default)]
     struct FakePlatform {
         fail_exec: bool,
+        desktop: Arc<FakeDesktop>,
     }
 
     #[async_trait]
@@ -298,7 +425,7 @@ mod tests {
             "/work".to_string()
         }
         fn desktop(&self) -> std::sync::Arc<dyn opengeni_agent_platform::DesktopBackend> {
-            std::sync::Arc::new(opengeni_agent_platform::NoDesktop)
+            self.desktop.clone()
         }
         fn default_shell(&self) -> Vec<String> {
             vec!["/bin/sh".to_string()]
@@ -366,10 +493,15 @@ mod tests {
     }
 
     fn ctx() -> DispatchContext {
+        ctx_with_consent(false)
+    }
+
+    fn ctx_with_consent(consented_screen_control: bool) -> DispatchContext {
         DispatchContext {
             agent_id: "a1".to_string(),
             epoch: 5,
             started: std::time::Instant::now(),
+            consented_screen_control,
         }
     }
 
@@ -405,7 +537,10 @@ mod tests {
 
     #[tokio::test]
     async fn handler_error_maps_to_agent_error_not_panic() {
-        let platform = Arc::new(FakePlatform { fail_exec: true });
+        let platform = Arc::new(FakePlatform {
+            fail_exec: true,
+            ..Default::default()
+        });
         let req = request(
             5,
             Op::Exec(v1::ExecRequest {
@@ -493,6 +628,82 @@ mod tests {
         match resp.result {
             Some(RespResult::FsRead(r)) => assert_eq!(&r.content[..], b"file-bytes"),
             other => panic!("expected FsRead, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_input_without_consent_is_refused_and_never_injects() {
+        let platform = Arc::new(FakePlatform::default());
+        let req = request(
+            5,
+            Op::DesktopInput(v1::DesktopInputRequest {
+                event: Some(v1::desktop_input_request::Event::Pointer(
+                    v1::PointerEvent {
+                        x: 10,
+                        y: 20,
+                        action: v1::PointerAction::Click as i32,
+                        button: v1::PointerButton::Left as i32,
+                    },
+                )),
+            }),
+        );
+        // ctx() defaults consented_screen_control = false.
+        let resp = dispatch(req, &platform, &ctx()).await;
+        assert!(resp.result.is_none(), "no result on a refused input");
+        let err = resp.error.expect("consent error present");
+        assert_eq!(err.code, ErrorCode::ConsentRequired as i32);
+        // The security-critical assertion: the platform was NEVER touched.
+        assert!(
+            platform.desktop.injected.lock().unwrap().is_empty(),
+            "an unconsented input must NOT reach inject"
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_input_with_consent_injects_the_event() {
+        let platform = Arc::new(FakePlatform::default());
+        let pointer = v1::PointerEvent {
+            x: 42,
+            y: 99,
+            action: v1::PointerAction::Down as i32,
+            button: v1::PointerButton::Right as i32,
+        };
+        let req = request(
+            5,
+            Op::DesktopInput(v1::DesktopInputRequest {
+                // `PointerEvent` is `Copy`, so this does not move `pointer`.
+                event: Some(v1::desktop_input_request::Event::Pointer(pointer)),
+            }),
+        );
+        let resp = dispatch(req, &platform, &ctx_with_consent(true)).await;
+        assert!(resp.error.is_none(), "a consented input has no error");
+        assert!(matches!(resp.result, Some(RespResult::DesktopInput(_))));
+        let seen = platform.desktop.injected.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one inject reached the backend");
+        // The control-plane input maps to a relay DesktopInput with an EMPTY
+        // channel_id (it goes straight to the display) and the same event.
+        assert_eq!(seen[0].channel_id, "");
+        assert_eq!(
+            seen[0].event,
+            Some(v1::desktop_input::Event::Pointer(pointer)),
+            "the event must reach inject unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_screenshot_returns_the_captured_frame_without_consent() {
+        let platform = Arc::new(FakePlatform::default());
+        // No consent needed: a screenshot is a VIEW op; ctx() is UNCONSENTED.
+        let req = request(5, Op::DesktopScreenshot(v1::DesktopScreenshotRequest {}));
+        let resp = dispatch(req, &platform, &ctx()).await;
+        assert!(resp.error.is_none(), "a screenshot needs no consent");
+        match resp.result {
+            Some(RespResult::DesktopScreenshot(s)) => {
+                assert_eq!(&s.png[..], FakeDesktop::PNG);
+                assert_eq!(s.width, FakeDesktop::WIDTH);
+                assert_eq!(s.height, FakeDesktop::HEIGHT);
+            }
+            other => panic!("expected DesktopScreenshot, got {other:?}"),
         }
     }
 }

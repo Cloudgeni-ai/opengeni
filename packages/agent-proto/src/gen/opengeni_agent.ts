@@ -807,11 +807,21 @@ export interface EnrollmentCredentials {
   agentId: string;
   workspaceId: string;
   /**
-   * NATS Account credentials (creds-file body) for the control plane connection.
-   * Account isolation is the tenancy boundary.
+   * The NATS CONNECT AUTH-TOKEN the agent presents (the signed `oge_` enrollment
+   * bearer). The server runs with AUTH CALLOUT (dossier §10.1 / M-AUTH): on connect
+   * the agent passes this as the auth-token; nats-server issues an authorization
+   * request to the control-plane's callout responder, which validates the bearer
+   * and returns a SIGNED user JWT scoping the connection to pub/sub ONLY
+   * `agent.<ws>.>` (+ `_INBOX.>`). That per-subject scope IS the per-workspace
+   * tenancy boundary — there is NO per-machine creds file to ship. (Field name kept
+   * for proto stability; it now carries the bearer, not an operator creds-file body.)
    */
   natsCredentials: string;
-  /** The NATS server URL(s) to dial. */
+  /**
+   * The NATS server URL(s) to dial. For the control plane these are `wss://` URLs
+   * (the relay-symmetric TLS ingress) so the agent rides the same TLS endpoint as
+   * the stream relay — no separate public TCP load balancer (dossier M-AUTH).
+   */
   natsUrls: string[];
   /** The relay edge base URL for opening stream channels. */
   relayUrl: string;
@@ -1067,6 +1077,39 @@ export interface DesktopEnsureResponse {
 }
 
 /**
+ * Inject one synthetic computer-use input event on the machine's desktop — the
+ * CONTROL-PLANE twin of the relay DesktopInput (the agent drives its OWN screen
+ * for computer-use; there is no human viewer channel). Reuses the relay
+ * DesktopInput event shapes; there is no channel_id (this goes straight to the
+ * display, not a relay channel). Injection is gated on consented_screen_control:
+ * an ungated call fails with ERROR_CODE_CONSENT_REQUIRED and never touches the OS.
+ */
+export interface DesktopInputRequest {
+  event: { $case: "pointer"; pointer: PointerEvent } | { $case: "key"; key: KeyEvent } | {
+    $case: "scroll";
+    scroll: ScrollEvent;
+  } | undefined;
+}
+
+export interface DesktopInputResponse {
+}
+
+/**
+ * Capture a single screenshot of the machine's desktop as a PNG. A VIEW op: it
+ * needs a display, NOT screen-control consent (the view/control decoupling), so
+ * it is not consent-gated. Returns the encoded image plus its geometry so the
+ * caller can size a canvas without decoding.
+ */
+export interface DesktopScreenshotRequest {
+}
+
+export interface DesktopScreenshotResponse {
+  png: Uint8Array;
+  width: number;
+  height: number;
+}
+
+/**
  * The agent's periodic liveness ping. Carries a metrics sample so the control
  * plane can upsert the machine's last-sample without a separate RPC. The
  * `seq` increments per heartbeat so the control plane can detect a gap.
@@ -1263,6 +1306,8 @@ export interface ControlRequest {
     | { $case: "desktopEnsure"; desktopEnsure: DesktopEnsureRequest }
     | { $case: "metrics"; metrics: MetricsRequest }
     | { $case: "updateMayProceed"; updateMayProceed: UpdateMayProceedRequest }
+    | { $case: "desktopInput"; desktopInput: DesktopInputRequest }
+    | { $case: "desktopScreenshot"; desktopScreenshot: DesktopScreenshotRequest }
     | undefined;
 }
 
@@ -1291,6 +1336,8 @@ export interface ControlResponse {
     | { $case: "desktopEnsure"; desktopEnsure: DesktopEnsureResponse }
     | { $case: "metrics"; metrics: MetricsSample }
     | { $case: "updateMayProceed"; updateMayProceed: UpdateMayProceedResponse }
+    | { $case: "desktopInput"; desktopInput: DesktopInputResponse }
+    | { $case: "desktopScreenshot"; desktopScreenshot: DesktopScreenshotResponse }
     | undefined;
 }
 
@@ -5743,6 +5790,297 @@ export const DesktopEnsureResponse: MessageFns<DesktopEnsureResponse> = {
   },
 };
 
+function createBaseDesktopInputRequest(): DesktopInputRequest {
+  return { event: undefined };
+}
+
+export const DesktopInputRequest: MessageFns<DesktopInputRequest> = {
+  encode(message: DesktopInputRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    switch (message.event?.$case) {
+      case "pointer":
+        PointerEvent.encode(message.event.pointer, writer.uint32(10).fork()).join();
+        break;
+      case "key":
+        KeyEvent.encode(message.event.key, writer.uint32(18).fork()).join();
+        break;
+      case "scroll":
+        ScrollEvent.encode(message.event.scroll, writer.uint32(26).fork()).join();
+        break;
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DesktopInputRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDesktopInputRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.event = { $case: "pointer", pointer: PointerEvent.decode(reader, reader.uint32()) };
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.event = { $case: "key", key: KeyEvent.decode(reader, reader.uint32()) };
+          continue;
+        }
+        case 3: {
+          if (tag !== 26) {
+            break;
+          }
+
+          message.event = { $case: "scroll", scroll: ScrollEvent.decode(reader, reader.uint32()) };
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DesktopInputRequest {
+    return {
+      event: isSet(object.pointer)
+        ? { $case: "pointer", pointer: PointerEvent.fromJSON(object.pointer) }
+        : isSet(object.key)
+        ? { $case: "key", key: KeyEvent.fromJSON(object.key) }
+        : isSet(object.scroll)
+        ? { $case: "scroll", scroll: ScrollEvent.fromJSON(object.scroll) }
+        : undefined,
+    };
+  },
+
+  toJSON(message: DesktopInputRequest): unknown {
+    const obj: any = {};
+    if (message.event?.$case === "pointer") {
+      obj.pointer = PointerEvent.toJSON(message.event.pointer);
+    } else if (message.event?.$case === "key") {
+      obj.key = KeyEvent.toJSON(message.event.key);
+    } else if (message.event?.$case === "scroll") {
+      obj.scroll = ScrollEvent.toJSON(message.event.scroll);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(base?: I): DesktopInputRequest {
+    return DesktopInputRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DesktopInputRequest>, I>>(object: I): DesktopInputRequest {
+    const message = createBaseDesktopInputRequest();
+    switch (object.event?.$case) {
+      case "pointer": {
+        if (object.event?.pointer !== undefined && object.event?.pointer !== null) {
+          message.event = { $case: "pointer", pointer: PointerEvent.fromPartial(object.event.pointer) };
+        }
+        break;
+      }
+      case "key": {
+        if (object.event?.key !== undefined && object.event?.key !== null) {
+          message.event = { $case: "key", key: KeyEvent.fromPartial(object.event.key) };
+        }
+        break;
+      }
+      case "scroll": {
+        if (object.event?.scroll !== undefined && object.event?.scroll !== null) {
+          message.event = { $case: "scroll", scroll: ScrollEvent.fromPartial(object.event.scroll) };
+        }
+        break;
+      }
+    }
+    return message;
+  },
+};
+
+function createBaseDesktopInputResponse(): DesktopInputResponse {
+  return {};
+}
+
+export const DesktopInputResponse: MessageFns<DesktopInputResponse> = {
+  encode(_: DesktopInputResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DesktopInputResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDesktopInputResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): DesktopInputResponse {
+    return {};
+  },
+
+  toJSON(_: DesktopInputResponse): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DesktopInputResponse>, I>>(base?: I): DesktopInputResponse {
+    return DesktopInputResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DesktopInputResponse>, I>>(_: I): DesktopInputResponse {
+    const message = createBaseDesktopInputResponse();
+    return message;
+  },
+};
+
+function createBaseDesktopScreenshotRequest(): DesktopScreenshotRequest {
+  return {};
+}
+
+export const DesktopScreenshotRequest: MessageFns<DesktopScreenshotRequest> = {
+  encode(_: DesktopScreenshotRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DesktopScreenshotRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDesktopScreenshotRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(_: any): DesktopScreenshotRequest {
+    return {};
+  },
+
+  toJSON(_: DesktopScreenshotRequest): unknown {
+    const obj: any = {};
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(base?: I): DesktopScreenshotRequest {
+    return DesktopScreenshotRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotRequest>, I>>(_: I): DesktopScreenshotRequest {
+    const message = createBaseDesktopScreenshotRequest();
+    return message;
+  },
+};
+
+function createBaseDesktopScreenshotResponse(): DesktopScreenshotResponse {
+  return { png: new Uint8Array(0), width: 0, height: 0 };
+}
+
+export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = {
+  encode(message: DesktopScreenshotResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.png.length !== 0) {
+      writer.uint32(10).bytes(message.png);
+    }
+    if (message.width !== 0) {
+      writer.uint32(16).uint32(message.width);
+    }
+    if (message.height !== 0) {
+      writer.uint32(24).uint32(message.height);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): DesktopScreenshotResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseDesktopScreenshotResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.png = reader.bytes();
+          continue;
+        }
+        case 2: {
+          if (tag !== 16) {
+            break;
+          }
+
+          message.width = reader.uint32();
+          continue;
+        }
+        case 3: {
+          if (tag !== 24) {
+            break;
+          }
+
+          message.height = reader.uint32();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): DesktopScreenshotResponse {
+    return {
+      png: isSet(object.png) ? bytesFromBase64(object.png) : new Uint8Array(0),
+      width: isSet(object.width) ? globalThis.Number(object.width) : 0,
+      height: isSet(object.height) ? globalThis.Number(object.height) : 0,
+    };
+  },
+
+  toJSON(message: DesktopScreenshotResponse): unknown {
+    const obj: any = {};
+    if (message.png.length !== 0) {
+      obj.png = base64FromBytes(message.png);
+    }
+    if (message.width !== 0) {
+      obj.width = Math.round(message.width);
+    }
+    if (message.height !== 0) {
+      obj.height = Math.round(message.height);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(base?: I): DesktopScreenshotResponse {
+    return DesktopScreenshotResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<DesktopScreenshotResponse>, I>>(object: I): DesktopScreenshotResponse {
+    const message = createBaseDesktopScreenshotResponse();
+    message.png = object.png ?? new Uint8Array(0);
+    message.width = object.width ?? 0;
+    message.height = object.height ?? 0;
+    return message;
+  },
+};
+
 function createBaseHeartbeat(): Heartbeat {
   return { seq: "0", uptimeMs: "0", activeSessions: 0, metrics: undefined, draining: false };
 }
@@ -7580,6 +7918,12 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       case "updateMayProceed":
         UpdateMayProceedRequest.encode(message.op.updateMayProceed, writer.uint32(226).fork()).join();
         break;
+      case "desktopInput":
+        DesktopInputRequest.encode(message.op.desktopInput, writer.uint32(234).fork()).join();
+        break;
+      case "desktopScreenshot":
+        DesktopScreenshotRequest.encode(message.op.desktopScreenshot, writer.uint32(242).fork()).join();
+        break;
     }
     return writer;
   },
@@ -7762,6 +8106,25 @@ export const ControlRequest: MessageFns<ControlRequest> = {
           };
           continue;
         }
+        case 29: {
+          if (tag !== 234) {
+            break;
+          }
+
+          message.op = { $case: "desktopInput", desktopInput: DesktopInputRequest.decode(reader, reader.uint32()) };
+          continue;
+        }
+        case 30: {
+          if (tag !== 242) {
+            break;
+          }
+
+          message.op = {
+            $case: "desktopScreenshot",
+            desktopScreenshot: DesktopScreenshotRequest.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -7843,6 +8206,17 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedRequest.fromJSON(object.updateMayProceed) }
         : isSet(object.update_may_proceed)
         ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedRequest.fromJSON(object.update_may_proceed) }
+        : isSet(object.desktopInput)
+        ? { $case: "desktopInput", desktopInput: DesktopInputRequest.fromJSON(object.desktopInput) }
+        : isSet(object.desktop_input)
+        ? { $case: "desktopInput", desktopInput: DesktopInputRequest.fromJSON(object.desktop_input) }
+        : isSet(object.desktopScreenshot)
+        ? { $case: "desktopScreenshot", desktopScreenshot: DesktopScreenshotRequest.fromJSON(object.desktopScreenshot) }
+        : isSet(object.desktop_screenshot)
+        ? {
+          $case: "desktopScreenshot",
+          desktopScreenshot: DesktopScreenshotRequest.fromJSON(object.desktop_screenshot),
+        }
         : undefined,
     };
   },
@@ -7893,6 +8267,10 @@ export const ControlRequest: MessageFns<ControlRequest> = {
       obj.metrics = MetricsRequest.toJSON(message.op.metrics);
     } else if (message.op?.$case === "updateMayProceed") {
       obj.updateMayProceed = UpdateMayProceedRequest.toJSON(message.op.updateMayProceed);
+    } else if (message.op?.$case === "desktopInput") {
+      obj.desktopInput = DesktopInputRequest.toJSON(message.op.desktopInput);
+    } else if (message.op?.$case === "desktopScreenshot") {
+      obj.desktopScreenshot = DesktopScreenshotRequest.toJSON(message.op.desktopScreenshot);
     }
     return obj;
   },
@@ -8025,6 +8403,21 @@ export const ControlRequest: MessageFns<ControlRequest> = {
         }
         break;
       }
+      case "desktopInput": {
+        if (object.op?.desktopInput !== undefined && object.op?.desktopInput !== null) {
+          message.op = { $case: "desktopInput", desktopInput: DesktopInputRequest.fromPartial(object.op.desktopInput) };
+        }
+        break;
+      }
+      case "desktopScreenshot": {
+        if (object.op?.desktopScreenshot !== undefined && object.op?.desktopScreenshot !== null) {
+          message.op = {
+            $case: "desktopScreenshot",
+            desktopScreenshot: DesktopScreenshotRequest.fromPartial(object.op.desktopScreenshot),
+          };
+        }
+        break;
+      }
     }
     return message;
   },
@@ -8099,6 +8492,12 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         break;
       case "updateMayProceed":
         UpdateMayProceedResponse.encode(message.result.updateMayProceed, writer.uint32(226).fork()).join();
+        break;
+      case "desktopInput":
+        DesktopInputResponse.encode(message.result.desktopInput, writer.uint32(234).fork()).join();
+        break;
+      case "desktopScreenshot":
+        DesktopScreenshotResponse.encode(message.result.desktopScreenshot, writer.uint32(242).fork()).join();
         break;
     }
     return writer;
@@ -8285,6 +8684,28 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           };
           continue;
         }
+        case 29: {
+          if (tag !== 234) {
+            break;
+          }
+
+          message.result = {
+            $case: "desktopInput",
+            desktopInput: DesktopInputResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
+        case 30: {
+          if (tag !== 242) {
+            break;
+          }
+
+          message.result = {
+            $case: "desktopScreenshot",
+            desktopScreenshot: DesktopScreenshotResponse.decode(reader, reader.uint32()),
+          };
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -8366,6 +8787,20 @@ export const ControlResponse: MessageFns<ControlResponse> = {
         ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedResponse.fromJSON(object.updateMayProceed) }
         : isSet(object.update_may_proceed)
         ? { $case: "updateMayProceed", updateMayProceed: UpdateMayProceedResponse.fromJSON(object.update_may_proceed) }
+        : isSet(object.desktopInput)
+        ? { $case: "desktopInput", desktopInput: DesktopInputResponse.fromJSON(object.desktopInput) }
+        : isSet(object.desktop_input)
+        ? { $case: "desktopInput", desktopInput: DesktopInputResponse.fromJSON(object.desktop_input) }
+        : isSet(object.desktopScreenshot)
+        ? {
+          $case: "desktopScreenshot",
+          desktopScreenshot: DesktopScreenshotResponse.fromJSON(object.desktopScreenshot),
+        }
+        : isSet(object.desktop_screenshot)
+        ? {
+          $case: "desktopScreenshot",
+          desktopScreenshot: DesktopScreenshotResponse.fromJSON(object.desktop_screenshot),
+        }
         : undefined,
     };
   },
@@ -8416,6 +8851,10 @@ export const ControlResponse: MessageFns<ControlResponse> = {
       obj.metrics = MetricsSample.toJSON(message.result.metrics);
     } else if (message.result?.$case === "updateMayProceed") {
       obj.updateMayProceed = UpdateMayProceedResponse.toJSON(message.result.updateMayProceed);
+    } else if (message.result?.$case === "desktopInput") {
+      obj.desktopInput = DesktopInputResponse.toJSON(message.result.desktopInput);
+    } else if (message.result?.$case === "desktopScreenshot") {
+      obj.desktopScreenshot = DesktopScreenshotResponse.toJSON(message.result.desktopScreenshot);
     }
     return obj;
   },
@@ -8546,6 +8985,24 @@ export const ControlResponse: MessageFns<ControlResponse> = {
           message.result = {
             $case: "updateMayProceed",
             updateMayProceed: UpdateMayProceedResponse.fromPartial(object.result.updateMayProceed),
+          };
+        }
+        break;
+      }
+      case "desktopInput": {
+        if (object.result?.desktopInput !== undefined && object.result?.desktopInput !== null) {
+          message.result = {
+            $case: "desktopInput",
+            desktopInput: DesktopInputResponse.fromPartial(object.result.desktopInput),
+          };
+        }
+        break;
+      }
+      case "desktopScreenshot": {
+        if (object.result?.desktopScreenshot !== undefined && object.result?.desktopScreenshot !== null) {
+          message.result = {
+            $case: "desktopScreenshot",
+            desktopScreenshot: DesktopScreenshotResponse.fromPartial(object.result.desktopScreenshot),
           };
         }
         break;

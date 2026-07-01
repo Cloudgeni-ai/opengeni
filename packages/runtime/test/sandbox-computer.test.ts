@@ -3,12 +3,16 @@ import { testSettings } from "@opengeni/testing";
 import { buildAgentCapabilities } from "../src/index";
 import {
   SandboxComputer,
+  NativeDesktopComputer,
+  isNativeDesktopSession,
   ComputerUseCapability,
   computerUse,
   ComputerReadOnlyError,
   ComputerUnavailableError,
   ComputerActionError,
+  type NativeDesktopSession,
 } from "../src/sandbox-computer";
+import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
 
 // A mock provider session that records every command. By default it mimics
 // MODAL: it implements execCommand (the formatted-string contract) and does NOT
@@ -234,6 +238,188 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     const c = new SandboxComputer(session as never, { dimensions: [1024, 768] });
     expect(c.environment).toBe("ubuntu");
     expect(c.dimensions).toEqual([1024, 768]);
+  });
+});
+
+// A FAKE self-hosted session presenting the `{ desktopInput, screenshot }` native
+// surface. Records every injected DesktopInput event so tests can assert the exact
+// protos (event $case + fields + enum values), and returns a configurable PNG.
+function makeNativeSession(opts: { png?: Uint8Array; width?: number; height?: number } = {}) {
+  const inputs: NonNullable<DesktopInputRequest["event"]>[] = [];
+  const session: NativeDesktopSession = {
+    desktopInput: async (event) => {
+      if (event) inputs.push(event);
+    },
+    screenshot: async () => ({
+      png: opts.png ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+      width: opts.width ?? 1280,
+      height: opts.height ?? 800,
+    }),
+  };
+  return { session, inputs };
+}
+
+describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", () => {
+  test("click emits a POINTER CLICK event with the coords + LEFT button", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.click(100, 200, "left");
+    expect(inputs.length).toBe(1);
+    const ev = inputs[0]!;
+    expect(ev.$case).toBe("pointer");
+    if (ev.$case !== "pointer") throw new Error("expected pointer");
+    expect(ev.pointer).toEqual({
+      x: 100,
+      y: 200,
+      action: PointerAction.POINTER_ACTION_CLICK,
+      button: PointerButton.POINTER_BUTTON_LEFT,
+    });
+  });
+
+  test("right/wheel clicks map to the RIGHT/MIDDLE pointer buttons", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.click(1, 1, "right");
+    await c.click(2, 2, "wheel");
+    expect((inputs[0] as { pointer: { button: PointerButton } }).pointer.button).toBe(PointerButton.POINTER_BUTTON_RIGHT);
+    expect((inputs[1] as { pointer: { button: PointerButton } }).pointer.button).toBe(PointerButton.POINTER_BUTTON_MIDDLE);
+  });
+
+  test("doubleClick emits a DOUBLE_CLICK pointer event (LEFT)", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.doubleClick(5, 6);
+    const ev = inputs[0]!;
+    if (ev.$case !== "pointer") throw new Error("expected pointer");
+    expect(ev.pointer.action).toBe(PointerAction.POINTER_ACTION_DOUBLE_CLICK);
+    expect(ev.pointer.button).toBe(PointerButton.POINTER_BUTTON_LEFT);
+  });
+
+  test("type emits a TEXT key event (isText:true, PRESS) with the verbatim string", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.type("it's a test");
+    const ev = inputs[0]!;
+    expect(ev.$case).toBe("key");
+    if (ev.$case !== "key") throw new Error("expected key");
+    expect(ev.key).toEqual({ key: "it's a test", isText: true, action: KeyAction.KEY_ACTION_PRESS });
+  });
+
+  test("keypress emits ONE non-text chord KeyEvent (platform-independent names, PRESS)", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.keypress(["ctrl", "c"]);
+    expect(inputs.length).toBe(1);
+    const ev = inputs[0]!;
+    if (ev.$case !== "key") throw new Error("expected key");
+    // Joined with "+", isText:false (interpret as key names — NOT xdotool keysyms).
+    expect(ev.key).toEqual({ key: "ctrl+c", isText: false, action: KeyAction.KEY_ACTION_PRESS });
+  });
+
+  test("scroll forwards the raw pixel deltas as a ScrollEvent (no notch quantization)", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.scroll(10, 20, -3, 300);
+    const ev = inputs[0]!;
+    expect(ev.$case).toBe("scroll");
+    if (ev.$case !== "scroll") throw new Error("expected scroll");
+    expect(ev.scroll).toEqual({ x: 10, y: 20, deltaX: -3, deltaY: 300 });
+  });
+
+  test("drag emits DOWN → MOVE(s) → UP pointer events along the path", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session);
+    await c.drag([[0, 0], [10, 10], [20, 20]]);
+    const actions = inputs.map((ev) => (ev.$case === "pointer" ? ev.pointer.action : -1));
+    // DOWN at the start, a MOVE through EACH subsequent waypoint, UP at the last.
+    expect(actions).toEqual([
+      PointerAction.POINTER_ACTION_DOWN,
+      PointerAction.POINTER_ACTION_MOVE,
+      PointerAction.POINTER_ACTION_MOVE,
+      PointerAction.POINTER_ACTION_UP,
+    ]);
+    // Down at the start, up at the last waypoint.
+    const first = inputs[0]!;
+    const last = inputs[inputs.length - 1]!;
+    if (first.$case !== "pointer" || last.$case !== "pointer") throw new Error("expected pointers");
+    expect([first.pointer.x, first.pointer.y]).toEqual([0, 0]);
+    expect([last.pointer.x, last.pointer.y]).toEqual([20, 20]);
+  });
+
+  test("screenshot returns the base64 of the fake PNG (non-empty, no data-URL prefix)", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const { session } = makeNativeSession({ png });
+    const c = new NativeDesktopComputer(session);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    // Raw base64 — the SDK adds the `data:image/png;base64,` prefix itself.
+    expect(shot.startsWith("data:")).toBe(false);
+  });
+
+  test("REGRESSION: an empty PNG THROWS (never an empty image_url that would 400 the turn)", async () => {
+    const { session } = makeNativeSession({ png: new Uint8Array() });
+    const c = new NativeDesktopComputer(session);
+    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error(`screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`);
+    expect(result.e).toBeInstanceOf(ComputerUnavailableError);
+  });
+
+  test("readOnly blocks every write but screenshot is always allowed", async () => {
+    const { session, inputs } = makeNativeSession();
+    const c = new NativeDesktopComputer(session, { readOnly: true });
+    await expect(c.click(1, 1, "left")).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.doubleClick(1, 1)).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.move(1, 1)).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.scroll(1, 1, 0, 10)).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.type("x")).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.keypress(["a"])).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    await expect(c.drag([[0, 0], [1, 1]])).rejects.toBeInstanceOf(ComputerReadOnlyError);
+    // No write ever reached the session.
+    expect(inputs.length).toBe(0);
+    // screenshot is a READ — never gated.
+    await expect(c.screenshot()).resolves.toBeString();
+  });
+
+  test("environment defaults to 'ubuntu' and dimensions default to the stream geometry", () => {
+    const { session } = makeNativeSession();
+    const c = new NativeDesktopComputer(session, { dimensions: [1024, 768] });
+    expect(c.environment).toBe("ubuntu");
+    expect(c.dimensions).toEqual([1024, 768]);
+  });
+});
+
+describe("computer backend selection (native vs xdotool)", () => {
+  test("isNativeDesktopSession: true for a {desktopInput,screenshot} session, false for a Modal session", () => {
+    const { session: native } = makeNativeSession();
+    expect(isNativeDesktopSession(native as never)).toBe(true);
+    // The Modal-shaped mock (execCommand only) is NOT native.
+    const { session: modal } = makeMockSession();
+    expect(isNativeDesktopSession(modal as never)).toBe(false);
+  });
+
+  test("ComputerUseCapability bound to a native session drives desktopInput (NOT exec)", async () => {
+    const { session, inputs } = makeNativeSession();
+    const cap = computerUse({ readOnly: false });
+    cap.bind(session as never);
+    const tools = cap.tools();
+    expect(tools.length).toBe(1);
+    // Reach through the tool to the selected computer and drive a click — it must
+    // land on the native desktopInput seam, proving NativeDesktopComputer was chosen.
+    const computer = (tools[0] as unknown as { computer: NativeDesktopComputer }).computer;
+    expect(computer).toBeInstanceOf(NativeDesktopComputer);
+    await computer.click(3, 4, "left");
+    expect(inputs.length).toBe(1);
+    expect(inputs[0]!.$case).toBe("pointer");
+  });
+
+  test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
+    const { session } = makeMockSession();
+    const cap = computerUse({ readOnly: false });
+    cap.bind(session as never);
+    const tools = cap.tools();
+    const computer = (tools[0] as unknown as { computer: unknown }).computer;
+    expect(computer).toBeInstanceOf(SandboxComputer);
   });
 });
 

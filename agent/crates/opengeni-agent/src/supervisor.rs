@@ -432,6 +432,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             agent_id: self.creds.agent_id.clone(),
             epoch: self.epoch.load(),
             started: self.started,
+            // The computer-use input consent gate reads the SAME enrollment grant
+            // the relay pump's `allow_input` uses.
+            consented_screen_control: self.creds.consented_screen_control,
         }
     }
 
@@ -515,6 +518,8 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::PtyResize(_)) => "pty_resize",
         Some(Op::PtyClose(_)) => "pty_close",
         Some(Op::DesktopEnsure(_)) => "desktop_ensure",
+        Some(Op::DesktopInput(_)) => "desktop_input",
+        Some(Op::DesktopScreenshot(_)) => "desktop_screenshot",
         Some(Op::Metrics(_)) => "metrics",
         Some(Op::UpdateMayProceed(_)) => "update_may_proceed",
         None => "none",

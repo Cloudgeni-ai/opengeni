@@ -33,6 +33,7 @@
 
 import { computerTool, type Computer, type Tool } from "@openai/agents";
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
+import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
 
 import { sandboxCommandExitCode, sandboxCommandOutput, sandboxCommandStillRunning } from "./index";
 // `stripExecBanner` is the SAME pure helper recording.ts uses to recover the raw
@@ -341,6 +342,171 @@ export class SandboxComputer implements Computer {
   }
 }
 
+// ── The native-desktop computer (self-hosted / macOS) ────────────────────────
+//
+// `SandboxComputer` drives the desktop by shelling out to xdotool/scrot over the
+// session's `exec` — which needs those X utilities installed in the box image and
+// only works under X11. A SELF-HOSTED machine (macOS OR bring-your-own Linux) has
+// neither guarantee, so it drives the desktop NATIVELY over the control plane: the
+// Rust agent injects input via CGEvent (macOS) / XTEST (Linux) and captures via
+// ScreenCaptureKit / x11, exposed as the two `SelfhostedSession` ops below. No
+// xdotool/scrot dependency; works on macOS.
+
+/** The structural slice of a self-hosted session the native computer drives — the
+ *  two control-plane ops added in session.ts. Kept structural (NOT an import of
+ *  `SelfhostedSession`) so this agent-loop file never hard-couples to the sandbox
+ *  leaf; the duck-typed `isNativeDesktopSession` probe (below) selects on it. */
+export type NativeDesktopSession = {
+  desktopInput(event: DesktopInputRequest["event"]): Promise<void>;
+  screenshot(): Promise<{ png: Uint8Array; width: number; height: number }>;
+};
+
+/** Model `Button` → wire `PointerButton`. The proto has no back/forward button, so
+ *  those degrade to UNSPECIFIED (the agent ignores an unmapped button rather than
+ *  mis-clicking). A total record so indexing is exhaustive. */
+const POINTER_BUTTON: Record<ComputerButton, PointerButton> = {
+  left: PointerButton.POINTER_BUTTON_LEFT,
+  right: PointerButton.POINTER_BUTTON_RIGHT,
+  wheel: PointerButton.POINTER_BUTTON_MIDDLE,
+  back: PointerButton.POINTER_BUTTON_UNSPECIFIED,
+  forward: PointerButton.POINTER_BUTTON_UNSPECIFIED,
+};
+
+export type NativeDesktopComputerOptions = {
+  dimensions?: [number, number]; // the display geometry (must match the capture size)
+  environment?: NonNullable<Computer["environment"]>; // "ubuntu" (default) | "mac" | ...; model uses it for OS key conventions
+  readOnly?: boolean; // when true, every WRITE action throws ComputerReadOnlyError
+};
+
+/**
+ * A `Computer` that drives a SELF-HOSTED machine's OWN desktop NATIVELY over the
+ * control plane (`desktopInput` inject + `screenshot` capture on the bound
+ * `SelfhostedSession`) instead of xdotool/scrot over `exec`. Consent + epoch are
+ * enforced AGENT-side, so an unconsented inject surfaces the session's mapped
+ * control error.
+ *
+ * screenshot() returns raw base64 with NO data-URL prefix — the EXACT contract of
+ * `SandboxComputer.screenshot`: the Agents SDK wraps it as
+ * `data:image/png;base64,${output}`, so an empty string would become
+ * `image_url: ''` and 400 the model turn. An empty PNG therefore THROWS
+ * `ComputerUnavailableError` (mirroring SandboxComputer's empty-guard) — the model
+ * never receives an empty image_url.
+ */
+export class NativeDesktopComputer implements Computer {
+  readonly environment: NonNullable<Computer["environment"]>;
+  readonly dimensions: [number, number];
+  private session: NativeDesktopSession;
+  private readonly readOnly: boolean;
+
+  constructor(session: NativeDesktopSession, opts: NativeDesktopComputerOptions = {}) {
+    this.session = session;
+    this.dimensions = opts.dimensions ?? DEFAULT_DIMENSIONS;
+    // Default "ubuntu" (self-hosted Linux is the near-term target); a macOS session
+    // should pass "mac" so the model uses ⌘-based shortcuts — see the coordinate TODO.
+    this.environment = opts.environment ?? "ubuntu";
+    this.readOnly = opts.readOnly ?? false;
+  }
+
+  /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
+  rebind(session: NativeDesktopSession) { this.session = session; }
+
+  private guardWrite() {
+    if (this.readOnly) throw new ComputerReadOnlyError();
+  }
+
+  private async pointer(x: number, y: number, action: PointerAction, button: PointerButton): Promise<void> {
+    // COORDINATE SEAM — TODO(verify e2e on macOS): the model computes x/y against the
+    // pixels of the screenshot it just saw, and the agent's macOS CGEvent inject
+    // treats x/y as raw screen coordinates. On a Retina Mac, ScreenCaptureKit may
+    // capture at 2× the logical POINT space while CGEvent expects logical points — a
+    // potential 2× mismatch between the coords the model derives and the coords the
+    // inject applies. This MUST be measured on a real Retina Mac (compare the
+    // screenshot's reported width/height against the logical display bounds) before
+    // any DPR scaling is added. Do NOT add scaling speculatively. Self-hosted Linux
+    // (XTEST/x11) is 1:1 and unaffected.
+    await this.session.desktopInput({ $case: "pointer", pointer: { x, y, action, button } });
+  }
+
+  async screenshot(): Promise<string> {
+    // CRITICAL CONTRACT (mirrors SandboxComputer.screenshot): NEVER return "". The
+    // Agents SDK builds the model image as `data:image/png;base64,${output}`; an
+    // empty output → `image_url: ''` → the model API 400s and kills the turn. A
+    // missing/empty frame is therefore a THROW, never a silent "". Native capture
+    // (ScreenCaptureKit / x11) does not have the cold-scrot warm-up the xdotool path
+    // retries around, so a single capture + a hard empty-guard is sufficient.
+    const { png } = await this.session.screenshot();
+    if (png.length === 0) {
+      throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
+    }
+    return Buffer.from(png).toString("base64");
+  }
+
+  async click(x: number, y: number, button: ComputerButton) {
+    this.guardWrite();
+    await this.pointer(x, y, PointerAction.POINTER_ACTION_CLICK, POINTER_BUTTON[button] ?? PointerButton.POINTER_BUTTON_LEFT);
+  }
+  async doubleClick(x: number, y: number) {
+    this.guardWrite();
+    await this.pointer(x, y, PointerAction.POINTER_ACTION_DOUBLE_CLICK, PointerButton.POINTER_BUTTON_LEFT);
+  }
+  async move(x: number, y: number) {
+    this.guardWrite();
+    await this.pointer(x, y, PointerAction.POINTER_ACTION_MOVE, PointerButton.POINTER_BUTTON_UNSPECIFIED);
+  }
+  async scroll(x: number, y: number, sx: number, sy: number) {
+    this.guardWrite();
+    // The model's scroll deltas are PIXELS — forward them straight to the agent as a
+    // ScrollEvent{x,y,deltaX,deltaY} and let the native inject translate to wheel
+    // events per platform. No xdotool "notch" quantization here (that is an
+    // xdotool-specific artifact); the agent owns the platform-appropriate scaling.
+    await this.session.desktopInput({ $case: "scroll", scroll: { x, y, deltaX: sx, deltaY: sy } });
+  }
+  async type(text: string) {
+    this.guardWrite();
+    // A literal text burst: isText:true tells the agent to type the string verbatim
+    // (Unicode-aware) rather than interpret it as a key name.
+    await this.session.desktopInput({ $case: "key", key: { key: text, isText: true, action: KeyAction.KEY_ACTION_PRESS } });
+  }
+  async keypress(keys: string[]) {
+    this.guardWrite();
+    // A chord ("ctrl+c") as ONE non-text KeyEvent (isText:false ⇒ interpret as key
+    // names). We send the model's PLATFORM-INDEPENDENT key names joined with "+" —
+    // NOT xdotool X keysyms (SandboxComputer's toKeysym maps to "Return"/"super"/
+    // "Prior", which are X-specific and wrong for the macOS CGEvent path). The agent
+    // owns the per-platform key-name → keycode mapping (the KeyEvent.key contract).
+    await this.session.desktopInput({ $case: "key", key: { key: keys.join("+"), isText: false, action: KeyAction.KEY_ACTION_PRESS } });
+  }
+  async drag(path: [number, number][]) {
+    this.guardWrite();
+    if (path.length === 0) return;
+    // Press at the start, move through each waypoint with the button held, release at
+    // the last point. The agent tracks button state across the DOWN → MOVE… → UP.
+    const [sx, sy] = path[0]!;
+    await this.pointer(sx, sy, PointerAction.POINTER_ACTION_DOWN, PointerButton.POINTER_BUTTON_LEFT);
+    for (const [px, py] of path.slice(1)) {
+      await this.pointer(px, py, PointerAction.POINTER_ACTION_MOVE, PointerButton.POINTER_BUTTON_LEFT);
+    }
+    const [ex, ey] = path[path.length - 1]!;
+    await this.pointer(ex, ey, PointerAction.POINTER_ACTION_UP, PointerButton.POINTER_BUTTON_LEFT);
+  }
+  async wait() {
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+/**
+ * Backend-aware SELECTION discriminator: a SELF-HOSTED session exposes the two
+ * native control-plane ops (`desktopInput` + `screenshot`); a MODAL session does
+ * not (it drives the desktop via xdotool/scrot over `exec`). Duck-typing on those
+ * two methods keeps this file from hard-importing `SelfhostedSession` (avoiding an
+ * agent-loop ↔ sandbox-leaf import coupling) and is future-proof: any backend that
+ * grows native inject/capture is picked up automatically.
+ */
+export function isNativeDesktopSession(session: SandboxSessionLike): session is SandboxSessionLike & NativeDesktopSession {
+  const s = session as Partial<NativeDesktopSession>;
+  return typeof s.desktopInput === "function" && typeof s.screenshot === "function";
+}
+
 // ── The capability (the SDK seam) ────────────────────────────────────────────
 
 export type ComputerUseArgs = {
@@ -367,13 +533,23 @@ export class ComputerUseCapability extends Capability {
 
   override tools(): Tool<unknown>[] {
     const session = requireBoundSession("computer-use", this._session);
-    const computer = new SandboxComputer(session, {
-      ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
-      ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
-      ...(this.args.display ? { display: this.args.display } : {}),
-      // The SDK base exposes the bound runAs as a protected field.
-      ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
-    });
+    // Backend-aware: a SELF-HOSTED session (macOS OR bring-your-own Linux) drives the
+    // desktop NATIVELY (CGEvent/XTEST inject + ScreenCaptureKit/x11 capture over the
+    // control plane) — no xdotool/scrot on the user's machine required. Everything
+    // else (Modal) keeps the xdotool/scrot-over-exec SandboxComputer. See
+    // `isNativeDesktopSession` for the duck-typed discriminator.
+    const computer: Computer = isNativeDesktopSession(session)
+      ? new NativeDesktopComputer(session, {
+          ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
+          ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
+        })
+      : new SandboxComputer(session, {
+          ...(this.args.dimensions ? { dimensions: this.args.dimensions } : {}),
+          ...(this.args.readOnly !== undefined ? { readOnly: this.args.readOnly } : {}),
+          ...(this.args.display ? { display: this.args.display } : {}),
+          // The SDK base exposes the bound runAs as a protected field.
+          ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
+        });
     return [
       computerTool({
         computer,
