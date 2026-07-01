@@ -683,7 +683,7 @@ function registerWorkspaceOrchestrationTools(
 
     server.registerTool("session_interrupt", {
       description:
-        "Interrupt a session in this workspace. mode='stop' (default) cancels the current turn AND pauses the session's active goal so it halts. mode='steer' cancels the current turn WITHOUT pausing the goal, so the session picks up its next queued turn — pair it with a preceding session_send_message to redirect a running session. Works whether the target is mid-turn or idle.",
+        "Interrupt a session in this workspace. mode='stop' (default) cancels the current turn AND pauses the session's active goal so it halts. mode='steer' cancels the current turn WITHOUT pausing the goal, so the session picks up its next queued turn (or, if nothing is queued, continues toward its active goal) — pair it with a preceding session_send_message to redirect a running session. Works whether the target is mid-turn or idle.",
       inputSchema: {
         sessionId: z4.string().uuid(),
         mode: z4.enum(["stop", "steer"]).optional(),
