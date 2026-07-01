@@ -236,3 +236,77 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("modal", undefined)).toBe(false);
   });
 });
+
+describe("owned-path beforeAgentStart hooks — the provided-session blind spot", () => {
+  // The SDK NEVER calls client.create/resume when runOptions.sandbox carries a live
+  // `session` (SandboxRuntimeManager.prepareAgent uses sandboxConfig.session as-is),
+  // so the create/resume decoration alone can never run lifecycle hooks on the
+  // lease-owned box. runAgentStream's owned branch must therefore run them DIRECTLY
+  // against the provided session — this is what executes the repository-clone hook
+  // (which also seeds the B1 askpass + token file) on production turns. Regression:
+  // hooks silently stopped running when sandbox ownership was enabled, which left
+  // boxes with an empty repo mount dir and no git auth at all.
+  test("repository-clone hook (with B1 token seed) runs against the provided session before the turn", async () => {
+    const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
+    const repoResource = {
+      kind: "repository" as const,
+      uri: "https://github.com/example/repo.git",
+      ref: "main",
+      mountPath: "repos/example/repo",
+      // installation+repository ids make repositoryUsesSandboxClone() true on the
+      // local backend, mirroring the GitHub-App resources production sessions carry.
+      githubInstallationId: 1,
+      githubRepositoryId: 2,
+    };
+    const environment = { HOME: "/workspace", GIT_ASKPASS: "/workspace/.opengeni/askpass" };
+    const model = new ScriptedModel([{ output: [assistantMessage("done, no tools")] }]);
+    const agent = buildOpenGeniAgent(settings, [repoResource], {
+      model,
+      sandboxEnvironment: environment,
+      gitTokenSeed: "seed-token-e2e",
+    });
+
+    // Stub live box: records execs; its manifest mirrors the agent's default manifest
+    // so applyManifestToProvidedSession sees no delta to apply.
+    const execCalls: Array<{ cmd: string }> = [];
+    const providedSession = {
+      state: { manifest: buildManifest(settings, [repoResource], environment) },
+      exec: async (args: { cmd: string }) => {
+        execCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      // The SDK's filesystem/shell/skills capabilities require these at prepare
+      // time even when the scripted turn never touches a tool.
+      createEditor: () => ({}),
+      execCommand: async (args: { cmd: string }) => {
+        execCalls.push(args);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      pathExists: async () => false,
+      materializeEntry: async () => undefined,
+    };
+    const stubClient = {
+      backendId: "unix_local",
+      serializeSessionState: async () => ({}),
+    };
+
+    const result = await runAgentStream(agent, "just answer", settings, {
+      ownedSandbox: {
+        client: stubClient as never,
+        session: providedSession as never,
+      },
+    });
+    for await (const _ of result.toStream()) {
+      void _;
+    }
+    await result.completed;
+
+    // The clone/seed command hit the PROVIDED box exactly once, before the turn —
+    // carrying both the off-manifest token seed and the clone script.
+    const cloneExecs = execCalls.filter((c) => c.cmd.includes("clone_repository"));
+    expect(cloneExecs.length).toBe(1);
+    expect(cloneExecs[0]!.cmd).toContain("OPENGENI_GIT_TOKEN_SEED");
+    expect(cloneExecs[0]!.cmd).toContain("seed-token-e2e");
+    expect(cloneExecs[0]!.cmd).toContain("repos/example/repo");
+  });
+});

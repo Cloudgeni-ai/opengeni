@@ -1638,15 +1638,31 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeed = gitTokenSeedForAgent(agent);
-    const decoratedClient = withSandboxLifecycleHooks(resourceClient, [
+    const ownedHooks = [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
       ...sandboxRepositoryCloneHooksForAgent(agent),
-    ], {
+    ];
+    const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
-    });
+    };
+    // OWNED-PATH HOOKS: the SDK NEVER calls client.create/resume when handed a live
+    // provided session (SandboxRuntimeManager uses `sandboxConfig.session` directly),
+    // so the withSandboxLifecycleHooks decoration below can never fire on this branch —
+    // it only wraps create/resume. Run the beforeAgentStart hooks directly against the
+    // provided box, once per turn, BEFORE the run starts: this is what executes the
+    // repository-clone hook (which also seeds the B1 askpass + token file) and the
+    // azure-cli-login hook on lease-owned boxes. Re-running on a warm box is safe by
+    // construction: clone skips when the target is already materialized, the token
+    // seed OVERWRITES the file (the desired per-turn refresh), and az login is
+    // idempotent. A turn resumed after preemption re-enters here and re-seeds the
+    // freshly minted token — which is exactly what a >1h-old warm box needs.
+    await runBeforeAgentStartHooks(session as SandboxSessionLike, ownedHooks, ownedHookContext);
+    // Keep the decoration as a safety net for any session the SDK does create/resume
+    // through the client during this run (it is inert for the provided session).
+    const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
     const ownedFilter = composeCallModelInputFilters(
       [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
         (f): f is CallModelInputFilter => Boolean(f),
@@ -2403,12 +2419,40 @@ export function sandboxLifecycleHooksForIds(ids: string[]): SandboxLifecycleHook
   });
 }
 
+function applicableBeforeAgentStartHooks(
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): SandboxLifecycleHook[] {
+  return hooks.filter((hook) => hook.phase === "beforeAgentStart" && (hook.shouldRun?.(context) ?? true));
+}
+
+/**
+ * Run the beforeAgentStart lifecycle hooks directly against an already-live box.
+ *
+ * The create/resume decoration (withSandboxLifecycleHooks) is structurally blind to
+ * the PROVIDED-session path: when runStream hands the SDK a live `session`
+ * (runOptions.sandbox.session — the lease-owned box resolved by the turn activity),
+ * SandboxRuntimeManager uses it as-is and never calls client.create/resume, so a
+ * wrapper around those methods never fires. Callers on that path invoke this
+ * before starting the run so the box still gets its beforeAgentStart preparation
+ * (repository clone + B1 askpass/token-file seed, azure-cli-login).
+ */
+export async function runBeforeAgentStartHooks(
+  session: SandboxSessionLike,
+  hooks: SandboxLifecycleHook[],
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  for (const hook of applicableBeforeAgentStartHooks(hooks, context)) {
+    await hook.run(session, context);
+  }
+}
+
 export function withSandboxLifecycleHooks(
   client: SandboxClient,
   hooks: SandboxLifecycleHook[],
   context: SandboxLifecycleHookContext,
 ): SandboxClient {
-  const beforeAgentStartHooks = hooks.filter((hook) => hook.phase === "beforeAgentStart" && (hook.shouldRun?.(context) ?? true));
+  const beforeAgentStartHooks = applicableBeforeAgentStartHooks(hooks, context);
   if (beforeAgentStartHooks.length === 0) {
     return client;
   }
