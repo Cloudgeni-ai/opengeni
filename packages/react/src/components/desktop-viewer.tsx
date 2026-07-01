@@ -3,6 +3,7 @@ import { LoaderCircleIcon, MonitorIcon, MousePointerClickIcon, WifiOffIcon } fro
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { useDesktopStream } from "../hooks/use-desktop-stream";
+import type { DesktopWebSocketFactory } from "../hooks/use-relay-frame-stream";
 
 export type DesktopViewerProps = {
   /** The desktop cell of the negotiated capabilities (`capabilities.DesktopStream`). */
@@ -19,6 +20,9 @@ export type DesktopViewerProps = {
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Custom socket factory for the self-hosted `relay-frames` transport (tests).
+   *  Defaults to `new WebSocket(url)`. Mirrors `rfbFactory`. */
+  webSocketFactory?: DesktopWebSocketFactory | undefined;
   /**
    * Consent gate for the un-redacted (and possibly shared) pixel plane. Rendered
    * BEFORE connecting whenever the desktop requires acknowledgment that hasn't
@@ -121,6 +125,7 @@ export function DesktopViewer({
   showControlToggle = true,
   scaleViewport,
   rfbFactory,
+  webSocketFactory,
   renderConsentGate,
   onAcknowledge,
   watching,
@@ -213,6 +218,7 @@ export function DesktopViewer({
     interactive: inControl,
     ...(scaleViewport !== undefined ? { scaleViewport } : {}),
     ...(rfbFactory ? { rfbFactory } : {}),
+    ...(webSocketFactory ? { webSocketFactory } : {}),
   });
 
   const connected = stream.state === "connected";
@@ -429,7 +435,11 @@ export function DesktopViewer({
         <TakeControlCallToAction
           disabled={!serverAllowsControl}
           disabledReason={
-            !serverAllowsControl ? "This deployment streams the desktop read-only" : undefined
+            !serverAllowsControl
+              ? capability?.client === "frames"
+                ? "View-only — live control isn't available for this machine yet."
+                : "This deployment streams the desktop read-only"
+              : undefined
           }
           onTakeControl={() => setTakeControl(true)}
         />

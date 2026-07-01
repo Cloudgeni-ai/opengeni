@@ -7,17 +7,21 @@ import {
   type DesktopStreamCapability,
 } from "@opengeni/sdk";
 import { type RefObject, useEffect, useRef, useState } from "react";
+import { type DesktopWebSocketFactory, useRelayFrameStream } from "./use-relay-frame-stream";
 
 export type UseDesktopStreamOptions = {
   /** The desktop cell of the negotiated capabilities (`capabilities.DesktopStream`). */
   capability: DesktopStreamCapability | null;
-  /** The mount target. RFB attaches here on connect. */
+  /** The mount target. RFB (or the frame canvas) attaches here on connect. */
   containerRef: RefObject<HTMLDivElement | null>;
   /** Read-only by default (v1 ruling H). interactive only when cap.mode allows. */
   interactive?: boolean | undefined;
   scaleViewport?: boolean | undefined;
   /** Custom RFB factory (tests / a WebRTC swap). Defaults to a lazy @novnc/novnc. */
   rfbFactory?: DesktopRfbFactory | undefined;
+  /** Custom socket factory for the `relay-frames` transport (tests). Defaults to
+   *  `new WebSocket(url)`. Mirrors `rfbFactory` for the frame renderer. */
+  webSocketFactory?: DesktopWebSocketFactory | undefined;
 };
 
 export type UseDesktopStreamResult = {
@@ -57,9 +61,26 @@ async function defaultRfbFactory(): Promise<DesktopRfbFactory> {
  * `interactive` prop → `RFB.viewOnly`. v1 always resolves to read-only. On a
  * capability `url` change (a rotation), the old RFB disconnects and a fresh one
  * connects to the new URL — a brief "desktop blink", acceptable on rollover.
+ *
+ * Transport dispatch: a Modal box negotiates `transport: "vnc-ws"` and drives the
+ * noVNC RFB below. A SELF-HOSTED machine negotiates `transport: "relay-frames"`
+ * (PNG-per-frame over the relay, view-only) — that path is delegated to
+ * `useRelayFrameStream`, which paints a `<canvas>`. Both hooks are ALWAYS called
+ * (rules of hooks); each is dormant for the other's transport, and we return the
+ * result of whichever owns the surface. The public interface is identical either
+ * way, so `DesktopViewer` is transport-agnostic.
  */
 export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopStreamResult {
-  const { capability, containerRef, interactive, scaleViewport, rfbFactory } = options;
+  const { capability, containerRef, interactive, scaleViewport, rfbFactory, webSocketFactory } =
+    options;
+
+  // The self-hosted PNG-frame path. Always invoked (rules of hooks); dormant
+  // unless `transport === "relay-frames"`, in which case it owns the surface.
+  const frameStream = useRelayFrameStream({
+    capability,
+    containerRef,
+    ...(webSocketFactory ? { webSocketFactory } : {}),
+  });
   const [state, setState] = useState<DesktopConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [nonce, setNonce] = useState(0);
@@ -210,5 +231,10 @@ export function useDesktopStream(options: UseDesktopStreamOptions): UseDesktopSt
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scaleViewport, state]);
 
+  // Delegate to whichever transport owns the surface. For `relay-frames` the
+  // noVNC effect above is dormant (it bailed to idle) and the frame renderer
+  // drives; for `vnc-ws` (and everything else) the noVNC path drives while the
+  // frame renderer stays idle. Same public shape either way.
+  if (transport === "relay-frames") return frameStream;
   return { state, error, reconnect };
 }

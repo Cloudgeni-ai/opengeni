@@ -55,6 +55,13 @@ export type {
 } from "./hooks/use-session-capabilities";
 export { useDesktopStream } from "./hooks/use-desktop-stream";
 export type { UseDesktopStreamOptions, UseDesktopStreamResult } from "./hooks/use-desktop-stream";
+export { useRelayFrameStream } from "./hooks/use-relay-frame-stream";
+export type {
+  DesktopWebSocketFactory,
+  DesktopWebSocketLike,
+  UseRelayFrameStreamOptions,
+  UseRelayFrameStreamResult,
+} from "./hooks/use-relay-frame-stream";
 export { useTerminalStream } from "./hooks/use-terminal-stream";
 export type {
   TerminalStreamStatus,

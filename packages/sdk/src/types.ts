@@ -84,8 +84,10 @@ export type SessionCapabilities = {
     reason: CapabilityUnavailableReason | null;
   };
   DesktopStream: {
-    transport: "vnc-ws" | "rdp-ws" | "webrtc" | null;
-    client: "novnc" | "web-rdp" | null;
+    // "relay-frames" + "frames": the selfhosted framebuffer stream — PNG-per-frame
+    // protobuf datagrams over the relay, painted by a canvas client (NOT RFB).
+    transport: "vnc-ws" | "rdp-ws" | "webrtc" | "relay-frames" | null;
+    client: "novnc" | "web-rdp" | "frames" | null;
     mode: "read-only" | "interactive";
     url: string | null;
     token: string | null;

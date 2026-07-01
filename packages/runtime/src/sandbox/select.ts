@@ -283,11 +283,17 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     // deployment that wants a genuinely read-only desktop sets
     // sandboxDesktopInteractive=false → mode "read-only" and the client disables
     // take-control. An unavailable cell is always "read-only" (nothing to drive).
-    const interactive = available && ctx.desktopInteractive !== false;
+    // Selfhosted desktop is the RELAY framebuffer: PNG-per-frame protobuf datagrams
+    // spliced over the relay, rendered by the "frames" canvas client — NOT noVNC/RFB
+    // (that x11vnc path exists only for Modal boxes). It is VIEW-ONLY in v1 (the
+    // frame client does not forward input yet), so its mode is always read-only
+    // regardless of the take-control policy.
+    const selfhostedFrames = ctx.backend === "selfhosted";
+    const interactive = available && !selfhostedFrames && ctx.desktopInteractive !== false;
     const mode = interactive ? ("interactive" as const) : ("read-only" as const);
     return {
-      transport: available ? cap.transport : null,
-      client: available ? ("novnc" as const) : null,
+      transport: available ? (selfhostedFrames ? ("relay-frames" as const) : cap.transport) : null,
+      client: available ? (selfhostedFrames ? ("frames" as const) : ("novnc" as const)) : null,
       mode,
       url: minted?.url ?? null,
       token: minted?.token ?? null,

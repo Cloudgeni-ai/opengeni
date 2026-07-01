@@ -85,7 +85,9 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.FileSystem.reason).toBeNull();
     expect(caps.Git.available).toBe(true);
     expect(caps.Terminal.transport).toBe("pty-ws");
-    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    // Selfhosted desktop is the RELAY framebuffer (PNG-per-frame), rendered by the
+    // "frames" canvas client — never noVNC (that's Modal's x11vnc path).
+    expect(caps.DesktopStream.transport).toBe("relay-frames");
     expect(caps.DesktopStream.reason).toBeNull();
     expect(caps.ComputerUse.available).toBe(true);
     expect(caps.Recording.available).toBe(true);
@@ -153,7 +155,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     // (read-only stream) + RECORDED — the agent already has whole-machine exec, so
     // passive viewing adds no capability. Only INPUT (ComputerUse / an interactive
     // stream) requires the explicit allowScreenControl consent.
-    expect(caps.DesktopStream.transport).toBe("vnc-ws");
+    expect(caps.DesktopStream.transport).toBe("relay-frames");
     expect(caps.DesktopStream.mode).toBe("read-only");
     expect(caps.DesktopStream.reason).toBeNull();
     expect(caps.Recording.available).toBe(true);

@@ -2778,8 +2778,11 @@ export const SessionCapabilities = z.object({
     reason: CapabilityUnavailableReason.nullable(),
   }),
   DesktopStream: z.object({
-    transport: z.enum(["vnc-ws", "rdp-ws", "webrtc"]).nullable(),
-    client: z.enum(["novnc", "web-rdp"]).nullable(),
+    // "relay-frames" is the selfhosted framebuffer stream: PNG-per-frame protobuf
+    // datagrams spliced over the relay (NOT RFB). The viewer renders it with the
+    // "frames" client (a canvas painter), distinct from Modal's "vnc-ws"/"novnc".
+    transport: z.enum(["vnc-ws", "rdp-ws", "webrtc", "relay-frames"]).nullable(),
+    client: z.enum(["novnc", "web-rdp", "frames"]).nullable(),
     mode: z.enum(["read-only", "interactive"]).default("read-only"),
     url: z.string().url().nullable(),
     token: z.string().nullable(),

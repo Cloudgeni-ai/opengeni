@@ -44,6 +44,7 @@
     "demo:build": "vite build demo"
   },
   "dependencies": {
+    "@opengeni/agent-proto": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^1.8.0",
