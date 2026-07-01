@@ -886,15 +886,16 @@ function maybeInstallCodexToolSearch(agent: Agent<any, any>, settings: Settings,
  * of the hosted ones, by dropping the model instance the SDK's transport
  * detection keys off. See {@link buildAgentCapabilities} for why (codex routes the
  * OpenAIResponsesModel to the ChatGPT backend, which rejects the hosted
- * `apply_patch` tool type). The SDK reads hosted-vs-function ONLY from
- * `_modelInstance` (set via `bindModel`); overriding `bindModel` to discard the
- * instance leaves `_modelInstance` undefined, so `supportsApplyPatchTransport` /
- * `supportsStructuredToolOutputTransport` return false and `tools()` emits the
- * function `apply_patch` + text `view_image`. `bindModel` still returns the
- * capability so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is
- * preserved.
+ * `apply_patch` AND `computer_use_preview` tool types). The SDK reads
+ * hosted-vs-function ONLY from `_modelInstance` (set via `bindModel`); overriding
+ * `bindModel` to discard the instance leaves `_modelInstance` undefined, so
+ * `supportsApplyPatchTransport` / `supportsStructuredToolOutputTransport` return
+ * false and `tools()` emits the function variants — `apply_patch` + text
+ * `view_image` for filesystem, and the `computer_*` function tools + text
+ * `computer_screenshot` for computer-use. `bindModel` still returns the capability
+ * so the SDK's bind chain (`.bind().bindRunAs().bindModel()`) is preserved.
  */
-function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem>): void {
+function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesystem> | ReturnType<typeof computerUse>): void {
   // Use `this` (NOT a captured reference to `capability`): the SandboxAgent binds
   // via `cap.clone().bind(session).bindRunAs(runAs).bindModel(model, instance)` and
   // runs tools() on the object the CHAIN returns. Capability.clone() copies this
@@ -972,18 +973,23 @@ export function buildAgentCapabilities(
     settings.computerUseEnabled
     && settings.sandboxDesktopEnabled
     && desktopCapableBackend(settings.sandboxBackend)
-    // computer-use emits a HOSTED `computer`/`computer_use_preview` tool with NO
-    // function-transport fallback. The ChatGPT/Codex backend rejects hosted tool
-    // types (only function/custom/web_search are accepted), so on the codex path
-    // (structuredToolTransport === false) attaching it would 400 the ENTIRE turn.
-    // Suppress it there — driving the desktop via the agent is simply unavailable
-    // on that backend; every other backend keeps the desktop tier.
-    && options.structuredToolTransport !== false
   ) {
-    caps.push(computerUse({
+    // computer-use is now transport-aware, exactly like filesystem: its `tools()`
+    // emits the HOSTED `computer_use_preview` tool on the structured transport and a
+    // set of FUNCTION `computer_*` tools on the text transport. The ChatGPT/Codex
+    // backend rejects hosted tool types (only function/custom/web_search accepted),
+    // so on the codex path (structuredToolTransport === false) we neutralize the
+    // capability's model binding — the SAME trick used for filesystem above — so
+    // `tools()` sees no model instance and emits the function tools the backend can
+    // call, instead of suppressing the desktop tier entirely.
+    const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
-    }) as unknown as ReturnType<typeof Capabilities.default>[number]);
+    });
+    if (options.structuredToolTransport === false) {
+      neutralizeStructuredToolTransport(computerCapability);
+    }
+    caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
   }
   return caps;
 }

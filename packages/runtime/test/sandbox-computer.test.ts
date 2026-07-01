@@ -7,12 +7,56 @@ import {
   isNativeDesktopSession,
   ComputerUseCapability,
   computerUse,
+  computerFunctionTools,
   ComputerReadOnlyError,
   ComputerUnavailableError,
   ComputerActionError,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
 import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
+
+// The SDK reads hosted-vs-function transport from the bound model instance's
+// constructor name (supportsStructuredToolOutputTransport): a name containing
+// "ChatCompletions" (and an UNBOUND model) → text/function transport; anything else
+// → structured/hosted. These two fakes make the branch explicit in the tests.
+class OpenAIResponsesModel {}
+class OpenAIChatCompletionsModel {}
+/** A structured-transport model instance → ComputerUseCapability emits the HOSTED tool. */
+const structuredModel = (): never => new OpenAIResponsesModel() as never;
+/** A ChatCompletions-family instance → ComputerUseCapability emits the FUNCTION tools. */
+const chatCompletionsModel = (): never => new OpenAIChatCompletionsModel() as never;
+
+// A fake Computer that records every method call so the function-tool routing can be
+// asserted without a real desktop. Cast to the SDK `Computer` at the call site.
+function makeFakeComputer(opts: { screenshotB64?: string } = {}) {
+  const calls: Array<[string, ...unknown[]]> = [];
+  const defaultB64 = Buffer.from(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a])).toString("base64");
+  const computer = {
+    environment: "ubuntu" as const,
+    dimensions: [1280, 800] as [number, number],
+    screenshot: async () => { calls.push(["screenshot"]); return opts.screenshotB64 ?? defaultB64; },
+    click: async (x: number, y: number, button: string) => { calls.push(["click", x, y, button]); },
+    doubleClick: async (x: number, y: number) => { calls.push(["doubleClick", x, y]); },
+    move: async (x: number, y: number) => { calls.push(["move", x, y]); },
+    scroll: async (x: number, y: number, sx: number, sy: number) => { calls.push(["scroll", x, y, sx, sy]); },
+    type: async (text: string) => { calls.push(["type", text]); },
+    keypress: async (keys: string[]) => { calls.push(["keypress", keys]); },
+    drag: async (path: [number, number][]) => { calls.push(["drag", path]); },
+    wait: async () => {},
+  };
+  return { computer, calls };
+}
+
+// Index a tool array by name, and invoke a function tool the SDK way (JSON-string
+// input through `.invoke(runContext, input)`).
+const toolsByName = (tools: unknown[]): Record<string, unknown> =>
+  Object.fromEntries((tools as Array<{ name: string }>).map((t) => [t.name, t]));
+const invokeTool = (t: unknown, args: unknown): Promise<unknown> =>
+  (t as { invoke: (ctx: never, input: string) => Promise<unknown> }).invoke({} as never, JSON.stringify(args));
+const FUNCTION_TOOL_NAMES = [
+  "computer_screenshot", "computer_click", "computer_double_click", "computer_move",
+  "computer_scroll", "computer_type", "computer_keypress", "computer_drag",
+];
 
 // A mock provider session that records every command. By default it mimics
 // MODAL: it implements execCommand (the formatted-string contract) and does NOT
@@ -401,7 +445,8 @@ describe("computer backend selection (native vs xdotool)", () => {
   test("ComputerUseCapability bound to a native session drives desktopInput (NOT exec)", async () => {
     const { session, inputs } = makeNativeSession();
     const cap = computerUse({ readOnly: false });
-    cap.bind(session as never);
+    // Structured transport → the single hosted computerTool over the selected Computer.
+    cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
     expect(tools.length).toBe(1);
     // Reach through the tool to the selected computer and drive a click — it must
@@ -416,7 +461,7 @@ describe("computer backend selection (native vs xdotool)", () => {
   test("ComputerUseCapability bound to a Modal session selects the xdotool SandboxComputer", () => {
     const { session } = makeMockSession();
     const cap = computerUse({ readOnly: false });
-    cap.bind(session as never);
+    cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
     const computer = (tools[0] as unknown as { computer: unknown }).computer;
     expect(computer).toBeInstanceOf(SandboxComputer);
@@ -424,18 +469,115 @@ describe("computer backend selection (native vs xdotool)", () => {
 });
 
 describe("ComputerUseCapability (the SDK seam)", () => {
-  test("tools() throws before bind(session) and returns one computerTool after", () => {
+  test("tools() throws before bind(session) and returns one HOSTED computerTool on the structured transport", () => {
     const cap = computerUse({ readOnly: false });
     expect(cap).toBeInstanceOf(ComputerUseCapability);
     expect(cap.type).toBe("computer-use");
     // Unbound → requireBoundSession throws.
     expect(() => cap.tools()).toThrow();
     const { session } = makeMockSession();
-    cap.bind(session as never);
+    // Structured transport (a non-ChatCompletions model instance) → hosted tool.
+    cap.bind(session as never).bindModel("responses", structuredModel());
     const tools = cap.tools();
     expect(tools.length).toBe(1);
     // The computer tool wires the model's computer_use_preview surface.
     expect((tools[0] as { type?: string }).type).toBe("computer");
+  });
+});
+
+// ── Transport-aware seam: codex/text FUNCTION tools vs the hosted computer tool ──
+// Mirrors the SDK filesystem capability, which branches view_image/apply_patch on
+// supportsStructuredToolOutputTransport(_modelInstance). ComputerUseCapability now
+// emits the hosted `computer_use_preview` tool on the structured transport and a set
+// of FUNCTION `computer_*` tools on the text/codex transport (an unbound or
+// ChatCompletions-family model), because the codex backend rejects hosted tools.
+describe("ComputerUseCapability transport-aware seam", () => {
+  test("text transport (no structured model bound) → the 8 FUNCTION computer_* tools", () => {
+    const { session } = makeMockSession();
+    const cap = computerUse({ readOnly: false });
+    cap.bind(session as never); // no bindModel → _modelInstance undefined → text transport
+    const names = cap.tools().map((t) => (t as { name?: string }).name);
+    expect(names).toEqual(FUNCTION_TOOL_NAMES);
+    // Every emitted tool is a function tool (not the hosted "computer" type).
+    for (const t of cap.tools()) expect((t as { type?: string }).type).toBe("function");
+  });
+
+  test("a ChatCompletions-family model also gets the FUNCTION tools", () => {
+    const { session } = makeMockSession();
+    const cap = computerUse({});
+    cap.bind(session as never).bindModel("gpt", chatCompletionsModel());
+    const names = cap.tools().map((t) => (t as { name?: string }).name);
+    expect(names).toEqual(FUNCTION_TOOL_NAMES);
+  });
+
+  test("structured transport → the single HOSTED computer tool (unchanged)", () => {
+    const { session } = makeMockSession();
+    const cap = computerUse({});
+    cap.bind(session as never).bindModel("responses", structuredModel());
+    const tools = cap.tools();
+    expect(tools.length).toBe(1);
+    expect((tools[0] as { type?: string }).type).toBe("computer");
+  });
+});
+
+describe("computerFunctionTools (codex text-transport routing)", () => {
+  test("emits all 8 computer_* function tools", () => {
+    const { computer } = makeFakeComputer();
+    const tools = computerFunctionTools(computer as never, false);
+    expect(tools.map((t) => (t as { name?: string }).name)).toEqual(FUNCTION_TOOL_NAMES);
+    for (const t of tools) expect((t as { type?: string }).type).toBe("function");
+  });
+
+  test("click/double_click/move/scroll/type/keypress/drag route to the bound Computer with the exact args", async () => {
+    const { computer, calls } = makeFakeComputer();
+    const t = toolsByName(computerFunctionTools(computer as never, false));
+    await invokeTool(t.computer_click, { x: 10, y: 20 }); // button defaults to left
+    await invokeTool(t.computer_click, { x: 1, y: 2, button: "right" });
+    await invokeTool(t.computer_double_click, { x: 3, y: 4 });
+    await invokeTool(t.computer_move, { x: 5, y: 6 });
+    await invokeTool(t.computer_scroll, { x: 7, y: 8, scroll_x: 0, scroll_y: 300 });
+    await invokeTool(t.computer_type, { text: "hello" });
+    await invokeTool(t.computer_keypress, { keys: ["ctrl", "c"] });
+    await invokeTool(t.computer_drag, { path: [{ x: 0, y: 0 }, { x: 9, y: 9 }] });
+    expect(calls).toEqual([
+      ["click", 10, 20, "left"],
+      ["click", 1, 2, "right"],
+      ["doubleClick", 3, 4],
+      ["move", 5, 6],
+      ["scroll", 7, 8, 0, 300],
+      ["type", "hello"],
+      ["keypress", ["ctrl", "c"]],
+      ["drag", [[0, 0], [9, 9]]],
+    ]);
+  });
+
+  test("computer_screenshot returns a data:image/png;base64 URL built from the Computer's base64 screenshot", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const b64 = Buffer.from(png).toString("base64");
+    const { computer, calls } = makeFakeComputer({ screenshotB64: b64 });
+    const t = toolsByName(computerFunctionTools(computer as never, false));
+    const out = await invokeTool(t.computer_screenshot, {});
+    // Exactly the two-step imageOutputFromBytes → renderImageForTextTransport shape,
+    // mirroring the SDK's text view_image: a data URL whose bytes are the fake's PNG.
+    expect(out).toBe(`data:image/png;base64,${b64}`);
+    expect(calls).toContainEqual(["screenshot"]);
+  });
+
+  test("readOnly returns a clear message and never touches the Computer for writes; screenshot still works", async () => {
+    const { computer, calls } = makeFakeComputer();
+    const t = toolsByName(computerFunctionTools(computer as never, true));
+    const clickOut = await invokeTool(t.computer_click, { x: 1, y: 1 });
+    const typeOut = await invokeTool(t.computer_type, { text: "x" });
+    const dragOut = await invokeTool(t.computer_drag, { path: [{ x: 0, y: 0 }, { x: 1, y: 1 }] });
+    expect(String(clickOut)).toContain("read-only");
+    expect(String(typeOut)).toContain("read-only");
+    expect(String(dragOut)).toContain("read-only");
+    // No write ever reached the Computer.
+    expect(calls.length).toBe(0);
+    // screenshot is a READ — never gated.
+    const shot = await invokeTool(t.computer_screenshot, {});
+    expect(String(shot).startsWith("data:image/")).toBe(true);
+    expect(calls).toEqual([["screenshot"]]);
   });
 });
 
@@ -463,15 +605,25 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     expect(t).not.toContain("computer-use");
   });
 
-  test("codex path (structuredToolTransport:false): NO computer-use even with desktop fully on — the hosted computer tool has no function fallback and would 400 the whole turn", () => {
+  test("codex path (structuredToolTransport:false): computer-use ATTACHED and NEUTRALIZED to FUNCTION tools (no longer suppressed)", () => {
     const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
-    // Same settings that DO attach computer-use on every other backend...
+    // Structured backend attaches computer-use (as before) — the hosted tool path.
     expect(buildAgentCapabilities(desktopOn, []).map((c) => (c as { type?: string }).type)).toContain("computer-use");
-    // ...are suppressed on the codex backend, which rejects the hosted computer tool.
-    const onCodex = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false }).map((c) => (c as { type?: string }).type);
-    expect(onCodex).not.toContain("computer-use");
-    // filesystem/shell/skills still present — only the unsupported hosted tool is dropped.
-    expect(onCodex).toContain("filesystem");
-    expect(onCodex).toContain("shell");
+    // On the codex backend it is NO LONGER dropped: it is attached and neutralized so
+    // its tools() emits the FUNCTION computer_* tools the codex backend accepts.
+    const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
+    const codexTypes = codexCaps.map((c) => (c as { type?: string }).type);
+    expect(codexTypes).toContain("computer-use");
+    // filesystem/shell still present (unchanged).
+    expect(codexTypes).toContain("filesystem");
+    expect(codexTypes).toContain("shell");
+    // Prove the attached capability emits the FUNCTION tools even when the SDK bind
+    // chain hands it a STRUCTURED model instance: neutralize overrode bindModel to
+    // drop the instance, so tools() falls to the function transport.
+    const computerCap = codexCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    const { session } = makeMockSession();
+    computerCap.bind(session as never).bindModel("responses", structuredModel());
+    const names = computerCap.tools().map((t) => (t as { name?: string }).name);
+    expect(names).toEqual(FUNCTION_TOOL_NAMES);
   });
 });

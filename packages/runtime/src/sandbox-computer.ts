@@ -31,7 +31,7 @@
 //   F5  scroll deltas are model PIXELS (often hundreds) — divided by a notch step
 //       and clamped, NOT used as literal wheel-click `--repeat` counts.
 
-import { computerTool, type Computer, type Tool } from "@openai/agents";
+import { computerTool, tool, type Computer, type Tool } from "@openai/agents";
 import { Capability, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
 
@@ -507,6 +507,244 @@ export function isNativeDesktopSession(session: SandboxSessionLike): session is 
   return typeof s.desktopInput === "function" && typeof s.screenshot === "function";
 }
 
+// ── Function-transport (codex / text backend) computer tools ─────────────────
+//
+// The SDK emits computer-use ONLY as the HOSTED `computer_use_preview` tool, which
+// the codex / ChatGPT backend rejects (it accepts only function/custom/web_search
+// tool types) — so on codex the hosted tool is unusable and the agent has nothing
+// to drive the desktop with. We mirror EXACTLY how the SDK's filesystem capability
+// degrades `view_image` for the text transport: when the bound model does NOT
+// support the structured tool-output transport, emit a set of FUNCTION tools that
+// route to the SAME bound `Computer`, and hand the model the screen by rendering
+// the screenshot image-output as a text-transport data URL — the identical two-step
+// `imageOutputFromBytes` → `renderImageForTextTransport` the SDK's text `view_image`
+// uses. Those three helpers are NOT public exports of `@openai/agents` /
+// `@openai/agents/sandbox` (they live in the SDK's private capabilities/transport +
+// shared/media modules, unreachable via the package `exports` map), so — mirroring
+// selfhosted/session.ts's local `sniffImageMediaType` — the three tiny pure helpers
+// are reimplemented here in lockstep with the SDK.
+
+/** The SDK's tool-output image shape (@openai/agents-core shared/media `ToolOutputImage`). */
+type ToolOutputImage = { type: "image"; image: { data: Uint8Array; mediaType: string } };
+
+/** Magic-byte image sniff, in lockstep with the SDK's `sniffImageMediaType`
+ *  (shared/media). Screenshots are always PNG (scrot / ScreenCaptureKit / x11), so
+ *  an unrecognized header defaults to image/png rather than failing the frame. */
+function sniffScreenshotMediaType(bytes: Uint8Array): string {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return "image/gif";
+  if (
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return "image/webp";
+  return "image/png";
+}
+
+/** Build the SDK `ToolOutputImage` from raw screenshot bytes — the structured shape
+ *  the SDK's `imageOutputFromBytes` produces (`{type:'image', image:{data,mediaType}}`). */
+function imageOutputFromScreenshotBytes(bytes: Uint8Array): ToolOutputImage {
+  return { type: "image", image: { data: Uint8Array.from(bytes), mediaType: sniffScreenshotMediaType(bytes) } };
+}
+
+/** Render an image tool-output as a text-transport string, in lockstep with the
+ *  SDK's private `renderImageForTextTransport` (capabilities/filesystem). Our image
+ *  output always carries `data` as bytes, so it becomes a `data:<mediaType>;base64,…`
+ *  URL — the exact form the text-backend `view_image` hands the model. */
+function renderImageForTextTransport(output: ToolOutputImage | string): string {
+  if (typeof output === "string") return output;
+  const { image } = output;
+  const mediaType = typeof image.mediaType === "string" ? image.mediaType : "application/octet-stream";
+  return `data:${mediaType};base64,${Buffer.from(image.data).toString("base64")}`;
+}
+
+/** Whether the bound model supports the structured tool-output transport, in
+ *  lockstep with the SDK's private `supportsStructuredToolOutputTransport`
+ *  (capabilities/transport): a ChatCompletions-family model — and an UNBOUND model
+ *  (undefined) — does NOT, so it gets the function tools; every other model keeps
+ *  the hosted `computer_use_preview` tool. The codex neutralize trick in index.ts
+ *  drops `_modelInstance`, so this returns false there and the function tools win. */
+function supportsStructuredToolOutputTransport(modelInstance: unknown): boolean {
+  if (!modelInstance) return false;
+  const constructorName =
+    typeof modelInstance === "object" && modelInstance && typeof (modelInstance as { constructor?: unknown }).constructor === "function"
+      ? ((modelInstance as { constructor: { name?: string } }).constructor.name ?? "")
+      : "";
+  return !constructorName.includes("ChatCompletions");
+}
+
+const COMPUTER_READ_ONLY_MESSAGE =
+  "computer-use is read-only for this session — click, double_click, move, scroll, type, keypress, and drag are disabled. Call computer_screenshot to observe the desktop.";
+
+// The two coordinate properties every pointer tool shares. Raw JSON schema (NOT
+// zod: zod is not a @opengeni/runtime dependency) with `strict:false`, mirroring the
+// SDK's own `apply_patch` function-tool schema style.
+const COORD_PROPS = {
+  x: { type: "integer", description: "X coordinate in the pixels of the most recent computer_screenshot" },
+  y: { type: "integer", description: "Y coordinate in the pixels of the most recent computer_screenshot" },
+} as const;
+
+function objectSchema(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
+/**
+ * The FUNCTION-transport computer tools for the codex / text backend, each routing
+ * to the SAME bound `Computer` the hosted `computer_use_preview` tool would drive.
+ * `computer_screenshot` returns the screen as a `data:image/png;base64,…` URL
+ * (imageOutputFromBytes → renderImageForTextTransport — the SDK's text `view_image`
+ * path) so the model SEES the desktop. Write tools return a concise confirmation;
+ * when read-only they return {@link COMPUTER_READ_ONLY_MESSAGE} instead of throwing,
+ * and any action error is returned as a string so a failed action never kills the
+ * turn. Exported so it can be unit-tested against a fake `Computer`.
+ */
+export function computerFunctionTools(
+  computer: Computer,
+  readOnly: boolean,
+  needsApproval?: ComputerUseArgs["needsApproval"],
+): Tool<unknown>[] {
+  const approval = needsApproval !== undefined ? { needsApproval: needsApproval as never } : {};
+  // Perform a WRITE action, surfacing read-only / failures as a model-readable
+  // string rather than an uncaught throw (an uncaught throw becomes a tool error
+  // the backend may 400 on, or kills the step).
+  const write = async (confirmation: string, action: () => void | Promise<void>): Promise<string> => {
+    if (readOnly) return COMPUTER_READ_ONLY_MESSAGE;
+    try {
+      await action();
+      return confirmation;
+    } catch (error) {
+      if (error instanceof ComputerReadOnlyError) return COMPUTER_READ_ONLY_MESSAGE;
+      return `computer action failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
+
+  return [
+    tool({
+      name: "computer_screenshot",
+      description:
+        "Capture the current desktop and return it as an image. Call this FIRST and again after each action — all coordinates for click/move/scroll/drag are pixels of the most recent screenshot.",
+      parameters: objectSchema({}, []) as never,
+      strict: false,
+      execute: async () => {
+        // screenshot() returns raw base64 PNG and NEVER an empty string (it throws
+        // instead), so the model can't receive an empty image_url.
+        const b64 = await computer.screenshot();
+        const bytes = Uint8Array.from(Buffer.from(b64, "base64"));
+        return renderImageForTextTransport(imageOutputFromScreenshotBytes(bytes));
+      },
+    }),
+    tool({
+      name: "computer_click",
+      description:
+        "Click the mouse at (x, y). `button` is one of left|right|wheel|back|forward (default left). Take a computer_screenshot first to find coordinates.",
+      parameters: objectSchema(
+        { ...COORD_PROPS, button: { type: "string", enum: ["left", "right", "wheel", "back", "forward"], description: "Mouse button; defaults to left" } },
+        ["x", "y"],
+      ) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { x, y, button } = input as { x: number; y: number; button?: ComputerButton };
+        return write(`clicked ${button ?? "left"} at (${x}, ${y})`, () => computer.click(x, y, button ?? "left"));
+      },
+    }),
+    tool({
+      name: "computer_double_click",
+      description: "Double-click the left mouse button at (x, y). Take a computer_screenshot first to find coordinates.",
+      parameters: objectSchema({ ...COORD_PROPS }, ["x", "y"]) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { x, y } = input as { x: number; y: number };
+        return write(`double-clicked at (${x}, ${y})`, () => computer.doubleClick(x, y));
+      },
+    }),
+    tool({
+      name: "computer_move",
+      description: "Move the mouse cursor to (x, y) without clicking.",
+      parameters: objectSchema({ ...COORD_PROPS }, ["x", "y"]) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { x, y } = input as { x: number; y: number };
+        return write(`moved to (${x}, ${y})`, () => computer.move(x, y));
+      },
+    }),
+    tool({
+      name: "computer_scroll",
+      description:
+        "Scroll at (x, y) by scroll_x / scroll_y pixels (positive scroll_y scrolls down, negative up; positive scroll_x scrolls right).",
+      parameters: objectSchema(
+        {
+          ...COORD_PROPS,
+          scroll_x: { type: "integer", description: "Horizontal scroll amount in pixels (positive = right)" },
+          scroll_y: { type: "integer", description: "Vertical scroll amount in pixels (positive = down)" },
+        },
+        ["x", "y", "scroll_x", "scroll_y"],
+      ) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { x, y, scroll_x, scroll_y } = input as { x: number; y: number; scroll_x: number; scroll_y: number };
+        return write(`scrolled (${scroll_x}, ${scroll_y}) at (${x}, ${y})`, () => computer.scroll(x, y, scroll_x, scroll_y));
+      },
+    }),
+    tool({
+      name: "computer_type",
+      description: "Type a literal text string at the current keyboard focus. Click the target field first.",
+      parameters: objectSchema({ text: { type: "string", description: "The literal text to type" } }, ["text"]) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { text } = input as { text: string };
+        return write(`typed ${text.length} character(s)`, () => computer.type(text));
+      },
+    }),
+    tool({
+      name: "computer_keypress",
+      description:
+        'Press a key or chord. `keys` is an ordered list pressed together, e.g. ["ctrl","c"] or ["Enter"]. Use key names (ctrl, alt, shift, cmd, enter, tab, esc, arrows…), not characters.',
+      parameters: objectSchema(
+        { keys: { type: "array", items: { type: "string" }, description: "Keys pressed together as a chord" } },
+        ["keys"],
+      ) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { keys } = input as { keys: string[] };
+        return write(`pressed ${keys.join("+")}`, () => computer.keypress(keys));
+      },
+    }),
+    tool({
+      name: "computer_drag",
+      description:
+        "Drag the left mouse button along a path of points. `path` is an ordered list of {x, y} pixels; the button is pressed at the first point, moved through each, and released at the last.",
+      parameters: objectSchema(
+        {
+          path: {
+            type: "array",
+            description: "Ordered list of points to drag through",
+            items: {
+              type: "object",
+              properties: { x: { type: "integer" }, y: { type: "integer" } },
+              required: ["x", "y"],
+              additionalProperties: false,
+            },
+          },
+        },
+        ["path"],
+      ) as never,
+      strict: false,
+      ...approval,
+      execute: async (input) => {
+        const { path } = input as { path: Array<{ x: number; y: number }> };
+        const points = path.map((p) => [p.x, p.y] as [number, number]);
+        return write(`dragged through ${points.length} point(s)`, () => computer.drag(points));
+      },
+    }),
+  ] as unknown as Tool<unknown>[];
+}
+
 // ── The capability (the SDK seam) ────────────────────────────────────────────
 
 export type ComputerUseArgs = {
@@ -524,8 +762,19 @@ export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
  * A `Capability` subclass merged into the agent's tool set by SandboxAgent
  * (`tools = [...agent.tools, ...capability.tools()]`). `bind(session)` hands it
  * the LIVE externally-owned session, so the agent's actions and the viewers'
- * pixels are one display. `tools()` returns one `computerTool` over a
- * SandboxComputer bound to that session.
+ * pixels are one display.
+ *
+ * `tools()` is TRANSPORT-AWARE, mirroring the SDK's `filesystem()` capability
+ * (which branches its `view_image` / `apply_patch` on
+ * `supportsStructuredToolOutputTransport(this._modelInstance)`):
+ *   • structured transport (the Responses/OpenAI backend) → the single HOSTED
+ *     `computer_use_preview` tool over a Computer bound to the session (unchanged).
+ *   • text transport (codex / ChatGPT backend — or an unbound model) → a set of
+ *     FUNCTION tools ({@link computerFunctionTools}) that route to the SAME Computer,
+ *     because the codex backend rejects the hosted computer tool type.
+ * The bound model instance is captured by the SDK's `bind().bindRunAs().bindModel()`
+ * chain (base `Capability._modelInstance`); the codex path in index.ts neutralizes
+ * `bindModel` so `_modelInstance` stays undefined here → the function tools win.
  */
 export class ComputerUseCapability extends Capability {
   readonly type = "computer-use";
@@ -550,11 +799,16 @@ export class ComputerUseCapability extends Capability {
           // The SDK base exposes the bound runAs as a protected field.
           ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
         });
-    return [
-      computerTool({
-        computer,
-        ...(this.args.needsApproval !== undefined ? { needsApproval: this.args.needsApproval as never } : {}),
-      }) as unknown as Tool<unknown>,
-    ];
+    // Structured transport keeps the HOSTED computer tool (unchanged); the codex /
+    // text backend gets the FUNCTION tools it can actually call.
+    if (supportsStructuredToolOutputTransport(this._modelInstance)) {
+      return [
+        computerTool({
+          computer,
+          ...(this.args.needsApproval !== undefined ? { needsApproval: this.args.needsApproval as never } : {}),
+        }) as unknown as Tool<unknown>,
+      ];
+    }
+    return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval);
   }
 }
