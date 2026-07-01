@@ -653,17 +653,23 @@ function registerWorkspaceOrchestrationTools(
         // First-party MCP token permissions for the spawned session; every
         // permission must be held by this grant (validated in the domain).
         firstPartyMcpPermissions: z4.array(z4.string()).optional(),
-        // Shared-sandbox placement (addendum 05 §D). OMIT to share THIS box by
-        // default (a session-spawned session shares its creator's box); pass
-        // "new" for a fresh private box, or {groupId} (a sibling session's
-        // `sandboxGroupId` from a prior session_create response) to fan two
-        // workers into one box. A shared box means one filesystem/repo/desktop,
-        // N independent conversations. The group is workspace-scoped.
+        // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
+        // creator's box — one filesystem/repo/desktop, N independent conversations;
+        // this is the SAFE DEFAULT and env vars are per-exec, NOT a reason to split.
+        // Pass "new" for a fresh isolated box (a different repo set or a genuinely
+        // separate filesystem), or {groupId} (a sibling session's `sandboxGroupId`
+        // from a prior session_create response) to join that specific sibling's box.
+        // A shared box requires the SAME image; a conflicting image is rejected (B3).
+        // The description below is what the AGENT sees (this comment is invisible to
+        // it); keep the two in sync. Grouping stays env-blind (correct) — the only
+        // shared-state hard-fail is the image conflict at the lease layer.
         sandbox: z4.union([
           z4.literal("shared"),
           z4.literal("new"),
           z4.object({ groupId: z4.string().uuid() }),
-        ]).optional(),
+        ]).describe(
+          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default and env vars are per-exec, not a reason to split. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box. A shared box requires the same image; a conflicting image is rejected.",
+        ).optional(),
         // The parent (manager) session is auto-inferred from the caller's
         // worker-signed sessionId claim, so a spawned worker's completion wakes
         // its manager automatically. There is deliberately no caller-supplied
