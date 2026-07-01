@@ -4,6 +4,7 @@ members = [
     "crates/opengeni-agent",
     "crates/opengeni-agent-proto",
     "crates/opengeni-agent-platform",
+    "crates/opengeni-agent-macos-ffi",
     "crates/opengeni-agent-stream",
     "crates/opengeni-agent-update",
     "crates/opengeni-relay",

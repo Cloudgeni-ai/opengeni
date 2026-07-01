@@ -1,0 +1,57 @@
+[package]
+name = "opengeni-agent-macos-ffi"
+description = "macOS-only leaf FFI crate: ScreenCaptureKit capture + CGEvent input + TCC preflight for the OpenGeni agent's desktop backend, wrapped behind a safe API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# NOTE: this crate deliberately does NOT do `[lints] workspace = true`.
+#
+# The workspace pins `unsafe_code = "forbid"` (agent/Cargo.toml). Apple FFI
+# (objc2 `msg_send!`, C function calls, ARC/pointer handoff) is inherently
+# `unsafe`, and a scoped `#[allow(unsafe_code)]` inside a crate that inherits a
+# `forbid` fails to compile (E0453 "allow(unsafe_code) overruled by outer
+# forbid"). So this one leaf crate lowers ITSELF to `deny` and confines every
+# `unsafe` to a single audited `#[allow(unsafe_code)] mod ffi` module. Every
+# other crate — including `opengeni-agent-platform`, which calls this crate's
+# SAFE public API — keeps the workspace `forbid` fully intact.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+# Re-declared to match the workspace (opting out of `workspace = true` above
+# forfeits the workspace clippy table, so we mirror it here verbatim).
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+doc_markdown = "allow"
+
+[dependencies]
+thiserror = { workspace = true }
+
+# The whole native surface is macOS-only. These are cfg-gated to `target_os =
+# "macos"` so a Linux/Windows build of the workspace pulls NONE of them — the
+# crate is a warning-clean skeleton (types + stub fns) on every other target.
+# Pinned to the current objc2 0.6 train (objc2 0.6.x + the 0.3.x framework
+# crates + block2 0.6.x + dispatch2 0.3.x); versions probed at authoring time:
+# objc2 0.6.4, framework crates 0.3.2, block2 0.6.2, dispatch2 0.3.1.
+#
+# We keep DEFAULT features on each objc2 framework crate (rather than hand-
+# picking per-type features): the default set enables `std`, every generated
+# type, and the block2/objc2-core-* interop shims the capture path needs
+# (SCK's block-taking `getShareableContent…`/`captureImage…`, CGImage/CGEvent).
+# This trades a little macOS-only compile time for not having to compile-verify
+# a hand-cut feature list — which this Linux host cannot do.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"

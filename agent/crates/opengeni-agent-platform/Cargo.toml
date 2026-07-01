@@ -11,6 +11,14 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Real macOS desktop backend (ScreenCaptureKit capture + CGEvent input) via the
+# leaf FFI crate. OFF by default: the default macOS build keeps the honest stub
+# (probe → None, capture/inject → Unsupported), byte-identical to before. CI
+# compiles the real path via `--all-features`; releases enable it only once a
+# signed, TCC-granted Mac has live-verified it.
+macos-desktop = ["dep:opengeni-agent-macos-ffi"]
+
 [dependencies]
 opengeni-agent-proto = { path = "../opengeni-agent-proto" }
 thiserror = { workspace = true }
@@ -30,6 +38,12 @@ image = { workspace = true }
 # (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true }
+
+# macOS desktop backend: the leaf FFI crate that owns all Apple `unsafe` behind a
+# safe API. Optional + macOS-gated so non-macOS builds (and the default macOS
+# build, feature off) never pull the objc2 dependency tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
