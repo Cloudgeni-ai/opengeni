@@ -1198,6 +1198,89 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("optional (auto-attached) capability MCP whose connect fails is skipped, not fatal", async () => {
+    // The geni-notebook class of bug: a workspace-default capability MCP whose
+    // credential expired returns 401 at connect. Because it was AUTO-ATTACHED
+    // (ToolRef.optional), the failure must drop the server with a warning and
+    // let the turn proceed — not fail the whole turn before the model runs. The
+    // config carries NO credential header, so the required-header server 401s.
+    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const warnings: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args); };
+    try {
+      const prepared = await prepareAgentTools(testSettings({
+        mcpServers: [{
+          id: "geni-notebook",
+          name: "Geni Notebook",
+          url: broken.url,
+          cacheToolsList: false,
+        }],
+      }), [{ kind: "mcp", id: "geni-notebook", optional: true }]);
+      try {
+        expect(prepared.mcpServers).toHaveLength(0); // 401 at connect => dropped, no throw
+      } finally {
+        await prepared.close();
+      }
+      // A warning names the skipped server so the drop is observable.
+      const warned = warnings.some((args) => args.some((arg) => typeof arg === "string" && arg.includes("geni-notebook")));
+      expect(warned).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      broken.close();
+    }
+  });
+
+  test("optional capability MCP drop does NOT take down a healthy sibling in the same turn", async () => {
+    // A broken optional capability server rides alongside a working required
+    // server: the required one must still connect and remain available while the
+    // optional one is skipped.
+    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const healthy = startTestMcpServer();
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(testSettings({
+        mcpServers: [
+          { id: "geni-notebook", name: "Geni Notebook", url: broken.url, cacheToolsList: false },
+          { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+        ],
+      }), [
+        { kind: "mcp", id: "geni-notebook", optional: true },
+        { kind: "mcp", id: "docs" },
+      ]);
+      try {
+        expect(prepared.mcpServers.map((server) => server.name)).toEqual(["docs"]);
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain("docs__search_documents");
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
+      broken.close();
+      healthy.close();
+    }
+  });
+
+  test("explicitly-requested (non-optional) capability MCP whose connect fails still fails the turn", async () => {
+    // The strict contract is unchanged: a tool the caller explicitly requested
+    // (no `optional` flag) that cannot connect must fail the turn.
+    const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    try {
+      await expect(prepareAgentTools(testSettings({
+        mcpServers: [{
+          id: "geni-notebook",
+          name: "Geni Notebook",
+          url: broken.url,
+          cacheToolsList: false,
+        }],
+      }), [{ kind: "mcp", id: "geni-notebook" }])).rejects.toThrow();
+    } finally {
+      broken.close();
+    }
+  });
+
   test("does not bleed the permission-scoped first-party tools-list across sessions", async () => {
     // The Agents SDK caches tools/list in a process-global map keyed by MCP
     // server name. The built-in `opengeni` server has the same name for every

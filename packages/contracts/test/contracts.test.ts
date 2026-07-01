@@ -16,6 +16,7 @@ import {
   DocumentSearchRequest,
   EnablePackRequest,
   MarketingDailyAnalysisTaskRequest,
+  mergeToolRefs,
   ResourceRef,
   SessionBusMessage,
   CLEARED_RUN_STATE_BLOB,
@@ -297,6 +298,26 @@ describe("contracts", () => {
     expect(() => CreateDocumentBaseRequest.parse({ name: "" })).toThrow();
     expect(() => AddDocumentRequest.parse({ fileId: "not-a-uuid" })).toThrow();
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
+  });
+
+  test("mergeToolRefs: explicit (strict) beats auto-attached (optional) for the same server", () => {
+    // A capability that is both auto-attached (optional) at create AND later
+    // explicitly requested must end up STRICT — the explicit request wins so an
+    // unavailable server fails the turn, preserving the fail-loud contract.
+    expect(mergeToolRefs(
+      [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      [{ kind: "mcp", id: "cap-notebook" }],
+    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+    // Order-independent: explicit first, optional second → still strict.
+    expect(mergeToolRefs(
+      [{ kind: "mcp", id: "cap-notebook" }],
+      [{ kind: "mcp", id: "cap-notebook", optional: true }],
+    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+    // Both optional → stays optional (non-fatal on connect).
+    expect(mergeToolRefs(
+      [{ kind: "mcp", id: "cap-notebook", optional: true }],
+      [{ kind: "mcp", id: "cap-notebook", optional: true }],
+    )).toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
   });
 });
 

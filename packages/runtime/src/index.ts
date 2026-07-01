@@ -998,14 +998,28 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
         clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
       } : {}),
     }), config.id, config.allowedTools);
-    // codex_apps connector availability is RUNTIME-DISCOVERED: the device-code
-    // login may lack the connector scopes, and the backend can reject the bearer
-    // at the initialize/tools-list handshake. Connect it best-effort so a 401/403
-    // (or a missing/failed token) drops the server rather than failing the turn.
-    return { server, bestEffort: isCodexAppsMcpServer(config) };
+    // A server is connected BEST-EFFORT (a connect / tools-list failure drops
+    // it instead of failing the turn) in two cases:
+    //  - codex_apps: connector availability is RUNTIME-DISCOVERED — the
+    //    device-code login may lack the connector scopes, and the backend can
+    //    reject the bearer at the initialize/tools-list handshake, so a 401/403
+    //    (or a missing/failed token) drops the server.
+    //  - an AUTO-ATTACHED workspace-default capability MCP (ToolRef.optional):
+    //    the caller never explicitly requested it, so a broken/expired
+    //    capability credential must SKIP the server with a warning, never kill
+    //    the turn before the model runs. An EXPLICITLY-requested tool omits
+    //    `optional` and stays strict (below), preserving the fail-loud contract.
+    const optional = tool.optional === true;
+    return { server, bestEffort: isCodexAppsMcpServer(config) || optional, optional };
   }));
   const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
   const bestEffortServers = servers.filter((entry) => entry.bestEffort).map((entry) => entry.server);
+  // Names of the OPTIONAL capability servers (not codex_apps) so a drop is
+  // surfaced as a warning; codex_apps keeps its historically-quiet drop (a
+  // not-logged-in ChatGPT plan is a normal, non-noteworthy state).
+  const optionalServerNames = new Set(
+    servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
+  );
   const connectedRequired = await connectMcpServers(requiredServers, {
     connectInParallel: true,
     strict: true,
@@ -1016,6 +1030,18 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
         strict: false,
       })
     : null;
+  if (connectedBestEffort) {
+    for (const failed of connectedBestEffort.failed) {
+      if (!optionalServerNames.has(failed.name)) {
+        continue;
+      }
+      const error = connectedBestEffort.errors.get(failed);
+      console.warn(
+        `[mcp] optional capability server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
   return {
     mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
     close: async () => {

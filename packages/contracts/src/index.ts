@@ -1202,6 +1202,16 @@ export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
+  // Non-fatal-on-connect marker for an AUTO-ATTACHED (workspace-default)
+  // capability MCP server: when true, a connect / tools-list failure (e.g. an
+  // expired capability credential returning 401) must SKIP that server with a
+  // logged warning and let the turn proceed, rather than failing the whole
+  // turn before the model runs. Absent/false ⇒ STRICT: an unavailable server
+  // fails the turn (the contract for EXPLICITLY-requested tools). This flag is
+  // set server-side only, at the default-capability auto-attach seam; it is
+  // stripped from client-supplied tool refs so an explicit request always
+  // stays strict.
+  optional: z.boolean().optional(),
 });
 export type ToolRef = z.infer<typeof ToolRef>;
 
@@ -1213,17 +1223,26 @@ export class ResourceRefConflictError extends Error {
 }
 
 export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRef[] {
-  const seen = new Set<string>();
-  const out: ToolRef[] = [];
+  const byKey = new Map<string, ToolRef>();
+  const order: string[] = [];
   for (const tool of [...existing, ...additions]) {
     const key = `${tool.kind}:${tool.id}`;
-    if (seen.has(key)) {
+    const prior = byKey.get(key);
+    if (!prior) {
+      byKey.set(key, tool);
+      order.push(key);
       continue;
     }
-    seen.add(key);
-    out.push(tool);
+    // Strict wins: if the same server appears both auto-attached (optional) and
+    // explicitly requested (non-optional), the explicit occurrence upgrades the
+    // merged ref to strict — a later explicit request of an already-defaulted
+    // capability MCP must still fail the turn when the server is unavailable.
+    if (prior.optional === true && tool.optional !== true) {
+      const { optional: _dropped, ...strict } = prior;
+      byKey.set(key, strict);
+    }
   }
-  return out;
+  return order.map((key) => byKey.get(key)!);
 }
 
 export function mergeResourceRefs(

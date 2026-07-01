@@ -30,7 +30,11 @@ export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[
       continue;
     }
     selected.add(tool.id);
-    out.push(tool);
+    // Normalize to a bare, STRICT ref: a client-supplied `optional` flag is
+    // dropped so an EXPLICITLY-requested tool always fails the turn when its
+    // server is unavailable. `optional: true` is set only server-side, at the
+    // default-capability auto-attach seam (enabledCapabilityMcpToolRefs).
+    out.push({ kind: "mcp", id: tool.id });
   }
   return out;
 }
@@ -41,7 +45,11 @@ export function enabledCapabilityMcpToolRefs(settings: McpSettings, runtimeSetti
   const configuredIds = new Set(settings.mcpServers.map((server) => server.id));
   return runtimeSettings.mcpServers
     .filter((server) => !configuredIds.has(server.id))
-    .map((server) => ({ kind: "mcp", id: server.id }));
+    // AUTO-ATTACHED (workspace-default) capability servers are marked optional:
+    // one of them having a broken/expired credential must SKIP that server, not
+    // fail the whole turn before the model runs. The caller only reaches here
+    // when the request omitted `tools`; an explicit list is never defaulted.
+    .map((server) => ({ kind: "mcp", id: server.id, optional: true }));
 }
 
 export function withDefaultEnabledCapabilityMcpTools(tools: ToolRef[], settings: McpSettings, runtimeSettings: McpSettings): ToolRef[] {

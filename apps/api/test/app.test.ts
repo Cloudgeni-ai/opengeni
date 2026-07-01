@@ -10,6 +10,7 @@ import {
   replaySessionEvents,
   routeLabel,
   validateGitHubRepositorySelectionShape,
+  validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
   workflowIdForSession,
 } from "../src/app";
@@ -66,8 +67,26 @@ describe("API helpers", () => {
       },
     )).toEqual([
       { kind: "mcp", id: "opengeni" },
-      { kind: "mcp", id: "cap-4fetch" },
+      // AUTO-ATTACHED capability MCPs carry optional:true so a broken/expired
+      // credential is non-fatal (skipped, turn proceeds) instead of failing the
+      // whole turn before the model runs.
+      { kind: "mcp", id: "cap-4fetch", optional: true },
     ]);
+  });
+
+  test("validateToolRefs strips a client-supplied optional flag (explicit tools stay strict)", () => {
+    const runtimeSettings = {
+      mcpServers: [
+        { id: "opengeni", url: "https://example.com/mcp", cacheToolsList: false },
+        { id: "cap-notebook", url: "https://example.com/notebook", cacheToolsList: false },
+      ],
+    };
+    // A client cannot smuggle optional:true onto an explicitly-requested tool to
+    // make it non-fatal; the normalized ref is a bare strict ref.
+    expect(validateToolRefs(
+      [{ kind: "mcp", id: "cap-notebook", optional: true }] as never,
+      runtimeSettings as never,
+    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
   });
 
   test("maps scheduled task schedules into Temporal specs", () => {
