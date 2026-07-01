@@ -128,8 +128,14 @@ jobs:
         run: |
           set -euo pipefail
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin -p opengeni-agent
-          cargo build --release --target aarch64-apple-darwin -p opengeni-agent
+          # `--features macos-desktop` ships the real macOS display backend
+          # (ScreenCaptureKit capture + CGEvent input + the TCC consent flow). It
+          # forwards to opengeni-agent-platform/macos-desktop and is macOS-ONLY —
+          # the Linux/Windows legs above build default features so their binaries
+          # stay byte-identical. The feature-on path compiles only on this macOS
+          # runner (the objc2 Apple FFI has no Linux/Windows target).
+          cargo build --release --target x86_64-apple-darwin -p opengeni-agent --features macos-desktop
+          cargo build --release --target aarch64-apple-darwin -p opengeni-agent --features macos-desktop
           lipo -create \
             "target/x86_64-apple-darwin/release/opengeni-agent" \
             "target/aarch64-apple-darwin/release/opengeni-agent" \

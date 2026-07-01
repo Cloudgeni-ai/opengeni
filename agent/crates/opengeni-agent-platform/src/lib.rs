@@ -58,6 +58,14 @@ pub use error::{PlatformError, PlatformResult};
 pub use native::NativePlatform;
 pub use pty::{spawn_pty, PtyProcess};
 
+/// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
+/// Recording + Accessibility grant state without prompting ([`desktop_grants`])
+/// and fire the OS consent prompts once ([`request_desktop_grants`]). The agent's
+/// startup/enroll seam uses these to request display capability on a real Mac; a
+/// denied grant degrades cleanly to `display_unavailable`.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+pub use macos::{desktop_grants, request_desktop_grants, DesktopGrants};
+
 /// Reported OS/arch identity of the host the agent runs on, folded into the
 /// connect [`Hello`](opengeni_agent_proto::v1::Hello).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -127,6 +127,13 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+    // macOS: request the Screen Recording + Accessibility grants ONCE so a
+    // display-capable Mac can probe + advertise its display (the supervisor's
+    // per-connect `capabilities()` re-probe then reflects a freshly-granted
+    // display). A denied/pending grant degrades cleanly to `display_unavailable`
+    // and never blocks the serve loop. No-op on every non-macOS / feature-off build.
+    ensure_macos_desktop_grants();
+
     // Enroll if we have no persisted credentials yet ("enroll-if-needed").
     let creds = if let Some(creds) = config::load_credentials().map_err(to_boxed)? {
         info!(agent_id = %creds.agent_id, "loaded existing enrollment");
@@ -224,11 +231,67 @@ fn parse_geometry(geometry: &str) -> (u32, u32) {
 /// `desktop` capability: `probe()` does a synchronous x11rb connect, so run it on
 /// the blocking pool — a wedged X server must not stall this async enroll task.
 async fn probe_offers_display() -> bool {
+    // On macOS, make sure the desktop grants have been requested before we probe,
+    // so a freshly-granted Mac reports its display in the enroll offer. No-op on
+    // every non-macOS / feature-off build.
+    ensure_macos_desktop_grants();
     let desktop = opengeni_agent_platform::resolve_desktop();
     tokio::task::spawn_blocking(move || desktop.probe().is_some())
         .await
         .unwrap_or(false)
 }
+
+/// macOS consent flow (feature `macos-desktop`): ensure the OS TCC grants the
+/// desktop backend needs — Screen Recording (probe + capture) and Accessibility
+/// (CGEvent input) — have been requested, so a display-capable Mac can actually
+/// probe and advertise its display.
+///
+/// If either grant is missing it logs a clear human message and fires the OS
+/// prompts ONCE per process (a [`std::sync::Once`] guard), then re-reads the state
+/// for an informative log. A still-denied grant degrades cleanly: `probe()` keeps
+/// returning `None`, so the capability stays `display_unavailable` — this NEVER
+/// blocks enroll or the serve loop, and exec/fs/git remain fully available.
+///
+/// The grant reads + request are non-blocking, non-prompting-preflight + a single
+/// prompt fire (the OS shows the dialog / the user toggles System Settings).
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn ensure_macos_desktop_grants() {
+    use std::sync::Once;
+    static REQUESTED: Once = Once::new();
+
+    let grants = opengeni_agent_platform::desktop_grants();
+    if grants.all_granted() {
+        return;
+    }
+    REQUESTED.call_once(|| {
+        warn!(
+            screen_recording = grants.screen_recording,
+            accessibility = grants.accessibility,
+            "this Mac needs OS permission to expose its display to OpenGeni — requesting \
+             Screen Recording + Accessibility. Approve the system prompt(s), or open \
+             System Settings > Privacy & Security and enable BOTH 'Screen Recording' and \
+             'Accessibility' for opengeni-agent, then let it reconnect. Until then the \
+             machine runs headless (exec/fs/git still work); the display appears once both \
+             grants are in place."
+        );
+        opengeni_agent_platform::request_desktop_grants();
+    });
+    let after = opengeni_agent_platform::desktop_grants();
+    if !after.all_granted() {
+        info!(
+            screen_recording = after.screen_recording,
+            accessibility = after.accessibility,
+            "macOS desktop grants still pending; display stays unavailable until both are \
+             enabled in System Settings (does not block exec/fs/git or enroll)"
+        );
+    }
+}
+
+/// No-op on every build except macOS-with-`macos-desktop`, keeping the default and
+/// non-macOS binaries byte-identical (mirrors the [`maybe_spawn_virtual_desktop`]
+/// cfg-stub pattern).
+#[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+fn ensure_macos_desktop_grants() {}
 
 /// The `enroll` command: drive the device flow, persist the credentials, and
 /// return them (so `run` can chain straight into serving).

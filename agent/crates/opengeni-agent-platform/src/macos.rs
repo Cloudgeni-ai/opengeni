@@ -72,6 +72,55 @@ impl MacosDesktop {
 #[cfg(feature = "macos-desktop")]
 use opengeni_agent_macos_ffi as macffi;
 
+// --- TCC grant status + consent request (feature `macos-desktop`) -----------
+//
+// `MacosDesktop::probe`/`capture`/`inject` all fail closed until the two macOS
+// TCC grants are in place: Screen Recording (probe + capture) and Accessibility
+// (CGEvent input delivery). These small helpers let the agent's lifecycle code
+// (`opengeni-agent`'s startup/enroll seam) READ the current grant state without
+// prompting and fire the OS consent prompts ONCE, so a display-capable Mac can
+// actually advertise its display. They are macOS + feature gated, so the default
+// and non-macOS builds compile nothing here (byte-identical).
+
+/// A non-prompting snapshot of the two macOS TCC grants the desktop backend needs.
+#[cfg(feature = "macos-desktop")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopGrants {
+    /// Screen Recording (`kTCCServiceScreenCapture`) — required for probe + capture.
+    pub screen_recording: bool,
+    /// Accessibility (`AXIsProcessTrusted`) — required for CGEvent input delivery.
+    pub accessibility: bool,
+}
+
+#[cfg(feature = "macos-desktop")]
+impl DesktopGrants {
+    /// Both grants are in place, so the backend can fully probe/capture/inject.
+    #[must_use]
+    pub fn all_granted(self) -> bool {
+        self.screen_recording && self.accessibility
+    }
+}
+
+/// Reads the current macOS TCC grant status WITHOUT prompting (the leaf crate's
+/// non-prompting `CGPreflightScreenCaptureAccess` + `AXIsProcessTrusted`).
+#[cfg(feature = "macos-desktop")]
+#[must_use]
+pub fn desktop_grants() -> DesktopGrants {
+    DesktopGrants {
+        screen_recording: macffi::screen_capture_granted(),
+        accessibility: macffi::accessibility_trusted(),
+    }
+}
+
+/// Fires the two macOS TCC consent prompts once (Screen Recording via
+/// `CGRequestScreenCaptureAccess`, Accessibility via the prompting
+/// `AXIsProcessTrustedWithOptions`) and deep-links to the Settings panes. Only the
+/// on-machine process can trigger the prompts; the user still flips the toggles.
+#[cfg(feature = "macos-desktop")]
+pub fn request_desktop_grants() {
+    macffi::request_grants();
+}
+
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
