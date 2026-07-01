@@ -578,7 +578,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           }
         : {}),
     });
-    return c.json(capabilities);
+
+    // SWAP-CASE desktop transport: the negotiation keyed on the HOME backend, but
+    // the desktop/terminal plane actually runs on the ACTIVE sandbox when one is
+    // pinned. If that active sandbox is a SELFHOSTED machine, its desktop is the
+    // RELAY framebuffer (PNG-per-frame) — the "relay-frames"/"frames" client, NOT
+    // the home box's noVNC. Override the cell so the viewer selects the frame
+    // renderer (the mint already served the machine's relay url). Machine-PRIMARY
+    // sessions (home backend already selfhosted) negotiate relay-frames directly,
+    // so the `=== "vnc-ws"` guard skips the extra lookup for them.
+    let responseCapabilities = capabilities;
+    if (session.activeSandboxId && capabilities.DesktopStream.transport === "vnc-ws") {
+      const activeSandbox = await getSandbox(db, workspaceId, session.activeSandboxId);
+      if (activeSandbox?.kind === "selfhosted") {
+        responseCapabilities = {
+          ...capabilities,
+          DesktopStream: {
+            ...capabilities.DesktopStream,
+            transport: "relay-frames",
+            client: "frames",
+            mode: "read-only",
+          },
+        };
+      }
+    }
+    return c.json(responseCapabilities);
   });
 
   // POST .../stream-capabilities/acknowledge — record the calling principal's
