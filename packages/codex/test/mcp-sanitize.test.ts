@@ -131,6 +131,28 @@ describe("sanitizeMcpJsonBody", () => {
     expect(tools.map((t: { name: string }) => t.name)).toEqual(["a", "b", "c", "d", "e"]);
   });
 
+  test("inlines a tool CALL's structuredContent into content so it reaches the model", () => {
+    // The live connector shape: real data in structuredContent, bare placeholder in content.
+    const call = JSON.stringify({
+      jsonrpc: "2.0", id: 7,
+      result: {
+        content: [{ type: "text", text: "Action completed." }],
+        structuredContent: { email: "jorgen.sandhaug@gmail.com", name: "Jørgen" },
+      },
+    });
+    const out = JSON.parse(sanitizeMcpJsonBody(call)).result;
+    // original content preserved + the structured payload appended as a text block
+    expect(out.content).toHaveLength(2);
+    expect(out.content[0]).toEqual({ type: "text", text: "Action completed." });
+    expect(out.content[1].type).toBe("text");
+    expect(JSON.parse(out.content[1].text)).toEqual({ email: "jorgen.sandhaug@gmail.com", name: "Jørgen" });
+  });
+
+  test("a call result with no structuredContent is untouched", () => {
+    const call = JSON.stringify({ jsonrpc: "2.0", id: 8, result: { content: [{ type: "text", text: "hi" }] } });
+    expect(sanitizeMcpJsonBody(call)).toBe(JSON.stringify(JSON.parse(call)));
+  });
+
   test("leaves non-tools-list messages untouched", () => {
     const other = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "x", capabilities: {} } });
     expect(sanitizeMcpJsonBody(other)).toBe(JSON.stringify(JSON.parse(other)));

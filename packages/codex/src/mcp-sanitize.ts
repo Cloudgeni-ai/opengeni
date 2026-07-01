@@ -149,11 +149,52 @@ function sanitizeToolsInRpcMessage(message: unknown, mapper: ToolNameMapper, nam
   }
 }
 
+/**
+ * Surface a tool CALL's `structuredContent` to the model by inlining it as a text
+ * `content` block, in place.
+ *
+ * WHY. The @openai/agents MCP bridge forwards ONLY `result.content` to the model
+ * (agents-core shims/mcp-server: `const result = parsed.content`) and DISCARDS
+ * `result.structuredContent`. The codex_apps connectors return the real payload in
+ * `structuredContent` and a bare `"Action completed."` placeholder in `content`
+ * (verified live: `gmail.get_profile` → content=[{text:"Action completed."}],
+ * structuredContent={id,name,email,…}). Without this the agent's tool call
+ * "succeeds" but carries NO data — the model sees only the placeholder. Appending
+ * the structured payload as a text block makes the data reach the model while
+ * leaving the original content untouched.
+ *
+ * No-op when there is no `structuredContent` — so a tools/list response (or any
+ * result without it) passes through unchanged. Runs alongside (after) the empty
+ * outputSchema drop, which is what stops the MCP SDK -32602ing this same result.
+ */
+function inlineStructuredContentInRpcMessage(message: unknown): void {
+  if (!message || typeof message !== "object") {
+    return;
+  }
+  const result = (message as { result?: unknown }).result;
+  if (!result || typeof result !== "object") {
+    return;
+  }
+  const record = result as Record<string, unknown>;
+  if (!("structuredContent" in record)) {
+    return;
+  }
+  const structured = record.structuredContent;
+  if (structured === undefined || structured === null) {
+    return;
+  }
+  const text = typeof structured === "string" ? structured : JSON.stringify(structured);
+  const content = Array.isArray(record.content) ? [...record.content] : [];
+  content.push({ type: "text", text });
+  record.content = content;
+}
+
 /** Sanitize a single JSON body (application/json MCP response). */
 export function sanitizeMcpJsonBody(text: string, mapper: ToolNameMapper = new ToolNameMapper(), namespaceSink?: Set<string>): string {
   try {
     const parsed = JSON.parse(text);
     sanitizeToolsInRpcMessage(parsed, mapper, namespaceSink);
+    inlineStructuredContentInRpcMessage(parsed);
     return JSON.stringify(parsed);
   } catch {
     return text; // not JSON we understand — leave untouched
@@ -172,6 +213,7 @@ export function sanitizeMcpSseBody(text: string, mapper: ToolNameMapper = new To
       try {
         const parsed = JSON.parse(payload);
         sanitizeToolsInRpcMessage(parsed, mapper, namespaceSink);
+        inlineStructuredContentInRpcMessage(parsed);
         return `data: ${JSON.stringify(parsed)}`;
       } catch {
         return line;
