@@ -1,9 +1,20 @@
-# `opengeni-agent` — the self-hosted agent (Rust workspace)
+# `opengeni-agent` — the Connected Machine agent (Rust workspace)
 
-The Rust agent that turns a user's own machine into a first-class OpenGeni
-sandbox (the `selfhosted` backend). This is a standalone Cargo workspace — it is
-**not** part of the bun monorepo (the bun workspaces glob excludes it, and
-`agent/target/` is gitignored).
+The Rust agent that turns a user's own machine into a **Connected Machine** — a
+first-class, co-equal PRIMARY OpenGeni compute target (the `selfhosted` backend,
+internally). This is a standalone Cargo workspace — it is **not** part of the bun
+monorepo (the bun workspaces glob excludes it, and `agent/target/` is gitignored).
+
+**How the control plane treats a Connected Machine** (canonical:
+[`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
+a machine-targeted turn runs on this agent **directly** — the control plane
+establishes the session on the machine and does **not** create, lease, or bill a
+cloud box for it. It ships the machine **no OpenGeni credential**: the platform
+GitHub-App token mint is skipped and exec carries `env: {}` on the wire, so this
+agent authenticates git with the machine's **own** credentials. The session runs
+under a **per-session working directory** (the control plane's `sessions.working_dir`,
+threaded to the agent as `workingDir`); the agent's reported `workspace_root` is the
+default base, and the control plane never `git clone`s a repo onto the machine.
 
 ## Crates
 

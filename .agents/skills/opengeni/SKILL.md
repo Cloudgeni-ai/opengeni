@@ -41,6 +41,7 @@ Then open the smallest source files that answer the question:
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
 - Documents/retrieval: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`.
 - GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
+- Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; design docs under `docs/design/connected-machines/`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 - React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
@@ -83,7 +84,8 @@ Keep these concepts straight while working:
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
 - **Worker activity**: side-effect boundary where the OpenAI Agents SDK actually runs. Treat model/tool/sandbox/cloud calls as side-effectful.
-- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded.
+- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently eleven members), so never claim it is only Docker/Modal/local/none.
+- **Connected Machine**: a user's own machine (enrolled through the `agent/` Rust agent) that acts as a first-class *primary* compute target, co-equal with the managed cloud sandbox — a sibling compute target, not a backend overlay bolted onto Modal. Its enum value is `selfhosted`. A machine-targeted turn establishes a `SelfhostedSession` directly and does NOT create, lease, or bill a cloud (Modal) box; the platform mints no GitHub token for it and never clones repos onto it (the machine uses its own git auth and already owns its filesystem). Runs execute at a per-session `workingDir` (default = the agent's launch dir), not a fixed `/workspace`. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default off). See `docs/design/connected-machines/` and `references/sandbox-configuration.md`.
 - **Resources**: external context mounted or made available to a run, commonly repositories and uploaded files.
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
@@ -168,7 +170,7 @@ For sandbox pluggability or adding a backend:
 
 Describe the backend contract in terms of the OpenAI Agents SDK sandbox client/session capabilities used by OpenGeni. Add a new backend by extending contracts/config, wiring a compatible SDK sandbox client, supporting manifests/resources/resume as needed, and adding tests.
 
-For sandbox configuration work, read `references/sandbox-configuration.md`. Use it when configuring Docker/Modal/local/none, deciding which environment variables enter the sandbox, debugging resource mounts, explaining sandbox preparation profiles and lifecycle hooks, adding a sandbox backend, or checking what claims are safe for docs/marketing.
+For sandbox configuration work, read `references/sandbox-configuration.md`. Use it when configuring any sandbox backend (Docker, Modal, local, none, the cloud backends, or a Connected Machine / `selfhosted`), deciding which environment variables enter the sandbox, debugging resource mounts, explaining sandbox preparation profiles and lifecycle hooks, adding a sandbox backend, or checking what claims are safe for docs/marketing.
 
 ## Tools And MCP Discovery
 
@@ -225,6 +227,7 @@ Update this skill in the same change whenever the repo changes any of these:
 - Run lifecycle: the goal continuation loop, the no-run-length-limits principle, and the three-store session memory model (history items / run-state blob / event log).
 - Public workflow: how to create sessions, stream events, upload files, attach resources, approve/interrupt, schedule tasks.
 - Pluggability model: sandbox backend contract, MCP tool config, model provider config, object storage, GitHub integration.
+- Compute targeting: the Connected Machine (`selfhosted`) primary-compute model, the machines/enrollment routes, per-session `workingDir`, and the `targetSandboxId` create field.
 - Source layout: if important files move or names change.
 - Important "do not claim" guardrails.
 

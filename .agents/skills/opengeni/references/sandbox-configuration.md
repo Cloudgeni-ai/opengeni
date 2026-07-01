@@ -7,14 +7,18 @@ Use this as a checklist, not as a substitute for reading current code. Re-check 
 Start with these searches:
 
 ```bash
-rg -n "SandboxBackend|sandboxBackend|OPENGENI_SANDBOX|DockerSandboxClient|ModalSandboxClient|UnixLocalSandboxClient|createSandboxClient|buildManifest|s3Mount|gitRepo|collectSandboxEnvironment|sandboxEnvironmentForRun|azureCliLogin|withSandboxLifecycleHooks|GIT_ASKPASS|OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT" \
+rg -n "SandboxBackend|sandboxBackend|CAPABILITY_DESCRIPTORS|OPENGENI_SANDBOX|DockerSandboxClient|ModalSandboxClient|UnixLocalSandboxClient|createSandboxClient|buildManifest|s3Mount|gitRepo|collectSandboxEnvironment|sandboxEnvironmentForRun|azureCliLogin|withSandboxLifecycleHooks|GIT_ASKPASS|OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT" \
   packages apps docker .env.example README.md AGENTS.md
+# Connected Machine (selfhosted) plumbing:
+rg -n "selfhosted|OPENGENI_SANDBOX_SELFHOSTED_ENABLED|sandboxSelfhostedEnabled|establishSelfhostedTurnSession|resolveActiveSandboxBackend|repositoryUsesSandboxClone|toMachinePath|targetSandboxId|working_dir|workingDir" \
+  packages apps agent docs/design/connected-machines
 ```
 
 Then inspect:
 
-- Contracts: `packages/contracts/src/index.ts` for allowed backend names and resource shapes.
-- Config: `packages/config/src/index.ts` and `.env.example` for env var parsing/defaults/validation.
+- Contracts: `packages/contracts/src/index.ts` for allowed backend names, the per-backend `CAPABILITY_DESCRIPTORS` metadata table, and resource shapes.
+- Config: `packages/config/src/index.ts` and `.env.example` for env var parsing/defaults/validation (including the `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` gate).
+- Connected Machine (`selfhosted`): `apps/worker/src/activities/agent-turn.ts` (the machine-primary turn branch + `resolveActiveSandboxBackend`), `packages/runtime/src/sandbox/selfhosted/session.ts` (`toMachinePath`, per-session `workingDir`), `repositoryUsesSandboxClone` in `packages/runtime/src/index.ts` (the clone-guard), the routes/services `apps/api/src/routes/{machines,enrollments}.ts` and `apps/api/src/sandbox/{machines,enrollment}.ts`, and the `agent/` Rust crate.
 - Runtime: `packages/runtime/src/index.ts` for sandbox client creation, agent construction, manifest entries, resume behavior, resource mounts, and sandbox lifecycle hooks.
 - Worker env: `apps/worker/src/activities/environment.ts` for per-run sandbox env, GitHub App token injection, git identity, and cloud credential behavior.
 - Files: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`, and file resource handling in runtime code.
@@ -35,14 +39,16 @@ Separate sandbox configuration into these independent questions:
 
 ## Backend Selection
 
-Find the current backend enum in contracts. The current architecture supports a small set of configured backends and treats the backend implementation as an OpenAI Agents SDK sandbox client.
+Find the current backend enum (`SandboxBackend`) in `packages/contracts/src/index.ts`. Do not describe it as only Docker/Modal/local/none — the shipped enum is broader. As of this writing it has eleven members, added additively at the end (a contracts/SDK/deployment parity test pins their order): the original four (`docker`, `modal`, `local`, `none`), then six cloud backends (`daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`), then `selfhosted` (bring-your-own-compute — a user's own machine enrolled as a first-class sandbox; see the Connected Machine section below). Each backend is treated as an OpenAI Agents SDK sandbox client, and static per-backend metadata (tier, OS support, capabilities, lifetime, snapshot, workspace root, port exposure) lives in the `CAPABILITY_DESCRIPTORS` table in the same contracts file, so downstream code branches on that data, never a hard-coded backend name.
 
-Typical meanings:
+Typical meanings of the original four:
 
 - **Docker**: local container sandbox. Requires building or providing a sandbox image.
 - **Modal**: remote Modal sandbox backend through the Agents SDK extension.
-- **Local**: Unix local sandbox client, useful for development but weaker isolation.
+- **Local**: Unix local sandbox client (its `backendId` is `unix_local`), useful for development but weaker isolation.
 - **None**: no sandbox client; the agent runs without sandbox capabilities.
+
+The six cloud backends (`daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`) are additional remote sandbox providers. Read their `CAPABILITY_DESCRIPTORS` rows for the exact tier, OS support, lifetime, and per-backend workspace root before documenting them — the workspace root is not universally `/workspace` (e2b is `/home/user`, vercel is `/vercel/sandbox`).
 
 Verify exact backend names and options in current code before documenting them.
 
@@ -88,9 +94,22 @@ When explaining Modal, say OpenGeni selects the Modal sandbox backend through th
 
 `none` disables sandbox client wiring. It can still be useful for pure model/tool behavior, but do not claim filesystem/shell isolation or mounted resources when the current runtime skips sandbox construction.
 
+## Connected Machine (`selfhosted`)
+
+The `selfhosted` backend is a **Connected Machine**: a user's own machine, enrolled through the `agent/` Rust agent, that acts as a first-class *primary* compute target rather than a backend overlay on the managed sandbox. The machine itself is the box — OpenGeni cannot snapshot the user's disk, so the descriptor is `persistable:false` and there is no cold re-create; "resume" means the enrolled agent's live subject is reachable. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (`sandboxSelfhostedEnabled` in config, default off); with it off the machines/enrollment routes 404 and the enum value is effectively unreachable.
+
+A machine-targeted turn is materially different from a cloud turn. The effective compute backend is resolved once at turn start (`resolveActiveSandboxBackend`); when it is `selfhosted`, the `machinePrimary` branch in `apps/worker/src/activities/agent-turn.ts` takes over:
+
+- **No phantom cloud box.** The worker establishes a `SelfhostedSession` directly (`establishSelfhostedTurnSession`) and does NOT call `resumeBoxForTurn` — no Modal box is created, leased, or billed. The warm-seconds meter keys off the *effective* backend, so a machine accrues zero cloud warm-time (`selfhosted` has no configured warm rate).
+- **No OpenGeni-minted token on the machine.** `sandboxEnvironmentForRun` is called with `skipGitHubToken` for a selfhosted-effective turn (`apps/worker/src/activities/environment.ts`), so the platform mints no GitHub App installation token and injects no git auth env. The machine uses its OWN git credentials. The token also never structurally crosses the wire — selfhosted exec does not forward the run environment onto the machine.
+- **No repo clone onto the machine.** `repositoryUsesSandboxClone` (`packages/runtime/src/index.ts`) returns false for a selfhosted effective backend, so the repository-clone lifecycle hook is skipped. A connected machine already owns its filesystem, and the clone hook would otherwise write onto the user's real disk — so the platform must never `git clone` there.
+- **Per-session working directory, not `/workspace`.** The machine runs the session under `sessions.working_dir` (added by migration `0027_session_working_dir.sql`). `packages/runtime/src/sandbox/selfhosted/session.ts` keeps a virtual `/workspace` root purely for manifest/root-delta parity with the cloud path, then `toMachinePath` re-anchors that virtual frame onto the chosen host path. An empty/NULL `workingDir` (the default) is a byte-identical no-op that resolves to the agent's launch workspace root.
+
+Targeting a machine at session creation uses `CreateSessionRequest.targetSandboxId` (the enrolled machine's sandbox id) plus optional `workingDir` (validated in `apps/api/src/domain/sessions.ts`); `workingDir` supplied without `targetSandboxId` is a 422. The dashboard/enrollment surfaces are `apps/api/src/routes/machines.ts` and `enrollments.ts` over `apps/api/src/sandbox/{machines,enrollment}.ts`, and the opt-in UI lives at the `@opengeni/react/machines` subpath (the package root stays a clean sandbox-only default).
+
 ## Workspace And Resources
 
-Find the current workspace root in runtime manifest code. The current design uses `/workspace` for sandboxed runs.
+Find the current workspace root in runtime manifest code and in the per-backend `CAPABILITY_DESCRIPTORS` rows. `/workspace` is the default for the container/cloud backends, but it is NOT universal: some backends declare a different root (e.g. e2b `/home/user`, vercel `/vercel/sandbox`), and a Connected Machine (`selfhosted`) runs at a per-session `workingDir` re-anchored onto the machine's real launch directory rather than a fixed `/workspace` (see the Connected Machine section above).
 
 Common resource behavior:
 
@@ -155,7 +174,7 @@ Current guidance:
 There are two GitHub credential paths:
 
 1. The `github` sandbox preparation profile may copy existing local `GH_TOKEN`/`GITHUB_TOKEN` and raw host git identity vars.
-2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, OpenGeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub.
+2. GitHub App repository resources can cause the worker to mint short-lived installation tokens scoped to selected repositories. For repository resources that need the clone-hook path, OpenGeni keeps GitHub credentials out of the persisted sandbox manifest and runs a sandbox lifecycle hook that clones the selected repositories inside the sandbox before the agent starts. It may also inject git/gh-compatible env/config for that run when the sandbox itself needs to use GitHub. This entire GitHub-App path is SKIPPED when the turn's effective backend is a Connected Machine (`selfhosted`): `sandboxEnvironmentForRun` runs with `skipGitHubToken` (no installation token is minted, no git auth env is injected) and `repositoryUsesSandboxClone` returns false (no clone hook). The machine uses its own git credentials and already holds its own checkout — the platform must not clone onto or authenticate on the user's real disk (see the Connected Machine section).
 
 Explicit `OPENGENI_GIT_*` settings can set sandbox git author/committer identity independently of ambient host env. Raw host `GIT_AUTHOR_*` and `GIT_COMMITTER_*` values should only enter through the `github` preparation profile or `OPENGENI_SANDBOX_ENV_ALLOWLIST`.
 
