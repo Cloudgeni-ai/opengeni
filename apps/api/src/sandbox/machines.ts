@@ -126,16 +126,21 @@ async function probeEnrollment(
 }
 
 /**
- * Resolve the dashboard STATE of an online machine. A machine that is online but
- * (a) has no display → `display_unavailable`; (b) is displayed but whole-machine
- * /screen-control consent is not acked → `consent_required`. Otherwise the
- * liveness state (online/reconnecting/offline) is the state. This mirrors the
- * desktop/computer-use degradation reasons in the selfhosted capability
- * negotiation so the dashboard pill and the dock agree.
+ * Resolve the dashboard STATE of a machine. State reflects REACHABILITY + the
+ * VIEW plane only: an online machine with no display → `display_unavailable` (no
+ * desktop stream, but compute — exec/fs/git/terminal — still works); otherwise
+ * the liveness state (online/reconnecting/offline). It deliberately does NOT fold
+ * in screen-control consent: a displayed machine can be VIEWED (read-only) and
+ * used for compute regardless of `allowScreenControl` — only INPUT (ComputerUse /
+ * an interactive stream) needs that consent, which is a per-capability concern
+ * carried by the separate `allowScreenControl` field (surfaced in the viewer's
+ * Take-control affordance), NOT a blocking machine state. This mirrors the
+ * view/control split in the selfhosted capability negotiation so the dashboard
+ * pill, the dock, and the "Run on" picker agree (a machine is never wrongly
+ * un-selectable just because its input isn't consented).
  */
 function machineStateFor(
   liveness: "online" | "reconnecting" | "offline",
-  consented: boolean,
   hasDisplay: boolean,
 ): MachinesResponse["machines"][number]["state"] {
   if (liveness !== "online") {
@@ -143,9 +148,6 @@ function machineStateFor(
   }
   if (!hasDisplay) {
     return "display_unavailable";
-  }
-  if (!consented) {
-    return "consent_required";
   }
   return "online";
 }
@@ -222,7 +224,7 @@ export async function listMachines(
       continue;
     }
     const probe = await probeEnrollment(services, workspaceId, enrollment);
-    const state = machineStateFor(probe.state, probe.consented, probe.hasDisplay);
+    const state = machineStateFor(probe.state, probe.hasDisplay);
 
     // sharedSessionCount = the lease refcount for this machine's group. The
     // selfhosted sandbox id IS the lease group key (maxSandboxes:1, N sessions

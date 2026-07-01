@@ -229,15 +229,18 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(sessBody.machines.length).toBe(2);
   }, 90_000);
 
-  test("state matrix: consent_required when display present but screen-control not acked; offline when no responder", async () => {
+  test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when no responder", async () => {
     if (!available) return;
-    // consent_required: has a display but allowScreenControl=false (consent not acked).
+    // A displayed machine whose SCREEN CONTROL isn't consented is still ONLINE:
+    // compute + read-only viewing work; only INPUT is withheld (surfaced via the
+    // separate allowScreenControl field, not by degrading the machine state).
     {
       const { accountId, workspaceId, bus } = await seed({ allowScreenControl: false, hasDisplay: true });
       const app = appFor(bus);
       const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
-      const body = await (await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).json() as { machines: Array<{ state: string }> };
-      expect(body.machines[0]!.state).toBe("consent_required");
+      const body = await (await app.request(`/v1/workspaces/${workspaceId}/machines`, { headers: { authorization: auth } })).json() as { machines: Array<{ state: string; allowScreenControl: boolean }> };
+      expect(body.machines[0]!.state).toBe("online");
+      expect(body.machines[0]!.allowScreenControl).toBe(false);
     }
     // offline: online=false → no responder → the probe misses; lastSeenAt is recent
     // BUT we clear it so it is hard-offline.
