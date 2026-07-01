@@ -1,10 +1,10 @@
 import {
-  StreamFrame,
-  StreamKind,
-  StreamOpen,
-  StreamOpenAck,
-  StreamRole,
-} from "@opengeni/agent-proto";
+  decodeStreamFrame,
+  decodeStreamOpenAck,
+  encodeStreamOpen,
+  STREAM_KIND_DESKTOP,
+  STREAM_ROLE_CLIENT,
+} from "../lib/relay-wire";
 import type { DesktopConnectionState, DesktopStreamCapability } from "@opengeni/sdk";
 import { type RefObject, useEffect, useRef, useState } from "react";
 
@@ -129,7 +129,7 @@ export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRel
       channelId: string;
       workspaceId: string;
       agentId: string;
-      kind: StreamKind;
+      kind: number;
       port: number;
     };
     try {
@@ -138,7 +138,7 @@ export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRel
         channelId: u.searchParams.get("channel") ?? "",
         workspaceId: u.searchParams.get("ws") ?? "",
         agentId: u.searchParams.get("agent") ?? "",
-        kind: StreamKind.STREAM_KIND_DESKTOP,
+        kind: STREAM_KIND_DESKTOP,
         port: Number(u.searchParams.get("port") ?? "0"),
       };
     } catch (cause) {
@@ -230,12 +230,12 @@ export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRel
 
     const onOpen = () => {
       if (disposed) return;
-      const body = StreamOpen.encode({
+      const body = encodeStreamOpen({
         channel,
         token: token ?? "",
-        role: StreamRole.STREAM_ROLE_CLIENT,
+        role: STREAM_ROLE_CLIENT,
         resumeFromSeq: "0",
-      }).finish();
+      });
       try {
         ws.send(datagram(TAG_OPEN, body).buffer as ArrayBuffer);
       } catch {
@@ -252,9 +252,9 @@ export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRel
       const tag = buf[0];
       const rest = buf.subarray(1);
       if (tag === TAG_OPENACK) {
-        let ack: ReturnType<typeof StreamOpenAck.decode>;
+        let ack: ReturnType<typeof decodeStreamOpenAck>;
         try {
-          ack = StreamOpenAck.decode(rest);
+          ack = decodeStreamOpenAck(rest);
         } catch {
           return;
         }
@@ -277,9 +277,9 @@ export function useRelayFrameStream(options: UseRelayFrameStreamOptions): UseRel
         // Accepted — stay "connecting" until the first frame paints.
         acked = true;
       } else if (tag === TAG_FRAME) {
-        let fr: ReturnType<typeof StreamFrame.decode>;
+        let fr: ReturnType<typeof decodeStreamFrame>;
         try {
-          fr = StreamFrame.decode(rest);
+          fr = decodeStreamFrame(rest);
         } catch {
           return;
         }

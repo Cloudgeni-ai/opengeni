@@ -44,7 +44,7 @@
     "demo:build": "vite build demo"
   },
   "dependencies": {
-    "@opengeni/agent-proto": "workspace:*",
+    "@bufbuild/protobuf": "^2.2.0",
     "@opengeni/sdk": "workspace:*",
     "clsx": "^2.1.1",
     "lucide-react": "^1.8.0",
@@ -111,6 +111,7 @@
   },
   "devDependencies": {
     "@codemirror/lang-css": "^6.3.1",
+    "@opengeni/agent-proto": "workspace:*",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/lang-json": "^6.0.2",
