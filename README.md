@@ -4,6 +4,8 @@ OpenGeni is a self-hostable managed agent service for long-running workspace and
 
 It provides a session-based API for creating, steering, observing, interrupting, and replaying agent runs. The included React app is one client for that API; other products can call the same API directly and let OpenGeni own durable session state, event history, approvals, and final outputs.
 
+Every session picks where it runs. A **managed sandbox** (a fresh cloud box OpenGeni provisions and tears down) and a **Connected Machine** (a computer you enroll — your laptop, a build server, a GPU box) are co-equal, first-class compute targets. A machine-targeted session runs directly on your hardware, under your own files and your own git credentials, with no cloud box in the loop.
+
 If you want to try the managed version, go to [app.opengeni.ai](https://app.opengeni.ai).
 
 ## What It Does
@@ -11,7 +13,8 @@ If you want to try the managed version, go to [app.opengeni.ai](https://app.open
 - Runs OpenAI Agents SDK agents behind a durable API.
 - Streams live session events over SSE while storing the replayable event log in Postgres.
 - Coordinates long-running work with Temporal signals for follow-ups, approvals, and interrupts.
-- Executes agent tools in sandbox backends such as Docker, Modal, local, or none.
+- Runs each session on a chosen compute target: a managed sandbox (Docker, Modal, local, cloud provider, or none) or a **Connected Machine** you enroll — with a per-session working folder on that machine.
+- Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no OpenGeni-minted token is pushed to it.
 - Attaches repositories, uploaded files, and document-search tools to sessions.
 - Uses a GitHub App integration for scoped repository access.
 - Supports document upload, indexing, retry, and semantic search with pgvector.
@@ -59,8 +62,12 @@ flowchart LR
     Temporal["Temporal<br/>orchestration and signals"]
     Worker["Worker<br/>OpenAI Agents SDK harness"]
     NATS["NATS Core<br/>live fanout"]
-    Sandbox["Sandbox backend<br/>Docker, Modal, cloud, or self-hosted"]
+    Control["NATS control plane<br/>machine exec/RPC"]
+    Relay["Stream relay<br/>pty/desktop frames"]
+    Sandbox["Managed sandbox<br/>Docker, Modal, cloud, or none"]
   end
+
+  Machine["Connected Machine<br/>your enrolled computer"]
 
   Web --> API
   Service --> API
@@ -73,7 +80,12 @@ flowchart LR
   Worker <--> DB
   Worker --> NATS
   Worker <--> Sandbox
+  Worker <--> Control
+  Machine -. dials out .-> Control
+  Machine -. dials out .-> Relay
 ```
+
+Managed sandboxes are provisioned inside the deployment. A Connected Machine is a computer you own: its agent dials **out** to the NATS control plane (for exec and control RPC) and to the stream relay (for terminal and desktop frames), so nothing has to be routable to the machine. Machine-target support is off by default and gated by an operator flag; see [Connected Machines](#connected-machines).
 
 Postgres is the durable source of truth. NATS is only the realtime fanout bus. If an API instance or SSE client misses live events, the API backfills from Postgres by event sequence.
 
@@ -91,7 +103,8 @@ For a map of every app and package and how they fit together, see [docs/architec
 - NATS Core realtime bus
 - MinIO for local S3-compatible file storage and Azure Blob, AWS S3, or GCS for production object storage
 - OpenAI Agents SDK
-- Pluggable sandbox backends: Docker, Modal, local, and cloud providers, plus self-hosted bring-your-own-compute (see [docs/architecture.md](docs/architecture.md) for the full list)
+- Two co-equal compute targets: managed sandboxes (Docker, Modal, local, cloud providers, or none) and Connected Machines — computers you enroll and run sessions on directly (see [Connected Machines](#connected-machines) and [docs/architecture.md](docs/architecture.md) for the full list)
+- A Rust agent + stream relay for Connected Machines (`agent/crates`), served to hosts by the control plane
 
 ## Agent Guides
 
@@ -208,12 +221,57 @@ Production operators should use managed services, existing endpoints, or officia
 1. Start the stack with `bun run dev`.
 2. Open `http://127.0.0.1:3000`.
 3. Choose model and reasoning settings.
-4. Optionally attach repositories, files, or document search.
-5. Send the first task.
-6. Watch messages, tool calls, approvals, sandbox output, and final status.
-7. Send follow-ups, approve or reject tool requests, or interrupt the session.
+4. Answer **Where should this run?** — pick **Managed Sandbox** (a fresh box, set up for you) or **Connected Machine** (run on your own computer). Machine is offered only when the feature is enabled and you have at least one enrolled machine.
+5. For a Connected Machine, pick the machine and its **Project / folder** — the per-session working directory the agent runs under (the machine root / its launch directory, or a subdirectory). A managed sandbox needs no folder choice.
+6. Optionally attach repositories, files, or document search.
+7. Send the first task.
+8. Watch messages, tool calls, approvals, sandbox output, and final status. The session header's **Run on** control shows the active target and, when machines are enabled, lets you swap targets mid-session.
+9. Send follow-ups, approve or reject tool requests, or interrupt the session.
 
 Sessions are durable. Reloading the browser or opening the session URL later replays event history from Postgres and reconnects to live events.
+
+### Enrolling a Connected Machine
+
+When Connected Machines are enabled, enroll one from the workspace **Machines** dashboard (or from the composer's machine picker):
+
+1. Click **Enroll a machine** and run the printed install one-liner on the computer you want to connect. It pulls the OpenGeni agent binary from the control plane and starts it.
+2. Approve the machine. Two paths exist:
+   - **Device flow (consent):** the agent prints a short code and a verification link; you open it and click **Grant** in the workspace to approve that specific machine. Approval is the loud, explicit consent step, and it records who approved.
+   - **Zero-click enroll token:** mint a short-lived enroll token in the workspace ahead of time; the agent redeems it headlessly (the token is the grant, no per-machine click) — the path for scripted or fleet enrollment.
+3. The machine appears in the dashboard with its status, OS/arch, and whether it offers a screen. You can revoke it at any time. Screen control is a separate opt-in granted at approval.
+
+The agent dials **out** to the control plane, so the machine needs no inbound network exposure. See [Connected Machines](#connected-machines) for how an operator turns the feature on.
+
+## Connected Machines
+
+A Connected Machine is a first-class, co-equal alternative to the managed sandbox: instead of a cloud box OpenGeni provisions, a session runs on a computer you enroll and own.
+
+How a machine session differs from a managed sandbox:
+
+- **Runs directly on your machine.** A machine-targeted turn establishes the session on the enrolled machine directly — no cloud box is created or billed for that turn.
+- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni injects a short-lived, run-scoped GitHub App token; for a machine that injection is skipped.)
+- **Your files, not a clone.** OpenGeni does not clone selected repositories onto the machine's real disk; the machine already owns its filesystem. The agent works in the per-session working folder you chose.
+- **Per-session working folder.** Each session names a working directory on the machine (the machine root, or a subdirectory); it is the cwd base for the agent's exec, terminal, and file dock.
+
+### Targeting machines from a custom client
+
+Any client that speaks the OpenGeni API can target a machine:
+
+- `POST /v1/workspaces/:workspaceId/sessions` (and the `session_create` MCP tool) accept `targetSandboxId` (the enrolled machine to run on) and `workingDir` (the per-session folder; only valid alongside `targetSandboxId`, and omitted means the machine's default working root).
+- The React SDK ships a `@opengeni/react/machines` subpath with the machines dashboard, enrollment device-flow and consent components, status surfacing, and a `useMachines` hook.
+- Enrollment is a small REST surface: agent-side device `start`/`poll` and headless token `exchange`, plus user-authenticated `approve`/`deny`, enroll-token mint, list, and revoke. All of it returns `404` while the feature is disabled.
+
+### Enabling Connected Machines (operators)
+
+The feature is **off by default**. While off, every enrollment and machine route returns `404` and the machine backend is inert — the surface does not exist for that deployment. Turning it on is provider-neutral:
+
+- **The enable flag.** Set `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`. This is the keystone that reveals the enrollment routes and activates the machine backend.
+- **The relay component.** Deploy the stream relay (`opengeni-relay`, in `agent/crates`) as its own workload. A machine's agent dials out to it for terminal and desktop frames. Configure its listen address (`OPENGENI_RELAY_BIND`) and token secret (`OPENGENI_RELAY_TOKEN_SECRET`).
+- **Control-plane endpoints handed to the agent.** Point the control plane at the NATS control plane the agent dials (`OPENGENI_SELFHOSTED_NATS_URL`) and the relay's base URL (`OPENGENI_SELFHOSTED_RELAY_URL`); these are returned to the agent as connect info at enrollment.
+- **Signing secrets.** `OPENGENI_ENROLLMENT_SIGNING_SECRET` signs the enrollment credential the agent presents back; `OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET` signs the agent's relay producer token (the relay verifies it with the same secret, and it falls back to the stream-token secret when unset). Without these the credential and stream planes degrade gracefully rather than failing boot. Keep them in the deployment secret store; never log them.
+- **Agent binary hosting.** The control plane serves the agent binary and install script under `/agent/*`; the install one-liner pulls from there. Nothing else needs to host it.
+
+Provision NATS and the relay with your own managed services or upstream charts, as the rest of the stack recommends. Do not expose the machine feature without the relay-token and enrollment-signing secrets in place and rate limits on the enrollment routes.
 
 ## GitHub App Setup
 
@@ -287,6 +345,18 @@ Document endpoints:
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents`
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/search`
 - `POST /v1/workspaces/:workspaceId/document-bases/:baseId/documents/:documentId/reindex`
+
+Connected Machine endpoints (all return `404` unless `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true`):
+
+- `POST /v1/enrollments/device/start` (agent-side, unauthenticated)
+- `POST /v1/enrollments/device/poll` (agent-side, unauthenticated)
+- `POST /v1/enrollments/device/lookup`
+- `POST /v1/enrollments/token/exchange` (agent-side headless enroll-token redemption)
+- `POST /v1/workspaces/:workspaceId/enrollments/device/approve`
+- `POST /v1/workspaces/:workspaceId/enrollments/device/deny`
+- `POST /v1/workspaces/:workspaceId/enrollments/token` (mint a headless enroll token)
+- `GET /v1/workspaces/:workspaceId/enrollments`
+- `POST /v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke`
 
 ## Testing
 

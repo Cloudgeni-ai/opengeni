@@ -5,6 +5,16 @@ This root creates a cleanup-friendly AWS substrate for the Helm chart:
 - EKS cluster and managed node group.
 - ECR repositories scoped under `name_prefix` for API, worker, and web images.
 - S3 bucket for `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3`.
+
+Connected Machines (`OPENGENI_SANDBOX_BACKEND=selfhosted`) add one more deployed
+component, the `opengeni-relay` stream relay. It is a separate image, so an
+operator enabling Connected Machines must also provision a container repository
+for it (this root creates the API/worker/web repositories only). The relay pairs
+each channel's producer and consumer in a per-replica in-memory registry, so its
+public wss ingress must route both dials for a channel to the same replica
+(consistent-hash / session affinity keyed on the channel) whenever more than one
+relay replica runs. See `docs/deployment.md` (Connected Machines) for the full
+relay/NATS/secret wiring.
 - AWS Secrets Manager runtime secret placeholder.
 - Optional RDS PostgreSQL when `postgres.mode = "managed"`.
 - `temporal.mode = "officialChart"` output wiring for the stack-wrapper managed upstream Temporal chart, or `external` for Temporal Cloud/customer endpoints.

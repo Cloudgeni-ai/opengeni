@@ -10,6 +10,7 @@ Use this reference to orient source discovery for OpenGeni deployment work. It i
 - Provider substrate examples: `deploy/terraform/azure`, `deploy/terraform/aws`, and `deploy/terraform/gcp`.
 - Optional stack wrappers for upstream platform charts: `deploy/stacks`.
 - Validation scripts: `scripts/deployment-preflight.ts`, `scripts/deployment-stack.ts`, `scripts/deployment-runtime-artifacts.ts`, `scripts/deployment-temporal-values.ts`, and `scripts/deployment-conformance.ts`.
+- Connected Machine (`selfhosted` backend) surfaces: the stream relay edge `agent/crates/opengeni-relay`; the enrollment routes `apps/api/src/routes/enrollments.ts` over `apps/api/src/sandbox/enrollment.ts`; the agent install/binary routes `apps/api/src/routes/install.ts` plus the committed `agent/install`; the relay/NATS chart templates under `deploy/helm/opengeni/templates` (`relay-*.yaml`, `nats-*.yaml`) and the `relay`/`nats`/`selfhosted` blocks in `deploy/helm/opengeni/values.yaml`; the `@opengeni/react/machines` client subpath.
 
 If paths move, rediscover by searching for deployment profile names, `DeploymentContract`, `stackPlanFor`, `deployment:preflight`, `deployment:stack`, Helm values files, and Terraform roots.
 
@@ -74,6 +75,45 @@ When planning a deployment, make these choices explicitly from current source:
 - Execution: real model provider credentials and a real sandbox backend unless the goal is smoke only.
 - Edge: ingress, TLS, auth boundary, metrics exposure, tracing/logging, and secret delivery.
 - Product posture: `access.mode` (`local`, `configured`, `managed`), `billing.mode`, `entitlements.mode`, and `usageLimits.mode`. Keep this orthogonal to cloud profile names such as `azure-managed`.
+
+## Connected Machines Versus Self-Hosted Deployment
+
+"Self-hosted" is overloaded in this repo — keep the two meanings distinct:
+
+- **Self-hosted DEPLOYMENT**: an operator runs the whole OpenGeni product
+  (API/web/worker + Postgres/NATS/Temporal/object storage) on their own
+  infrastructure. This is what every profile above and `docs/deployment.md`
+  describe.
+- **Connected Machine (user-owned compute)**: the `selfhosted` sandbox backend
+  (`OPENGENI_SANDBOX_BACKEND=selfhosted`; also the 11th entry in the
+  `SandboxBackend` enum and the `selfhosted` `MachineKind`). A user enrolls their
+  own computer as a first-class primary compute target. A machine-targeted turn
+  establishes the machine session directly and routes tool execution to the
+  agent on that machine over NATS request/reply; the platform creates no cloud
+  box, distributes no platform-minted git token (the machine uses its own git
+  credentials), and does not clone repos onto it. Optional and OFF by default.
+
+Operator surfaces the Connected Machine feature adds, all gated by
+`OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default off → enrollment routes 404, the
+backend is inert):
+
+- **The stream relay** (`opengeni-relay` image, `relay.enabled=true`): the wss
+  channel a machine's agent dials OUT to. It splices the agent's producer stream
+  and the viewer's consumer stream in a per-replica in-memory registry, so a
+  multi-replica relay behind an L7 ingress needs channel affinity (both dials for
+  a channel must reach the same replica). It holds no cluster state and makes no
+  cluster egress.
+- **NATS with auth-callout** (`nats.authCallout` or an external NATS running the
+  same `deploy/nats/auth-callout.conf`): the per-workspace-scoped control plane
+  the agent authenticates to.
+- **Agent-binary hosting from the control plane**: the API serves the install
+  script and the per-deploy agent binary at auth-exempt paths (`/install.sh`,
+  `/install.ps1`, `/agent/*`; `apps/api/src/routes/install.ts`), so the install
+  one-liner pulls the exact agent build matching the running control plane, with a
+  public release archive as fallback/self-update.
+- **Runtime-secret + non-secret wiring**: the relay/enrollment/NATS token secrets
+  and the `OPENGENI_SELFHOSTED_*` URLs/names (see the `values.yaml` `secret:`
+  comment and `packages/config`).
 
 ## Verification Meaning
 

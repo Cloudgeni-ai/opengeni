@@ -15,6 +15,15 @@ This Terraform root module is the Azure reference substrate for OpenGeni. It is 
 - ACR pull role assignment for AKS kubelet identity.
 - Optional AKS Microsoft Defender attachment to an existing Log Analytics workspace.
 
+Connected Machines (`OPENGENI_SANDBOX_BACKEND=selfhosted`) add one more deployed
+component, the `opengeni-relay` stream relay. Its image is pushed to the same
+Azure Container Registry as the API/worker/web images (no extra registry
+resource is required). The relay pairs each channel's producer and consumer in a
+per-replica in-memory registry, so its public wss ingress must route both dials
+for a channel to the same replica (consistent-hash / session affinity keyed on
+the channel) whenever more than one relay replica runs. See `docs/deployment.md`
+(Connected Machines) for the full relay/NATS/secret wiring.
+
 ## Phases
 
 Use `deployment_phase = "bootstrap"` to create cloud substrate before runtime dependencies are known. Bootstrap mode does not require Temporal, object storage, or external Postgres endpoints unless those resources are being created by Terraform.

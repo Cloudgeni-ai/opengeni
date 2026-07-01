@@ -158,6 +158,18 @@ The sandbox image remains separate:
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
 ```
 
+The Connected Machine stream relay is a separate deployed component built from
+the `agent/` Cargo workspace. It is only needed when Connected Machines are
+enabled (see [Connected Machines](#connected-machines)):
+
+```bash
+docker build -f agent/crates/opengeni-relay/Dockerfile -t opengeni-relay agent
+```
+
+For production Helm releases that enable Connected Machines, pin the
+`opengeni-relay` image by digest as well as tag, the same way API, worker, web,
+and migration images are pinned.
+
 ## Helm
 
 Render the chart with an existing secret:
@@ -335,6 +347,117 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+
+## Connected Machines
+
+A Connected Machine is a user-owned computer (a laptop, workstation, or server,
+including macOS) enrolled as a first-class primary compute backend
+(`OPENGENI_SANDBOX_BACKEND=selfhosted`). When a session turn targets a Connected
+Machine, the platform establishes the machine session directly and routes tool
+execution to the agent running on that machine over a NATS request/reply control
+plane. No cloud sandbox box is created for that turn, no platform-minted GitHub
+token is distributed to the machine (it uses its own local git credentials), and
+repositories are not cloned onto it by the platform; the working directory is
+chosen per session.
+
+This is a separate, optional deployment surface. It is gated OFF by default;
+existing deployments are completely unaffected unless an operator enables it.
+
+### Enable flag
+
+The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default
+`false`). While it is off, the enrollment routes return `404` — the surface does
+not exist for the deployment — and the `selfhosted` backend is inert.
+
+### Components to deploy
+
+Enabling Connected Machines adds two net-new deployed components plus their
+ingress and secret wiring:
+
+- **Stream relay** (`opengeni-relay` image): a stateless wss byte-pump that
+  splices the agent's producer stream and the viewer's consumer stream for a
+  channel (pty/desktop). Enable with `relay.enabled=true`; the chart then renders
+  the relay Deployment, Service, HPA, PodDisruptionBudget, NetworkPolicy, and —
+  when observability is on — a ServiceMonitor. The relay holds no cluster state
+  and makes no cluster egress; both the agent and the viewer dial IN through the
+  ingress.
+- **NATS with auth-callout**: the machine's agent dials a NATS websocket to reach
+  the request/reply control plane, authenticated per workspace by a NATS
+  auth-callout responder. Use the chart-managed NATS fixture with
+  `nats.authCallout.enabled=true` for preview/smoke, or fold the same
+  `deploy/nats/auth-callout.conf` config into an external/production NATS
+  deployment (`nats.enabled=false`).
+
+Both the relay and the NATS websocket need public wss ingress hosts (for example
+`relay.<domain>` and `nats.<domain>`) with the long-lived-stream ingress
+annotations (read/send timeouts of at least `3600` seconds, buffering off). Flip
+`selfhosted.enabled=true` together with `relay.enabled=true` and the NATS
+callout.
+
+### Ingress channel affinity
+
+The relay pairs a channel's producer and consumer in a per-replica in-memory
+registry, so both dials for a given channel must reach the SAME relay replica.
+When running more than one relay replica behind an L7 ingress, configure the
+ingress to route both dials for a channel to the same backend (consistent-hash or
+session affinity keyed on the channel); otherwise a producer and consumer can
+land on different replicas and never pair.
+
+### Runtime-secret keys
+
+Set these in the runtime secret (never a committed values file) when enabling
+Connected Machines:
+
+- `OPENGENI_STREAM_TOKEN_SECRET` — HMAC the relay verifies the viewer (`ogs_`)
+  stream token with.
+- `OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET` — HMAC the relay verifies the agent
+  (`ogr_`) producer token with; may be omitted to reuse
+  `OPENGENI_STREAM_TOKEN_SECRET` for both planes.
+- `OPENGENI_ENROLLMENT_SIGNING_SECRET` — HMAC the control plane signs the
+  enrollment bearer with (falls back to `OPENGENI_DELEGATION_SECRET`).
+- `OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED`,
+  `OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY`,
+  `OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD`, and
+  `OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD` — the NATS auth-callout account
+  seed/public key and the control/callout logins.
+
+Non-secret wiring goes in config/values: `OPENGENI_SELFHOSTED_NATS_URL` and
+`OPENGENI_SELFHOSTED_RELAY_URL` (the public wss URLs the agent dials, matching the
+ingress hosts) plus the callout account/user names. The relay's non-secret tuning
+knobs are `OPENGENI_RELAY_RING_FRAMES`, `OPENGENI_RELAY_SPLICE_BUFFER`,
+`OPENGENI_RELAY_RATE_BURST_BYTES`, `OPENGENI_RELAY_RATE_BYTES_PER_SEC`, and
+`OPENGENI_RELAY_PAIR_TIMEOUT_SECS`. A missing token secret makes the relay reject
+every connection (fail-closed).
+
+### Agent binary distribution
+
+The machine agent is served from the control plane itself. The API exposes the
+install script and the per-deploy agent binary at auth-exempt paths
+(`/install.sh`, `/install.ps1`, `/uninstall.sh`, and `/agent/*`), so
+`curl -fsSL https://<host>/install.sh | sh` installs the exact agent build that
+matches the running control plane (the per-SHA binary baked into the API image),
+with no dependency on an external CDN. A public release archive is the fallback
+for other OS/arch assets and the self-update channel. Route these paths (and an
+optional `get.<domain>` host) to the `api` service in the ingress.
+
+### Enrolling a machine
+
+Enrollment binds a machine to a workspace and requires the enable flag. Two paths
+are supported:
+
+- **Device flow**: the agent starts an enrollment
+  (`/v1/enrollments/device/start`) and a workspace member holding
+  `enrollments:manage` approves it at the consent page
+  (`/v1/workspaces/:workspaceId/enrollments/device/approve`).
+- **Zero-click enroll token**: a workspace member holding `enrollments:manage`
+  mints a short-TTL enroll token
+  (`/v1/workspaces/:workspaceId/enrollments/token`) that the agent redeems
+  headlessly (`/v1/enrollments/token/exchange`) with no human approval — suited
+  to fleet or headless provisioning.
+
+Client SDKs surface the machine dashboard and enrollment flow through the
+`@opengeni/react/machines` subpath, and target a session at a specific machine
+with `CreateSessionRequest.targetSandboxId` (plus an optional `workingDir`).
 
 ## Security Boundary
 
