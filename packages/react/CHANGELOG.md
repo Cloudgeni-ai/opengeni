@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.8.0
+
+### Patch Changes
+
+- 3d708b5: Add compact event replay support for history windows and switch React session-event loading to capped compact pages with coalesced-delta resume cursors.
+- Updated dependencies [3d708b5]
+  - @opengeni/sdk@0.8.0
+
 ## 0.7.0
 
 ### Minor Changes
