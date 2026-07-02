@@ -159,11 +159,16 @@ function TimelineGroupView({
   renderMessageText,
   onOpenSession,
   toolRegistry,
+  insideTurn = false,
 }: {
   group: TimelineGroup;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   toolRegistry: ToolRegistry;
+  /** Rendering inside an expanded turn group: the outer chip already owns the
+      failure surface, so nested chips stay tinted but quiet (no repeated
+      failure text, no auto-open) — one loud error, N calm sub-expands. */
+  insideTurn?: boolean;
 }) {
   switch (group.kind) {
     case "activity":
@@ -171,8 +176,8 @@ function TimelineGroupView({
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
-          failureText={group.failureText}
-          defaultOpen={group.outcome === "failed" ? true : undefined}
+          failureText={insideTurn ? undefined : group.failureText}
+          defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
         >
           <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
         </TurnSummary>
@@ -189,7 +194,9 @@ function TimelineGroupView({
           durationMs={durationBetween(group.startedAt, group.endedAt)}
           defaultOpen={group.outcome === "failed" ? true : undefined}
         >
-          <div className="flex flex-col gap-4">
+          {/* The body wears the timeline's rail language (matching ActivityRail)
+              so nested chips read as contained by the turn, not as siblings. */}
+          <div className="flex flex-col gap-4 border-l-2 border-og-border pl-3 sm:pl-4">
             {group.groups.map((child) => (
               <TimelineGroupView
                 key={timelineGroupKey(child)}
@@ -197,6 +204,7 @@ function TimelineGroupView({
                 renderMessageText={renderMessageText}
                 onOpenSession={onOpenSession}
                 toolRegistry={toolRegistry}
+                insideTurn
               />
             ))}
           </div>

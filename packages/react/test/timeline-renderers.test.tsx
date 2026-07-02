@@ -176,6 +176,35 @@ describe("MessageTimeline — settled turn folding", () => {
 
     await r.unmount();
   });
+
+  test("nested chips inside a failed turn stay quiet — the outer chip owns the failure", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy preview" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "helm dep update" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.delta", { text: "Dependencies ready, deploying now." }),
+      timelineEvent("agent.message.completed", { text: "Dependencies ready, deploying now." }),
+      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "helm upgrade preview ./chart" } }),
+      timelineEvent("turn.failed", { error: "provider down" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const triggers = turnSummaryTriggers(r.container);
+    // The open outer chip is the one loud failure surface; nested cluster chips
+    // are closed and never repeat the failure text.
+    const withFailure = triggers.filter((t) => (t.textContent ?? "").includes("provider down"));
+    expect(withFailure).toHaveLength(1);
+    expect(withFailure[0]?.getAttribute("data-state")).toBe("open");
+    const nested = triggers.filter((t) => t !== withFailure[0]);
+    expect(nested.length).toBeGreaterThan(0);
+    for (const chip of nested) {
+      expect(chip.getAttribute("data-state")).toBe("closed");
+    }
+
+    await r.unmount();
+  });
 });
 
 /* ---- Issue 2: multi-file apply_patch count ------------------------------ */
