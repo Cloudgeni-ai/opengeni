@@ -164,8 +164,10 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       const revoked = await client.deleteApiKey(workspaceId, apiKeyId);
       setApiKeys((current) => current.map((key) => key.id === revoked.id ? revoked : key));
       toast.success("API key revoked");
+      return true;
     } catch (error) {
       toast.error("Failed to revoke API key", { description: error instanceof Error ? error.message : String(error) });
+      return false;
     } finally {
       setBusy(false);
     }
@@ -350,11 +352,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           title={`Revoke API key “${revokingKey?.name ?? ""}”?`}
           description={`Any product calling OpenGeni with ${revokingKey?.prefix ?? ""}… stops working immediately. This can't be undone.`}
           confirmLabel="Revoke key"
-          onConfirm={async () => {
-            if (revokingKey) {
-              await revokeKey(revokingKey.id);
-            }
-          }}
+          onConfirm={() => (revokingKey ? revokeKey(revokingKey.id) : false)}
         />
 
         {/* Danger zone */}
@@ -471,8 +469,10 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
       await client.removeWorkspaceMember(workspaceId, member.subjectId);
       setMembers((current) => current.filter((existing) => existing.subjectId !== member.subjectId));
       toast.success("Member removed");
+      return true;
     } catch (caught) {
       toast.error("Failed to remove member", { description: caught instanceof Error ? caught.message : String(caught) });
+      return false;
     } finally {
       setBusy(false);
     }
@@ -577,11 +577,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
         title={`Remove ${removingMember?.subjectLabel ?? removingMember?.subjectId ?? ""} from this workspace?`}
         description="They lose access to this workspace immediately. You can add them again later."
         confirmLabel="Remove access"
-        onConfirm={async () => {
-          if (removingMember) {
-            await removeMember(removingMember);
-          }
-        }}
+        onConfirm={() => (removingMember ? removeMember(removingMember) : false)}
       />
     </section>
   );

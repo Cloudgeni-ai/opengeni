@@ -270,9 +270,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       await client.deletePack(workspaceId, pack.id);
       await Promise.all([packs.refresh(), refresh()]);
       toast.success(`Unregistered ${pack.name}`);
+      return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to unregister pack");
       toast.error(copy.title, { description: copy.description });
+      return false;
     } finally {
       setBusyId(null);
     }
@@ -700,20 +702,32 @@ function PacksSection(props: {
   onRegister: (manifestDraft: string) => Promise<boolean>;
   onEnable: (pack: CapabilityPack, environmentId: string | undefined) => void;
   onDisable: (pack: CapabilityPack) => void;
-  onUnregister: (pack: CapabilityPack) => Promise<void>;
+  onUnregister: (pack: CapabilityPack) => Promise<boolean>;
 }) {
   const { packs } = props;
   const [registerOpen, setRegisterOpen] = useState(false);
   const [manifestDraft, setManifestDraft] = useState("");
+  // Registration runs through a direct client call (not the packs hook), so the
+  // hook's `mutating` flag never covers it — this local flag owns the button's
+  // pending/disabled state and blocks double-submits.
+  const [registering, setRegistering] = useState(false);
   // Honest list state: a failed load renders as an error with retry, never as
   // the empty state.
   const packsView = listViewState({ loading: packs.loading, error: packs.error, count: packs.packs.length });
 
   async function register() {
-    const registered = await props.onRegister(manifestDraft);
-    if (registered) {
-      setRegisterOpen(false);
-      setManifestDraft("");
+    if (registering) {
+      return;
+    }
+    setRegistering(true);
+    try {
+      const registered = await props.onRegister(manifestDraft);
+      if (registered) {
+        setRegisterOpen(false);
+        setManifestDraft("");
+      }
+    } finally {
+      setRegistering(false);
     }
   }
 
@@ -749,8 +763,8 @@ function PacksSection(props: {
           />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>Cancel</Button>
-            <Button type="button" size="sm" disabled={packs.mutating || !manifestDraft.trim()} onClick={() => void register()}>
-              {packs.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+            <Button type="button" size="sm" disabled={registering || !manifestDraft.trim()} onClick={() => void register()}>
+              {registering ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
               Register pack
             </Button>
           </div>
@@ -803,7 +817,7 @@ function PackCard(props: {
   busy: boolean;
   onEnable: (environmentId: string | undefined) => void;
   onDisable: () => void;
-  onUnregister: () => Promise<void>;
+  onUnregister: () => Promise<boolean>;
 }) {
   const { pack, installation } = props;
   const enabled = installation?.status === "active";

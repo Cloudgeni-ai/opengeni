@@ -15,7 +15,7 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
+import { FILE_ONLY_MESSAGE_TEXT, useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -82,7 +82,12 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     value: message,
     setValue: setMessage,
     sending: context.busy,
-    canSend: message.trim().length > 0 && !context.busy && !attachments.uploading && computeReady,
+    // Mirrors useComposer's gate: a ready attachment with no typed draft is a
+    // sendable file-only message (the API requires non-empty text, so send()
+    // substitutes FILE_ONLY_MESSAGE_TEXT).
+    canSend:
+      (message.trim().length > 0 || attachments.readyResources.length > 0) &&
+      !context.busy && !attachments.uploading && computeReady,
     // Queue-vs-steer is meaningless before the session exists.
     mode: "queue",
     setMode: () => {},
@@ -91,7 +96,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     error: null,
     clearError: () => {},
     send: async () => {
-      const text = message.trim();
+      const text = message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
       if (!text || context.busy || attachments.uploading || !computeReady) {
         return false;
       }
