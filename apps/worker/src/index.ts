@@ -16,6 +16,11 @@ export type WorkerOptions = {
   settings?: Settings;
   activities?: ReturnType<typeof createActivities>;
   activityDependencies?: ActivityDependencies;
+  // Embedded hosts install @opengeni/worker-bundle under node_modules, where
+  // Temporal's workflow webpack refuses to transpile TS. They relocate
+  // src/workflows.ts to a host-owned path and point the worker at it here.
+  // Unset (standalone) keeps today's in-package path byte-for-byte.
+  workflowsPath?: string;
 };
 
 export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise<{
@@ -41,7 +46,7 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
     connection,
     namespace: settings.temporalNamespace,
     taskQueue: settings.temporalTaskQueue,
-    workflowsPath: new URL("../src/workflows.ts", import.meta.url).pathname,
+    workflowsPath: options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
     activities,
   });
   return { worker, connection };
