@@ -722,6 +722,24 @@ selfhosted:
   natsControlUser: control
   natsCalloutUser: auth
 
+# Optional self-hosted HashiCorp Terraform MCP server. Agents reach it by adding
+# an OPENGENI_MCP_SERVERS entry that points at
+# http://<fullname>-terraform-mcp:8080/mcp, then selecting it for a session with
+# an explicit {kind:mcp,id} ToolRef. This is Terraform Registry docs only; no
+# Terraform Enterprise token is wired.
+terraformMcp:
+  enabled: false
+  image:
+    repository: hashicorp/terraform-mcp-server
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
 observability:
   structuredLogs: true
   metrics:

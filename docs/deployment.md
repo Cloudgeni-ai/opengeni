@@ -246,7 +246,7 @@ Production self-hosted platform dependencies should use mature upstream projects
 - TLS: cert-manager, cloud load balancer certificate integration, or an existing ingress/TLS stack.
 - Observability: OpenTelemetry Collector/Operator plus Prometheus Operator-compatible resources, exported to a self-hosted LGTM-compatible stack or a managed cloud backend.
 
-The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
+The OpenGeni Helm chart owns OpenGeni API, web, worker, migrations, optional Terraform Registry MCP docs service, and integration resources such as `ServiceMonitor`, `PrometheusRule`, `ExternalSecret`, and workload NetworkPolicies. It must not become a replacement chart for NATS, Temporal, Postgres, cert-manager, or the observability platform.
 
 The stack wrapper may install upstream charts as a convenience layer. That
 keeps lifecycle commands visible and reversible without making those charts
@@ -347,6 +347,39 @@ Sandbox file mount support is also backend-specific:
 | --- | --- | --- | --- | --- |
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
+
+## Terraform Registry MCP Docs
+
+The Helm chart can deploy an optional, cluster-internal HashiCorp Terraform MCP
+server for authoritative Terraform Registry documentation:
+
+```bash
+helm upgrade --install opengeni deploy/helm/opengeni \
+  --namespace opengeni \
+  --set terraformMcp.enabled=true \
+  --set secret.existingSecret=opengeni-runtime
+```
+
+This renders a `ClusterIP` service at
+`http://<fullname>-terraform-mcp:8080/mcp`. For a release named `opengeni`, the
+default service name is `opengeni-terraform-mcp`. Register it in
+`OPENGENI_MCP_SERVERS`, for example:
+
+```json
+[
+  {
+    "id": "terraform-registry",
+    "name": "Terraform Registry Docs",
+    "url": "http://opengeni-terraform-mcp:8080/mcp",
+    "cacheToolsList": true
+  }
+]
+```
+
+Then select it per session with an explicit tool reference such as
+`{"kind":"mcp","id":"terraform-registry"}`. The chart does not wire a Terraform
+Enterprise token or other provider credential into this server; it is a
+registry-docs endpoint only.
 
 ## Connected Machines
 

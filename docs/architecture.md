@@ -300,7 +300,7 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 
 ### 6.4 Deployment (`deploy/`)
 
-`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
+`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
 
 ### 6.5 Docs, scripts, test
 
@@ -463,7 +463,7 @@ The current map:
 
 A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile into validated deploy plans: required env, preflight checks, Terraform/Helm targets, and generated artifacts. **12 built-in profiles** (local-compose, local-kubernetes, kubernetes-external, {azure,aws,gcp}-{managed,existing-services}, preview-pr, preview-branch, self-contained-kubernetes) + **product overlays** (none / managed-saas-staging / managed-saas-production, which hard-override sandbox→modal and access→externalGateway).
 
-- **What OpenGeni owns vs disposable fixtures.** The chart (`deploy/helm/opengeni`) owns **api/web/worker/relay/migrations**. The in-chart **Postgres/Temporal/NATS/MinIO are disposable conformance fixtures** (default `enabled:false`) — *not production services*. Official NATS/Temporal are lifecycle-managed by the stack wrappers (`deploy/stacks`), outside the app chart; official Temporal needs an **existing** Postgres.
+- **What OpenGeni owns vs disposable fixtures.** The chart (`deploy/helm/opengeni`) owns **api/web/worker/relay/migrations**, plus optional app-adjacent integrations such as the Terraform Registry MCP docs service. The in-chart **Postgres/Temporal/NATS/MinIO are disposable conformance fixtures** (default `enabled:false`) — *not production services*. Official NATS/Temporal are lifecycle-managed by the stack wrappers (`deploy/stacks`), outside the app chart; official Temporal needs an **existing** Postgres.
 - **Secrets never reach Helm values.** `generateRuntimeArtifacts` puts sensitive Terraform outputs only into `runtime.env` (and records them in `sensitiveTerraformOutputsUsed`); generated files carry "Do not commit generated copies."
 - **Parity (not import).** `@opengeni/deployment`'s `SANDBOX_REQUIRED_ENV` and `SandboxBackend` *mirror* `@opengeni/config`/`@opengeni/contracts` — enforced by **tests, not the type system**. Edit one side without the other and it compiles but the parity test goes red.
 - **Conformance.** `scripts/deployment-conformance.ts` black-box-verifies a running deployment (health, access boundary, session run, SSE replay, MCP-tool session, scheduled task, storage round-trip). Preflight is `scripts/deployment-preflight.ts`.

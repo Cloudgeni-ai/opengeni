@@ -1,0 +1,54 @@
+{{- if .Values.terraformMcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-terraform-mcp
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: terraform-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: terraform-mcp
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: terraform-mcp
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: terraform-mcp
+          image: {{ printf "%s:%s" .Values.terraformMcp.image.repository .Values.terraformMcp.image.tag | quote }}
+          imagePullPolicy: {{ .Values.terraformMcp.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TRANSPORT_MODE
+              value: streamable-http
+            - name: TRANSPORT_HOST
+              value: 0.0.0.0
+            - name: TRANSPORT_PORT
+              value: "8080"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" (dict "path" "/health" "initialDelaySeconds" 5 "periodSeconds" 10 "timeoutSeconds" 2 "failureThreshold" 3)) | nindent 12 }}
+          livenessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" (dict "path" "/health" "initialDelaySeconds" 20 "periodSeconds" 20 "timeoutSeconds" 2 "failureThreshold" 3)) | nindent 12 }}
+          resources:
+            {{- toYaml .Values.terraformMcp.resources | nindent 12 }}
+{{- end }}
