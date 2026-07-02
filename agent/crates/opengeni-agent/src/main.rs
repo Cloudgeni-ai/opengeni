@@ -44,7 +44,7 @@ mod update;
 
 use std::sync::Arc;
 
-use clap::Parser as _;
+use clap::{CommandFactory as _, Parser as _};
 use opengeni_agent_platform::{NativePlatform, Platform};
 use opengeni_agent_stream::{RelayHub, RelayHubConfig};
 use tracing::{error, info, warn};
@@ -103,7 +103,20 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
         .api_url
         .clone()
         .unwrap_or_else(|| DEFAULT_API_URL.to_string());
-    match cli.command.unwrap_or_default() {
+    let Some(command) = cli.command else {
+        // No subcommand. This is reached BOTH by a bare `opengeni-agent` in a
+        // terminal AND by a Finder/Raycast/`open` launch of the .app bundle, which
+        // execs the binary with no args and no controlling TTY. A blind
+        // enroll-if-needed-then-serve (the old `Command::default()` = `run`) turns
+        // that GUI launch into a headless process with no visible UI — which
+        // LaunchServices reports as "the application does not respond" and which,
+        // when not yet enrolled, drops into an invisible device-flow that can never
+        // show its user code. So branch on enrollment: a double-click of an ENROLLED
+        // machine starts the agent (the nicest outcome), and an un-enrolled one
+        // prints usage and exits promptly — never a zombie.
+        return run_default(&api_url).await;
+    };
+    match command {
         Command::Run(args) => run(args, &api_url).await,
         Command::Enroll(args) => enroll_command(args, &api_url).await.map(|_| ()),
         Command::Service(args) => service::run(&args).map_err(string_err),
@@ -116,6 +129,30 @@ async fn dispatch_command(cli: Cli) -> anyhow_lite::Result {
                 .map_err(string_err)
         }
         Command::Uninstall(args) => uninstall::run(&args).map_err(string_err),
+    }
+}
+
+/// Handles a bare `opengeni-agent` invocation (no subcommand) so a GUI launch of
+/// the .app bundle NEVER hangs as a headless zombie (dossier §23.0; the
+/// REPLACE_APP incident). Finder/Raycast/`open` exec the binary with no args and
+/// no TTY:
+///   * already enrolled → behave exactly like `run` (a double-click starts the
+///     agent — the nicest outcome; it serves deliberately until stopped);
+///   * not enrolled (or credentials unreadable) → print usage to stderr and exit 0
+///     promptly, rather than dropping into an invisible device-flow enroll that
+///     needs a workspace id + a visible TTY and would otherwise appear to hang.
+async fn run_default(api_url: &str) -> anyhow_lite::Result {
+    if let Ok(Some(_)) = config::load_credentials() {
+        run(RunArgs::default(), api_url).await
+    } else {
+        // Not enrolled (or creds unreadable): show how to get started and exit
+        // cleanly. Help goes to stderr so a `opengeni-agent | …` pipe is unchanged.
+        eprintln!("{}", Cli::command().render_help());
+        eprintln!(
+            "This machine is not enrolled yet. Run `opengeni-agent enroll` (see the \
+             Machines page for the one-liner), then `opengeni-agent run`."
+        );
+        Ok(())
     }
 }
 

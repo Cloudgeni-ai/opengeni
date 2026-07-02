@@ -370,8 +370,115 @@ link_macos_cli() {
   printf '%s' "$_install_dir/opengeni-agent"
 }
 
-# Assemble an ad-hoc-signed app bundle around the verified binary and symlink the
-# CLI into it. Echoes the CLI path on stdout (logs go to stderr via log()).
+# Probe the login keychain for a "Developer ID Application" code-signing identity
+# and remember the chosen one in two globals: OPENGENI_SIGN_IDENTITY_HASH (the
+# 40-hex SHA-1 to pass to `codesign --sign`, empty if none) and
+# OPENGENI_SIGN_IDENTITY_NAME (the human label, for the log line). Called directly
+# (NOT via `$(...)`) so the globals survive — a command substitution runs in a
+# subshell and would drop them. When several identities are present it
+# deterministically picks the FIRST that `security` lists and logs that choice.
+# WHY: macOS keys TCC (Screen Recording / Accessibility) grants to the signing
+# identity, so re-signing every update with the SAME Developer ID keeps the grants;
+# an ad-hoc signature loses them on any update.
+OPENGENI_SIGN_IDENTITY_HASH=""
+OPENGENI_SIGN_IDENTITY_NAME=""
+macos_developer_id_identity() {
+  OPENGENI_SIGN_IDENTITY_HASH=""
+  OPENGENI_SIGN_IDENTITY_NAME=""
+  command -v security >/dev/null 2>&1 || return 0
+  # `security find-identity -v -p codesigning` lines look like:
+  #   1) <40-hex-sha1> "Developer ID Application: Name (TEAMID)"
+  _ids="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Developer ID Application')" \
+    || _ids=""
+  [ -n "$_ids" ] || return 0
+  _n="$(printf '%s\n' "$_ids" | grep -c 'Developer ID Application')"
+  _line="$(printf '%s\n' "$_ids" | head -n1)"
+  _hash="$(printf '%s\n' "$_line" | awk '{print $2}')"
+  [ -n "$_hash" ] || return 0
+  OPENGENI_SIGN_IDENTITY_HASH="$_hash"
+  OPENGENI_SIGN_IDENTITY_NAME="$(printf '%s\n' "$_line" | sed -n 's/.*"\(.*\)".*/\1/p')"
+  if [ "$_n" -gt 1 ]; then
+    log "found $_n Developer ID Application identities; deterministically using the first: $OPENGENI_SIGN_IDENTITY_NAME ($_hash)"
+  fi
+}
+
+# Code-sign a STAGED bundle (it lives in a temp dir, NOT ~/Applications yet): strip
+# quarantine/provenance xattrs, sign with the user's Developer ID when present else
+# ad-hoc, then hard-verify. WHY temp-dir + `xattr -cr`: signing in place on a live
+# bundle repeatedly failed `codesign --verify --deep --strict` with "invalid
+# resource directory" (a sealed leftover *.cstemp / macOS provenance xattrs); a
+# clean staged copy scrubbed of xattrs is what actually verifies. A `--verify
+# --strict` failure here is FATAL (the caller never swaps a broken bundle in).
+# NOTE: POSIX sh has no locals — every var here is global. Use `_bundle` (not the
+# caller's `_app`) so this never clobbers the install path the caller swaps in.
+macos_sign_bundle() {
+  _bundle="$1"
+
+  # Strip quarantine/provenance xattrs the download or copy may have set — the
+  # suspected cause of the in-place "invalid resource directory" verify failures.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$_bundle" 2>/dev/null || true
+  fi
+
+  if ! command -v codesign >/dev/null 2>&1; then
+    log "warning: codesign not found (unexpected on macOS); skipping signing + verification"
+    return 0
+  fi
+
+  macos_developer_id_identity
+  if [ -n "$OPENGENI_SIGN_IDENTITY_HASH" ]; then
+    # Signing with the user's identity may pop a one-time Keychain consent prompt —
+    # that is expected and desirable (it is what makes the TCC grants durable).
+    if codesign --force --sign "$OPENGENI_SIGN_IDENTITY_HASH" \
+        --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1; then
+      log "signed with Developer ID \"$OPENGENI_SIGN_IDENTITY_NAME\" (approve the Keychain prompt if it appears); grants will survive updates that re-sign with this identity"
+    else
+      log "warning: Developer ID signing failed; falling back to ad-hoc (grants will NOT survive updates)"
+      codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1 \
+        || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
+    fi
+  else
+    codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_bundle" >/dev/null 2>&1 \
+      || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
+    log "ad-hoc signed (no Developer ID identity found); grants will not survive updates"
+  fi
+
+  # Hard-verify the freshly-signed STAGED bundle before it is swapped into place.
+  codesign --verify --strict "$_bundle" >/dev/null 2>&1 \
+    || die 2 "codesign --verify --strict FAILED for the freshly-signed bundle; not installing"
+}
+
+# Atomically replace the installed bundle at $2 with the staged+verified bundle at
+# $1: move any existing bundle aside to a dot-prefixed .bak, move the new one into
+# place, drop the .bak on success. On ANY failure restore the .bak and die loudly —
+# the user is NEVER left without a working bundle.
+macos_swap_bundle_into_place() {
+  _new="$1"; _dst="$2"
+  _bak=""
+  if [ -e "$_dst" ] || [ -L "$_dst" ]; then
+    _bak="$(dirname "$_dst")/.$(basename "$_dst").bak.$$"
+    rm -rf "$_bak" 2>/dev/null || true
+    mv "$_dst" "$_bak" || die 2 "cannot move the existing bundle aside ($_dst)"
+  fi
+  if mv "$_new" "$_dst" 2>/dev/null; then
+    if [ -n "$_bak" ]; then rm -rf "$_bak" 2>/dev/null || true; fi
+    return 0
+  fi
+  # The install failed: put the old bundle back so the user keeps a working app.
+  if [ -n "$_bak" ]; then
+    if mv "$_bak" "$_dst" 2>/dev/null; then
+      die 2 "failed to install the new bundle to $_dst; restored the previous bundle"
+    fi
+    die 2 "failed to install the new bundle to $_dst AND could not restore the backup at $_bak"
+  fi
+  die 2 "failed to install the new bundle to $_dst"
+}
+
+# Assemble an app bundle around the verified binary and symlink the CLI into it.
+# Assembled in a temp dir, signed (Developer ID when available, else ad-hoc) +
+# verified there, then atomically swapped into ~/Applications — NEVER signed in
+# place (see macos_sign_bundle for why). Echoes the CLI path on stdout (logs go to
+# stderr via log()).
 install_macos_local_bundle() {
   _bin="$1"; _install_dir="$2"
   _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
@@ -386,23 +493,21 @@ install_macos_local_bundle() {
     log "OPENGENI_INSTALL_REPLACE_APP=1 — replacing the existing signed app bundle"
   fi
 
-  # Assemble fresh. Reached only for an absent bundle, an ad-hoc bundle (safe to
-  # replace), or an explicit forced replace.
-  rm -rf "$_app"
-  mkdir -p "$_app/Contents/MacOS" || die 2 "cannot create $_app"
-  cp "$_bin" "$_app/Contents/MacOS/opengeni-agent" || die 2 "cannot populate $_app"
-  chmod 0755 "$_app/Contents/MacOS/opengeni-agent"
-  write_info_plist "$_app/Contents/Info.plist" "$(resolve_app_version "$_app/Contents/MacOS/opengeni-agent")"
+  # Assemble FRESH in a temp dir. Reached only for an absent bundle, an ad-hoc
+  # bundle (safe to replace), or an explicit forced replace.
+  _stage="$TMPDIR_OG/local-bundle-stage"
+  rm -rf "$_stage"
+  _staged_app="$_stage/$OPENGENI_APP_NAME.app"
+  mkdir -p "$_staged_app/Contents/MacOS" || die 2 "cannot create the staging bundle"
+  cp "$_bin" "$_staged_app/Contents/MacOS/opengeni-agent" || die 2 "cannot populate the staging bundle"
+  chmod 0755 "$_staged_app/Contents/MacOS/opengeni-agent"
+  write_info_plist "$_staged_app/Contents/Info.plist" \
+    "$(resolve_app_version "$_staged_app/Contents/MacOS/opengeni-agent")"
 
-  # Ad-hoc sign the WHOLE bundle with the stable identifier (codesign ships with
-  # macOS). `--force` re-signs cleanly; a failure is non-fatal (the agent still
-  # runs) but is called out because it means macOS may re-prompt for permissions.
-  if command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_app" >/dev/null 2>&1 \
-      || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
-  else
-    log "warning: codesign not found (unexpected on macOS); skipping ad-hoc signing"
-  fi
+  macos_sign_bundle "$_staged_app"
+
+  mkdir -p "$HOME/Applications" || die 2 "cannot create $HOME/Applications"
+  macos_swap_bundle_into_place "$_staged_app" "$_app"
   log "installed app bundle at $_app"
   link_macos_cli "$_app" "$_install_dir"
 }
@@ -453,14 +558,30 @@ install_macos_prebuilt_bundle() {
   if macos_bundle_is_signed_nonadhoc "$_app" && [ "${OPENGENI_INSTALL_REPLACE_APP:-0}" != "1" ]; then
     log "kept the existing signed \"$OPENGENI_APP_NAME.app\" (its signature holds your macOS grants). Set OPENGENI_INSTALL_REPLACE_APP=1 to replace it."
   else
-    mkdir -p "$_apps" || die 2 "cannot create $_apps"
-    rm -rf "$_app"
+    # Extract into a temp staging dir, scrub the download's quarantine xattrs, verify
+    # the (already Developer-ID + notarized) signature there, then atomically swap it
+    # into ~/Applications. We do NOT re-sign a prebuilt bundle — that would break its
+    # notarization; xattr-scrub + verify + atomic swap is all this path needs.
+    _stage="$TMPDIR_OG/prebuilt-bundle-stage"
+    rm -rf "$_stage"
+    mkdir -p "$_stage" || die 2 "cannot create the staging dir"
     # ditto/unzip both ship with macOS; the archive's root entry is the .app dir.
     if command -v ditto >/dev/null 2>&1; then
-      ditto -x -k "$_zip" "$_apps" || die 3 "failed to extract the app bundle"
+      ditto -x -k "$_zip" "$_stage" || die 3 "failed to extract the app bundle"
     else
-      unzip -oq "$_zip" -d "$_apps" || die 3 "failed to extract the app bundle"
+      unzip -oq "$_zip" -d "$_stage" || die 3 "failed to extract the app bundle"
     fi
+    _staged_app="$_stage/$OPENGENI_APP_NAME.app"
+    [ -d "$_staged_app" ] || die 3 "the archive did not contain \"$OPENGENI_APP_NAME.app\""
+    if command -v xattr >/dev/null 2>&1; then
+      xattr -cr "$_staged_app" 2>/dev/null || true
+    fi
+    if command -v codesign >/dev/null 2>&1; then
+      codesign --verify --strict "$_staged_app" >/dev/null 2>&1 \
+        || die 2 "codesign --verify --strict FAILED for the prebuilt bundle; not installing"
+    fi
+    mkdir -p "$_apps" || die 2 "cannot create $_apps"
+    macos_swap_bundle_into_place "$_staged_app" "$_app"
     log "installed notarized app bundle at $_app"
   fi
   link_macos_cli "$_app" "$_install_dir"
@@ -598,4 +719,10 @@ finish() {
   fi
 }
 
-main "$@"
+# Run the installer — UNLESS sourced with OPENGENI_INSTALL_LIB=1, which lets the
+# darwin bundle-assembly simulation (agent/install/test/macos-bundle-sim.sh) load
+# these helper functions and exercise them with mocked codesign/security/xattr,
+# without the network download + real install. A normal `curl … | sh` never sets it.
+if [ "${OPENGENI_INSTALL_LIB:-0}" != "1" ]; then
+  main "$@"
+fi

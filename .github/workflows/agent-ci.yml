@@ -161,6 +161,14 @@ jobs:
         working-directory: agent
         run: bash install/test/ci-install-smoke.sh
 
+      - name: Simulate the macOS app-bundle assembly (mocked codesign/security)
+        if: runner.os != 'Windows'
+        shell: bash
+        working-directory: agent
+        # Runs on Linux + macOS runners alike: sources install.sh as a library and
+        # drives the darwin bundle-signing/atomic-swap helpers with mocked tools.
+        run: sh install/test/macos-bundle-sim.sh
+
       - name: Smoke the install script (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
