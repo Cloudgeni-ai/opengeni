@@ -112,6 +112,36 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(reparsed.kind).toBe("sandbox.command.output");
     expect(reparsed.stream).toBe("stdout");
   });
+
+  test("redacts session MCP credential header values to names", () => {
+    const cleaned = sanitizeEventPayload({
+      mcpServers: [{
+        id: "peloton",
+        url: "https://peloton.example/mcp",
+        headers: { Authorization: "Bearer create-secret" },
+      }],
+      mcpCredentialUpdates: [{
+        id: "peloton",
+        headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
+      }],
+    }) as unknown as {
+      mcpServers: Array<{ id: string; url: string; headerNames: string[] }>;
+      mcpCredentialUpdates: Array<{ id: string; headerNames: string[] }>;
+    };
+
+    const serialized = JSON.stringify(cleaned);
+    expect(serialized).not.toContain("create-secret");
+    expect(serialized).not.toContain("rotated-secret");
+    expect(cleaned.mcpServers[0]).toEqual({
+      id: "peloton",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization"],
+    });
+    expect(cleaned.mcpCredentialUpdates[0]).toEqual({
+      id: "peloton",
+      headerNames: ["Authorization", "X-Session"],
+    });
+  });
 });
 
 describe("session_history_items jsonb safety (durable SDK item)", () => {

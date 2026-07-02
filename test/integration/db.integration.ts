@@ -12,6 +12,7 @@ import {
   consumeSessionCompactionRequest,
   countSessionHistoryItems,
   createDb,
+  decryptEnvironmentValue,
   getActiveSessionHistoryItems,
   getSessionHistoryItems,
   requestSessionCompaction,
@@ -22,6 +23,7 @@ import {
   createSession,
   createSessionGoal,
   createSessionWithIdempotencyKey,
+  encryptEnvironmentValue,
   getSessionByCreateIdempotencyKey,
   createTurn,
   dbSql,
@@ -38,6 +40,8 @@ import {
   updateSessionGoal,
   upsertSessionGoal,
   listEnabledMcpCapabilityServers,
+  listSessionMcpServerMetadata,
+  listSessionMcpServersForRun,
   listScheduledTaskRuns,
   listScheduledTasks,
   getSessionTurn,
@@ -47,6 +51,7 @@ import {
   setSessionStatus,
   updateScheduledTask,
   updateScheduledTaskRun,
+  updateSessionMcpServerCredentials,
   withRlsContext,
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
@@ -87,6 +92,91 @@ describe("DB integration", () => {
     expectContiguousSequences(events);
     expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id)).toHaveLength(3);
     expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 1)).toHaveLength(2);
+  });
+
+  test("stores per-session MCP credentials encrypted and bumps credential version on rotation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const encryptionKey = new Uint8Array(32);
+    encryptionKey.fill(7);
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "session mcp",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      mcpServers: [{
+        id: "peloton",
+        name: "Peloton MCP",
+        url: "https://peloton.example/mcp",
+        allowedTools: ["workouts.list"],
+        timeoutMs: 2500,
+        cacheToolsList: true,
+        headersEncrypted: {
+          Authorization: encryptEnvironmentValue(encryptionKey, "Bearer create-secret"),
+        },
+      }],
+    });
+
+    expect(session.mcpServers).toEqual([{
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization"],
+      credentialVersion: 1,
+    }]);
+    expect(await listSessionMcpServerMetadata(dbClient.db, grant.workspaceId, session.id)).toEqual(session.mcpServers);
+
+    const rawRows = await dbClient.db.execute(dbSql<{
+      headers_encrypted: Record<string, string>;
+      credential_version: number;
+    }>`select headers_encrypted, credential_version from session_mcp_servers where session_id = ${session.id}`);
+    const raw = rawRows[0]!;
+    expect(JSON.stringify(raw.headers_encrypted)).not.toContain("create-secret");
+    expect(decryptEnvironmentValue(encryptionKey, raw.headers_encrypted.Authorization!)).toBe("Bearer create-secret");
+    expect(Number(raw.credential_version)).toBe(1);
+
+    const forRun = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, encryptionKey);
+    expect(forRun).toEqual([{
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      allowedTools: ["workouts.list"],
+      timeoutMs: 2500,
+      cacheToolsList: true,
+      headerNames: ["Authorization"],
+      headers: { Authorization: "Bearer create-secret" },
+      credentialVersion: 1,
+    }]);
+
+    const rotated = await updateSessionMcpServerCredentials(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      updates: [{
+        id: "peloton",
+        headersEncrypted: {
+          Authorization: encryptEnvironmentValue(encryptionKey, "Bearer rotated-secret"),
+          "X-Session": encryptEnvironmentValue(encryptionKey, "turn-2"),
+        },
+      }],
+    });
+    expect(rotated.missingIds).toEqual([]);
+    expect(rotated.servers).toEqual([{
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization", "X-Session"],
+      credentialVersion: 2,
+    }]);
+
+    const afterRotation = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, encryptionKey);
+    expect(afterRotation[0]?.headers).toEqual({ Authorization: "Bearer rotated-secret", "X-Session": "turn-2" });
+    expect(afterRotation[0]?.credentialVersion).toBe(2);
+    const rawAfterRows = await dbClient.db.execute(dbSql<{
+      headers_encrypted: Record<string, string>;
+    }>`select headers_encrypted from session_mcp_servers where session_id = ${session.id}`);
+    expect(JSON.stringify(rawAfterRows[0]!.headers_encrypted)).not.toContain("rotated-secret");
   });
 
   test("serializes concurrent event appends into contiguous sequence numbers", async () => {

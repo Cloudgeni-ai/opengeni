@@ -81,9 +81,66 @@ export function sanitizeEventPayload<T>(payload: T): T {
   }
   if (payload && typeof payload === "object") {
     const entries = Object.entries(payload as Record<string, unknown>).map(
-      ([key, value]) => [sanitizeEventString(key), sanitizeEventPayload(value)] as const,
+      ([key, value]) => [sanitizeEventString(key), sanitizeSensitiveEventField(key, value)] as const,
     );
     return Object.fromEntries(entries) as unknown as T;
   }
   return payload;
+}
+
+function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
+  if (key === "mcpServers") {
+    return sanitizeSessionMcpServerList(value);
+  }
+  if (key === "mcpCredentialUpdates") {
+    return sanitizeMcpCredentialUpdateList(value);
+  }
+  return sanitizeEventPayload(value);
+}
+
+function sanitizeSessionMcpServerList(value: unknown): unknown {
+  if (!Array.isArray(value)) {
+    return sanitizeEventPayload(value);
+  }
+  return value.map((item) => {
+    if (!isPlainObject(item)) {
+      return sanitizeEventPayload(item);
+    }
+    const { headers, headersEncrypted, ...rest } = item;
+    const cleaned = sanitizeEventPayload(rest) as Record<string, unknown>;
+    const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
+    if (headerNames) {
+      cleaned.headerNames = headerNames;
+    }
+    return cleaned;
+  });
+}
+
+function sanitizeMcpCredentialUpdateList(value: unknown): unknown {
+  if (!Array.isArray(value)) {
+    return sanitizeEventPayload(value);
+  }
+  return value.map((item) => {
+    if (!isPlainObject(item)) {
+      return sanitizeEventPayload(item);
+    }
+    const { headers, headersEncrypted, ...rest } = item;
+    const cleaned = sanitizeEventPayload(rest) as Record<string, unknown>;
+    const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
+    if (headerNames) {
+      cleaned.headerNames = headerNames;
+    }
+    return cleaned;
+  });
+}
+
+function safeHeaderNames(value: unknown): string[] | null {
+  if (!isPlainObject(value)) {
+    return null;
+  }
+  return Object.keys(value).map(sanitizeEventString).sort();
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

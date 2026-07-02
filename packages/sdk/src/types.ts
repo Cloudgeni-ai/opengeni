@@ -239,6 +239,29 @@ export type GoalSpec = {
   maxAutoContinuations?: number | undefined;
 };
 
+export type SessionMcpServerInput = {
+  id: string;
+  name?: string | undefined;
+  url: string;
+  allowedTools?: string[] | undefined;
+  timeoutMs?: number | undefined;
+  cacheToolsList?: boolean | undefined;
+  headers?: Record<string, string> | undefined;
+};
+
+export type SessionMcpCredentialUpdateInput = {
+  id: string;
+  headers: Record<string, string>;
+};
+
+export type SessionMcpServerMetadata = {
+  id: string;
+  name: string | null;
+  url: string;
+  headerNames: string[];
+  credentialVersion: number;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -254,6 +277,7 @@ export type Session = {
   sandboxBackend: SandboxBackend;
   environmentId: string | null;
   firstPartyMcpPermissions: string[] | null;
+  mcpServers: SessionMcpServerMetadata[];
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -607,6 +631,7 @@ export type CreateSessionRequest = {
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
+  mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
   // (from inside a session → "shared" with the creator's box, top-level → "new").
@@ -650,6 +675,7 @@ export const KNOWN_PERMISSIONS = [
   "api_keys:manage",
   "environments:manage",
   "environments:use",
+  "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
@@ -1596,6 +1622,7 @@ export type UserMessageEventInput = {
     tools?: ToolRef[] | undefined;
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 

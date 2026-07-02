@@ -64,7 +64,7 @@ import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, resolveActiveDesktopTransport, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
-import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
+import { settingsWithEnabledCapabilityMcpServers, settingsWithSessionMcpServerMetadata } from "@opengeni/core";
 import {
   normalizeResources,
   validateFileResources,
@@ -322,14 +322,17 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // A turn-update may switch the queued turn's model; reject one the host
     // does not expose (omitted leaves the existing model unchanged).
     assertConfiguredModel(settings, payload.model);
-    const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+    const session = await requireSession(db, workspaceId, sessionId);
+    const runtimeSettings = settingsWithSessionMcpServerMetadata(
+      await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings),
+      session.mcpServers,
+    );
     const resources = payload.resources !== undefined ? normalizeResources(payload.resources) : existing.resources;
     const tools = payload.tools !== undefined ? validateToolRefs(payload.tools, runtimeSettings) : existing.tools;
     if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }
     await validateFileResources(db, workspaceId, resources);
-    const session = await requireSession(db, workspaceId, sessionId);
     await validateGitHubRepositorySelection(db, workspaceId, [...session.resources, ...resources]);
     const turn = await updateQueuedSessionTurn(db, workspaceId, turnId, {
       ...(payload.prompt !== undefined ? { prompt: payload.prompt.trim() } : {}),
@@ -393,6 +396,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
+        mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
         ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
       });
       return c.json(accepted, 202);

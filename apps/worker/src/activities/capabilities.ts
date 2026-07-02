@@ -12,14 +12,56 @@ import {
 import {
   decryptedCapabilityHeaders,
   listEnabledMcpCapabilityServers,
+  listSessionMcpServerMetadata,
+  listSessionMcpServersForRun,
   workspaceCodexSubscriptionActive,
   type Database,
   type EnabledMcpCapabilityServer,
+  type SessionMcpServerForRun,
 } from "@opengeni/db";
 
 export async function settingsWithEnabledCapabilityMcpServers(db: Database, workspaceId: string, settings: Settings): Promise<Settings> {
   const enabled = await listEnabledMcpCapabilityServers(db, workspaceId);
   return settingsWithMcpCapabilityServers(settings, enabled);
+}
+
+export async function settingsWithSessionMcpServersForRun(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  settings: Settings,
+): Promise<Settings> {
+  const encryptionKey = environmentsEncryptionKeyBytes(settings);
+  if (!encryptionKey) {
+    const metadata = await listSessionMcpServerMetadata(db, workspaceId, sessionId);
+    if (metadata.length === 0) {
+      return settings;
+    }
+    throw new Error("session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  }
+  return settingsWithSessionMcpServers(settings, await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey));
+}
+
+export function settingsWithSessionMcpServers(settings: Settings, servers: SessionMcpServerForRun[]): Settings {
+  if (servers.length === 0) {
+    return settings;
+  }
+  const sessionIds = new Set(servers.map((server) => server.id));
+  return {
+    ...settings,
+    mcpServers: [
+      ...settings.mcpServers.filter((server) => !sessionIds.has(server.id)),
+      ...servers.map((server) => ({
+        id: server.id,
+        ...(server.name ? { name: server.name } : {}),
+        url: server.url,
+        ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+        ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+        cacheToolsList: server.cacheToolsList ?? false,
+        headers: server.headers,
+      })),
+    ],
+  };
 }
 
 /**

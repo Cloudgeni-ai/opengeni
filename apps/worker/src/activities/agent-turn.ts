@@ -57,7 +57,7 @@ import {
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type ModelProviderApi, type RegistryProviderKind, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
-import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers, settingsWithSessionMcpServersForRun } from "./capabilities";
 import { chooseRotationActive, computeIdleDelayMs, computeReactiveRotationResume, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
 import type { CodexAccountStatus } from "@opengeni/db";
 import { buildCodexTokenResolver } from "./codex-auth";
@@ -885,12 +885,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // runtime falls back to runSettings.agentInstructionsTemplate (the
       // deployment default, byte-identical to the historical preamble).
       const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
-      const runSettings = {
+      const baseRunSettings = {
         ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
         openaiModel: turn.model,
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
+      const runSettings = await settingsWithSessionMcpServersForRun(db, input.workspaceId, input.sessionId, baseRunSettings);
       // Multi-provider per-turn routing → the provider gating (compaction mode,
       // hosted web search, encrypted reasoning, context window) the agent and
       // compaction summarizer must use; null falls back to the legacy global

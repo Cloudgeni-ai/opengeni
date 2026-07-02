@@ -283,6 +283,28 @@ export const sessions = pgTable("sessions", {
   createIdempotency: uniqueIndex("sessions_workspace_create_idempotency_idx").on(table.workspaceId, table.createIdempotencyKey).where(sql`${table.createIdempotencyKey} is not null`),
 }));
 
+export const sessionMcpServers = pgTable("session_mcp_servers", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: uuid("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  serverId: text("server_id").notNull(),
+  name: text("name"),
+  url: text("url").notNull(),
+  allowedTools: jsonb("allowed_tools").$type<string[]>(),
+  timeoutMs: integer("timeout_ms"),
+  cacheToolsList: boolean("cache_tools_list").notNull().default(false),
+  // Map of header name -> AES-GCM ciphertext. Values are decrypted only by the
+  // worker's run-preparation path and never returned by API helpers.
+  headersEncrypted: jsonb("headers_encrypted").$type<Record<string, string>>().notNull().default({}),
+  credentialVersion: integer("credential_version").notNull().default(1),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  sessionServer: uniqueIndex("session_mcp_servers_session_server_idx").on(table.workspaceId, table.sessionId, table.serverId),
+  session: index("session_mcp_servers_session_idx").on(table.workspaceId, table.sessionId),
+}));
+
 export const files = pgTable("files", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),

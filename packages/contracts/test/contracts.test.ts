@@ -19,6 +19,7 @@ import {
   mergeToolRefs,
   ResourceRef,
   SessionBusMessage,
+  SessionMcpServerMetadata,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -38,6 +39,59 @@ describe("contracts", () => {
       tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }],
     });
     expect(payload.tools).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }]);
+  });
+
+  test("accepts per-session MCP servers and credential rotations without response value echo", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      tools: [{ kind: "mcp", id: "peloton" }],
+      mcpServers: [{
+        id: "peloton",
+        name: "Peloton MCP",
+        url: "https://peloton.example/mcp",
+        allowedTools: ["workouts.list"],
+        timeoutMs: 1500,
+        cacheToolsList: false,
+        headers: { Authorization: "Bearer create-secret" },
+      }],
+    });
+    expect(payload.mcpServers[0]?.headers).toEqual({ Authorization: "Bearer create-secret" });
+    expect(() => CreateSessionRequest.parse({
+      initialMessage: "bad url",
+      mcpServers: [{ id: "bad", url: "http://example.com/mcp" }],
+    })).toThrow();
+
+    const event = ClientSessionEvent.parse({
+      type: "user.message",
+      payload: {
+        text: "rotate",
+        mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer rotated-secret" } }],
+      },
+    });
+    expect(event.type).toBe("user.message");
+    if (event.type !== "user.message") {
+      throw new Error("expected user.message");
+    }
+    expect(event.payload.mcpCredentialUpdates?.[0]?.headers.Authorization).toBe("Bearer rotated-secret");
+
+    const metadata = SessionMcpServerMetadata.parse({
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization"],
+      credentialVersion: 2,
+    });
+    expect(metadata).toEqual({
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization"],
+      credentialVersion: 2,
+    });
+    expect(() => SessionMcpServerMetadata.parse({
+      ...metadata,
+      headers: { Authorization: "Bearer must-not-echo" },
+    })).toThrow();
   });
 
   test("accepts repository and file resources on create session", () => {

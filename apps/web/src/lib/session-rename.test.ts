@@ -32,6 +32,7 @@ function session(patch: Partial<Session> = {}): Session {
     sandboxBackend: "none",
     environmentId: null,
     firstPartyMcpPermissions: null,
+    mcpServers: [],
     createIdempotencyKey: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",

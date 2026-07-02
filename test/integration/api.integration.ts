@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -1452,7 +1452,7 @@ describe("API component integration", () => {
     });
     expect(omittedTools.status).toBe(202);
     const omittedSession = await omittedTools.json() as { id: string };
-    expect((await requireSession(dbClient.db, workspaceId, omittedSession.id)).tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+    expect((await requireSession(dbClient.db, workspaceId, omittedSession.id)).tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
 
     const explicitEmptyTools = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
@@ -1479,7 +1479,7 @@ describe("API component integration", () => {
     });
     expect(omittedTaskResponse.status).toBe(201);
     const omittedTask = await omittedTaskResponse.json() as { id: string; agentConfig: { tools: unknown[] } };
-    expect(omittedTask.agentConfig.tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+    expect(omittedTask.agentConfig.tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
 
     const explicitEmptyTaskResponse = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
       method: "POST",
@@ -1502,7 +1502,7 @@ describe("API component integration", () => {
     });
     expect(patchedDefault.status).toBe(200);
     expect(((await patchedDefault.json()) as { agentConfig: { tools: unknown[] } }).agentConfig.tools)
-      .toContainEqual({ kind: "mcp", id: "cap-route-mcp" });
+      .toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
     const patchedExplicit = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${omittedTask.id}`), {
       method: "PATCH",
       headers: { "content-type": "application/json" },
@@ -2589,10 +2589,14 @@ describe("API component integration", () => {
     const session = await sessionResponse.json() as { id: string; resources: unknown[] };
     expect(session.resources).toEqual([{ kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` }]);
     const initialEvents = await listSessionEvents(dbClient.db, workspaceId, session.id, 0, 10);
-    expect(initialEvents.find((event) => event.type === "user.message")?.payload).toEqual({
+    const initialPayload = initialEvents.find((event) => event.type === "user.message")?.payload as Record<string, unknown> | undefined;
+    expect(initialPayload).toMatchObject({
       text: "use file",
       resources: [{ kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` }],
     });
+    if (Array.isArray(initialPayload?.tools)) {
+      expect(initialPayload.tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
+    }
 
     const followUpSessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
       method: "POST",
@@ -2614,10 +2618,13 @@ describe("API component integration", () => {
     });
     expect(followUp.status).toBe(202);
     const followUpEvent = await followUp.json() as SessionEvent;
-    expect(followUpEvent.payload).toEqual({
+    expect(followUpEvent.payload).toMatchObject({
       text: "use file now",
       resources: [{ kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` }],
     });
+    if (Array.isArray((followUpEvent.payload as Record<string, unknown>).tools)) {
+      expect((followUpEvent.payload as { tools: unknown[] }).tools).toContainEqual({ kind: "mcp", id: "cap-route-mcp", optional: true });
+    }
     expect((await requireSession(dbClient.db, workspaceId, followUpSession.id)).resources).toEqual([
       { kind: "file", fileId: upload.fileId, mountPath: `files/${upload.fileId}` },
     ]);
@@ -3769,14 +3776,275 @@ describe("API component integration", () => {
         sessionId: managerSession.id,
       });
       const workerTools = (await workerPrepared.mcpServers[0]!.listTools()).map((tool) => tool.name);
-      expect(workerTools).not.toContain("opengeni__sessions_list");
-      expect(workerTools).not.toContain("opengeni__session_create");
+      expect(workerTools).toContain("opengeni__sessions_list");
+      expect(workerTools).toContain("opengeni__session_create");
+      expect(workerTools).toContain("opengeni__environment_set_variable");
       expect(workerTools).toContain("opengeni__scheduled_tasks_list");
+      expect(workerTools).not.toContain("opengeni__mcp_servers_attach");
     } finally {
       await managerPrepared?.close().catch(() => undefined);
       await workerPrepared?.close().catch(() => undefined);
       server.stop(true);
     }
+  });
+
+  test("per-session MCP servers are attach-gated, sanitized, rotatable credentials", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const appSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      productAccessMode: "configured",
+      delegationSecret,
+      environmentsEncryptionKey: environmentsTestKey,
+    });
+    const app = createApp({
+      settings: appSettings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const signToken = async (permissions: Permission[]) => `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "test:session-mcp-servers",
+      permissions,
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })}`;
+    const attachAuth = await signToken(["workspace:read", "sessions:create", "sessions:read", "sessions:control", "mcp_servers:attach"]);
+    const limitedAuth = await signToken(["workspace:read", "sessions:create", "sessions:read", "sessions:control"]);
+
+    const createSecret = "Bearer create-secret";
+    const created = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the peloton server",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "peloton" }],
+        mcpServers: [{
+          id: "peloton",
+          name: "Peloton MCP",
+          url: "https://peloton.example/mcp",
+          allowedTools: ["workouts.list"],
+          timeoutMs: 2500,
+          cacheToolsList: false,
+          headers: { Authorization: createSecret },
+        }],
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(created.status).toBe(202);
+    const createText = await created.text();
+    expect(createText).not.toContain(createSecret);
+    const session = JSON.parse(createText) as {
+      id: string;
+      tools: Array<{ kind: string; id: string }>;
+      mcpServers: Array<{ id: string; name: string | null; url: string; headerNames: string[]; credentialVersion: number; headers?: unknown }>;
+    };
+    expect(session.tools).toContainEqual({ kind: "mcp", id: "peloton" });
+    expect(session.mcpServers).toEqual([{
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization"],
+      credentialVersion: 1,
+    }]);
+    expect(session.mcpServers[0]?.headers).toBeUndefined();
+
+    const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    const runServers = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(runServers[0]?.headers).toEqual({ Authorization: createSecret });
+    expect(runServers[0]?.allowedTools).toEqual(["workouts.list"]);
+    const rawMcpRows = await dbClient.db.execute(dbSql<{ headers_encrypted: Record<string, string> }>`
+      select headers_encrypted from session_mcp_servers where session_id = ${session.id}
+    `);
+    expect(JSON.stringify(rawMcpRows)).not.toContain(createSecret);
+
+    const createdEventRows = await dbClient.db.execute(dbSql<{ payload: unknown }>`
+      select payload from session_events where session_id = ${session.id} order by sequence
+    `);
+    const createdEventsJson = JSON.stringify(createdEventRows);
+    expect(createdEventsJson).not.toContain(createSecret);
+    expect(createdEventsJson).toContain("headerNames");
+
+    const rotatedSecret = "Bearer rotated-secret";
+    const rotated = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: {
+          text: "rotate then continue",
+          mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: rotatedSecret, "X-Turn": "2" } }],
+        },
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(rotated.status).toBe(202);
+    const rotatedText = await rotated.text();
+    expect(rotatedText).not.toContain(rotatedSecret);
+    const accepted = JSON.parse(rotatedText) as { payload: { mcpCredentialUpdates?: Array<{ id: string; headerNames: string[]; credentialVersion: number; headers?: unknown }> } };
+    expect(accepted.payload.mcpCredentialUpdates).toEqual([{
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      headerNames: ["Authorization", "X-Turn"],
+      credentialVersion: 2,
+    }]);
+    expect(accepted.payload.mcpCredentialUpdates?.[0]?.headers).toBeUndefined();
+    const afterRotation = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(afterRotation[0]?.headers).toEqual({ Authorization: rotatedSecret, "X-Turn": "2" });
+    expect(afterRotation[0]?.credentialVersion).toBe(2);
+
+    const allEventRows = await dbClient.db.execute(dbSql<{ payload: unknown }>`
+      select payload from session_events where session_id = ${session.id} order by sequence
+    `);
+    const allEventsJson = JSON.stringify(allEventRows);
+    expect(allEventsJson).not.toContain(createSecret);
+    expect(allEventsJson).not.toContain(rotatedSecret);
+    expect(allEventsJson).not.toContain("\"headers\"");
+
+    const unknown = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: { text: "bad rotate", mcpCredentialUpdates: [{ id: "unknown", headers: { Authorization: "Bearer nope" } }] },
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(unknown.status).toBe(422);
+    expect(await unknown.text()).toContain("unknown session MCP server id: unknown");
+
+    const deniedRotate = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: { text: "denied rotate", mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer denied" } }] },
+      }),
+      headers: { "content-type": "application/json", authorization: limitedAuth },
+    });
+    expect(deniedRotate.status).toBe(403);
+    expect(await deniedRotate.text()).toContain("missing permission: mcp_servers:attach");
+
+    const deniedCreate = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "no permission",
+        model: "scripted-model",
+        mcpServers: [{ id: "denied", url: "https://denied.example/mcp", headers: { Authorization: "Bearer denied" } }],
+      }),
+      headers: { "content-type": "application/json", authorization: limitedAuth },
+    });
+    expect(deniedCreate.status).toBe(403);
+    expect(await deniedCreate.text()).toContain("missing permission: mcp_servers:attach");
+
+    const collision = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "reserved id",
+        model: "scripted-model",
+        mcpServers: [{ id: "opengeni", url: "https://reserved.example/mcp", headers: { Authorization: "Bearer reserved" } }],
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(collision.status).toBe(422);
+    expect(await collision.text()).toContain("MCP server id already exists: opengeni");
+
+    const appWithoutKey = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const missingKey = await appWithoutKey.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "missing key",
+        model: "scripted-model",
+        mcpServers: [{ id: "needs_key", url: "https://needs-key.example/mcp", headers: { Authorization: "Bearer secret" } }],
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(missingKey.status).toBe(503);
+    expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  });
+
+  test("cancelled-session user messages do not rotate per-session MCP credentials", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        environmentsEncryptionKey: environmentsTestKey,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const attachAuth = `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "test:session-mcp-cancelled-rotation",
+      permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control", "mcp_servers:attach"],
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })}`;
+
+    const createSecret = "Bearer create-secret";
+    const created = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the peloton server",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "peloton" }],
+        mcpServers: [{
+          id: "peloton",
+          name: "Peloton MCP",
+          url: "https://peloton.example/mcp",
+          headers: { Authorization: createSecret, "X-Initial": "1" },
+        }],
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(created.status).toBe(202);
+    const session = await created.json() as { id: string };
+    const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    const beforeCredentials = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(beforeCredentials[0]?.headers).toEqual({ Authorization: createSecret, "X-Initial": "1" });
+    expect(beforeCredentials[0]?.credentialVersion).toBe(1);
+
+    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "cancelled", null);
+    const beforeEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const beforeTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 100);
+    const beforeUsage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 100 });
+    const wakeupsBefore = wf.wakeups.length;
+
+    const rejected = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: {
+          text: "rotate after cancellation",
+          mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer rejected", "X-Initial": "2" } }],
+        },
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.text()).toContain("cannot accept a new user message");
+
+    const afterCredentials = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(afterCredentials[0]?.headers).toEqual({ Authorization: createSecret, "X-Initial": "1" });
+    expect(afterCredentials[0]?.credentialVersion).toBe(1);
+    expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100)).toHaveLength(beforeEvents.length);
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 100)).toHaveLength(beforeTurns.length);
+    expect(await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 100 })).toHaveLength(beforeUsage.length);
+    expect(wf.wakeups.length).toBe(wakeupsBefore);
   });
 
   test("goal-bearing sessions always hold goals:manage in their first-party MCP permissions", async () => {
