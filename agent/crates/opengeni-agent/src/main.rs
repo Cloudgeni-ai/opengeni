@@ -36,6 +36,7 @@ mod cli;
 mod config;
 mod dispatch;
 mod enrollment;
+mod instance_lock;
 mod metrics;
 mod service;
 mod supervisor;
@@ -164,6 +165,32 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 /// The FOREGROUND `run` command: enroll-if-needed, then dial + serve until a
 /// clean SIGINT/SIGTERM stops it.
 async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
+    // Single-instance guard, taken FIRST (before enroll-if-needed or any dial): an
+    // enrolled agent's NATS subject IS its identity, so two `run` processes on one
+    // machine become duplicate control-RPC responders + heartbeat publishers and
+    // ops route nondeterministically. This was seen live twice — a Finder/Raycast
+    // run-by-default racing a terminal `run`. Held for the whole process lifetime
+    // (dropped when `run` returns), and by the OS when the process exits, so a
+    // crashed holder self-heals. Covers BOTH explicit `run` and run-by-default,
+    // since both land here; `enroll`/`service`/`update`/`uninstall` do NOT lock.
+    let _instance_lock: Option<instance_lock::InstanceLock> = match instance_lock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(instance_lock::LockError::Contended { holder_pid }) => {
+            let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
+            // A launcher double-click of an already-running agent is a no-op, not an
+            // error: print a clear line and exit 0 (SUCCESS) rather than a failure.
+            eprintln!("opengeni-agent is already running (pid {pid}) — this instance will exit");
+            return Ok(());
+        }
+        Err(e) => {
+            // Fail-open: the guard is a safety net, not a hard gate. If the lock
+            // file cannot be created/locked (unusual — same dir as credentials),
+            // warn and continue rather than refuse to start.
+            warn!(error = %e, "could not acquire the single-instance lock; continuing without it");
+            None
+        }
+    };
+
     // macOS: request the Screen Recording + Accessibility grants ONCE so a
     // display-capable Mac can probe + advertise its display (the supervisor's
     // per-connect `capabilities()` re-probe then reflects a freshly-granted
