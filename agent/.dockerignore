@@ -1,0 +1,13 @@
+# Context-slimming for image builds whose context ROOT is agent/ — i.e. the
+# relay image (`az acr build --file agent/crates/opengeni-relay/Dockerfile agent`).
+# Nested .dockerignore files are invisible to repo-root-context builds, so this
+# CANNOT affect the api image, whose root context deliberately carries
+# install/baked ("the agent ships inside the control-plane").
+#
+# install/baked holds ~370 MiB of per-SHA baked agent binaries the relay build
+# never reads (its COPY . . feeds only the Rust workspace build); shipping them
+# made the relay context upload 380 MiB and exposed every staging build to ACR
+# connection resets (two consecutive failures on 2026-07-02).
+install/baked
+# Host-side cargo build outputs; the image builds its own target inside.
+target
