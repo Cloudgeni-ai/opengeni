@@ -131,6 +131,14 @@ export function selectCodexCredentialForTurn(args: {
 // agent must not blindly replay side effects it cannot see in its history:
 // at most the single in-flight model step was lost, and anything it started
 // there may or may not have completed.
+// Resume notice after an in-turn context-window overflow was recovered by
+// compaction: the turn's earlier work survives (albeit summarized), so the
+// agent continues instead of the session dying or stalling idle.
+export const CONTEXT_OVERFLOW_RESUME_TEXT = [
+  "[TURN RESUMED AFTER CONTEXT COMPACTION] The conversation grew past the model's context window mid-turn; older history above was compacted into a summary.",
+  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
+].join("\n");
+
 export const WORKER_SHUTDOWN_RESUME_TEXT = [
   "[TURN RESUMED AFTER WORKER RESTART] The platform worker running this turn restarted (deploy/rollout) before the turn finished.",
   "Your conversation history above, including this turn's earlier work, is preserved up to the last checkpoint; at most the single in-flight model step after it was lost.",
@@ -1683,6 +1691,46 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
           }
           if (progressPersisted) {
+            // The user's intent was live mid-turn — after a successful
+            // compaction the turn AUTO-CONTINUES via the same synthesized
+            // resume-notice requeue the worker-shutdown checkpoint uses (never
+            // the original trigger, so side effects are not replayed). Idle is
+            // the fallback, not the default; it remains for: legacy run-state
+            // history (resuming the frozen pre-compaction RunState would
+            // overflow again), a compaction that could not shrink anything,
+            // and a turn that ALREADY resumed from an overflow (loop guard —
+            // a second overflow in the same lineage stops churning).
+            const triggerPayload =
+              trigger.payload && typeof trigger.payload === "object" && !Array.isArray(trigger.payload)
+                ? trigger.payload as Record<string, unknown>
+                : {};
+            const overflowResumedTurn = triggerType === "turn.preempted" && triggerPayload.reason === "context_overflow_compacted";
+            const canAutoContinue =
+              compacted && !overflowResumedTurn && settings.sessionHistorySource === "items" && activeTurnId != null;
+            if (canAutoContinue) {
+              const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
+                {
+                  turnId: activeTurnId,
+                  type: "turn.preempted",
+                  payload: {
+                    triggerEventId: input.triggerEventId,
+                    reason: "context_overflow_compacted",
+                    resumeWithNotice: true,
+                    text: CONTEXT_OVERFLOW_RESUME_TEXT,
+                  },
+                },
+                { turnId: activeTurnId, type: "session.status.changed", payload: { status: "queued" } },
+              ]);
+              await requeuePreemptedTurn(db, input.workspaceId, activeTurnId, preemptedEvent ? preemptedEvent.id : input.triggerEventId);
+              await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
+              activityStatus = "preempted";
+              observability.info("context overflow recovery succeeded by compacting and auto-continuing", {
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                compacted,
+              });
+              return { status: "preempted" };
+            }
             await publish!([
               {
                 type: "turn.failed",

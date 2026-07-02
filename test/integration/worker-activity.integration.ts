@@ -550,7 +550,7 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
-  test("context overflow after persisted progress compacts and idles without failing the session", async () => {
+  test("context overflow after persisted progress compacts and AUTO-CONTINUES via a resume-notice requeue", async () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
@@ -627,9 +627,110 @@ describe("worker activities integration", () => {
         sessionId: session.id,
         triggerEventId: trigger!.id,
         workflowId: "workflow-overflow-progress",
-      })).resolves.toEqual({ status: "idle" });
+      })).resolves.toEqual({ status: "preempted" });
 
       expect(model.calls).toBe(2);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
+      // The turn auto-continues: no turn.failed — a preempted-with-notice requeue,
+      // exactly like the worker-shutdown checkpoint path.
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      const preempted = events.find((event) => event.type === "turn.preempted");
+      expect(preempted?.payload).toMatchObject({
+        reason: "context_overflow_compacted",
+        resumeWithNotice: true,
+      });
+      expect(typeof (preempted?.payload as Record<string, unknown>).text).toBe("string");
+      expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
+      expect(latestStatus(events)).toBe("queued");
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
+      const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+      expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("an overflow on an overflow-resumed turn idles instead of requeueing again (loop guard)", async () => {
+    const noopWorkflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      signalApprovalDecision: async () => undefined,
+      signalInterrupt: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const grant = await testGrant(dbClient.db);
+    const apiSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "configured",
+      delegationSecret: "test-delegation-secret",
+    });
+    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    try {
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 1_000_000,
+        contextReservedOutputTokens: 0,
+        contextCompactSoftFraction: 0.99,
+        contextKeepRecentTokens: 20,
+        mcpServers: [{
+          id: "opengeni",
+          name: "OpenGeni",
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          timeoutMs: undefined,
+          cacheToolsList: false,
+        }],
+      });
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "overflow after resume",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+      });
+      await appendSessionHistoryItems(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        items: [
+          { position: 0, item: { type: "message", role: "user", content: "old context" } },
+          { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+          { position: 2, item: { type: "message", role: "user", content: "recent context" } },
+          { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "recent answer" }] } },
+        ],
+      });
+      // The trigger IS an overflow resume: a second overflow in this lineage
+      // must idle, not requeue forever.
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "turn.preempted", payload: { reason: "context_overflow_compacted", resumeWithNotice: true, text: "[resumed after compaction]" } },
+      ]);
+      const model = new ScriptedModel([
+        { id: "overflow-loop-1", output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")] },
+        { error: contextOverflowError("maximum context length exceeded") },
+      ]);
+      const activities = createActivities({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: runtimeWithFakeCompactionSummarizer(model, "loop guard summary"),
+      });
+
+      await expect(activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-overflow-loop-guard",
+      })).resolves.toEqual({ status: "idle" });
+
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
       const failed = events.find((event) => event.type === "turn.failed");
       expect(failed?.payload).toMatchObject({
@@ -637,11 +738,9 @@ describe("worker activities integration", () => {
         code: "context_window_overflow_compacted",
         recovery: "user_message",
       });
-      expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
-      expect(latestStatus(events)).toBe("idle");
+      // No SECOND requeue: the only turn.preempted event is the trigger itself.
+      expect(events.filter((event) => event.type === "turn.preempted").length).toBe(1);
       expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-      const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-      expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
     } finally {
       server.stop(true);
     }
