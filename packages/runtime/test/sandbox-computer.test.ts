@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { testSettings } from "@opengeni/testing";
 import { buildAgentCapabilities } from "../src/index";
 import {
@@ -581,6 +583,99 @@ describe("computerFunctionTools (codex text-transport routing)", () => {
   });
 });
 
+describe("computerFunctionTools image delivery on the codex backend", () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const PNG_B64 = Buffer.from(PNG).toString("base64");
+  const PNG_DATA_URL = `data:image/png;base64,${PNG_B64}`;
+
+  test("imageFunctionResults=false (default): computer_screenshot returns the text data-URL string", async () => {
+    const { computer } = makeFakeComputer({ screenshotB64: PNG_B64 });
+    const t = toolsByName(computerFunctionTools(computer as never, false, undefined, false));
+    const out = await invokeTool(t.computer_screenshot, {});
+    // Chat-completions providers keep the SDK's text view_image rendering EXACTLY.
+    expect(out).toBe(PNG_DATA_URL);
+  });
+
+  test("imageFunctionResults=true: computer_screenshot returns a structured {type:'image'} tool output", async () => {
+    const { computer } = makeFakeComputer({ screenshotB64: PNG_B64 });
+    const t = toolsByName(computerFunctionTools(computer as never, false, undefined, true));
+    const out = (await invokeTool(t.computer_screenshot, {})) as {
+      type: string;
+      image: { data: Uint8Array; mediaType: string };
+    };
+    // NOT a text data-URL string — the structured image the codex backend can SEE.
+    expect(typeof out).toBe("object");
+    expect(out.type).toBe("image");
+    expect(out.image.mediaType).toBe("image/png");
+    expect(Array.from(out.image.data)).toEqual(Array.from(PNG));
+  });
+
+  // The decisive Candidate-A evidence: the structured {type:'image', image:{data:Uint8Array}}
+  // return value NEVER reaches the DB as a Uint8Array. agents-core's getToolCallOutputItem
+  // (runner/toolExecution.mjs — normalizeStructuredToolOutput → toInlineImageString/asDataUrl,
+  // then convertStructuredToolOutputToInputItem) converts the bytes to a base64 data-URL
+  // STRING and persists `{type:'input_image', image:'data:…'}`. That string survives JSON
+  // round-trip, and at request time the codex serializer maps `image` → `image_url`.
+  test("round-trip: tool result → getToolCallOutputItem → JSON → request wire shape has a non-empty input_image image_url", async () => {
+    const { computer } = makeFakeComputer({ screenshotB64: PNG_B64 });
+    const t = toolsByName(computerFunctionTools(computer as never, false, undefined, true));
+    const toolResult = await invokeTool(t.computer_screenshot, {});
+
+    // Reach the REAL agents-core normalizer that builds the persisted function_call_result
+    // (not exported from the package root, so resolve it through @openai/agents' own deps).
+    const req = createRequire(import.meta.url);
+    const agentsReq = createRequire(req.resolve("@openai/agents"));
+    const toolExecPath = join(dirname(agentsReq.resolve("@openai/agents-core")), "runner", "toolExecution.mjs");
+    const { getToolCallOutputItem } = (await import(toolExecPath)) as {
+      getToolCallOutputItem: (
+        toolCall: { name: string; callId: string },
+        output: unknown,
+      ) => { type: string; callId: string; output: unknown };
+    };
+
+    // 1) The tool result becomes the persisted function_call_result raw item.
+    const rawItem = getToolCallOutputItem({ name: "computer_screenshot", callId: "call_1" }, toolResult);
+    expect(Array.isArray(rawItem.output)).toBe(true);
+    const persistedItem = (rawItem.output as Array<Record<string, unknown>>)[0]!;
+    // Persisted as an input_image whose `image` is a data-URL STRING — no Uint8Array.
+    expect(persistedItem.type).toBe("input_image");
+    expect(typeof persistedItem.image).toBe("string");
+    expect(persistedItem.image as string).toBe(PNG_DATA_URL);
+
+    // 2) DB round-trip through JSON.stringify/parse (session_history_items persistence).
+    const replayed = JSON.parse(JSON.stringify(rawItem.output)) as Array<Record<string, unknown>>;
+    // Deep-equal proves nothing degraded (a Uint8Array would round-trip as an
+    // object-of-numbers and break this equality + the request serializer below).
+    expect(replayed).toEqual(rawItem.output as never);
+    const replayedItem = replayed[0]!;
+    expect(typeof replayedItem.image).toBe("string");
+
+    // 3) The request-time serializer (agents-openai openaiResponsesModel.mjs
+    //    convertStructuredOutputToRequestItem input_image branch: reads `image ?? imageUrl`,
+    //    emits `image_url`) turns the replayed item into the codex /responses wire shape.
+    const wire = convertInputImageToRequestItem(replayedItem);
+    expect(wire.type).toBe("input_image");
+    expect(typeof wire.image_url).toBe("string");
+    expect((wire.image_url as string).length).toBeGreaterThan(0);
+    expect(wire.image_url).toBe(PNG_DATA_URL);
+  });
+});
+
+// Faithful copy of the input_image branch of agents-openai's private
+// convertStructuredOutputToRequestItem (openaiResponsesModel.mjs): it is NOT exported,
+// so it is replicated here — the branch reads `image ?? imageUrl` and emits `image_url`.
+function convertInputImageToRequestItem(item: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { type: "input_image" };
+  const imageValue = (item.image ?? item.imageUrl) as unknown;
+  if (typeof imageValue === "string") {
+    result.image_url = imageValue;
+  }
+  if (typeof item.detail === "string") {
+    result.detail = item.detail;
+  }
+  return result;
+}
+
 describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
   const types = (s: Parameters<typeof buildAgentCapabilities>[0]) =>
     buildAgentCapabilities(s, []).map((c) => (c as { type?: string }).type);
@@ -625,5 +720,19 @@ describe("buildAgentCapabilities computer-use gating (P4.3)", () => {
     computerCap.bind(session as never).bindModel("responses", structuredModel());
     const names = computerCap.tools().map((t) => (t as { name?: string }).name);
     expect(names).toEqual(FUNCTION_TOOL_NAMES);
+  });
+
+  test("codex path threads imageFunctionResults:true → the emitted computer_screenshot returns a structured image", async () => {
+    const desktopOn = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: true, computerUseEnabled: true });
+    const codexCaps = buildAgentCapabilities(desktopOn, [], { structuredToolTransport: false });
+    const computerCap = codexCaps.find((c) => (c as { type?: string }).type === "computer-use") as unknown as ComputerUseCapability;
+    // A MODAL mock session → SandboxComputer; its base64 screenshot read returns PNG bytes.
+    const { session } = makeMockSession({ pngBytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) });
+    computerCap.bind(session as never).bindModel("responses", structuredModel());
+    const screenshotTool = computerCap.tools().find((t) => (t as { name?: string }).name === "computer_screenshot");
+    const out = (await invokeTool(screenshotTool, {})) as { type?: string; image?: { mediaType?: string } };
+    // Structured image (codex sees it), NOT the text data-URL string.
+    expect(out.type).toBe("image");
+    expect(out.image?.mediaType).toBe("image/png");
   });
 });
