@@ -181,7 +181,7 @@ export function SandboxTerminal({
         convertEol: true,
         disableStdin: !interactive,
         cursorBlink: interactive,
-        fontFamily: fontFamily ?? "var(--og-font-mono, var(--font-mono, monospace))",
+        fontFamily: fontFamily ?? "var(--og-font-mono)",
         fontSize: fontSize ?? 13,
         lineHeight: 1.25,
         // A little breathing room from the panel edge so output isn't flush to
@@ -318,23 +318,21 @@ export function SandboxTerminal({
   return (
     <div className={cn("relative flex h-full w-full flex-col overflow-hidden", className)}>
       {showHeader && (
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] px-2 py-1 text-[11px] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border px-2 py-1 text-og-xs text-og-fg-subtle">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
               className={cn(
                 "size-1.5 shrink-0 rounded-full",
-                result.running
-                  ? "bg-[color:var(--og-color-status-running,var(--color-status-running,#d29922))]"
-                  : "bg-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]",
+                result.running ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
-            <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))]">
+            <span className="truncate font-og-mono">
               pty: {shell ?? "shell"}
             </span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
             {!interactive && (
-              <span className="rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-surface-2,var(--color-surface-2,#161616))] px-1.5 py-0.5 text-[10px] uppercase tracking-wide">
+              <span className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide">
                 read-only
               </span>
             )}
@@ -344,7 +342,7 @@ export function SandboxTerminal({
                 termRef.current?.clear();
                 writtenRef.current = new Set();
               }}
-              className="rounded-[var(--og-radius-sm,4px)] px-1.5 py-0.5 text-[10px] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
+              className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-10"
             >
               Clear
             </button>
@@ -355,7 +353,7 @@ export function SandboxTerminal({
           with the terminal surface (capture so they win even though xterm's own
           listeners stop propagation). The host warms the box for pty-ws here. */}
       <div
-        className="relative min-h-0 flex-1 bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))] px-2 py-1.5"
+        className="relative min-h-0 flex-1 bg-og-bg px-2 py-1.5"
         onPointerDownCapture={onActivate}
         onFocusCapture={onActivate}
       >
@@ -379,7 +377,7 @@ const XTERM_BASE_CSS = `
 .xterm.focus,.xterm:focus{outline:none}
 .xterm .xterm-helpers{position:absolute;top:0;z-index:5}
 .xterm .xterm-helper-textarea{padding:0;border:0;margin:0;position:absolute;opacity:0;left:-9999em;top:0;width:0;height:0;z-index:-5;white-space:nowrap;overflow:hidden;resize:none}
-.xterm .composition-view{background:#000;color:#FFF;display:none;position:absolute;white-space:nowrap;z-index:1}
+.xterm .composition-view{background:var(--og-color-bg);color:var(--og-color-fg);display:none;position:absolute;white-space:nowrap;z-index:1}
 .xterm .composition-view.active{display:block}
 .xterm .xterm-viewport{background-color:transparent;overflow-y:scroll;cursor:default;position:absolute;right:0;left:0;top:0;bottom:0}
 .xterm .xterm-screen{position:relative}
@@ -418,7 +416,7 @@ function ensureXtermBaseCss(): void {
 
 function TerminalPlaceholder() {
   return (
-    <div className="absolute inset-0 flex items-center justify-center text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+    <div className="absolute inset-0 flex items-center justify-center text-og-sm text-og-fg-subtle">
       Loading terminal…
     </div>
   );

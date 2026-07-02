@@ -30,15 +30,15 @@ export type SandboxFilesProps = {
 };
 
 const STATUS_TINT: Record<GitFileDiff["status"], string> = {
-  added: "text-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]",
-  modified: "text-[color:var(--og-color-status-running,var(--color-warning,#d29922))]",
-  deleted: "text-[color:var(--og-color-danger,var(--color-danger,#f85149))]",
-  renamed: "text-[color:var(--og-color-accent,var(--color-info,#58a6ff))]",
-  copied: "text-[color:var(--og-color-accent,var(--color-info,#58a6ff))]",
-  untracked: "text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]",
-  ignored: "text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]",
-  conflicted: "text-[color:var(--og-color-danger,var(--color-danger,#f85149))]",
-  typechange: "text-[color:var(--og-color-status-running,var(--color-warning,#d29922))]",
+  added: "text-og-status-idle",
+  modified: "text-og-status-running",
+  deleted: "text-og-status-failed",
+  renamed: "text-og-accent",
+  copied: "text-og-accent",
+  untracked: "text-og-fg-subtle",
+  ignored: "text-og-fg-subtle",
+  conflicted: "text-og-status-failed",
+  typechange: "text-og-status-running",
 };
 
 const STATUS_LETTER: Record<GitFileDiff["status"], string> = {
@@ -158,13 +158,13 @@ export function SandboxFiles({
           className={cn(
             "min-h-0 overflow-auto",
             wide
-              ? "w-[280px] shrink-0 border-r border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]"
+              ? "w-[280px] shrink-0 border-r border-og-border"
               : "flex-1",
           )}
         >
           {changed.length > 0 && (
-            <div className="border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]">
-              <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+            <div className="border-b border-og-border">
+              <div className="px-2 py-1 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">
                 Changes · {changed.length}
               </div>
               <ul className="pb-1">
@@ -174,14 +174,13 @@ export function SandboxFiles({
                       type="button"
                       onClick={() => selectFile(file.path)}
                       className={cn(
-                        "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-xs hover:bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
-                        file.path === effectiveSelected &&
-                          "bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
+                        "flex w-full items-center gap-1.5 truncate px-2 py-0.5 text-left text-og-sm hover:bg-og-surface-2 pointer-coarse:min-h-10",
+                        file.path === effectiveSelected && "bg-og-surface-2",
                       )}
                     >
                       <span
                         className={cn(
-                          "w-3 shrink-0 text-center font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[10px]",
+                          "w-3 shrink-0 text-center font-og-mono text-og-xs",
                           STATUS_TINT[file.status],
                         )}
                       >
@@ -189,11 +188,11 @@ export function SandboxFiles({
                       </span>
                       <FileIcon className="size-3.5 shrink-0 opacity-70" />
                       <span className="truncate">{file.path}</span>
-                      <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-[10px]">
-                        <span className="text-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]">
+                      <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-2 text-og-xs">
+                        <span className="text-og-status-idle">
                           +{file.additions}
                         </span>
-                        <span className="text-[color:var(--og-color-danger,var(--color-danger,#f85149))]">
+                        <span className="text-og-status-failed">
                           −{file.deletions}
                         </span>
                       </span>
@@ -204,14 +203,14 @@ export function SandboxFiles({
             </div>
           )}
 
-          <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+          <div className="px-2 py-1 text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">
             Files
           </div>
           <FileBrowser
             result={files}
             selectedPath={effectiveSelected ?? undefined}
             onSelectFile={selectFile}
-            emptyState="No files."
+            emptyState="This directory is empty"
             className="min-w-0"
           />
         </div>
@@ -223,14 +222,14 @@ export function SandboxFiles({
             "flex min-h-0 min-w-0 flex-col",
             wide
               ? "flex-1"
-              : "flex-[1.4] border-t border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]",
+              : "flex-[1.4] border-t border-og-border",
           )}
         >
-          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1">
-            <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[11px] text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
+            <span className="min-w-0 truncate font-og-mono text-og-xs text-og-fg-muted">
               {effectiveSelected ?? "No file selected"}
             </span>
-            <div className="flex shrink-0 items-center gap-1">
+            <div className="flex min-w-0 shrink-0 flex-wrap items-center justify-end gap-1">
               {/* The Working/Staged + Unified/Split toggles only apply to a diff.
                   Hide them in the read-only viewer (a non-changed tree file). */}
               {selectedDiff && stagedGit && (
@@ -306,7 +305,7 @@ export function SandboxFiles({
               ) : fileView.content !== null ? (
                 <>
                 {fileView.truncated && (
-                  <div className="border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1 text-[10px] text-[color:var(--og-color-status-running,var(--color-warning,#d29922))]">
+                  <div className="border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-xs text-og-status-running">
                     Large file — showing a truncated preview ({fileView.sizeBytes ?? 0} bytes loaded). Editing is disabled to avoid corrupting the file.
                   </div>
                 )}
@@ -316,14 +315,14 @@ export function SandboxFiles({
                     contents={fileView.content}
                     themeType={resolvedTheme}
                     fallback={
-                      <pre className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px]">
+                      <pre className="overflow-auto whitespace-pre p-2 font-og-mono text-og-sm text-og-fg">
                         {fileView.content}
                       </pre>
                     }
                     className="p-1"
                   />
                 ) : (
-                  <pre className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px]">
+                  <pre className="overflow-auto whitespace-pre p-2 font-og-mono text-og-sm text-og-fg">
                     {fileView.content}
                   </pre>
                 )}
@@ -350,27 +349,25 @@ export function SandboxFiles({
 function GitHeader({ git, dirtyCount }: { git: UseSandboxGitResult; dirtyCount: number }) {
   const dirty = dirtyCount > 0;
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1 text-xs">
+    <div className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1 text-og-sm">
       <span
         className={cn(
           "size-2 shrink-0 rounded-full",
-          dirty
-            ? "bg-[color:var(--og-color-status-running,var(--color-warning,#d29922))]"
-            : "bg-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]",
+          dirty ? "bg-og-status-running" : "bg-og-status-idle",
         )}
         title={dirty ? `${dirtyCount} changed` : "clean"}
       />
-      <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]">
+      <span className="truncate font-og-mono text-og-fg">
         {git.branch ?? (git.isRepo ? "(detached)" : "no repo")}
       </span>
       {(git.ahead > 0 || git.behind > 0) && (
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+        <span className="flex shrink-0 items-center gap-1.5 text-og-xs text-og-fg-subtle">
           {git.ahead > 0 && <span>↑{git.ahead}</span>}
           {git.behind > 0 && <span>↓{git.behind}</span>}
         </span>
       )}
       {dirty && (
-        <span className="ml-auto shrink-0 text-[10px] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+        <span className="ml-auto shrink-0 text-og-xs text-og-fg-subtle">
           {dirtyCount} changed
         </span>
       )}
@@ -388,17 +385,17 @@ function Segmented({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="flex items-center rounded-[var(--og-radius-sm,4px)] border border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] p-0.5">
+    <div className="flex flex-wrap items-center rounded-og-sm border border-og-border p-0.5">
       {options.map((opt) => (
         <button
           key={opt.value}
           type="button"
           onClick={() => onChange(opt.value)}
           className={cn(
-            "rounded-[var(--og-radius-xs,3px)] px-1.5 py-0.5 text-[10px]",
+            "rounded-og-xs px-1.5 py-0.5 text-og-xs pointer-coarse:min-h-10",
             opt.value === value
-              ? "bg-[color:var(--og-color-accent-soft,var(--color-surface-2,#222))] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
-              : "text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]",
+              ? "bg-og-accent-soft text-og-fg"
+              : "text-og-fg-subtle hover:text-og-fg",
           )}
         >
           {opt.label}
@@ -499,7 +496,7 @@ function Notice({ children, className }: { children: ReactNode; className?: stri
   return (
     <div
       className={cn(
-        "flex h-full items-center justify-center p-4 text-center text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]",
+        "flex h-full items-center justify-center p-4 text-center text-og-sm text-og-fg-subtle",
         className,
       )}
     >

@@ -99,12 +99,12 @@ export function PierreFile({
   // Same shadow-DOM override vars as PierreDiff: pin the base background to the
   // dock surface so the viewer reads as part of the panel, not a black seam.
   const pierreVars = {
-    "--diffs-dark-bg": "var(--og-color-bg, #0d0d0d)",
-    "--diffs-light-bg": "var(--og-color-bg, #ffffff)",
-    "--diffs-bg-buffer-override": "var(--og-color-surface-1, #161616)",
-    "--diffs-bg-separator-override": "var(--og-color-surface-1, #161616)",
-    "--diffs-font-size": "12.5px",
-    "--diffs-line-height": "20px",
+    "--diffs-dark-bg": "var(--og-color-bg)",
+    "--diffs-light-bg": "var(--og-color-bg)",
+    "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
+    "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    "--diffs-font-size": "var(--og-code-font-size)",
+    "--diffs-line-height": "var(--og-code-line-height)",
   } as CSSProperties;
 
   return (
@@ -125,7 +125,7 @@ export function PierreFile({
 function PlainFile({ name, contents }: { name: string; contents: string }) {
   return (
     <pre
-      className="overflow-auto whitespace-pre p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
+      className="overflow-auto whitespace-pre p-2 font-og-mono text-og-sm text-og-fg"
       data-file={name}
     >
       {contents}
@@ -135,7 +135,7 @@ function PlainFile({ name, contents }: { name: string; contents: string }) {
 
 function FileSkeleton() {
   return (
-    <div className="p-3 text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+    <div className="p-3 text-og-sm text-og-fg-subtle">
       Loading file…
     </div>
   );

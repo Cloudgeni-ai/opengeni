@@ -17,6 +17,8 @@
   --og-font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, sans-serif;
   --og-font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --og-font-features: "cv11", "ss01", "ss03";
+  --og-code-font-size: 12px;
+  --og-code-line-height: 18px;
 
   /* Radius ----------------------------------------------------------------- */
   --og-radius-xs: 4px;
@@ -60,6 +62,8 @@
   --og-color-status-failed: oklch(0.7 0.16 22);
   --og-color-status-cancelled: oklch(0.6 0.035 260);
   --og-color-danger: oklch(0.66 0.18 22);
+  --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 14%, transparent);
+  --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 14%, transparent);
 
   /* Elevation ----------------------------------------------------------------
      Dark surfaces barely cast shadows; elevation reads mostly from the
@@ -103,6 +107,8 @@
   --og-color-status-failed: oklch(0.55 0.19 22);
   --og-color-status-cancelled: oklch(0.55 0.025 260);
   --og-color-danger: oklch(0.55 0.2 22);
+  --og-color-diff-add-bg: color-mix(in oklch, var(--og-color-status-idle) 12%, transparent);
+  --og-color-diff-del-bg: color-mix(in oklch, var(--og-color-status-failed) 12%, transparent);
 
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
   --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);

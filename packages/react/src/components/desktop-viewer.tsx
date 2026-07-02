@@ -84,6 +84,10 @@ type DesktopUiState =
   | "error" // RFB error / securityfailure after a connect.
   | "connected"; // live framebuffer painting.
 
+// Media-inspection exception: the framebuffer sits on true black so screenshots
+// and desktop pixels are not tinted by the product chrome palette.
+const DESKTOP_MEDIA_BACKGROUND = "#000";
+
 /** Reasons that are genuinely-unavailable (never warmable from the viewer). A
  *  `lease_cold` is deliberately EXCLUDED — that's the warmable cold state. */
 function isHardUnavailable(reason: CapabilityUnavailableReason | null): boolean {
@@ -369,11 +373,11 @@ export function DesktopViewer({
   return (
     <div
       className={cn(
-        "relative h-full w-full overflow-hidden bg-black",
-        inControl &&
-          "ring-2 ring-inset ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+        "relative h-full w-full overflow-hidden",
+        inControl && "ring-2 ring-inset ring-og-accent",
         className,
       )}
+      style={{ backgroundColor: DESKTOP_MEDIA_BACKGROUND }}
       data-opengeni-desktop
       data-state={stream.state}
       data-ui-state={uiState}
@@ -399,15 +403,15 @@ export function DesktopViewer({
           `connecting` UI-state (every other non-connected state has an explicit
           overlay). A spinner + transitional copy makes it feel live. */}
       {uiState === "connecting" && (
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 text-og-fg-subtle">
           <span className="relative flex items-center justify-center">
             <MonitorIcon className="size-8 opacity-30" strokeWidth={1.5} />
             <LoaderCircleIcon
-              className="absolute size-12 animate-og-spin text-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] opacity-70"
+              className="absolute size-12 animate-og-spin text-og-accent opacity-70"
               strokeWidth={1.25}
             />
           </span>
-          <span className="text-xs">Connecting to the desktop…</span>
+          <span className="text-og-sm">Connecting to the desktop…</span>
         </div>
       )}
 
@@ -438,7 +442,7 @@ export function DesktopViewer({
             !serverAllowsControl
               ? capability?.client === "frames"
                 ? "View-only — live control isn't available for this machine yet."
-                : "This deployment streams the desktop read-only"
+                : "This deployment streams the desktop read-only."
               : undefined
           }
           onTakeControl={() => setTakeControl(true)}
@@ -481,36 +485,36 @@ function TakeControlCallToAction({
         title={disabled ? disabledReason : "Take control of the desktop"}
         onClick={onTakeControl}
         className={cn(
-          "group pointer-events-auto flex items-center gap-3 rounded-[var(--og-radius-lg,12px)] border px-5 py-3",
-          "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]",
-          "bg-[color:var(--og-color-bg,#0d0d0d)]/85 backdrop-blur-md",
-          "shadow-[var(--og-shadow-lg,0_10px_30px_-10px_rgba(0,0,0,0.6))]",
+          "group pointer-events-auto flex items-center gap-3 rounded-og-lg border px-5 py-3",
+          "border-og-border",
+          "bg-og-bg/85 backdrop-blur-md",
+          "shadow-og-lg",
           "outline-none transition-all duration-150 ease-out",
-          "focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] focus-visible:ring-offset-2 focus-visible:ring-offset-black",
+          "focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg",
           disabled
             ? "cursor-not-allowed opacity-60"
             : cn(
                 "cursor-pointer opacity-90 hover:-translate-y-0.5 hover:opacity-100",
-                "hover:border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
-                "hover:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]/10",
+                "hover:border-og-accent",
+                "hover:bg-og-accent/10",
               ),
         )}
       >
         <span
           className={cn(
             "flex size-9 shrink-0 items-center justify-center rounded-full transition-colors",
-            "bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
-            "text-[color:var(--og-color-accent-fg,#fff)]",
+            "bg-og-accent",
+            "text-og-accent-fg",
             disabled ? "" : "group-hover:scale-105",
           )}
         >
           <MousePointerClickIcon className="size-5" strokeWidth={2} />
         </span>
         <span className="flex flex-col items-start leading-tight">
-          <span className="text-sm font-semibold text-[color:var(--og-color-fg,#e6e6e6)]">
+          <span className="text-og-base font-semibold text-og-fg">
             Take control
           </span>
-          <span className="text-[11px] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+          <span className="text-og-xs text-og-fg-subtle">
             {disabled && disabledReason ? disabledReason : "Drive the mouse & keyboard"}
           </span>
         </span>
@@ -530,15 +534,15 @@ function TakeControlCallToAction({
 function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () => void }) {
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between gap-2 p-2">
-      <span className="pointer-events-auto inline-flex items-center gap-2 rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] px-2.5 py-1 text-[11px] font-medium text-[color:var(--og-color-accent-fg,#fff)] shadow-[var(--og-shadow-md)]">
+      <span className="pointer-events-auto inline-flex items-center gap-2 rounded-og-sm bg-og-accent px-2.5 py-1 text-og-xs font-medium text-og-accent-fg shadow-og-md">
         <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />
         You&apos;re in control
         <span className="opacity-75">· click Return control (or Ctrl+Alt+Shift)</span>
       </span>
       <div className="pointer-events-auto flex items-center gap-1.5">
         {shared && (
-          <span className="rounded-[var(--og-radius-sm,4px)] bg-[color:var(--og-color-danger,var(--color-danger,#f85149))]/85 px-2 py-0.5 text-[10px] text-white">
-            Shared box — others are watching
+          <span className="rounded-og-sm bg-og-status-failed/85 px-2 py-0.5 text-og-xs text-og-accent-fg">
+            Shared sandbox — others are watching
           </span>
         )}
         <button
@@ -546,9 +550,9 @@ function InControlBar({ shared, onRelease }: { shared: boolean; onRelease: () =>
           onClick={onRelease}
           title="Return control (or press Ctrl+Alt+Shift)"
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-[var(--og-radius-sm,4px)] border px-2.5 py-1 text-[11px] font-semibold shadow-[var(--og-shadow-md)] transition-colors",
-            "border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] bg-[color:var(--og-color-bg,#0d0d0d)]/90 text-[color:var(--og-color-fg,#e6e6e6)] backdrop-blur-sm",
-            "outline-none hover:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] hover:text-[color:var(--og-color-accent-fg,#fff)] focus-visible:ring-2 focus-visible:ring-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]",
+            "inline-flex items-center gap-1.5 rounded-og-sm border px-2.5 py-1 text-og-xs font-semibold shadow-og-md transition-colors",
+            "border-og-accent bg-og-bg/90 text-og-fg backdrop-blur-sm",
+            "outline-none hover:bg-og-accent hover:text-og-accent-fg focus-visible:ring-2 focus-visible:ring-og-accent",
           )}
         >
           <MonitorIcon className="size-3.5" strokeWidth={2} aria-hidden />
@@ -568,7 +572,7 @@ function unavailableCopy(reason: CapabilityUnavailableReason | null): string {
     case "os_unsupported":
       return "The sandbox OS does not support a desktop stream.";
     case "not_provisioned":
-      return "No display stack is provisioned on this box yet.";
+      return "This sandbox doesn't have a desktop yet.";
     case "disabled_by_policy":
       return "Desktop streaming is disabled on this deployment.";
     case "lease_cold":
@@ -589,14 +593,14 @@ function unavailableCopy(reason: CapabilityUnavailableReason | null): string {
  */
 function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
   return (
-    <div className="flex max-w-sm flex-col items-center gap-3 rounded-lg border border-[color:var(--color-border,#2a2a2a)] bg-[color:var(--color-bg,#0d0d0d)]/90 p-5 text-center text-sm text-[color:var(--color-fg,#e6e6e6)] backdrop-blur-sm">
+    <div className="flex max-w-sm flex-col items-center gap-3 rounded-og-lg border border-og-border bg-og-bg/90 p-5 text-center text-og-base text-og-fg backdrop-blur-sm">
       <LoaderCircleIcon
-        className="size-7 animate-og-spin text-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]"
+        className="size-7 animate-og-spin text-og-accent"
         strokeWidth={1.5}
       />
       <div className="space-y-1">
         <div className="font-medium">Warming the sandbox…</div>
-        <p className="text-xs text-[color:var(--color-fg-subtle,#888)]">
+        <p className="text-og-sm text-og-fg-subtle">
           Spinning up the desktop — this takes a few seconds.
         </p>
       </div>
@@ -604,7 +608,7 @@ function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
         <button
           type="button"
           onClick={onRetry}
-          className="rounded border border-[color:var(--color-border,#2a2a2a)] px-3 py-1.5 text-xs text-[color:var(--color-fg-muted,#aaa)] transition-colors hover:text-[color:var(--color-fg,#e6e6e6)]"
+          className="rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm text-og-fg-muted transition-colors hover:text-og-fg pointer-coarse:min-h-10"
         >
           Taking too long? Retry
         </button>
@@ -615,19 +619,19 @@ function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
 
 function DefaultConsentGate({ shared, onAccept }: { shared: boolean; onAccept: () => void }) {
   return (
-    <div className="max-w-sm rounded-lg border border-[color:var(--color-border,#2a2a2a)] bg-[color:var(--color-bg,#0d0d0d)] p-4 text-center text-sm text-[color:var(--color-fg,#e6e6e6)]">
+    <div className="max-w-sm rounded-og-lg border border-og-border bg-og-bg p-4 text-center text-og-base text-og-fg">
       <div className="mb-1 font-medium">Watch the live desktop?</div>
-      <p className="mb-3 text-xs text-[color:var(--color-fg-subtle,#888)]">
+      <p className="mb-3 text-og-sm text-og-fg-subtle">
         The desktop pixel stream is <strong>un-redacted</strong> — it can show secrets the agent prints
         on screen.
         {shared
-          ? " This box is shared: you will also see sibling sessions' agents on the same screen."
+          ? " This sandbox is shared: you'll also see other sessions' agents on the same screen."
           : ""}
       </p>
       <button
         type="button"
         onClick={onAccept}
-        className="rounded bg-[color:var(--color-brand,#3b82f6)] px-3 py-1.5 text-xs font-medium text-white"
+        className="rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg pointer-coarse:min-h-10"
       >
         I understand — show the desktop
       </button>
@@ -637,17 +641,17 @@ function DefaultConsentGate({ shared, onAccept }: { shared: boolean; onAccept: (
 
 function defaultNotice(title: string, body: string, onRetry?: () => void): ReactNode {
   return (
-    <div className="max-w-sm rounded-lg border border-[color:var(--color-border,#2a2a2a)] bg-[color:var(--color-bg,#0d0d0d)] p-4 text-center text-sm text-[color:var(--color-fg,#e6e6e6)]">
+    <div className="max-w-sm rounded-og-lg border border-og-border bg-og-bg p-4 text-center text-og-base text-og-fg">
       <div className="mb-1 flex items-center justify-center gap-1.5 font-medium">
         {onRetry && <WifiOffIcon className="size-4 opacity-70" strokeWidth={1.75} />}
         {title}
       </div>
-      <p className="text-xs text-[color:var(--color-fg-subtle,#888)]">{body}</p>
+      <p className="text-og-sm text-og-fg-subtle">{body}</p>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded border border-[color:var(--color-border,#2a2a2a)] px-3 py-1.5 text-xs transition-colors hover:border-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]"
+          className="mt-3 rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm transition-colors hover:border-og-accent pointer-coarse:min-h-10"
         >
           Reconnect
         </button>
