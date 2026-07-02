@@ -1,5 +1,28 @@
 # @opengeni/react
 
+## 0.6.0
+
+### Minor Changes
+
+- a4f370f: Carve the connected-machine UI into a dedicated `@opengeni/react/machines` subpath, and add `workingDir` to the SDK create-session request.
+
+  - **`@opengeni/react`**: the bring-your-own-compute surface (`useMachines`, `MachinesDashboard`, `MachineCard`, `MachineDockBar`, `SharedMachineDisclosure`, `MachineStatusPill`, `ConnectionStatusPill`, `ConnectionDot`, `MachineMetrics`, `EnrollmentDeviceFlow`, `EnrollmentConsent`, `connectionStatusForState`, and the `MachineView` / `MachineState` / `MachineKind` / `MachinesResponse` / `MetricSample` view-model types) now lives at `@opengeni/react/machines`. The root keeps re-exporting it for backwards compatibility — **non-breaking** — but the root re-export is **deprecated** and will move in a future major. Import from `@opengeni/react/machines` going forward.
+  - **`@opengeni/sdk`**: `CreateSessionRequest` gains an optional `workingDir?: string` field — the host working directory for a connected-machine target (the agent runs there; defaults to the machine's launch dir). Ignored for managed sandboxes.
+
+- d9d7743: Render the self-hosted desktop stream: a PNG-frame canvas client for `transport: "relay-frames"`.
+
+  Self-hosted machines stream their desktop as PNG-per-frame protobuf datagrams over the relay (not RFB), so the noVNC/RFB viewer could never render them — the desktop went "warm" but the live stream never came up. This adds `useRelayFrameStream`, a view-only canvas renderer that opens the relay channel, decodes each PNG frame, and paints it (latest-wins backpressure so a slow decode never queues). `useDesktopStream` now dispatches on `DesktopStream.transport`: `"vnc-ws"` → noVNC (Modal boxes), `"relay-frames"` → the frame renderer (self-hosted machines). The `DesktopStream.transport` / `client` unions gain `"relay-frames"` / `"frames"`. View-only in v1 (matches the machine's read-only mode); interactive input is a follow-up.
+
+- d718d37: Render `session_interrupt` as a distinct worker action in the timeline. When a manager agent stops or steers a session it spawned (the new first-party `session_interrupt` MCP tool), the projection now emits a dedicated `interrupt` worker item carrying the target `workerSessionId` and the `mode` (`"stop"` | `"steer"`), and the activity rail titles it accordingly ("Stopping worker" / "Steering worker" / "Worker stopped" / "Worker steered") instead of a generic tool-call row — matching the existing `spawn` / `message` worker rendering.
+- ccebacd: Completed, failed, and cancelled turns now fold their activity behind a TurnSummary chip in MessageTimeline, with failed turns starting expanded so their failure text remains visible.
+- 5a289d0: Settled turns now collapse the entire turn span behind one summary chip, leaving only the final agent message visible until expanded. Expanding the chip reveals mid-turn narration and nested per-cluster activity summaries.
+
+### Patch Changes
+
+- Updated dependencies [a4f370f]
+- Updated dependencies [d9d7743]
+  - @opengeni/sdk@0.6.0
+
 ## 0.5.0
 
 ### Minor Changes

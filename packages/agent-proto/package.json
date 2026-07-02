@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/agent-proto",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Generated TypeScript wire-protocol types for the OpenGeni self-hosted agent — the control-plane side of the single-source-of-truth codegen from agent/proto/opengeni_agent.proto.",
   "license": "Apache-2.0",
   "repository": {
