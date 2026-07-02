@@ -66,6 +66,15 @@ export interface RoutableBackendSession {
   supportsPty?(): boolean;
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
+  // The native-desktop control-plane surface (self-hosted / macOS): a backend that
+  // drives the desktop NATIVELY (input inject + frame capture) instead of shelling
+  // xdotool/scrot over `exec`. Optional like the rest — only a `SelfhostedSession`
+  // implements these; a Modal box does not. The computer-use capability duck-types
+  // on their PRESENCE (`isNativeDesktopSession`) to pick the native vs exec Computer.
+  // `event` is kept `unknown` (mirroring the interface's structural style + avoiding
+  // a proto import into the leaf); the SelfhostedSession takes `DesktopInputRequest["event"]`.
+  desktopInput?(event: unknown): Promise<void>;
+  screenshot?(): Promise<{ png: Uint8Array; width: number; height: number }>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -171,9 +180,48 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
 
+  // The native-desktop control-plane ops (self-hosted / macOS). Declared as OPTIONAL
+  // INSTANCE fields — NOT prototype methods — because their PRESENCE is the selection
+  // signal `isNativeDesktopSession` (sandbox-computer.ts) uses to pick the native vs
+  // exec-shelling Computer. If they were unconditional prototype methods, this proxy
+  // would ALWAYS duck-type as native — misclassifying a Modal-fronting proxy (whose
+  // real backend has no native surface) and driving CGEvent/screenshot ops at a box
+  // that cannot serve them. So the constructor assigns them ONLY when the
+  // construction-time default backend actually implements the native surface (below).
+  desktopInput?: (event: unknown) => Promise<void>;
+  screenshot?: () => Promise<{ png: Uint8Array; width: number; height: number }>;
+
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
+
+    // Conditionally expose the native-desktop surface. Presence = the computer-use
+    // native/exec selection signal (isNativeDesktopSession duck-types on
+    // desktopInput+screenshot being functions); unconditional presence would
+    // misclassify Modal-fronting proxies as native. So we mint these per-INSTANCE
+    // arrow properties ONLY when the default backend resolved at construction is
+    // itself native-capable — the machine-primary (selfhosted) case. Each dispatches
+    // to the ACTIVE backend at call-time; if a mid-turn swap lands on a backend that
+    // lacks the op (a cross-kind swap to a Modal box), dispatch throws
+    // RoutingUnsupportedError — a legible tool failure, never a silent Linux-tool
+    // shell onto a Mac.
+    const def = deps.defaultResolved?.session;
+    if (typeof def?.desktopInput === "function" && typeof def?.screenshot === "function") {
+      this.desktopInput = (event: unknown) =>
+        this.dispatch("desktopInput", async (s) => {
+          if (!s.desktopInput) {
+            throw new RoutingUnsupportedError("desktopInput", this.cached?.kind ?? "unknown");
+          }
+          return s.desktopInput(event);
+        });
+      this.screenshot = () =>
+        this.dispatch("screenshot", async (s) => {
+          if (!s.screenshot) {
+            throw new RoutingUnsupportedError("screenshot", this.cached?.kind ?? "unknown");
+          }
+          return s.screenshot();
+        });
+    }
   }
 
   /**
