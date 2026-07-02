@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { computerToolModeForTurn, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -432,3 +432,32 @@ describe("worker shutdown preemption", () => {
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("check whether it already happened");
   });
 });
+
+// The worker is the ONE place provider identity is authoritative, so it derives the
+// EXPLICIT computer-use tool transport there instead of letting the runtime string-sniff
+// the model instance's constructor name. This seam pins the provider→mode mapping.
+describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi) =>
+    ({ provider: { kind, api } }) as Parameters<typeof computerToolModeForTurn>[0];
+
+  test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
+    // api is irrelevant once kind is codex-subscription — codex wins.
+    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe("function-image");
+    expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
+  });
+
+  test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+  });
+
+  test("a registry responses provider → hosted", () => {
+    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
+  });
+
+  test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
+    expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+type RegistryProviderKind = "api-key" | "codex-subscription";
+type ModelProviderApi = "responses" | "chat";

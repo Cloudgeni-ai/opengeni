@@ -761,6 +761,25 @@ export function computerFunctionTools(
 
 // ── The capability (the SDK seam) ────────────────────────────────────────────
 
+/**
+ * EXPLICIT tool-transport selection, decided by the caller that knows the
+ * provider's true wire identity (the worker's model resolution — see agent-turn.ts),
+ * NOT inferred from the bound model instance's constructor name. This is the
+ * HARDENING seam: `supportsStructuredToolOutputTransport` string-sniffs the
+ * constructor for "ChatCompletions", which a wrapped / proxied / minified model
+ * instance would defeat — silently handing a chat-completions provider the HOSTED
+ * `computer_use_preview` tool it 400s on every turn. When `toolMode` is set, tools()
+ * OBEYS it and never consults the sniff:
+ *   • "hosted"         → the single hosted `computer_use_preview` tool (Responses backends).
+ *   • "function-image" → the FUNCTION `computer_*` tools with screenshots delivered as a
+ *                        structured `{type:'image'}` output (the codex/ChatGPT backend,
+ *                        which rejects hosted tool types but SEES structured image results).
+ *   • "function-text"  → the FUNCTION tools with screenshots rendered as a text
+ *                        `data:…;base64` URL (chat-completions providers, which can't read
+ *                        structured image tool results).
+ */
+export type ComputerToolMode = "hosted" | "function-image" | "function-text";
+
 export type ComputerUseArgs = {
   dimensions?: [number, number];
   readOnly?: boolean;
@@ -771,8 +790,14 @@ export type ComputerUseArgs = {
   // `input_image` content item inside the function_call_output) instead of the text
   // data-URL string. Only the codex/ChatGPT backend can read structured image tool
   // results; chat-completions providers cannot, so this stays OFF (text rendering)
-  // by default and is turned on only on the codex path (see index.ts).
+  // by default and is turned on only on the codex path (see index.ts). Ignored when
+  // `toolMode` is set (the mode carries its own image-delivery choice).
   imageFunctionResults?: boolean;
+  // EXPLICIT transport selection (see {@link ComputerToolMode}). When present, tools()
+  // obeys it directly — the constructor-name sniff is NOT consulted. When ABSENT, the
+  // legacy sniff behaviour is preserved byte-for-byte (back-compat for any embedder
+  // that constructs the capability without threading a mode).
+  toolMode?: ComputerToolMode;
 };
 
 export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
@@ -820,16 +845,36 @@ export class ComputerUseCapability extends Capability {
           // The SDK base exposes the bound runAs as a protected field.
           ...(typeof this._runAs === "string" ? { runAs: this._runAs } : {}),
         });
-    // Structured transport keeps the HOSTED computer tool (unchanged); the codex /
-    // text backend gets the FUNCTION tools it can actually call.
+    // HARDENING: when the caller declares an EXPLICIT toolMode, obey it and NEVER
+    // consult `supportsStructuredToolOutputTransport` — tool selection must not
+    // depend on the model instance's constructor name (a wrapped/proxied/minified
+    // instance would defeat the "ChatCompletions" string-sniff and silently hand a
+    // chat-completions provider the hosted tool it 400s on). The mode is decided by
+    // the worker, where provider identity is authoritative (see agent-turn.ts).
+    switch (this.args.toolMode) {
+      case "hosted":
+        return [this.hostedComputerTool(computer)];
+      case "function-image":
+        return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, true);
+      case "function-text":
+        return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, false);
+      case undefined:
+        break; // fall through to the legacy sniff (back-compat), preserved byte-for-byte
+    }
+    // Legacy (no toolMode): structured transport keeps the HOSTED computer tool
+    // (unchanged); the codex / text backend gets the FUNCTION tools it can call.
     if (supportsStructuredToolOutputTransport(this._modelInstance)) {
-      return [
-        computerTool({
-          computer,
-          ...(this.args.needsApproval !== undefined ? { needsApproval: this.args.needsApproval as never } : {}),
-        }) as unknown as Tool<unknown>,
-      ];
+      return [this.hostedComputerTool(computer)];
     }
     return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, this.args.imageFunctionResults ?? false);
+  }
+
+  /** The single HOSTED `computer_use_preview` tool bound to `computer` — identical
+   *  construction for the explicit "hosted" mode and the legacy structured-sniff path. */
+  private hostedComputerTool(computer: Computer): Tool<unknown> {
+    return computerTool({
+      computer,
+      ...(this.args.needsApproval !== undefined ? { needsApproval: this.args.needsApproval as never } : {}),
+    }) as unknown as Tool<unknown>;
   }
 }

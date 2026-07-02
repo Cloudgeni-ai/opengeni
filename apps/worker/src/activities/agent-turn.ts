@@ -51,8 +51,9 @@ import {
   summarizeForCompaction,
   type SandboxFileDownload,
   type OpenGeniRuntime,
+  type ComputerToolMode,
 } from "@opengeni/runtime";
-import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type Settings } from "@opengeni/config";
+import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type ModelProviderApi, type RegistryProviderKind, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
 import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { chooseRotationActive, computeIdleDelayMs, computeReactiveRotationResume, type CodexRotationStrategy, type RotationDecision } from "./codex-rotation";
@@ -362,6 +363,43 @@ export function shouldStartOnTurnRecording(params: {
     && desktopCapableBackend(params.establishedBackendId)
     && params.effectiveBackend !== "selfhosted"
   );
+}
+
+/**
+ * Decide the EXPLICIT computer-use tool transport for THIS turn.
+ *
+ * The runtime's SDK-mirrored capability would otherwise pick hosted-vs-function
+ * tools by string-sniffing the bound model instance's constructor name for
+ * "ChatCompletions" (supportsStructuredToolOutputTransport). That is fragile: a
+ * wrapped / proxied / minified model instance defeats the sniff and a
+ * chat-completions provider would silently get the HOSTED `computer_use_preview`
+ * tool it 400s on every turn. So the mode is decided HERE — the worker's model
+ * resolution is the ONE place a provider's true wire identity is authoritative —
+ * and threaded to the runtime as an explicit flag (buildAgent → computerToolMode):
+ *   • codex-subscription → "function-image": the ChatGPT/Codex backend rejects
+ *     hosted tool types but SEES structured `input_image` tool results.
+ *   • a "chat" (OpenAIChatCompletionsModel wire) provider → "function-text": it takes
+ *     function tools but can't read structured image results, so screenshots render
+ *     as a text data-URL.
+ *   • everything else — built-in Azure/OpenAI responses, registry "responses"
+ *     providers, AND the LEGACY global-client fallback (resolveTurnModel returned
+ *     null) — → "hosted": real Responses hosted-tool support.
+ *
+ * Pure + exported so the mapping is unit-testable without a live turn.
+ */
+export function computerToolModeForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind; api: ModelProviderApi } } | null,
+): ComputerToolMode {
+  if (!resolvedModel) {
+    return "hosted"; // legacy built-in Responses client — real hosted support
+  }
+  if (resolvedModel.provider.kind === "codex-subscription") {
+    return "function-image";
+  }
+  if (resolvedModel.provider.api === "chat") {
+    return "function-text";
+  }
+  return "hosted";
 }
 
 /**
@@ -1200,8 +1238,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // providers = the SDK's own ChatCompletions detection) keeps the SDK
             // default.
             structuredToolTransport: resolvedModel.provider.kind !== "codex-subscription",
+            // EXPLICIT computer-use tool transport, derived from the resolved provider's
+            // authoritative wire identity (codex → function-image, chat → function-text,
+            // responses → hosted) so the runtime never string-sniffs the model instance's
+            // constructor name. See {@link computerToolModeForTurn}.
+            computerToolMode: computerToolModeForTurn(resolvedModel),
           }
-          : {}),
+          // LEGACY global-client fallback (resolveTurnModel returned null → the model
+          // is not in the registry, served by the built-in OpenAI/Azure Responses
+          // client). That backend has real hosted support, so pin computerToolMode to
+          // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
+          : { computerToolMode: computerToolModeForTurn(null) }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceEnvironment
