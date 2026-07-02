@@ -270,6 +270,16 @@ function SessionChatPane(props: {
   // if the strip lingers for a beat before the status flips.
   const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
   const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
+  // Decision state is scoped to ONE requires_action pause. Once the session
+  // resumes, both maps reset — otherwise a later approval that reuses an id
+  // (including the index-fallback ids) would render permanently disabled, and
+  // long sessions would accumulate stale entries.
+  useEffect(() => {
+    if (props.session.status !== "requires_action") {
+      setApprovalPending((current) => (Object.keys(current).length ? {} : current));
+      setApprovalSettled((current) => (Object.keys(current).length ? {} : current));
+    }
+  }, [props.session.status]);
   const decideApproval = useCallback(
     async (approvalId: string, decision: "approve" | "reject") => {
       if (approvalPending[approvalId] || approvalSettled[approvalId]) {

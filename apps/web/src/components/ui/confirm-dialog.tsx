@@ -43,16 +43,25 @@ export function ConfirmDialog({
   confirmLabel: string;
   cancelLabel?: string;
   destructive?: boolean;
-  /** May be async; the dialog shows pending state and closes on success. */
-  onConfirm: () => void | Promise<void>;
+  /**
+   * May be async; the dialog shows pending state while it runs. The dialog
+   * closes on success — returning `false` (or throwing) keeps it open so a
+   * failed mutation never reads as a completed one. Handlers that catch their
+   * own errors (to toast) must return `false` on the failure path.
+   */
+  onConfirm: () => void | boolean | Promise<void | boolean>;
 }) {
   const [pending, setPending] = useState(false);
 
   const confirm = async () => {
     setPending(true);
     try {
-      await onConfirm();
-      onOpenChange(false);
+      const result = await onConfirm();
+      if (result !== false) {
+        onOpenChange(false);
+      }
+    } catch {
+      // The handler surfaces its own error (toast/notice); stay open for retry.
     } finally {
       setPending(false);
     }

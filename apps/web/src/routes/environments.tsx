@@ -421,7 +421,7 @@ function EnvironmentCard(props: {
         title={`Delete environment “${environment.name}”?`}
         description="Its variables are removed and sessions can no longer use them. This can't be undone."
         confirmLabel="Delete environment"
-        onConfirm={() => void props.onDelete()}
+        onConfirm={() => props.onDelete()}
       />
       <ConfirmDialog
         open={confirmDeleteVariable !== null}
@@ -438,6 +438,7 @@ function EnvironmentCard(props: {
           if (removed) {
             toast.success(`Variable ${name} deleted`);
           }
+          return removed;
         }}
       />
     </article>

@@ -190,8 +190,10 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         toast.success("Scheduled task deleted");
       }
       await refresh();
+      return true;
     } catch (error) {
       toast.error(ACTION_ERROR[action], { description: error instanceof Error ? error.message : String(error) });
+      return false;
     } finally {
       setBusyTaskId(null);
     }
@@ -421,12 +423,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
         description="This deletes the schedule and stops future runs. Sessions it already created are kept."
         confirmLabel="Delete task"
-        onConfirm={async () => {
-          if (confirmDelete) {
-            await taskAction(confirmDelete, "delete");
-            setConfirmDelete(null);
-          }
-        }}
+        onConfirm={() => (confirmDelete ? taskAction(confirmDelete, "delete") : false)}
       />
     </div>
   );
