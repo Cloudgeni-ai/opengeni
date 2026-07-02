@@ -24,11 +24,17 @@ import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 export { DESKTOP_STREAM_PORT };
 export const STREAM_PORT = DESKTOP_STREAM_PORT;
 
-// The whole-stack launch is bounded by the readiness gates inside the script
-// (four loops of 50 * 0.1s = ~5s each, ~20s worst case) PLUS first-boot XFCE/dbus
-// + font-cache warm-up on a cold gVisor box. 60s gives headroom over the spike's
-// observed ~5-10s warm path without masking a genuine wedge.
-export const DISPLAY_STACK_TIMEOUT_MS = 60_000;
+// The whole-stack launch is bounded by the readiness gates inside the up-script
+// (four loops of 50 * 0.1s = ~5s each, ~20s worst case) PLUS the PAINTABLE-FRAME
+// gate we append (up to ~30s of scrot probing) PLUS first-boot XFCE/dbus + font-cache
+// warm-up on a cold gVisor box. 90s gives headroom over the spike's observed ~5-10s
+// warm path AND the cold-box paint warm-up without masking a genuine wedge.
+export const DISPLAY_STACK_TIMEOUT_MS = 90_000;
+
+// PAINTABLE-FRAME gate: poll scrot up to this many times, this many seconds apart,
+// waiting for a non-empty frame before declaring the stack "up" (~30s worst case).
+const PAINT_PROBE_ATTEMPTS = 150;
+const PAINT_PROBE_INTERVAL_S = 0.2;
 
 /** Desktop geometry for the framebuffer. v1 has no live RANDR: a resolution
  *  change is a full down -> up restart (a separate op). */
@@ -41,15 +47,25 @@ export type DesktopGeometry = {
 export const DEFAULT_DESKTOP_GEOMETRY: DesktopGeometry = { width: 1280, height: 800, dpi: 96 };
 
 /** Thrown when a stage of the launch script failed. exitCode 11/12/13 map to
- *  Xvfb / x11vnc / websockify respectively (the stage that died). Degradation is
- *  surfaced as a value to viewers by the caller; this error is for diagnostics. */
+ *  Xvfb / x11vnc / websockify respectively (the stage that died); 14 is the
+ *  PAINTABLE-FRAME gate (ports listening but scrot still yields an empty frame —
+ *  the display is up but not actually painting). Degradation is surfaced as a
+ *  value to viewers by the caller; this error is for diagnostics. */
 export class DisplayStackError extends Error {
   readonly exitCode: number;
-  readonly stage: "xvfb" | "x11vnc" | "websockify" | "unknown";
+  readonly stage: "xvfb" | "x11vnc" | "websockify" | "paint" | "unknown";
 
   constructor(exitCode: number, output: string) {
     const stage =
-      exitCode === 11 ? "xvfb" : exitCode === 12 ? "x11vnc" : exitCode === 13 ? "websockify" : "unknown";
+      exitCode === 11
+        ? "xvfb"
+        : exitCode === 12
+          ? "x11vnc"
+          : exitCode === 13
+            ? "websockify"
+            : exitCode === 14
+              ? "paint"
+              : "unknown";
     super(`desktop display stack failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`);
     this.name = "DisplayStackError";
     this.exitCode = exitCode;
@@ -125,15 +141,41 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
   // flock -w bounds the wait so a wedged holder can't deadlock the caller; the
   // up-script itself ALSO takes the same lock (belt + braces) so this works even
   // against an older image that predates the wrapper.
-  return (
+  //
+  // PAINTABLE-FRAME GATE (the completion criterion): the up-script's readiness gates
+  // only assert that Xvfb answers xdpyinfo and that x11vnc:5900 + websockify:PORT are
+  // LISTENING — NOT that the display actually PAINTS. On a stone-cold gVisor box (the
+  // machine→sandbox swap-recovery turn always hits one), Xvfb can answer and the VNC
+  // ports can bind seconds BEFORE the root window / XFCE compositor is drawable, so a
+  // scrot right after the `OPENGENI_DESKTOP_UP` marker yields a ZERO-BYTE frame — which
+  // is exactly the empty screenshot that 400s the model and blanks the human viewer.
+  // We therefore chain a real scrot probe as the completion gate: after the up-script
+  // reports success, poll scrot until it produces a NON-EMPTY frame (bounded ~30s), and
+  // only THEN let the command exit 0. If it never paints we exit 14 so the caller sees a
+  // typed DisplayStackError("paint") — an HONEST failure the worker can degrade + log,
+  // rather than a false "up" that hands the model an empty image. `-ac` on Xvfb disables
+  // access control so this root-side scrot reaches :0. Runs on a pre-check hit too (cheap
+  // — an already-up display paints on the first probe). Lives in the runtime-built script
+  // (not the baked image up-script) so it ships with the worker/api, no image rebuild.
+  const bringUp =
     `if nc -z 127.0.0.1 ${port} >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then ` +
     `echo "OPENGENI_DESKTOP_UP port=${port} geometry=${geometry.width}x${geometry.height} dpi=${geometry.dpi} (precheck)"; ` +
     `else ` +
     `mkdir -p /tmp/opengeni-desktop && ` +
     `flock -w 45 /tmp/opengeni-desktop/up.outer.lock ` +
     `env ${env} opengeni-desktop-up; ` +
-    `fi`
-  );
+    `fi`;
+  const paintProbe =
+    `p=/tmp/opengeni-desktop/paint-probe.png; ` +
+    `for i in $(seq 1 ${PAINT_PROBE_ATTEMPTS}); do ` +
+    `if DISPLAY=:0 scrot -o "$p" >/dev/null 2>&1 && [ -s "$p" ]; then rm -f "$p"; break; fi; ` +
+    `rm -f "$p"; ` +
+    // NOTE: NOT_PAINTING goes to STDOUT (not stderr): Modal is execCommand-only, so the
+    // caller infers the outcome by string-matching the output — stdout is always captured.
+    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot empty after warmup"; exit 14; fi; ` +
+    `sleep ${PAINT_PROBE_INTERVAL_S}; ` +
+    `done`;
+  return `mkdir -p /tmp/opengeni-desktop; { ${bringUp} ; } && { ${paintProbe} ; }`;
 }
 
 function execResultOutput(result: ExecResultLike | string): string {
@@ -157,6 +199,13 @@ function execResultExitCode(result: ExecResultLike | string): number | null {
 // bare string), we infer success from the OPENGENI_DESKTOP_UP marker and infer
 // the failing stage from the stage-failure message the script prints to stderr.
 function inferExitFromOutput(output: string): number {
+  // Check the PAINTABLE-FRAME failure FIRST: on that path the up-script already
+  // printed OPENGENI_DESKTOP_UP (bring-up succeeded) and THEN the paint gate failed,
+  // so both markers are present — the NOT_PAINTING one is the authoritative outcome.
+  // (Modal is execCommand-only, so this string-inference path is the live one.)
+  if (/OPENGENI_DESKTOP_NOT_PAINTING/.test(output)) {
+    return 14;
+  }
   if (/OPENGENI_DESKTOP_UP\b/.test(output)) {
     return 0;
   }

@@ -178,7 +178,9 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
   // return "" — it throws (a clear action failure) or self-heals via retry.
   test("REGRESSION: a zero-byte (cold/dead :0) frame THROWS — never returns an empty string", async () => {
     const { session } = makeMockSession({ pngBytes: new Uint8Array() }); // empty PNG, every attempt
-    const c = new SandboxComputer(session as never);
+    // Shrink the warm-up budget so the "genuinely dead display" path fails fast in the
+    // test instead of burning the full 30s cold-boot budget (behavior is identical).
+    const c = new SandboxComputer(session as never, { screenshotWarmupBudgetMs: 30, screenshotRetryDelayMs: 5 });
     // Failure-sensitive: it must reject (NOT resolve to ""), so an empty image_url
     // can never reach the model.
     const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));

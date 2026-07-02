@@ -84,9 +84,12 @@ start() { # name, cmd...
 
 # 1. Xvfb :0  (RAM framebuffer; 24-bit mandatory for Chrome; no live RANDR -> geometry fixed here)
 start xvfb Xvfb :0 -ac -screen 0 "${W}x${H}x24" -dpi "$DPI" -retro -nolisten tcp -nolisten unix
-# readiness gate: block until the display answers
-for i in $(seq 1 50); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 0.1; \
-  [ "$i" = "50" ] && { echo "Xvfb failed to come up" >&2; exit 11; }; done
+# readiness gate: block until the display answers. 100*0.1s=10s (was 50/5s) — on a
+# STONE-COLD gVisor box (the machine->sandbox swap-recovery turn always hits one) Xvfb's
+# first xdpyinfo answer can exceed 5s under runsc syscall overhead + cold page cache, and
+# a spurious exit 11 here degrades the whole desktop to Channel-A for the turn.
+for i in $(seq 1 100); do xdpyinfo -display :0 >/dev/null 2>&1 && break; sleep 0.1; \
+  [ "$i" = "100" ] && { echo "Xvfb failed to come up" >&2; exit 11; }; done
 
 # 1b. KEYMAP — Xvfb boots with a SPARSE default XKB map: only a handful of keysyms
 # have a keycode, so x11vnc silently drops any keysym noVNC sends that isn't in it

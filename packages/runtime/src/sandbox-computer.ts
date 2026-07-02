@@ -67,10 +67,16 @@ const SCROLL_NOTCH_PIXELS = 100;
 const SCROLL_MAX_CLICKS = 15;
 // screenshot() never hands the model an empty image_url (the SDK turns "" into
 // `image_url: ''`, which the model API 400s). A cold/not-yet-painting :0 can yield
-// a zero-byte frame on the first scrot; bounded retries with a short pause let a
-// momentarily-unpainted-but-live display self-heal before we FAIL LOUD.
-const SCREENSHOT_MAX_ATTEMPTS = 3;
-const SCREENSHOT_RETRY_DELAY_MS = 400;
+// zero-byte frames for the WHOLE warm-up window of a freshly cold-booted box — Xvfb
+// + XFCE + dbus + font-cache under gVisor routinely take 20s+, and the recovery path
+// after a machine→sandbox swap ALWAYS hits a stone-cold Modal box on its first turn.
+// So we retry across a bounded WALL-CLOCK budget (not a tiny fixed attempt count) with
+// a short pause between tries, so that first post-cold / post-swap screenshot self-heals
+// as the display warms — then FAIL LOUD once the budget is genuinely spent (a display
+// that is dead, not merely warming). ~800ms of retries (the prior 3×400ms) was far too
+// short to ride out a cold gVisor XFCE boot, so the turn failed loud on a transient.
+const SCREENSHOT_WARMUP_BUDGET_MS = 30_000;
+const SCREENSHOT_RETRY_DELAY_MS = 750;
 
 export type SandboxComputerOptions = {
   display?: string; // ":0"
@@ -79,6 +85,11 @@ export type SandboxComputerOptions = {
   typeDelayMs?: number; // xdotool type --delay (default 12ms)
   readOnly?: boolean; // when true, every WRITE action throws ComputerReadOnlyError
   screenshotTmpDir?: string; // "/tmp"
+  // How long screenshot() keeps retrying an empty (still-warming) frame before it
+  // FAILS LOUD, and the pause between tries. Defaults to the cold-boot warm-up budget;
+  // exposed mainly so tests can shrink it (a real caller wants the full budget).
+  screenshotWarmupBudgetMs?: number;
+  screenshotRetryDelayMs?: number;
 };
 
 // X keysym map for keypress(): model key names → xdotool keysyms.
@@ -144,6 +155,8 @@ export class SandboxComputer implements Computer {
   private readonly typeDelayMs: number;
   private readonly readOnly: boolean;
   private readonly tmp: string;
+  private readonly screenshotWarmupBudgetMs: number;
+  private readonly screenshotRetryDelayMs: number;
 
   constructor(session: SandboxSessionLike, opts: SandboxComputerOptions = {}) {
     this.session = session as unknown as ComputerSession;
@@ -155,6 +168,8 @@ export class SandboxComputer implements Computer {
     this.typeDelayMs = opts.typeDelayMs ?? 12;
     this.readOnly = opts.readOnly ?? false;
     this.tmp = opts.screenshotTmpDir ?? "/tmp";
+    this.screenshotWarmupBudgetMs = opts.screenshotWarmupBudgetMs ?? SCREENSHOT_WARMUP_BUDGET_MS;
+    this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? SCREENSHOT_RETRY_DELAY_MS;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
@@ -231,17 +246,23 @@ export class SandboxComputer implements Computer {
     // but momentarily not painting (XFCE/dbus still warming) recovers without
     // failing the turn.
     let lastError: unknown;
-    for (let attempt = 0; attempt < SCREENSHOT_MAX_ATTEMPTS; attempt++) {
+    const deadline = Date.now() + this.screenshotWarmupBudgetMs;
+    let attempt = 0;
+    // Retry across a WALL-CLOCK budget (not a fixed count): a stone-cold box on the
+    // first post-swap / post-cold turn can take 20s+ to paint, and a zero-byte frame
+    // is a KNOWN transient during that warm-up — not a reason to fail the turn.
+    while (true) {
       if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, SCREENSHOT_RETRY_DELAY_MS));
+        await new Promise((r) => setTimeout(r, this.screenshotRetryDelayMs));
       }
+      attempt++;
       const f = `${this.tmp}/og-shot-${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
       try {
         await this.x(`scrot --pointer --overwrite ${f}`);
         const bytes = await this.readScreenshotBytes(f);
         if (bytes.length === 0) {
           // A cold/not-yet-painting :0 yields a zero-byte frame. Retry rather than
-          // hand the model an empty image_url; throw on the final attempt.
+          // hand the model an empty image_url; throw once the budget is spent.
           throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
         }
         return Buffer.from(bytes).toString("base64");
@@ -252,9 +273,15 @@ export class SandboxComputer implements Computer {
         // screenshot result.
         await this.x(`rm -f ${f}`).catch(() => undefined);
       }
+      // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
+      if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
+        break;
+      }
     }
-    // Exhausted retries: FAIL LOUD. A clear throw is the only acceptable outcome —
-    // returning "" here would surface to the model as an invalid empty image_url.
+    // Exhausted the warm-up budget: FAIL LOUD. A clear throw is the only acceptable
+    // outcome — returning "" here would surface to the model as an invalid empty
+    // image_url. Reaching here means the display was still dead after ~30s, not merely
+    // warming, so a hard action failure is correct.
     if (lastError instanceof Error) {
       throw lastError;
     }

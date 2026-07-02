@@ -29,12 +29,18 @@ import {
 // FIRST `opengeni-desktop-up` "launches" the stack (records launches), every
 // subsequent call observes it already up and is a NO-OP that re-prints the same
 // marker (exactly what flock + alive-guards yield on a real box).
-function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 | 13 } = {}) {
+function makeFakeBox(opts: { mode?: "exec" | "execCommand"; failStage?: 11 | 12 | 13 | 14 } = {}) {
   const calls: string[] = [];
   let launches = 0;
   let up = false;
 
   const runUp = (): { exitCode: number; output: string } => {
+    if (opts.failStage === 14) {
+      // The PAINTABLE-FRAME gate: bring-up SUCCEEDED (marker printed) but scrot never
+      // produced a non-empty frame, so both markers are present and the script exits 14.
+      const marker = `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`;
+      return { exitCode: 14, output: `${marker}\nOPENGENI_DESKTOP_NOT_PAINTING scrot empty after warmup` };
+    }
     if (opts.failStage) {
       const msg =
         opts.failStage === 11
@@ -95,6 +101,21 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(cmd).toContain("flock");
     expect(cmd).toContain("opengeni-desktop-up");
     expect(cmd).toContain("DESKTOP_W=1920 DESKTOP_H=1080 DESKTOP_DPI=120 STREAM_PORT=7090");
+  });
+
+  test("(2a) PAINTABLE-FRAME GATE: the script scrot-probes for a non-empty frame and exits 14 when it never paints", () => {
+    const cmd = buildDisplayStackScript({ port: 6080 });
+    // The completion criterion is a REAL scrot (not just ports listening). It must
+    // appear AFTER the bring-up (the up-script/precheck), chained with && so a failed
+    // bring-up short-circuits it, and it must exit 14 (the "paint" stage) on failure.
+    const scrotIdx = cmd.indexOf("scrot -o");
+    const upIdx = cmd.indexOf("opengeni-desktop-up");
+    expect(scrotIdx).toBeGreaterThan(upIdx);
+    expect(cmd).toContain("[ -s ");
+    expect(cmd).toContain("exit 14");
+    expect(cmd).toContain("OPENGENI_DESKTOP_NOT_PAINTING");
+    // chained so a failed bring-up never reaches the paint probe.
+    expect(cmd).toContain("&& {");
   });
 
   test("(2b) FAST PRE-CHECK: buildDisplayStackScript probes the exposed + VNC ports BEFORE the flock", () => {
@@ -179,6 +200,34 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     } catch (e) {
       expect((e as DisplayStackError).stage).toBe("xvfb");
     }
+  });
+
+  test("(4c) PAINTABLE-FRAME failure (exit 14) throws DisplayStackError stage 'paint' — exec path", async () => {
+    const box = makeFakeBox({ failStage: 14 });
+    let thrown: unknown;
+    try {
+      await ensureDisplayStack(box.session);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DisplayStackError);
+    expect((thrown as DisplayStackError).exitCode).toBe(14);
+    expect((thrown as DisplayStackError).stage).toBe("paint");
+  });
+
+  test("(4d) PAINTABLE-FRAME failure via execCommand: NOT_PAINTING wins even though UP is also present", async () => {
+    // Modal is execCommand-only (no structured exitCode), so success/failure is
+    // string-inferred. On the paint-fail path the up-script ALREADY printed the UP
+    // marker, so both markers are present — NOT_PAINTING must be authoritative.
+    const box = makeFakeBox({ mode: "execCommand", failStage: 14 });
+    let thrown: unknown;
+    try {
+      await ensureDisplayStack(box.session);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DisplayStackError);
+    expect((thrown as DisplayStackError).stage).toBe("paint");
   });
 
   test("(5) a session that cannot run commands throws DisplayStackUnsupportedError", async () => {
