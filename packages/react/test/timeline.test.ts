@@ -659,8 +659,10 @@ describe("groupTimeline", () => {
       ]),
     );
     const [activity] = activityGroups(groups);
-    expect(activity?.outcome).toBe("failed");
-    expect(activity?.failureText).toBe("model provider unavailable");
+    // The in-flight call was interrupted BY the failure — the cluster reads
+    // calm interrupted; the turn-level fold carries the red + failure text.
+    expect(activity?.outcome).toBe("cancelled");
+    expect(activity?.failureText).toBeUndefined();
   });
 
   test("a settled turn folds the full span and leaves the final agent message after it", () => {
@@ -822,8 +824,10 @@ describe("groupTimeline", () => {
     const [turn] = turnGroups(groups);
     expect(turn?.groups.map((group) => group.kind)).toEqual(["activity", "item", "activity"]);
     expect(activities).toHaveLength(2);
-    expect(activities.map((group) => group.outcome)).toEqual(["failed", "failed"]);
-    expect(activities.map((group) => group.failureText)).toEqual(["compiler exploded", "compiler exploded"]);
+    // Cluster outcomes are their own: the first (reasoning, settled) reads
+    // complete; the second held the interrupted in-flight call.
+    expect(activities.map((group) => group.outcome)).toEqual(["complete", "cancelled"]);
+    expect(activities.map((group) => group.failureText)).toEqual([undefined, undefined]);
   });
 
   test("sequential settled turns stamp only their own activity groups", () => {
@@ -839,10 +843,10 @@ describe("groupTimeline", () => {
     const activities = activityGroups(groups);
     expect(groups.map((group) => group.kind)).toEqual(["turn", "turn"]);
     expect(activities).toHaveLength(2);
-    expect(activities.map((group) => group.outcome)).toEqual(["complete", "failed"]);
+    expect(activities.map((group) => group.outcome)).toEqual(["complete", "cancelled"]);
     expect(activities.map((group) => group.items.map((item) => item.turnId))).toEqual([["turn-1"], ["turn-2"]]);
     expect(activities[0]?.failureText).toBeUndefined();
-    expect(activities[1]?.failureText).toBe("deploy failed");
+    expect(activities[1]?.failureText).toBeUndefined();
   });
 
   test("a null-turn failure stamps the trailing activity group", () => {
@@ -854,7 +858,7 @@ describe("groupTimeline", () => {
       ]),
     );
     const [activity] = activityGroups(groups);
-    expect(activity?.outcome).toBe("failed");
+    expect(activity?.outcome).toBe("cancelled");
   });
 
   test("a null-turn cancellation keeps the legacy finalize path (not a queued retraction)", () => {
@@ -902,3 +906,58 @@ describe("extractSessionRef", () => {
     expect(extractSessionRef(null)).toBeNull();
   });
 });
+
+describe("cluster outcomes inside a failed turn", () => {
+  // The user-reported case: a turn fails at its LAST step; the earlier
+  // sub-clusters all completed. Only the turn-level fold may show failed —
+  // completed clusters stay calm.
+  test("completed sub-clusters keep outcome complete when the turn fails later", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
+      event("agent.toolCall.output", { id: "c1", output: "ok" }),
+      event("agent.message.completed", { text: "Narration between clusters." }),
+      event("agent.toolCall.created", { id: "c2", name: "exec_command", arguments: { cmd: "pwd" } }),
+      event("agent.toolCall.output", { id: "c2", output: "/workspace" }),
+      event("turn.failed", { error: "context overflow" }),
+    ]);
+    const groups = groupTimeline(items);
+    const turnGroup = groups.find((group) => group.kind === "turn");
+    expect(turnGroup?.outcome).toBe("failed");
+    const activity = collectActivityGroups(groups);
+    expect(activity.length).toBeGreaterThan(0);
+    for (const cluster of activity) {
+      expect(cluster.outcome).toBe("complete");
+    }
+  });
+
+  test("only the cluster containing a genuinely failed item shows failed", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
+      event("agent.toolCall.output", { id: "c1", output: "ok" }),
+      event("agent.message.completed", { text: "Narration." }),
+      event("agent.toolCall.created", { id: "c2", name: "exec_command", arguments: { cmd: "boom" } }),
+      event("agent.toolCall.output", { id: "c2", output: "exit 1", error: true }),
+      event("turn.failed", { error: "tool failed" }),
+    ]);
+    const groups = groupTimeline(items);
+    const activity = collectActivityGroups(groups);
+    const outcomes = activity.map((cluster) => cluster.outcome);
+    expect(outcomes).toContain("failed");
+    expect(outcomes.filter((outcome) => outcome === "failed").length).toBe(1);
+  });
+});
+
+function collectActivityGroups(groups: ReturnType<typeof groupTimeline>) {
+  const out: Array<Extract<ReturnType<typeof groupTimeline>[number], { kind: "activity" }>> = [];
+  for (const group of groups) {
+    if (group.kind === "activity") out.push(group);
+    if (group.kind === "turn") {
+      for (const inner of group.groups) {
+        if (inner.kind === "activity") out.push(inner);
+      }
+    }
+  }
+  return out;
+}

@@ -617,8 +617,19 @@ function stampTurnOutcome(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
 }
 
 function applyTurnOutcome(group: Extract<TimelineGroup, { kind: "activity" }>, turnEnd: TurnEndItem): void {
-  group.outcome = turnEnd.outcome;
-  if (turnEnd.failureText) {
+  // A sub-cluster reports ITS OWN outcome, not the turn's. When a turn fails
+  // at step 7, clusters 1–6 completed — painting them all red says "everything
+  // broke" when one thing did. The turn-level fold carries the turn outcome;
+  // a cluster goes red only if an item inside it actually failed, and reads
+  // "cancelled" (interrupted) only when it holds the items cut off mid-flight.
+  if (turnEnd.outcome === "complete") {
+    group.outcome = "complete";
+    return;
+  }
+  const hasFailed = group.items.some((item) => "status" in item && item.status === "failed");
+  const hasInterrupted = group.items.some((item) => "status" in item && item.status === "cancelled");
+  group.outcome = hasFailed ? "failed" : hasInterrupted ? "cancelled" : "complete";
+  if (turnEnd.failureText && hasFailed) {
     group.failureText = turnEnd.failureText;
   }
 }
