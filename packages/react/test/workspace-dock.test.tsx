@@ -28,6 +28,28 @@ function ControlledDock(props: { onCollapsedChange: (collapsed: boolean) => void
   );
 }
 
+/** Force `useIsNarrow` to report a phone-width viewport for the callback's span. */
+async function withNarrowViewport(run: () => Promise<void>): Promise<void> {
+  const original = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: true,
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent() {
+      return false;
+    },
+  })) as unknown as typeof window.matchMedia;
+  try {
+    await run();
+  } finally {
+    window.matchMedia = original;
+  }
+}
+
 describe("WorkspaceDock", () => {
   test("dock collapse controls can be owned by the host", async () => {
     const changes: boolean[] = [];
@@ -50,5 +72,28 @@ describe("WorkspaceDock", () => {
     expect(rendered.container.textContent ?? "").toContain("Run content");
 
     await rendered.unmount();
+  });
+
+  test("below the breakpoint the dock is a full-screen overlay with no resize splitter", async () => {
+    await withNarrowViewport(async () => {
+      const changes: boolean[] = [];
+      const rendered = await renderComponent(
+        <ControlledDock onCollapsedChange={(collapsed) => changes.push(collapsed)} />,
+      );
+
+      // No drag splitter renders on a phone-width viewport.
+      expect(rendered.container.querySelector("[data-separator-state]")).toBeNull();
+      // The dock content is presented as a modal overlay, not a side column.
+      const overlay = rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]');
+      expect(overlay).not.toBeNull();
+      expect(overlay?.textContent ?? "").toContain("Run content");
+
+      // The overlay's own close control drives the same collapsed contract.
+      await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
+      expect(changes.at(-1)).toBe(true);
+      expect(rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]')).toBeNull();
+
+      await rendered.unmount();
+    });
   });
 });

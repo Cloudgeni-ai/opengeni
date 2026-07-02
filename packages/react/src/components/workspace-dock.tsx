@@ -4,6 +4,7 @@ import {
   Maximize2Icon,
   Minimize2Icon,
   PanelRightCloseIcon,
+  XIcon,
 } from "lucide-react";
 import {
   Group,
@@ -49,8 +50,42 @@ export type WorkspaceDockProps = {
  * restore button returns). Layout persists via `useDefaultLayout` keyed on
  * `autoSaveId`. Maximize is a mode ABOVE the Group (a `fixed inset-0` overlay) —
  * pushing a Panel to ~100% still fights min sizes and leaves a chat sliver.
+ *
+ * Below {@link DOCK_OVERLAY_BREAKPOINT} the side-by-side split can't work on a
+ * phone-width viewport, so the resizable panels are dropped entirely: the
+ * primary pane goes full-width and the dock becomes a full-screen overlay driven
+ * by the same `collapsed` / `onCollapsedChange` contract (collapsed → hidden).
+ * No drag splitter renders below the breakpoint.
  */
 const useDockLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/**
+ * The dock stops being a side column at this width and becomes a full-screen
+ * overlay — matches the app's rail-drawer breakpoint (the single `isMobile`
+ * source). The package can't read app context, so it detects the width itself.
+ */
+const DOCK_OVERLAY_BREAKPOINT = 1024;
+
+/** SSR-safe `(max-width: …)` match; false until mounted, then live. */
+function useIsNarrow(maxWidth: number): boolean {
+  const [narrow, setNarrow] = useState(false);
+  useDockLayoutEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mql = window.matchMedia(`(max-width: ${maxWidth - 1}px)`);
+    const update = () => setNarrow(mql.matches);
+    update();
+    if (typeof mql.addEventListener === "function") {
+      mql.addEventListener("change", update);
+      return () => mql.removeEventListener("change", update);
+    }
+    // Legacy Safari.
+    mql.addListener(update);
+    return () => mql.removeListener(update);
+  }, [maxWidth]);
+  return narrow;
+}
 
 export function WorkspaceDock({
   primary,
@@ -65,6 +100,7 @@ export function WorkspaceDock({
   maxSize = 70,
   className,
 }: WorkspaceDockProps) {
+  const narrow = useIsNarrow(DOCK_OVERLAY_BREAKPOINT);
   const dockPanelRef = usePanelRef();
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -117,16 +153,6 @@ export function WorkspaceDock({
     // rebuild tab JSX frequently; only id changes can invalidate the active tab.
   }, [tabIds, firstTabId, current, setTab]);
 
-  // Esc restores from maximize.
-  useEffect(() => {
-    if (!maximized) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMaximized(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [maximized]);
-
   const collapse = useCallback(() => {
     dockPanelRef.current?.collapse();
     setCollapsed(true);
@@ -136,14 +162,76 @@ export function WorkspaceDock({
     setCollapsed(false);
   }, [dockPanelRef, setCollapsed]);
 
+  // Esc restores from maximize (desktop) and closes the mobile overlay.
+  useEffect(() => {
+    const overlayOpen = maximized || (narrow && !collapsed);
+    if (!overlayOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (maximized) setMaximized(false);
+      else collapse();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [maximized, narrow, collapsed, collapse]);
+
+  // Below the breakpoint the dock is a full-screen overlay, not a resizable
+  // column: primary goes full-width and no splitter ever mounts. The overlay is
+  // driven by the same `collapsed` contract (collapsed → hidden).
+  if (narrow) {
+    return (
+      <div className={cn("relative flex h-full min-h-0 w-full min-w-0", className)}>
+        <div className="min-h-0 min-w-0 flex-1">{primary}</div>
+        {!collapsed && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Workspace"
+            className="fixed inset-0 z-40 flex flex-col bg-og-bg"
+            style={{
+              paddingTop: "env(safe-area-inset-top)",
+              paddingBottom: "env(safe-area-inset-bottom)",
+            }}
+          >
+            <DockChrome
+              tabs={tabs}
+              current={current}
+              onTab={setTab}
+              controls={
+                <ChromeButton onClick={collapse} title="Close workspace" label="Close workspace">
+                  <XIcon className="size-4" />
+                </ChromeButton>
+              }
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const dockChrome = (
     <DockChrome
       tabs={tabs}
       current={current}
       onTab={setTab}
-      maximized={maximized}
-      onToggleMaximize={() => setMaximized((m) => !m)}
-      onCollapse={maximized ? () => setMaximized(false) : collapse}
+      controls={
+        <>
+          <ChromeButton
+            onClick={() => setMaximized((m) => !m)}
+            title={maximized ? "Restore (Esc)" : "Maximize"}
+            label={maximized ? "Restore dock" : "Maximize dock"}
+          >
+            {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
+          </ChromeButton>
+          <ChromeButton
+            onClick={maximized ? () => setMaximized(false) : collapse}
+            title={maximized ? "Restore" : "Collapse"}
+            label={maximized ? "Restore dock" : "Collapse dock"}
+          >
+            <PanelRightCloseIcon className="size-3.5" />
+          </ChromeButton>
+        </>
+      }
     />
   );
 
@@ -161,7 +249,7 @@ export function WorkspaceDock({
 
         {!collapsed && (
           <Separator className="group relative w-1.5 shrink-0 outline-none">
-            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-[color:var(--og-color-border,var(--color-border,#2a2a2a))] transition-colors group-hover:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))] group-data-[separator-state=dragging]:bg-[color:var(--og-color-accent,var(--color-brand,#3b82f6))]" />
+            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-og-border transition-colors group-hover:bg-og-accent group-data-[separator-state=dragging]:bg-og-accent" />
           </Separator>
         )}
 
@@ -186,7 +274,7 @@ export function WorkspaceDock({
           {/* Hidden behind the overlay while maximized (avoids double-mounting
               the surfaces). */}
           {!collapsed && !maximized && (
-            <div className="flex h-full min-h-0 min-w-0 flex-col border-l border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))]">
+            <div className="flex h-full min-h-0 min-w-0 flex-col border-l border-og-border bg-og-bg">
               {dockChrome}
             </div>
           )}
@@ -199,7 +287,7 @@ export function WorkspaceDock({
           type="button"
           onClick={expand}
           title="Open workspace"
-          className="absolute inset-y-0 right-0 flex w-6 shrink-0 items-center justify-center border-l border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
+          className="absolute inset-y-0 right-0 flex w-6 shrink-0 items-center justify-center border-l border-og-border bg-og-surface-1 text-og-fg-subtle hover:text-og-fg"
         >
           <ChevronsLeftRightIcon className="size-3.5" />
         </button>
@@ -207,7 +295,7 @@ export function WorkspaceDock({
 
       {/* Maximize overlay: full-workspace surface above everything. */}
       {maximized && (
-        <div className="fixed inset-0 z-40 flex flex-col bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))]">
+        <div className="fixed inset-0 z-40 flex flex-col bg-og-bg">
           {dockChrome}
         </div>
       )}
@@ -215,26 +303,54 @@ export function WorkspaceDock({
   );
 }
 
+/** A dock-chrome control button — compact on fine pointers, ≥40px on coarse. */
+function ChromeButton({
+  onClick,
+  title,
+  label,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-label={label}
+      className="inline-flex items-center justify-center rounded-og-sm p-1 transition-colors hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:size-10"
+    >
+      {children}
+    </button>
+  );
+}
+
 function DockChrome({
   tabs,
   current,
   onTab,
-  maximized,
-  onToggleMaximize,
-  onCollapse,
+  controls,
 }: {
   tabs: WorkspaceTab[];
   current: string;
   onTab: (id: string) => void;
-  maximized: boolean;
-  onToggleMaximize: () => void;
-  onCollapse: () => void;
+  /** Right-aligned chrome controls (maximize / collapse, or the overlay close). */
+  controls: ReactNode;
 }) {
   const active = tabs.find((t) => t.id === current) ?? tabs[0];
   return (
     <>
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] px-1.5 py-1">
-        <div className="flex min-w-0 items-center gap-0.5" role="tablist">
+      <div className="flex shrink-0 items-center gap-2 border-b border-og-border px-1.5 py-1">
+        {/* The tab list scrolls horizontally when it can't fit — it must never
+            grow into or overlap the chrome controls (they stay shrink-0). The
+            scrollbar is hidden to keep the strip calm. */}
+        <div
+          className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          role="tablist"
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
@@ -243,35 +359,18 @@ function DockChrome({
               aria-selected={tab.id === current}
               onClick={() => onTab(tab.id)}
               className={cn(
-                "flex items-center gap-1 rounded-[var(--og-radius-sm,4px)] px-2 py-1 text-[11px] font-medium transition-colors",
+                "flex shrink-0 items-center gap-1 rounded-og-sm px-2 py-1 text-og-xs font-medium transition-colors pointer-coarse:min-h-10",
                 tab.id === current
-                  ? "bg-[color:var(--og-color-accent-soft,var(--color-surface-2,#222))] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
-                  : "text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]",
+                  ? "bg-og-accent-soft text-og-fg"
+                  : "text-og-fg-subtle hover:text-og-fg",
               )}
             >
-              <span className="truncate">{tab.label}</span>
+              <span>{tab.label}</span>
               {tab.badge}
             </button>
           ))}
         </div>
-        <div className="flex shrink-0 items-center gap-0.5 text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
-          <button
-            type="button"
-            onClick={onToggleMaximize}
-            title={maximized ? "Restore (Esc)" : "Maximize"}
-            className="rounded-[var(--og-radius-sm,4px)] p-1 hover:bg-[color:var(--og-color-surface-2,var(--color-surface-2,#222))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
-          >
-            {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
-          </button>
-          <button
-            type="button"
-            onClick={onCollapse}
-            title={maximized ? "Restore" : "Collapse"}
-            className="rounded-[var(--og-radius-sm,4px)] p-1 hover:bg-[color:var(--og-color-surface-2,var(--color-surface-2,#222))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]"
-          >
-            <PanelRightCloseIcon className="size-3.5" />
-          </button>
-        </div>
+        <div className="flex shrink-0 items-center gap-0.5 text-og-fg-subtle">{controls}</div>
       </div>
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden" role="tabpanel">
         {active?.content}
