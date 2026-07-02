@@ -53,12 +53,6 @@ import {
 import { cn } from "@/lib/utils";
 import type { SandboxBackend, Session } from "@/types";
 
-const examples = [
-  "Inspect the repository and summarize the infrastructure layout.",
-  "Run Terraform and Checkov checks, then propose the smallest safe fix.",
-  "Create a focused GitHub PR for the failing policy check.",
-] as const;
-
 const BACKEND_OPTIONS = managedBackendOptions();
 
 export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
@@ -148,27 +142,6 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           controls={<SessionControlStrip workspaceId={workspaceId} />}
         />
 
-        {message.trim().length === 0 ? (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {examples.map((example) => (
-              <button
-                key={example}
-                type="button"
-                onClick={() => setMessage(example)}
-                disabled={context.busy}
-                className={cn(
-                  "max-w-full truncate rounded-full border px-3 py-1 text-left text-xs",
-                  "border-border bg-surface-2/50",
-                  "text-fg-muted hover:text-fg",
-                  "hover:border-border-strong hover:bg-surface-2",
-                  "transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60",
-                )}
-              >
-                {example}
-              </button>
-            ))}
-          </div>
-        ) : null}
 
         <ComputeTargetControl
           workspaceId={workspaceId}
@@ -523,57 +496,53 @@ function ManagedSandboxFields(props: {
   const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])].filter(Boolean).join(" · ");
 
   return (
-    <div className="grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
-      <div className="grid gap-2">
-        <Label className="flex items-center gap-1.5 text-xs">
+    // One flat card: hairline-separated rows, controls right-aligned, no
+    // nested boxes and no restating helper text — the controls speak.
+    <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
+      <div className="flex items-center justify-between gap-3 px-3 py-2">
+        <Label className="flex shrink-0 items-center gap-1.5 text-xs">
           <GitBranchIcon className="size-3 shrink-0 text-fg-subtle" />
-          Repository + branch
+          Repository
         </Label>
-        <div>
+        <div className="flex min-w-0 justify-end">
           <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled={props.disabled} />
         </div>
-        <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
-          <FolderIcon className="size-3 shrink-0" />
-          Repositories are cloned into <span className="font-mono text-fg-muted">/workspace</span>.
-        </p>
       </div>
 
       {/* Offer environments only when some exist — configuration UI for
           resources you don't have is clutter (same rule as machines). */}
       {environments.environments.length > 0 ? (
-      <div className="grid gap-2 border-t border-border pt-4">
-        <Label className="flex items-center gap-1.5 text-xs">
-          <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
-          Environment
-        </Label>
-        <Select
-          value={draft.environmentId}
-          disabled={props.disabled}
-          onChange={(event) => onChange({ ...draft, environmentId: event.target.value })}
-        >
-          <option value="">No environment</option>
-          {environments.environments.map((environment) => (
-            <option key={environment.id} value={environment.id}>
-              {environment.name} ({environment.variables.length} vars)
-            </option>
-          ))}
-        </Select>
-        <p className="text-2xs text-fg-subtle">
-          Variables are set in the sandbox at start. Their values stay write-only.
-        </p>
-      </div>
+        <div className="flex items-center justify-between gap-3 border-t border-border/70 px-3 py-2">
+          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
+            <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
+            Environment
+          </Label>
+          <Select
+            value={draft.environmentId}
+            disabled={props.disabled}
+            onChange={(event) => onChange({ ...draft, environmentId: event.target.value })}
+            className="h-8 w-auto max-w-56 text-xs"
+          >
+            <option value="">No environment</option>
+            {environments.environments.map((environment) => (
+              <option key={environment.id} value={environment.id}>
+                {environment.name} ({environment.variables.length} vars)
+              </option>
+            ))}
+          </Select>
+        </div>
       ) : null}
 
-      {/* Low-level sandbox backend override — demoted into this kind's Advanced
-          detail, descriptor-driven from CAPABILITY_DESCRIPTORS. */}
-      <details className="group rounded-md border border-border bg-surface/30 transition-colors open:bg-surface/50">
+      {/* Low-level sandbox backend override — a quiet in-card disclosure row,
+          descriptor-driven from CAPABILITY_DESCRIPTORS. */}
+      <details className="group border-t border-border/70">
         <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
           <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
           <span>Advanced</span>
           <span className="text-fg-subtle/70">·</span>
           <span className="truncate">backend: {backendSummary}</span>
         </summary>
-        <div className="grid gap-2 px-3 pb-3">
+        <div className="grid gap-1.5 px-3 pb-2.5">
           <Select
             value={compute.backend}
             disabled={props.disabled}
@@ -815,22 +784,23 @@ function OptionalSessionOptions(props: {
   ].filter(Boolean);
 
   return (
-    <Collapsible open={props.open} onOpenChange={props.onOpenChange} className="mt-3">
+    <Collapsible open={props.open} onOpenChange={props.onOpenChange} className="mt-2">
+      <div className="overflow-hidden rounded-lg border border-border bg-surface/40">
       <CollapsibleTrigger asChild>
         <button
           type="button"
-          className="flex w-full items-center gap-2 rounded-lg border border-border bg-surface/40 px-3 py-2.5 text-left text-xs text-fg-muted transition-colors hover:border-border-strong hover:bg-surface-2/60 hover:text-fg"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg-muted transition-colors hover:bg-surface-2/40 hover:text-fg"
         >
           <SlidersHorizontalIcon className="size-3.5 shrink-0 text-fg-subtle" />
           <span className="font-medium">Goal &amp; tool permissions</span>
           <span className="min-w-0 flex-1 truncate text-2xs text-fg-subtle">
-            {summary.length > 0 ? summary.join(" · ") : "Optional — run toward a goal, limit tool access"}
+            {summary.length > 0 ? summary.join(" · ") : "Optional"}
           </span>
           <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")} />
         </button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="mt-2 grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
+        <div className="grid gap-3 border-t border-border/70 px-3 pb-3 pt-2.5">
           <div className="grid gap-2">
             <Label className="flex items-center gap-1.5 text-xs">
               <FlagIcon className="size-3 shrink-0 text-fg-subtle" />
@@ -841,7 +811,7 @@ function OptionalSessionOptions(props: {
               disabled={props.disabled}
               onChange={(event) => update({ goalText: event.target.value })}
               placeholder="Keep the session working on its own between your messages…"
-              className="min-h-14 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-12 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             />
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
               <Input
@@ -897,6 +867,7 @@ function OptionalSessionOptions(props: {
           </div>
         </div>
       </CollapsibleContent>
+      </div>
     </Collapsible>
   );
 }
