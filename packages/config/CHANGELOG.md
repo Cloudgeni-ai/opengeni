@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.2.2
+
+### Patch Changes
+
+- 5962dd0: Republish the closure so published manifests reference `@opengeni/contracts@^0.4.0`. The previous `^0.3.0` ranges exclude 0.4.0 under 0.x caret semantics, causing consumers to nest a stale contracts copy that lacks the current export surface.
+- Updated dependencies [5962dd0]
+  - @opengeni/codex@0.2.1
+
 ## 0.2.1
 
 ### Patch Changes
