@@ -49,7 +49,7 @@ function LayoutToggle({ layout, onChange }: { layout: "unified" | "split"; onCha
           type="button"
           onClick={() => onChange(value)}
           className={cn(
-            "rounded-[5px] px-2 py-[3px] text-[11px] font-medium capitalize transition-colors",
+            "rounded-og-xs px-2 py-[3px] text-og-xs font-medium capitalize transition-colors",
             layout === value ? "bg-og-surface-2 text-og-fg" : "text-og-fg-subtle hover:text-og-fg-muted",
           )}
         >
