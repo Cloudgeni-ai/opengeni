@@ -523,7 +523,7 @@ export function workerGoalEvents(): SessionEvent[] {
 
 /* ----------------------------------------------------------------------------
    Segment C/D/E — completed / failed / cancelled turns (fold to a chip).
-   These are returned as activity-only event runs the harness wraps in TurnSummary.
+   These are full event runs; MessageTimeline folds them through the live pipeline.
    -------------------------------------------------------------------------- */
 
 export function completedTurnEvents(): SessionEvent[] {

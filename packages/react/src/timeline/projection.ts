@@ -8,6 +8,7 @@ import type {
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
+  TurnEndItem,
   ToolCallItem,
   WorkerItem,
 } from "./types";
@@ -301,30 +302,40 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "turn.completed": {
         finalizeOpen(turnId);
+        items.push(turnEndItem(event, "complete", null));
         break;
       }
 
       case "turn.failed": {
+        const hadActivity = hasTurnActivity(items, turnId);
+        const failureText = failureMessage(payload);
         finalizeOpen(turnId, "failed");
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "failed",
-          text: failureMessage(payload) ?? "The turn failed.",
-          occurredAt: event.occurredAt,
-        });
+        items.push(turnEndItem(event, "failed", failureText));
+        if (!hadActivity) {
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "failed",
+            text: failureText ?? "The turn failed.",
+            occurredAt: event.occurredAt,
+          });
+        }
         break;
       }
 
       case "turn.cancelled": {
+        const hadActivity = hasTurnActivity(items, turnId);
         finalizeOpen(turnId, "cancelled");
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "cancelled",
-          text: "Interrupted.",
-          occurredAt: event.occurredAt,
-        });
+        items.push(turnEndItem(event, "cancelled", null));
+        if (!hadActivity) {
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "cancelled",
+            text: "Interrupted.",
+            occurredAt: event.occurredAt,
+          });
+        }
         break;
       }
 
@@ -394,11 +405,15 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
   for (const item of items) {
     if (isActivityItem(item)) {
       const open = groups[groups.length - 1];
-      if (open?.kind === "activity") {
+      if (open?.kind === "activity" && open.outcome === undefined) {
         open.items.push(item);
       } else {
         groups.push({ kind: "activity", id: `activity-${item.id}`, items: [item] });
       }
+      continue;
+    }
+    if (item.kind === "turn-end") {
+      stampTurnOutcome(groups, item);
       continue;
     }
     groups.push({ kind: "item", item });
@@ -407,6 +422,62 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
 }
 
 /* --- helpers ---------------------------------------------------------------- */
+
+function turnEndItem(
+  event: SessionEvent,
+  outcome: TurnEndItem["outcome"],
+  failureText: string | null,
+): TurnEndItem {
+  return {
+    kind: "turn-end",
+    id: `${event.id}-turn-end`,
+    turnId: event.turnId ?? null,
+    outcome,
+    failureText,
+    occurredAt: event.occurredAt,
+  };
+}
+
+function hasTurnActivity(items: TimelineItem[], turnId: string | null): boolean {
+  if (turnId) {
+    return items.some((item) => isActivityItem(item) && item.turnId === turnId);
+  }
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || item.kind === "turn-end" || item.kind === "user-message") {
+      return false;
+    }
+    if (isActivityItem(item)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stampTurnOutcome(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
+  if (turnEnd.turnId === null) {
+    const trailing = groups[groups.length - 1];
+    if (trailing?.kind === "activity" && trailing.outcome === undefined) {
+      applyTurnOutcome(trailing, turnEnd);
+    }
+    return;
+  }
+  for (const group of groups) {
+    if (group.kind !== "activity" || group.outcome !== undefined) {
+      continue;
+    }
+    if (group.items.some((activity) => activity.turnId === turnEnd.turnId)) {
+      applyTurnOutcome(group, turnEnd);
+    }
+  }
+}
+
+function applyTurnOutcome(group: Extract<TimelineGroup, { kind: "activity" }>, turnEnd: TurnEndItem): void {
+  group.outcome = turnEnd.outcome;
+  if (turnEnd.failureText) {
+    group.failureText = turnEnd.failureText;
+  }
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};

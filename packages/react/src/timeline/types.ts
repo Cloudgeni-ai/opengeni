@@ -117,6 +117,17 @@ export type NoticeItem = {
   occurredAt: string;
 };
 
+export type TurnOutcome = "complete" | "failed" | "cancelled";
+
+export type TurnEndItem = {
+  kind: "turn-end";
+  id: string;
+  turnId: string | null;
+  outcome: TurnOutcome;
+  failureText: string | null;
+  occurredAt: string;
+};
+
 export type TimelineItem =
   | UserMessageItem
   | AgentMessageItem
@@ -126,11 +137,12 @@ export type TimelineItem =
   | SandboxItem
   | SessionStatusItem
   | GoalItem
-  | NoticeItem;
+  | NoticeItem
+  | TurnEndItem;
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox). */
 export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
-  | { kind: "activity"; id: string; items: ActivityItem[] };
+  | { kind: "activity"; id: string; items: ActivityItem[]; outcome?: TurnOutcome; failureText?: string };

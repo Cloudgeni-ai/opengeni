@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { SessionEvent } from "@opengeni/sdk";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
 import type { ToolCallItem, SandboxItem } from "../src/timeline";
+import { MessageTimeline } from "../src";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -13,6 +15,32 @@ import type { ToolCallItem, SandboxItem } from "../src/timeline";
    -------------------------------------------------------------------------- */
 
 registerDom();
+
+let timelineSequence = 0;
+
+function timelineEvent(type: string, payload: unknown, turnId: string | null = "turn-1"): SessionEvent {
+  timelineSequence += 1;
+  return {
+    id: `timeline-evt-${timelineSequence}`,
+    workspaceId: "ws-1",
+    sessionId: "session-1",
+    sequence: timelineSequence,
+    type,
+    payload,
+    occurredAt: new Date(1718000000000 + timelineSequence * 1000).toISOString(),
+    turnId,
+  };
+}
+
+function resetTimelineEvents(): void {
+  timelineSequence = 0;
+}
+
+function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
+  return (
+    Array.from(container.querySelectorAll("button")).find((button) => /\d+ steps?/.test(button.textContent ?? "")) ?? null
+  );
+}
 
 function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
   return {
@@ -29,6 +57,60 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     ...overrides,
   };
 }
+
+describe("MessageTimeline — settled turn folding", () => {
+  test("settled turn activity renders behind a TurnSummary trigger", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Run the checks" }),
+      timelineEvent("agent.reasoning.delta", { text: "Checking the suite." }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("turn.completed", {}),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.textContent).toContain("2 steps");
+    expect(trigger?.textContent).toContain("1 command");
+
+    await r.unmount();
+  });
+
+  test("live turn activity renders the rail directly without a TurnSummary trigger", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Run the checks" }),
+      timelineEvent("agent.reasoning.delta", { text: "Checking the suite." }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} status="running" />);
+    await flush();
+
+    expect(turnSummaryTrigger(r.container)).toBeNull();
+    expect(r.container.textContent).toContain("Checking the suite.");
+
+    await r.unmount();
+  });
+
+  test("failed turns start expanded and show the failure text on the summary chip", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy preview" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "helm upgrade preview ./chart" } }),
+      timelineEvent("turn.failed", { error: "provider down" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("data-state")).toBe("open");
+    expect(trigger?.textContent).toContain("provider down");
+
+    await r.unmount();
+  });
+});
 
 /* ---- Issue 2: multi-file apply_patch count ------------------------------ */
 

@@ -106,6 +106,7 @@ export type {
   SessionStatusItem,
   TimelineGroup,
   TimelineItem,
+  TurnEndItem,
   ToolCallItem,
   UserMessageItem,
   WorkerItem,

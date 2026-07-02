@@ -27,6 +27,7 @@ import {
   type TimelineItem,
   type ToolRegistry,
   type UserMessageItem,
+  TurnSummary,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
 
@@ -105,7 +106,19 @@ export function MessageTimeline({
             : null}
           {groups.map((group) =>
             group.kind === "activity" ? (
-              <ActivityRail key={group.id} items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+              group.outcome ? (
+                <TurnSummary
+                  key={group.id}
+                  items={group.items}
+                  outcome={group.outcome}
+                  failureText={group.failureText}
+                  defaultOpen={group.outcome === "failed" ? true : undefined}
+                >
+                  <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+                </TurnSummary>
+              ) : (
+                <ActivityRail key={group.id} items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+              )
             ) : (
               <TimelineRow key={group.item.id} item={group.item} renderMessageText={renderMessageText} />
             ),
@@ -303,4 +316,3 @@ function NoticeRow({ item }: { item: NoticeItem }) {
     </div>
   );
 }
-

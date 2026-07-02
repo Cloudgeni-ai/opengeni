@@ -7,6 +7,8 @@ import {
   sessionStatusFromEvents,
   type AgentMessageItem,
   type SandboxItem,
+  type TimelineGroup,
+  type TurnEndItem,
   type ToolCallItem,
   type UserMessageItem,
   type WorkerItem,
@@ -24,12 +26,18 @@ function event(type: string, payload: unknown, options: { turnId?: string | null
     type,
     payload,
     occurredAt: new Date(1718000000000 + sequence * 1000).toISOString(),
-    turnId: options.turnId ?? "turn-1",
+    turnId: options.turnId === undefined ? "turn-1" : options.turnId,
   };
 }
 
 function reset(): void {
   sequence = 0;
+}
+
+type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
+
+function activityGroups(groups: TimelineGroup[]): ActivityGroup[] {
+  return groups.filter((group): group is ActivityGroup => group.kind === "activity");
 }
 
 describe("buildTimeline", () => {
@@ -290,9 +298,11 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
-    expect(items.map((item) => item.kind)).toEqual(["session-status", "notice", "notice"]);
-    expect(items[1]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
-    expect(items[2]).toMatchObject({ tone: "cancelled" });
+    expect(items.map((item) => item.kind)).toEqual(["session-status", "turn-end", "notice", "turn-end", "notice"]);
+    expect(items[1]).toMatchObject({ outcome: "failed", failureText: "model provider unavailable" });
+    expect(items[2]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
+    expect(items[3]).toMatchObject({ outcome: "cancelled", failureText: null });
+    expect(items[4]).toMatchObject({ tone: "cancelled" });
   });
 
   test("turn.completed finalizes the turn's streaming and running items", () => {
@@ -304,6 +314,72 @@ describe("buildTimeline", () => {
     ]);
     expect((items[0] as ToolCallItem).status).toBe("complete");
     expect((items[1] as AgentMessageItem).streaming).toBe(false);
+  });
+
+  test("turn lifecycle events emit turn-end items with their outcome metadata", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.completed", {}, { turnId: "turn-complete" }),
+      event("turn.failed", { error: "model provider unavailable" }, { turnId: "turn-failed" }),
+      event("turn.cancelled", {}, { turnId: "turn-cancelled" }),
+    ]);
+    const turnEnds = items.filter((item): item is TurnEndItem => item.kind === "turn-end");
+    expect(turnEnds.map(({ turnId, outcome, failureText }) => ({ turnId, outcome, failureText }))).toEqual([
+      { turnId: "turn-complete", outcome: "complete", failureText: null },
+      { turnId: "turn-failed", outcome: "failed", failureText: "model provider unavailable" },
+      { turnId: "turn-cancelled", outcome: "cancelled", failureText: null },
+    ]);
+  });
+
+  test("failed turns with activity fold the failure into turn-end instead of emitting a duplicate notice", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+      event("turn.failed", { error: "model provider unavailable" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
+    expect(items[1]).toMatchObject({ outcome: "failed", failureText: "model provider unavailable" });
+  });
+
+  test("failed turns without activity keep the failure notice", () => {
+    reset();
+    const items = buildTimeline([event("turn.failed", { error: "model provider unavailable" })]);
+    expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
+    expect(items[1]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
+  });
+
+  test("cancelled turns with activity fold interruption into turn-end instead of emitting a duplicate notice", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make test" } }),
+      event("turn.cancelled", {}),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
+    expect(items[1]).toMatchObject({ outcome: "cancelled", failureText: null });
+  });
+
+  test("cancelled turns without activity keep the interruption notice", () => {
+    reset();
+    const items = buildTimeline([event("turn.cancelled", {})]);
+    expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
+    expect(items[1]).toMatchObject({ tone: "cancelled", text: "Interrupted." });
+  });
+
+  test("null-turn failures use activity since the last turn boundary for notice suppression", () => {
+    reset();
+    const withActivity = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: null }),
+      event("turn.failed", { error: "boom" }, { turnId: null }),
+    ]);
+    expect(withActivity.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
+
+    reset();
+    const afterUserBoundary = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: null }),
+      event("user.message", { text: "new turn" }),
+      event("turn.failed", { error: "boom" }, { turnId: null }),
+    ]);
+    expect(afterUserBoundary.map((item) => item.kind)).toEqual(["tool-call", "user-message", "turn-end", "notice"]);
   });
 
   // Fix 3: in-flight tools when turn.failed must become "failed", not "complete"
@@ -403,6 +479,76 @@ describe("groupTimeline", () => {
       throw new Error("expected activity group");
     }
     expect(activity.items.map((item) => item.kind)).toEqual(["reasoning", "tool-call"]);
+  });
+
+  test("settled activity groups carry outcome and failure text", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
+        event("turn.failed", { error: "model provider unavailable" }),
+      ]),
+    );
+    const [activity] = activityGroups(groups);
+    expect(activity?.outcome).toBe("failed");
+    expect(activity?.failureText).toBe("model provider unavailable");
+  });
+
+  test("live activity groups have no turn outcome", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } })]),
+    );
+    const [activity] = activityGroups(groups);
+    expect(activity?.outcome).toBeUndefined();
+    expect(activity?.failureText).toBeUndefined();
+  });
+
+  test("a turn split by an interleaved agent message stamps both activity clusters", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.reasoning.delta", { text: "thinking" }, { turnId: "turn-split" }),
+        event("agent.message.completed", { text: "Checking this first." }, { turnId: "turn-split" }),
+        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: "turn-split" }),
+        event("turn.failed", { error: "compiler exploded" }, { turnId: "turn-split" }),
+      ]),
+    );
+    const activities = activityGroups(groups);
+    expect(groups.map((group) => group.kind)).toEqual(["activity", "item", "activity"]);
+    expect(activities).toHaveLength(2);
+    expect(activities.map((group) => group.outcome)).toEqual(["failed", "failed"]);
+    expect(activities.map((group) => group.failureText)).toEqual(["compiler exploded", "compiler exploded"]);
+  });
+
+  test("sequential settled turns stamp only their own activity groups", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "setup" } }, { turnId: "turn-1" }),
+        event("turn.completed", {}, { turnId: "turn-1" }),
+        event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "deploy" } }, { turnId: "turn-2" }),
+        event("turn.failed", { error: "deploy failed" }, { turnId: "turn-2" }),
+      ]),
+    );
+    const activities = activityGroups(groups);
+    expect(activities).toHaveLength(2);
+    expect(activities.map((group) => group.outcome)).toEqual(["complete", "failed"]);
+    expect(activities.map((group) => group.items.map((item) => item.turnId))).toEqual([["turn-1"], ["turn-2"]]);
+    expect(activities[0]?.failureText).toBeUndefined();
+    expect(activities[1]?.failureText).toBe("deploy failed");
+  });
+
+  test("a null-turn turn-end stamps the trailing activity group", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } }, { turnId: null }),
+        event("turn.cancelled", {}, { turnId: null }),
+      ]),
+    );
+    const [activity] = activityGroups(groups);
+    expect(activity?.outcome).toBe("cancelled");
   });
 });
 

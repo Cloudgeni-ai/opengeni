@@ -8,9 +8,6 @@ import {
   LightboxProvider,
   MessageTimeline,
   TimelineRow,
-  TurnSummary,
-  type ActivityItem,
-  type TurnOutcome,
 } from "../src/index";
 import {
   cancelledTurnEvents,
@@ -50,39 +47,6 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
       {hint ? <p className="mt-1.5 truncate text-og-sm text-og-fg-subtle">{hint}</p> : null}
       <div className="mt-4">{children}</div>
     </section>
-  );
-}
-
-/** The activity items of a single-turn event run (drops the user message wrapper). */
-function activityOf(events: ReturnType<typeof tourEvents>): ActivityItem[] {
-  const ACTIVITY = new Set(["reasoning", "tool-call", "worker", "sandbox"]);
-  return buildTimeline(events).filter((item): item is ActivityItem => ACTIVITY.has(item.kind));
-}
-
-/** A folded turn: a TurnSummary chip wrapping the real ActivityRail. */
-function FoldedTurn({
-  prompt,
-  events,
-  outcome,
-  failureText,
-  defaultOpen,
-}: {
-  prompt: string;
-  events: ReturnType<typeof tourEvents>;
-  outcome: TurnOutcome;
-  failureText?: string;
-  defaultOpen?: boolean;
-}) {
-  const items = useMemo(() => activityOf(events), [events]);
-  return (
-    <div className="flex flex-col gap-3">
-      <TimelineRow
-        item={{ kind: "user-message", id: "prompt", text: prompt, resources: [], tools: [], occurredAt: new Date().toISOString() }}
-      />
-      <TurnSummary items={items} outcome={outcome} {...(failureText ? { failureText } : {})} defaultOpen={defaultOpen ?? false}>
-        <ActivityRail items={items} />
-      </TurnSummary>
-    </div>
   );
 }
 
@@ -167,25 +131,15 @@ function Harness() {
               title="Completed turn — folded to a summary chip"
               hint="A settled turn folds behind one quiet chip. Click to expand."
             >
-              <FoldedTurn
-                prompt="Set up the project, get the test suite green, and screenshot the dashboard."
-                events={completedTurnEvents()}
-                outcome="complete"
-              />
+              <MessageTimeline events={completedTurnEvents()} className="max-h-none" />
             </Section>
 
             <Section title="Failed turn — folds, but the error is never hidden">
-              <FoldedTurn
-                prompt="Deploy the preview to staging."
-                events={failedTurnEvents()}
-                outcome="failed"
-                failureText="helm upgrade failed: ImagePullBackOff (desktop image not found)"
-                defaultOpen
-              />
+              <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
             </Section>
 
             <Section title="Interrupted turn — cancelled mid-run">
-              <FoldedTurn prompt="Tail the prod logs forever." events={cancelledTurnEvents()} outcome="cancelled" />
+              <MessageTimeline events={cancelledTurnEvents()} className="max-h-none" />
             </Section>
 
             <Section

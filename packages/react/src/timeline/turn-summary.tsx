@@ -5,7 +5,8 @@ import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { applyPatchOps, isApplyPatch } from "./parsers";
 import { rawTypeOf } from "./registry";
-import type { ActivityItem } from "./types";
+import type { ActivityItem, TurnOutcome } from "./types";
+export type { TurnOutcome } from "./types";
 
 /* ----------------------------------------------------------------------------
    Turn summary
@@ -18,8 +19,6 @@ import type { ActivityItem } from "./types";
    This keeps the timeline calm: a finished turn is a single line until the
    reader chooses to look inside it.
    -------------------------------------------------------------------------- */
-
-export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnSummaryProps = {
   /** The activity items in the turn (used only to compute the facet counts). */
