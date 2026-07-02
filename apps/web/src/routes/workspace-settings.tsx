@@ -192,13 +192,13 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         />
 
         {/* Workspace name / rename */}
-        <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
           <div>
             <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <PencilIcon className="size-3.5 text-[color:var(--color-brand)]" />
+              <PencilIcon className="size-3.5 text-brand" />
               Workspace name
             </h2>
-            <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">The name shows everywhere this workspace appears.</p>
+            <p className="mt-1 text-xs text-fg-muted">The name shows everywhere this workspace appears.</p>
           </div>
           {canRename ? (
             <form
@@ -215,7 +215,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               </Button>
             </form>
           ) : (
-            <p className="text-xs text-[color:var(--color-fg-subtle)]">Only workspace admins can rename this workspace.</p>
+            <p className="text-xs text-fg-subtle">Only workspace admins can rename this workspace.</p>
           )}
         </section>
 
@@ -223,13 +223,13 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
 
         {/* Environments link */}
-        <section className="flex items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+        <section className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface p-4">
           <div className="min-w-0">
             <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <BoxIcon className="size-3.5 text-[color:var(--color-brand)]" />
+              <BoxIcon className="size-3.5 text-brand" />
               Environments
             </h2>
-            <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Variable sets injected into sandboxes at session start.</p>
+            <p className="mt-1 text-xs text-fg-muted">Variable sets injected into sandboxes at session start.</p>
           </div>
           <Button asChild type="button" variant="secondary" size="sm">
             <Link to="/workspaces/$workspaceId/environments" params={{ workspaceId }}>
@@ -242,19 +242,19 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         <CodexSubscriptionsCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />
 
         {/* API keys (moved from the old account page) */}
-        <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
           <div>
             <h2 className="flex items-center gap-1.5 text-sm font-medium">
-              <KeyRoundIcon className="size-3.5 text-[color:var(--color-brand)]" />
+              <KeyRoundIcon className="size-3.5 text-brand" />
               API keys
             </h2>
-            <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Workspace-scoped keys for calling OpenGeni from another product.</p>
+            <p className="mt-1 text-xs text-fg-muted">Workspace-scoped keys for calling OpenGeni from another product.</p>
           </div>
           {createdToken ? (
-            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3">
-              <div className="text-xs font-medium text-emerald-200">Token shown once</div>
+            <div className="rounded-md border border-status-idle/30 bg-status-idle/10 p-3">
+              <div className="text-xs font-medium text-status-idle">Token shown once</div>
               <div className="mt-2 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-[color:var(--color-bg)] px-2 py-1.5 text-xs">{createdToken}</code>
+                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs">{createdToken}</code>
                 <Button type="button" variant="ghost" size="icon-sm" onClick={() => void navigator.clipboard.writeText(createdToken)}>
                   <CopyIcon className="size-3.5" />
                 </Button>
@@ -271,7 +271,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 </Button>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-[color:var(--color-fg-subtle)]">A key can only carry permissions your own grant can delegate.</p>
+                <p className="text-xs text-fg-subtle">A key can only carry permissions your own grant can delegate.</p>
                 <Button type="button" variant="ghost" size="sm" disabled={delegablePermissions.size === 0} onClick={() => setSelectedPermissions(new Set(delegablePermissions))}>
                   Select all delegable
                 </Button>
@@ -284,7 +284,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               />
             </>
           ) : (
-            <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot manage API keys for this workspace.</p>
+            <p className="text-xs text-fg-subtle">This subject cannot manage API keys for this workspace.</p>
           )}
           <div className="grid gap-2">
             {apiKeysError ? (
@@ -292,10 +292,10 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             ) : apiKeys.length === 0 ? (
               <EmptyState>No API keys.</EmptyState>
             ) : apiKeys.map((apiKey) => (
-              <div key={apiKey.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-3 py-2">
+              <div key={apiKey.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                  <div className="mt-1 truncate text-xs text-[color:var(--color-fg-subtle)]">{apiKey.prefix}... · {apiKey.revokedAt ? "revoked" : "active"}</div>
+                  <div className="mt-1 truncate text-xs text-fg-subtle">{apiKey.prefix}... · {apiKey.revokedAt ? "revoked" : "active"}</div>
                 </div>
                 <Button type="button" variant="ghost" size="sm" disabled={busy || Boolean(apiKey.revokedAt)} onClick={() => void revokeKey(apiKey.id)}>
                   <Trash2Icon className="size-3.5" />
@@ -430,13 +430,13 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div>
         <h2 className="flex items-center gap-1.5 text-sm font-medium">
-          <UsersIcon className="size-3.5 text-[color:var(--color-brand)]" />
+          <UsersIcon className="size-3.5 text-brand" />
           People with access
         </h2>
-        <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">People who can act in this workspace, and what each one can do.</p>
+        <p className="mt-1 text-xs text-fg-muted">People who can act in this workspace, and what each one can do.</p>
       </div>
 
       {canManage ? (
@@ -461,28 +461,28 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
           </Button>
         </form>
       ) : (
-        <p className="text-xs text-[color:var(--color-fg-subtle)]">Only members who can manage people can add or remove access.</p>
+        <p className="text-xs text-fg-subtle">Only members who can manage people can add or remove access.</p>
       )}
 
       <div className="grid gap-2">
         {error ? (
           <LoadErrorState title="Couldn't load members" error={error} onRetry={() => void refresh()} />
         ) : !loaded ? (
-          <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+          <div className="flex items-center gap-2 text-xs text-fg-muted">
             <Loader2Icon className="size-3.5 animate-spin" />
             Loading members
           </div>
         ) : userMembers.length === 0 ? (
           <EmptyState>No people have access yet.</EmptyState>
         ) : userMembers.map((member) => (
-          <div key={member.subjectId} className="grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-3 py-2">
+          <div key={member.subjectId} className="grid gap-2 rounded-lg border border-border bg-bg/35 px-3 py-2">
             <div className="flex min-w-0 items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="truncate text-sm font-medium">
                   {member.subjectLabel ?? member.subjectId}
-                  {member.subjectId === callerSubjectId ? <span className="ml-1.5 text-[color:var(--color-fg-subtle)]">(you)</span> : null}
+                  {member.subjectId === callerSubjectId ? <span className="ml-1.5 text-fg-subtle">(you)</span> : null}
                 </div>
-                <div className="mt-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+                <div className="mt-1 truncate text-xs text-fg-subtle">
                   {member.role} · {member.permissions.length} permission{member.permissions.length === 1 ? "" : "s"}
                 </div>
               </div>
@@ -500,7 +500,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
               ) : null}
             </div>
             {canManage && editing === member.subjectId ? (
-              <div className="grid gap-3 border-t border-[color:var(--color-border)] pt-3">
+              <div className="grid gap-3 border-t border-border pt-3">
                 <PermissionGroupPicker
                   groups={workspaceMemberPermissionGroups}
                   selected={editPermissions}
@@ -556,13 +556,13 @@ function DangerZone(props: {
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-status-failed)]/30 bg-[color:var(--color-status-failed)]/5 p-4">
+    <section className="grid gap-3 rounded-lg border border-status-failed/30 bg-status-failed/5 p-4">
       <div>
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-[color:var(--color-status-failed)]">
+        <h2 className="flex items-center gap-1.5 text-sm font-medium text-status-failed">
           <TriangleAlertIcon className="size-3.5" />
           Danger zone
         </h2>
-        <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+        <p className="mt-1 text-xs text-fg-muted">
           Workspace deletion is irreversible and removes every session, environment, and API key.
         </p>
       </div>
@@ -583,9 +583,9 @@ function DangerZone(props: {
           </Button>
         </span>
         {disabledReason ? (
-          <p className="mt-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">{disabledReason}</p>
+          <p className="mt-1.5 text-2xs text-fg-subtle">{disabledReason}</p>
         ) : (
-          <p className="mt-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">Stop any running sessions first; deletion is refused while one is live.</p>
+          <p className="mt-1.5 text-2xs text-fg-subtle">Stop any running sessions first; deletion is refused while one is live.</p>
         )}
       </div>
 
@@ -605,7 +605,7 @@ function DangerZone(props: {
             </DialogHeader>
             <div className="mt-4 grid gap-1.5">
               <Label htmlFor="confirm-workspace-name">
-                Type <span className="font-mono text-[color:var(--color-fg)]">{props.workspaceName}</span> to confirm
+                Type <span className="font-mono text-fg">{props.workspaceName}</span> to confirm
               </Label>
               <Input
                 id="confirm-workspace-name"

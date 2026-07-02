@@ -13,14 +13,14 @@ import type { FileAsset, ResourceRef, Session } from "@/types";
 
 export function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
   return (
-    <div className="mb-4 flex flex-col gap-3 rounded-lg border border-zinc-500/30 bg-zinc-500/10 p-3 text-zinc-100 sm:flex-row sm:items-center sm:justify-between">
+    <div className="mb-4 flex flex-col gap-3 rounded-lg border border-status-cancelled/30 bg-status-cancelled/10 p-3 text-status-cancelled sm:flex-row sm:items-center sm:justify-between">
       <div className="flex min-w-0 gap-2.5">
-        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-zinc-300" />
+        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-cancelled" />
         <div className="min-w-0">
           <div className="text-sm font-medium">
             This session was cancelled and cannot be continued.
           </div>
-          <div className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+          <div className="mt-1 text-xs text-fg-muted">
             Historical session from {formatTimestamp(props.session.createdAt)}.
           </div>
         </div>
@@ -41,16 +41,16 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
 export function FailedSessionBanner({ failure }: { failure: SessionFailureSummary }) {
   return (
     <div className="mx-auto mb-2 w-full max-w-3xl px-4 pt-4 sm:px-6">
-      <div data-testid="failed-session-banner" className="flex gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-red-100">
-        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-red-300" />
+      <div data-testid="failed-session-banner" className="flex gap-2.5 rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-status-failed">
+        <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-status-failed" />
         <div className="min-w-0 text-sm">
           <span className="font-medium">This session failed{failure.failedAt ? ` ${formatTimestamp(failure.failedAt)}` : ""}.</span>{" "}
           {failure.reason ? (
-            <span className="text-red-200/90">{failure.reason}</span>
+            <span className="text-status-failed/90">{failure.reason}</span>
           ) : (
-            <span className="text-[color:var(--color-fg-muted)]">No failure detail was recorded.</span>
+            <span className="text-fg-muted">No failure detail was recorded.</span>
           )}
-          <div className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+          <div className="mt-1 text-xs text-fg-muted">
             {failure.redispatchCount > 0 ? (
               <>The platform re-dispatched {failure.redispatchCount} timed-out turn{failure.redispatchCount === 1 ? "" : "s"} after worker restarts before this failure. </>
             ) : null}
@@ -67,18 +67,18 @@ export function FailedSessionBanner({ failure }: { failure: SessionFailureSummar
 
 export function TerminalSessionArchive(props: { session: Session; eventCount: number }) {
   return (
-    <div className="grid min-h-[18rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] px-4 py-10 text-center">
+    <div className="grid min-h-[18rem] place-items-center rounded-lg border border-dashed border-border px-4 py-10 text-center">
       <div className="max-w-md">
-        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-md bg-[color:var(--color-surface-2)] text-[color:var(--color-fg-muted)]">
+        <div className="mx-auto mb-3 flex size-10 items-center justify-center rounded-md bg-surface-2 text-fg-muted">
           <TerminalIcon className="size-4" />
         </div>
         <div className="text-sm font-medium">
           Historical cancelled session
         </div>
-        <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+        <p className="mt-1 text-xs leading-5 text-fg-muted">
           This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Sanitized debug metadata is available in the inspector.
         </p>
-        <div className="mt-3 text-[11px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+        <div className="mt-3 text-2xs uppercase tracking-wide text-fg-subtle">
           {props.eventCount} timeline item{props.eventCount === 1 ? "" : "s"}
         </div>
       </div>
@@ -98,7 +98,7 @@ export function UserMessageBody({ workspaceId, item }: { workspaceId: string; it
           {repositoryResources.map((resource) => (
             <span
               key={`${resource.uri}:${resource.ref}:${resource.mountPath ?? ""}`}
-              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
             >
               <GitBranchIcon className="size-3.5 shrink-0" />
               <span className="truncate">{repositoryDisplayName(resource)}</span>
@@ -107,7 +107,7 @@ export function UserMessageBody({ workspaceId, item }: { workspaceId: string; it
           {item.tools.map((tool) => (
             <span
               key={`${tool.kind}:${tool.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]"
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
             >
               <WrenchIcon className="size-3.5" />
               <span>{tool.id}</span>
@@ -156,7 +156,7 @@ export function MessageFileAttachment({ workspaceId, resource }: { workspaceId: 
       type="button"
       onClick={() => void openFile()}
       disabled={busy}
-      className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)] disabled:opacity-60"
+      className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60"
     >
       {isImage ? <ImageIcon className="size-3.5 shrink-0" /> : <FileJsonIcon className="size-3.5 shrink-0" />}
       <span className="truncate">{file?.filename ?? resource.fileId}</span>

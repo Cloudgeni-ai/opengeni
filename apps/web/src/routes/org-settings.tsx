@@ -126,11 +126,11 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
           ) : undefined}
         />
 
-        <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <h2 className="text-sm font-medium">Organization name</h2>
-              <p className="mt-1 truncate text-xs text-[color:var(--color-fg-muted)]">{organizationLabel}</p>
+              <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
             </div>
             <Button asChild type="button" variant="ghost" size="sm">
               <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId }}>
@@ -141,11 +141,11 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
           </div>
         </section>
 
-        <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+        <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-medium">Credits</h2>
-              <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+              <p className="mt-1 text-xs text-fg-muted">
                 {billing
                   ? `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
                   : !canReadBilling || !accountId
@@ -155,7 +155,7 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
                       : "Billing balance unavailable"}
               </p>
             </div>
-            <span className="rounded-full border border-[color:var(--color-border)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]">
+            <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
               {billing?.mode ?? "unknown"}
             </span>
           </div>
@@ -168,7 +168,7 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
                 <label className="grid gap-1">
                   <span className="sr-only">Credit amount</span>
                   <input
-                    className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 text-sm outline-none focus:border-[color:var(--color-fg-muted)]"
+                    className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-fg-muted"
                     inputMode="decimal"
                     min="5"
                     max="10000"
@@ -188,10 +188,10 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
                   </Button>
                 ))}
               </div>
-              <p className="text-xs text-[color:var(--color-fg-subtle)]">Minimum top-up is $5.00.</p>
+              <p className="text-xs text-fg-subtle">Minimum top-up is $5.00.</p>
             </div>
           ) : (
-            <p className="text-xs text-[color:var(--color-fg-subtle)]">Credit checkout is available when Stripe billing is enabled for this deployment.</p>
+            <p className="text-xs text-fg-subtle">Credit checkout is available when Stripe billing is enabled for this deployment.</p>
           )}
         </section>
 
@@ -243,37 +243,37 @@ function EntitlementsSection(props: {
 }) {
   const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <GaugeIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            <GaugeIcon className="size-3.5 text-brand" />
             Plan & entitlements
           </h2>
-          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">The limits and features this organization runs under.</p>
+          <p className="mt-1 text-xs text-fg-muted">The limits and features this organization runs under.</p>
         </div>
-        <span className="rounded-full border border-[color:var(--color-border)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]">
+        <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
           {props.entitlements?.mode ?? "unknown"}
         </span>
       </div>
 
       {!props.enabled ? (
-        <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot read billing entitlements for the organization.</p>
+        <p className="text-xs text-fg-subtle">This subject cannot read billing entitlements for the organization.</p>
       ) : props.error ? (
         <LoadErrorState title="Couldn't load entitlements" error={props.error} onRetry={props.onRetry} />
       ) : !props.entitlements ? (
-        <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading entitlements
         </div>
       ) : rows.length === 0 ? (
-        <p className="text-xs text-[color:var(--color-fg-subtle)]">No entitlement limits — this deployment does not restrict the organization.</p>
+        <p className="text-xs text-fg-subtle">No entitlement limits — this deployment does not restrict the organization.</p>
       ) : (
         <div className="flex flex-wrap gap-2">
           {rows.map((row) => (
-            <span key={row.name} className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1 text-xs">
+            <span key={row.name} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs">
               <span className="font-medium">{row.name}</span>
-              <span className="font-mono text-[11px] text-[color:var(--color-fg-muted)]">{row.value}</span>
+              <span className="font-mono text-2xs text-fg-muted">{row.value}</span>
             </span>
           ))}
         </div>
@@ -291,14 +291,14 @@ function UsageSection(props: {
 }) {
   const summary = useMemo(() => aggregateUsage(props.usage), [props.usage]);
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <ActivityIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            <ActivityIcon className="size-3.5 text-brand" />
             Usage
           </h2>
-          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Recent metered events for this organization, straight from the billing ledger.</p>
+          <p className="mt-1 text-xs text-fg-muted">Recent metered events for this organization, straight from the billing ledger.</p>
         </div>
         <Button type="button" variant="ghost" size="sm" disabled={!props.enabled || props.loading} onClick={props.onRefresh}>
           <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
@@ -307,25 +307,25 @@ function UsageSection(props: {
       </div>
 
       {!props.enabled ? (
-        <p className="text-xs text-[color:var(--color-fg-subtle)]">This subject cannot read billing usage for the organization.</p>
+        <p className="text-xs text-fg-subtle">This subject cannot read billing usage for the organization.</p>
       ) : props.error && props.usage.length === 0 ? (
         // Honest failed-load state: a failed usage read must never render as
         // "No usage recorded yet." (usage already on screen keeps rendering).
         <LoadErrorState title="Couldn't load usage" error={props.error} onRetry={props.onRefresh} />
       ) : props.loading && props.usage.length === 0 ? (
-        <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+        <div className="flex items-center gap-2 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading usage
         </div>
       ) : props.usage.length === 0 ? (
-        <p className="text-xs text-[color:var(--color-fg-subtle)]">No usage recorded yet.</p>
+        <p className="text-xs text-fg-subtle">No usage recorded yet.</p>
       ) : (
         <>
           <div className="flex flex-wrap gap-2">
             {summary.map((entry) => (
-              <span key={`${entry.eventType}:${entry.unit}`} className="inline-flex items-center gap-1.5 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1 text-xs">
+              <span key={`${entry.eventType}:${entry.unit}`} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/35 px-2 py-1 text-xs">
                 <span className="font-medium">{entry.eventType}</span>
-                <span className="font-mono text-[11px] text-[color:var(--color-fg-muted)]">
+                <span className="font-mono text-2xs text-fg-muted">
                   {Number.isInteger(entry.total) ? entry.total : entry.total.toFixed(4)} {entry.unit}
                 </span>
               </span>
@@ -333,7 +333,7 @@ function UsageSection(props: {
           </div>
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse text-left text-xs">
-              <thead className="border-b border-[color:var(--color-border)] text-[color:var(--color-fg)]">
+              <thead className="border-b border-border text-fg">
                 <tr>
                   <th className="whitespace-nowrap px-2 py-1.5 font-medium">Event</th>
                   <th className="whitespace-nowrap px-2 py-1.5 font-medium">Quantity</th>
@@ -341,17 +341,17 @@ function UsageSection(props: {
                   <th className="whitespace-nowrap px-2 py-1.5 font-medium">Occurred</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[color:var(--color-border)]/70">
+              <tbody className="divide-y divide-border/70">
                 {props.usage.slice(0, 30).map((event) => (
                   <tr key={event.id}>
-                    <td className="px-2 py-1.5 text-[color:var(--color-fg-muted)]">{event.eventType}</td>
-                    <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[color:var(--color-fg-muted)]">
+                    <td className="px-2 py-1.5 text-fg-muted">{event.eventType}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 font-mono text-fg-muted">
                       {Number.isInteger(event.quantity) ? event.quantity : event.quantity.toFixed(6)} {event.unit}
                     </td>
-                    <td className="max-w-44 truncate px-2 py-1.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">
+                    <td className="max-w-44 truncate px-2 py-1.5 font-mono text-2xs text-fg-subtle">
                       {event.sourceResourceType ? `${event.sourceResourceType}:${event.sourceResourceId ?? ""}` : "—"}
                     </td>
-                    <td className="whitespace-nowrap px-2 py-1.5 text-[color:var(--color-fg-subtle)]">{formatTimestamp(event.occurredAt)}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5 text-fg-subtle">{formatTimestamp(event.occurredAt)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -369,14 +369,14 @@ function UsageSection(props: {
  *  access; this read-only card stays honest by showing only the caller. */
 function MembersSection(props: { workspaceId: string; canManage: boolean; subjectLabel: string; role: string | null }) {
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <UsersIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            <UsersIcon className="size-3.5 text-brand" />
             Members
           </h2>
-          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">Who can act in this organization.</p>
+          <p className="mt-1 text-xs text-fg-muted">Who can act in this organization.</p>
         </div>
         <Button asChild type="button" variant="ghost" size="sm">
           <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId: props.workspaceId }}>
@@ -385,16 +385,16 @@ function MembersSection(props: { workspaceId: string; canManage: boolean; subjec
           </Link>
         </Button>
       </div>
-      <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-3 py-2">
+      <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium">{props.subjectLabel}</div>
-          <div className="mt-0.5 truncate text-xs text-[color:var(--color-fg-subtle)]">You{props.role ? ` · ${props.role}` : ""}</div>
+          <div className="mt-0.5 truncate text-xs text-fg-subtle">You{props.role ? ` · ${props.role}` : ""}</div>
         </div>
-        <span className="shrink-0 rounded-full border border-[color:var(--color-border)] px-2 py-1 text-xs text-[color:var(--color-fg-muted)]">
+        <span className="shrink-0 rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
           {props.role ?? "member"}
         </span>
       </div>
-      <p className="text-xs text-[color:var(--color-fg-subtle)]">
+      <p className="text-xs text-fg-subtle">
         Access is granted per workspace. Manage members in Workspace settings → People with access.
         {props.canManage ? "" : " Only organization admins can change organization-level roles."}
       </p>

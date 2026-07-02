@@ -334,7 +334,7 @@ function SessionChatPane(props: {
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               emptyState={(
-                <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-[color:var(--color-border)] text-sm text-[color:var(--color-fg-subtle)]">
+                <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-border text-sm text-fg-subtle">
                   Waiting for session activity
                 </div>
               )}
@@ -350,9 +350,9 @@ function SessionChatPane(props: {
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
           <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
             {props.approvals.map((approval) => (
-              <div key={approval.id} className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+              <div key={approval.id} className="rounded-lg border border-status-waiting/40 bg-status-waiting/10 p-3">
                 <div className="text-sm font-medium">{approval.name}</div>
-                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-[color:var(--color-bg)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-xs text-fg-muted">
                   {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
                 </pre>
                 <div className="mt-3 flex justify-end gap-2">

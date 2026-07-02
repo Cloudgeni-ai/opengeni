@@ -28,7 +28,7 @@ import type { Session } from "@/types";
 function RailBody() {
   const rail = useRail();
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[color:var(--color-surface)]/40">
+    <div className="flex h-full min-h-0 flex-col bg-surface/40">
       {/* Brand */}
       <div className={cn("flex h-12 shrink-0 items-center", rail.collapsed ? "justify-center px-2" : "px-3")}>
         <Link
@@ -37,7 +37,7 @@ function RailBody() {
           className="flex items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none"
           aria-label="OpenGeni home"
         >
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <SparkleIcon className="size-3.5" />
           </span>
           {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
@@ -50,7 +50,7 @@ function RailBody() {
         <WorkspaceNav />
       </div>
 
-      <div className="my-2 border-t border-[color:var(--color-border)]" />
+      <div className="my-2 border-t border-border" />
 
       {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
 
@@ -98,7 +98,7 @@ export function RailShell({ children }: { children: ReactNode }) {
             aria-label="Primary"
             data-collapsed={rail.collapsed}
             className={cn(
-              "motion-safe:transition-[width] motion-safe:duration-150 shrink-0 border-r border-[color:var(--color-border)]",
+              "motion-safe:transition-[width] motion-safe:duration-150 shrink-0 border-r border-border",
               rail.collapsed ? "w-[56px]" : "w-[260px]",
             )}
           >
@@ -145,7 +145,7 @@ function CanvasTopStrip() {
   }
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/75 px-3 backdrop-blur sm:px-4">
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4">
       {rail.isMobile ? (
         <Button
           type="button"
@@ -162,7 +162,7 @@ function CanvasTopStrip() {
         <>
           <div className="min-w-0 flex-1">
             <SessionTitleEditor session={context.session} onRename={context.updateSessionTitle} />
-            <div className="flex min-w-0 items-center gap-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+            <div className="flex min-w-0 items-center gap-1 truncate text-xs text-fg-subtle">
               <span className="truncate">
                 {context.session.model} · {String(context.session.metadata.reasoningEffort ?? "low")}
               </span>
@@ -201,7 +201,7 @@ function CanvasTopStrip() {
           params={{ workspaceId: rail.workspaceId }}
           className="flex items-center gap-2 text-sm font-semibold"
         >
-          <span className="flex size-5 items-center justify-center rounded bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
             <SparkleIcon className="size-3" />
           </span>
           OpenGeni
@@ -247,7 +247,7 @@ function SessionTitleEditor(props: {
         }}
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
-        className="w-full truncate rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-[color:var(--color-ring)]/40 focus-visible:ring-[color:var(--color-ring)]"
+        className="w-full truncate rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-ring/40 focus-visible:ring-ring"
       />
     );
   }
@@ -258,7 +258,7 @@ function SessionTitleEditor(props: {
         type="button"
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
-        className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium hover:text-[color:var(--color-fg)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
+        className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
       >
         {display}
       </button>
@@ -268,7 +268,7 @@ function SessionTitleEditor(props: {
         size="icon-xs"
         onClick={rename.startEditing}
         aria-label="Rename session"
-        className="shrink-0 text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg)]"
+        className="shrink-0 text-fg-subtle hover:text-fg"
       >
         <PencilIcon className="size-3.5" />
       </Button>

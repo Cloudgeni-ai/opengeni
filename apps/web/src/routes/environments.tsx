@@ -78,7 +78,7 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
       />
 
       {createOpen ? (
-        <div className="mt-4 grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
+        <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
           <div className="grid gap-1.5">
             <Label htmlFor="environment-name">Name</Label>
             <Input id="environment-name" value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="staging-aws" className="h-9" autoFocus />
@@ -98,7 +98,7 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
 
       <div className="mt-5 grid gap-3">
         {environmentsView === "loading" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
             <Loader2Icon className="size-4 animate-spin" />
             Loading environments
           </div>
@@ -131,9 +131,9 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
           ))
         )}
         {environments.mutationError ? (
-          <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200">
+          <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed">
             <span className="min-w-0 flex-1">{environments.mutationError.message}</span>
-            <button type="button" onClick={environments.clearMutationError} aria-label="Dismiss environment error" className="shrink-0 rounded p-0.5 hover:bg-red-500/20">
+            <button type="button" onClick={environments.clearMutationError} aria-label="Dismiss environment error" className="shrink-0 rounded p-0.5 hover:bg-status-failed/20">
               <XIcon className="size-3" />
             </button>
           </div>
@@ -203,7 +203,7 @@ function EnvironmentCard(props: {
   }
 
   return (
-    <article className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+    <article className="rounded-lg border border-border bg-surface/45 p-3">
       <div className="flex min-w-0 items-start justify-between gap-3">
         {editing ? (
           <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
@@ -213,10 +213,10 @@ function EnvironmentCard(props: {
         ) : (
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{environment.name}</div>
-            <div className="mt-0.5 text-xs text-[color:var(--color-fg-muted)]">
+            <div className="mt-0.5 text-xs text-fg-muted">
               {environment.description ?? "No description"}
             </div>
-            <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+            <div className="mt-1 text-2xs text-fg-subtle">
               {environment.variables.length} variable{environment.variables.length === 1 ? "" : "s"} · updated {formatTimestamp(environment.updatedAt)}
             </div>
           </div>
@@ -244,7 +244,7 @@ function EnvironmentCard(props: {
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Delete environment"
-                className="hover:text-red-300"
+                className="hover:text-status-failed"
                 disabled={props.mutating || props.attachedSessions.length > 0 || props.attachedTasks.length > 0}
                 title={props.attachedSessions.length > 0 || props.attachedTasks.length > 0 ? "Detach it from sessions and tasks first" : "Delete environment"}
                 onClick={() => void props.onDelete()}
@@ -258,24 +258,24 @@ function EnvironmentCard(props: {
 
       <div className="mt-3 space-y-1.5">
         {environment.variables.length === 0 ? (
-          <p className="text-xs text-[color:var(--color-fg-subtle)]">No variables yet.</p>
+          <p className="text-xs text-fg-subtle">No variables yet.</p>
         ) : (
           environment.variables.map((variable) => (
-            <div key={variable.name} className="rounded-md border border-[color:var(--color-border)]/70 bg-[color:var(--color-bg)]/25 px-2.5 py-1.5">
+            <div key={variable.name} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
               <div className="flex min-w-0 items-center gap-2">
-                <KeyRoundIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+                <KeyRoundIcon className="size-3 shrink-0 text-fg-subtle" />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs">{variable.name}</span>
-                <span className="shrink-0 text-[10px] text-[color:var(--color-fg-subtle)]">
+                <span className="shrink-0 text-2xs text-fg-subtle">
                   v{variable.version} · {formatTimestamp(variable.updatedAt)}
                 </span>
-                <span className="shrink-0 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]" title="Values are write-only and never returned by the API">
+                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle" title="Values are write-only and never returned by the API">
                   ••••••
                 </span>
                 <Button
                   type="button"
                   variant="ghost"
                   size="xs"
-                  className="h-6 shrink-0 text-[11px]"
+                  className="h-6 shrink-0 text-2xs"
                   disabled={props.mutating}
                   onClick={() => {
                     setRotatingName((current) => current === variable.name ? null : variable.name);
@@ -289,7 +289,7 @@ function EnvironmentCard(props: {
                   variant="ghost"
                   size="icon-xs"
                   aria-label={`Delete variable ${variable.name}`}
-                  className="shrink-0 hover:text-red-300"
+                  className="shrink-0 hover:text-status-failed"
                   disabled={props.mutating}
                   onClick={() => void props.onDeleteVariable(variable.name).then((removed) => {
                     if (removed) {
@@ -345,14 +345,14 @@ function EnvironmentCard(props: {
       </div>
 
       {(props.attachedSessions.length > 0 || props.attachedTasks.length > 0) ? (
-        <div className="mt-3 border-t border-[color:var(--color-border)]/70 pt-2 text-[11px] text-[color:var(--color-fg-subtle)]">
-          <span className="font-medium text-[color:var(--color-fg-muted)]">Attached to:</span>{" "}
+        <div className="mt-3 border-t border-border/70 pt-2 text-2xs text-fg-subtle">
+          <span className="font-medium text-fg-muted">Attached to:</span>{" "}
           {props.attachedSessions.slice(0, 4).map((session) => (
             <Link
               key={session.id}
               to="/workspaces/$workspaceId/sessions/$sessionId"
               params={{ workspaceId: props.workspaceId, sessionId: session.id }}
-              className="mr-2 underline decoration-[color:var(--color-border-strong)] underline-offset-2 hover:text-[color:var(--color-fg)]"
+              className="mr-2 underline decoration-border-strong underline-offset-2 hover:text-fg"
             >
               session “{session.initialMessage.slice(0, 32)}{session.initialMessage.length > 32 ? "…" : ""}”
             </Link>

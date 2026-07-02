@@ -71,23 +71,23 @@ export function ModelPicker(props: {
           size="sm"
           disabled={props.disabled}
           aria-label="Model and effort"
-          className="h-8 max-w-[14rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]"
+          className="h-8 max-w-[14rem] gap-1 rounded-full border border-transparent px-2.5 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
-          <span className="truncate font-medium text-[color:var(--color-fg)]">{selectedModelLabel(choices, props.model)}</span>
+          <span className="truncate font-medium text-fg">{selectedModelLabel(choices, props.model)}</span>
           <span>{labelEffort(props.effort)}</span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-56 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl">
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">Effort</DropdownMenuLabel>
+      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-56 rounded-xl border-border bg-surface p-2 shadow-xl">
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">Effort</DropdownMenuLabel>
         {effortOptions.map((option) => (
           <DropdownMenuItem key={option} onSelect={() => props.onEffortChange(option)} className="h-8 cursor-pointer rounded-md px-2 text-sm">
             <span>{labelEffort(option)}</span>
             {option === props.effort ? <CheckIcon className="ml-auto size-4" /> : null}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator className="my-2 bg-[color:var(--color-border)]" />
-        <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">Model</DropdownMenuLabel>
+        <DropdownMenuSeparator className="my-2 bg-border" />
+        <DropdownMenuLabel className="px-2 pt-0 pb-1 text-xs font-normal text-fg-subtle">Model</DropdownMenuLabel>
         {choices.map((choice, index) => (
           <ModelChoiceRow
             key={choice.id}
@@ -114,7 +114,7 @@ function ModelChoiceRow(props: {
   return (
     <>
       {props.showProviderLabel ? (
-        <DropdownMenuLabel className="px-2 pt-1 pb-0.5 text-[10px] font-normal uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+        <DropdownMenuLabel className="px-2 pt-1 pb-0.5 text-2xs font-normal uppercase tracking-wide text-fg-subtle">
           {props.choice.providerLabel}
         </DropdownMenuLabel>
       ) : null}
@@ -130,8 +130,8 @@ function pillClass(active: boolean): string {
   return cn(
     "h-8 max-w-[12rem] gap-1.5 rounded-full border px-2.5 text-xs",
     active
-      ? "border-[color:var(--color-brand)]/35 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
-      : "border-transparent text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
+      ? "border-brand/35 bg-brand/10 text-fg"
+      : "border-transparent text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg",
   );
 }
 
@@ -170,8 +170,8 @@ export function EnabledMcpToolPicker(props: {
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-72 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl">
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">Enabled MCPs</DropdownMenuLabel>
+      <DropdownMenuContent align="start" side="top" sideOffset={8} className="w-72 rounded-xl border-border bg-surface p-2 shadow-xl">
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">Enabled MCPs</DropdownMenuLabel>
         {props.servers.map((server) => (
           <DropdownMenuItem
             key={server.id}
@@ -182,7 +182,7 @@ export function EnabledMcpToolPicker(props: {
             className="h-9 cursor-pointer rounded-md px-2 text-sm"
           >
             <span className="min-w-0 flex-1 truncate">{server.name}</span>
-            <span className="ml-2 max-w-24 truncate font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{server.id}</span>
+            <span className="ml-2 max-w-24 truncate font-mono text-2xs text-fg-subtle">{server.id}</span>
             {props.selectedIds.has(server.id) ? <CheckIcon className="ml-2 size-4 shrink-0" /> : null}
           </DropdownMenuItem>
         ))}

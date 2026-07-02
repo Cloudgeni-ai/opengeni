@@ -25,7 +25,7 @@ export function GoalCard({ goal, events }: {
   return (
     <div data-testid="goal-card" className="min-w-0 space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+        <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-fg-subtle">
           <FlagIcon className="size-3.5" />
           Goal
         </h3>
@@ -33,7 +33,7 @@ export function GoalCard({ goal, events }: {
       </div>
 
       {goal.loading && !record ? (
-        <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-xs text-[color:var(--color-fg-muted)]">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-3 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading goal
         </div>
@@ -41,22 +41,22 @@ export function GoalCard({ goal, events }: {
         <div
           className={cn(
             "rounded-lg border p-2.5",
-            record.status === "active" && "border-[color:var(--color-brand)]/35 bg-[color:var(--color-brand)]/5",
-            record.status === "paused" && "border-amber-500/30 bg-amber-500/5",
-            record.status === "completed" && "border-emerald-500/30 bg-emerald-500/5",
+            record.status === "active" && "border-brand/35 bg-brand/5",
+            record.status === "paused" && "border-status-waiting/30 bg-status-waiting/5",
+            record.status === "completed" && "border-status-idle/30 bg-status-idle/5",
           )}
         >
-          <div className="text-xs leading-5 text-[color:var(--color-fg)]">{record.text}</div>
+          <div className="text-xs leading-5 text-fg">{record.text}</div>
           {record.successCriteria ? (
-            <div className="mt-1.5 text-[11px] leading-4 text-[color:var(--color-fg-muted)]">
+            <div className="mt-1.5 text-2xs text-fg-muted">
               <span className="font-medium">Done when:</span> {record.successCriteria}
             </div>
           ) : null}
           {record.status === "paused" && record.rationale ? (
-            <div className="mt-1.5 text-[11px] leading-4 text-amber-200/90">Paused: {record.rationale}</div>
+            <div className="mt-1.5 text-2xs text-status-waiting/90">Paused: {record.rationale}</div>
           ) : null}
           {record.status === "completed" && record.evidence ? (
-            <div className="mt-1.5 text-[11px] leading-4 text-emerald-200/90">Evidence: {record.evidence}</div>
+            <div className="mt-1.5 text-2xs text-status-idle/90">Evidence: {record.evidence}</div>
           ) : null}
 
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -92,9 +92,9 @@ export function GoalCard({ goal, events }: {
       ) : null}
 
       {goal.mutationError ? (
-        <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200">
+        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed">
           <span className="min-w-0 flex-1">{goal.mutationError.message}</span>
-          <button type="button" onClick={goal.clearMutationError} aria-label="Dismiss goal error" className="shrink-0 rounded p-0.5 hover:bg-red-500/20">
+          <button type="button" onClick={goal.clearMutationError} aria-label="Dismiss goal error" className="shrink-0 rounded p-0.5 hover:bg-status-failed/20">
             <XIcon className="size-3" />
           </button>
         </div>
@@ -102,15 +102,15 @@ export function GoalCard({ goal, events }: {
 
       {goalEvents.length > 0 ? (
         <details className="group">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg-muted)]">
+          <summary className="cursor-pointer list-none text-2xs font-medium text-fg-subtle hover:text-fg-muted">
             <ChevronDownIcon className="mr-1 inline size-3 transition-transform group-open:rotate-180" />
             Goal history ({goalEvents.length})
           </summary>
           <ol className="mt-2 space-y-1" aria-label="Goal event history">
             {goalEvents.slice(0, 20).map((event) => (
-              <li key={event.id} className="flex items-center justify-between gap-2 rounded-md border border-[color:var(--color-border)]/70 bg-[color:var(--color-bg)]/25 px-2 py-1.5 text-[11px]">
-                <span className="min-w-0 truncate font-medium text-[color:var(--color-fg-muted)]">{eventLabel(event.type)}</span>
-                <span className="shrink-0 text-[10px] text-[color:var(--color-fg-subtle)]">{formatTimestamp(event.occurredAt)}</span>
+              <li key={event.id} className="flex items-center justify-between gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5 text-2xs">
+                <span className="min-w-0 truncate font-medium text-fg-muted">{eventLabel(event.type)}</span>
+                <span className="shrink-0 text-2xs text-fg-subtle">{formatTimestamp(event.occurredAt)}</span>
               </li>
             ))}
           </ol>
@@ -132,14 +132,14 @@ export function GoalChip({ goal }: { goal: UseGoalResult }) {
       title={record.text}
       className={cn(
         "inline-flex max-w-56 items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-medium",
-        record.status === "active" && "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]",
-        record.status === "paused" && "border-amber-500/40 bg-amber-500/10 text-amber-200",
-        record.status === "completed" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+        record.status === "active" && "border-brand/40 bg-brand/10 text-fg",
+        record.status === "paused" && "border-status-waiting/40 bg-status-waiting/10 text-status-waiting",
+        record.status === "completed" && "border-status-idle/40 bg-status-idle/10 text-status-idle",
       )}
     >
       <FlagIcon className="size-3 shrink-0" />
       <span className="min-w-0 truncate">{record.text}</span>
-      <span className="shrink-0 font-mono text-[10px] opacity-75">
+      <span className="shrink-0 font-mono text-2xs opacity-75">
         {record.status === "paused" ? "paused" : record.status === "completed" ? "done" : `${record.autoContinuations}↻ ${record.noProgressStreak}∅`}
       </span>
     </span>
@@ -150,10 +150,10 @@ function GoalStatusPill({ status }: { status: "active" | "paused" | "completed" 
   return (
     <span
       className={cn(
-        "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
-        status === "active" && "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]",
-        status === "paused" && "border-amber-500/40 bg-amber-500/10 text-amber-200",
-        status === "completed" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+        "rounded-full border px-1.5 py-0.5 text-2xs font-medium",
+        status === "active" && "border-brand/40 bg-brand/10 text-fg",
+        status === "paused" && "border-status-waiting/40 bg-status-waiting/10 text-status-waiting",
+        status === "completed" && "border-status-idle/40 bg-status-idle/10 text-status-idle",
       )}
     >
       {status}
@@ -165,13 +165,13 @@ function CounterChip({ label, value, tone }: { label: string; value: string; ton
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px]",
+        "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-2xs",
         tone === "warn"
-          ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
-          : "border-[color:var(--color-border)] text-[color:var(--color-fg-subtle)]",
+          ? "border-status-waiting/40 bg-status-waiting/10 text-status-waiting"
+          : "border-border text-fg-subtle",
       )}
     >
-      <span className="font-mono font-medium text-[color:var(--color-fg-muted)]">{value}</span>
+      <span className="font-mono font-medium text-fg-muted">{value}</span>
       {label}
     </span>
   );

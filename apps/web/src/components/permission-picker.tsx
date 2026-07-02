@@ -16,7 +16,7 @@ export function PermissionGroupPicker(props: {
     <div className="grid gap-3">
       {props.groups.map((group) => (
         <div key={group.label} className="grid gap-1.5">
-          <div className="text-xs font-medium text-[color:var(--color-fg-muted)]">{group.label}</div>
+          <div className="text-xs font-medium text-fg-muted">{group.label}</div>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {group.permissions.map((permission) => {
               const delegable = props.delegable ? props.delegable.has(permission) : true;
@@ -24,7 +24,7 @@ export function PermissionGroupPicker(props: {
                 <label
                   key={permission}
                   title={delegable ? undefined : "Your grant cannot delegate this permission"}
-                  className={`flex items-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 px-2 py-1.5 text-xs ${delegable && !props.disabled ? "" : "cursor-not-allowed opacity-50"}`}
+                  className={`flex items-center gap-2 rounded-md border border-border bg-bg/35 px-2 py-1.5 text-xs ${delegable && !props.disabled ? "" : "cursor-not-allowed opacity-50"}`}
                 >
                   <input
                     type="checkbox"

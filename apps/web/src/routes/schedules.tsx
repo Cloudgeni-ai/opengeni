@@ -22,6 +22,7 @@ import { ScheduledTaskRepositoryPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
@@ -196,7 +197,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
 
       <div className="mt-4 grid gap-2">
         {tasksView === "loading" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
             <Loader2Icon className="size-4 animate-spin" />
             Loading scheduled tasks
           </div>
@@ -208,30 +209,30 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           const taskRuns = runs[task.id] ?? [];
           const lastRun = summarizeLastRun(taskRuns);
           return (
-            <div key={task.id} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+            <div key={task.id} className="rounded-lg border border-border bg-surface p-3">
               <div className="flex min-w-0 items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-sm font-medium">{task.name}</span>
                     <span
                       className={cn(
-                        "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+                        "shrink-0 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
                         task.status === "active"
-                          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                          : "border-amber-500/30 bg-amber-500/10 text-amber-200",
+                          ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
+                          : "border-status-waiting/30 bg-status-waiting/10 text-status-waiting",
                       )}
                     >
                       {task.status}
                     </span>
                   </div>
-                  <div className="mt-1 text-xs text-[color:var(--color-fg-subtle)]">
+                  <div className="mt-1 text-xs text-fg-subtle">
                     {scheduleLabel(task.schedule)} · {task.runMode.replaceAll("_", " ")}
                   </div>
                   {lastRun ? (
                     <div
                       className={cn(
-                        "mt-1 truncate text-[11px]",
-                        lastRun.tone === "failed" ? "text-red-300" : lastRun.tone === "pending" ? "text-amber-200" : "text-[color:var(--color-fg-subtle)]",
+                        "mt-1 truncate text-2xs",
+                        lastRun.tone === "failed" ? "text-status-failed" : lastRun.tone === "pending" ? "text-status-waiting" : "text-fg-subtle",
                       )}
                     >
                       {lastRun.label}
@@ -260,7 +261,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                   >
                     <HistoryIcon className="size-3.5" />
                     Runs
-                    {taskRuns.length > 0 ? <span className="ml-1 rounded-full border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px]">{taskRuns.length}</span> : null}
+                    {taskRuns.length > 0 ? <span className="ml-1 rounded-full border border-border px-1.5 py-0.5 text-2xs">{taskRuns.length}</span> : null}
                   </Button>
                   <Button
                     type="button"
@@ -309,9 +310,9 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
               ) : null}
 
               {historyTaskId === task.id ? (
-                <div className="mt-3 border-t border-[color:var(--color-border)] pt-2">
+                <div className="mt-3 border-t border-border pt-2">
                   {taskRuns.length === 0 ? (
-                    <p className="px-1 py-2 text-xs text-[color:var(--color-fg-subtle)]">No runs recorded for this task yet.</p>
+                    <p className="px-1 py-2 text-xs text-fg-subtle">No runs recorded for this task yet.</p>
                   ) : (
                     <ol className="grid gap-1" aria-label={`${task.name} run history`}>
                       {taskRuns.map((run) => (
@@ -322,21 +323,21 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                             onClick={() => run.sessionId
                               ? void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: run.sessionId } })
                               : undefined}
-                            className="flex w-full items-center justify-between gap-2 rounded border border-[color:var(--color-border)] px-2 py-1.5 text-left text-xs text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)] disabled:opacity-60"
+                            className="flex w-full items-center justify-between gap-2 rounded border border-border px-2 py-1.5 text-left text-xs text-fg-muted hover:bg-surface-2 disabled:opacity-60"
                           >
                             <span className="flex min-w-0 items-center gap-2">
                               <span
                                 className={cn(
                                   "size-2 shrink-0 rounded-full",
-                                  run.status === "dispatched" && "bg-emerald-400",
-                                  run.status === "failed" && "bg-red-400",
-                                  run.status === "queued" && "bg-amber-300",
+                                  run.status === "dispatched" && "bg-status-idle",
+                                  run.status === "failed" && "bg-status-failed",
+                                  run.status === "queued" && "bg-status-waiting",
                                 )}
                               />
                               <span className="shrink-0">{run.triggerType}</span>
                               <span className="shrink-0">{run.status}</span>
-                              {run.error ? <span className="min-w-0 truncate text-red-300">{run.error}</span> : null}
-                              {run.sessionId ? <span className="min-w-0 truncate font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{run.sessionId}</span> : null}
+                              {run.error ? <span className="min-w-0 truncate text-status-failed">{run.error}</span> : null}
+                              {run.sessionId ? <span className="min-w-0 truncate font-mono text-2xs text-fg-subtle">{run.sessionId}</span> : null}
                             </span>
                             <span className="shrink-0">{formatTimestamp(run.firedAt)}</span>
                           </button>
@@ -371,7 +372,7 @@ function ScheduledTaskForm(props: {
   };
 
   return (
-    <div className="mt-4 grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3">
+    <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3">
       <div className="grid gap-2 sm:grid-cols-2">
         <div className="grid gap-1.5">
           <Label>Name</Label>
@@ -379,21 +380,20 @@ function ScheduledTaskForm(props: {
         </div>
         <div className="grid gap-1.5">
           <Label>Schedule</Label>
-          <select
-            className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
+          <Select
             value={form.scheduleType}
             onChange={(event) => update("scheduleType", event.target.value as ScheduledTaskFormState["scheduleType"])}
           >
             <option value="once">Once</option>
             <option value="interval">Interval</option>
             <option value="calendar">Daily</option>
-          </select>
+          </Select>
         </div>
       </div>
       <textarea
         value={form.prompt}
         onChange={(event) => update("prompt", event.target.value)}
-        className="min-h-20 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-sm"
+        className="min-h-20 rounded-md border border-border bg-bg px-3 py-2 text-sm"
         placeholder="What should the agent do on schedule?"
       />
       <div className="grid gap-2 sm:grid-cols-3">
@@ -404,25 +404,23 @@ function ScheduledTaskForm(props: {
         ) : (
           <Input type="time" value={form.calendarTime} onChange={(event) => update("calendarTime", event.target.value)} />
         )}
-        <select
-          className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
+        <Select
           value={form.runMode}
           onChange={(event) => update("runMode", event.target.value as ScheduledTask["runMode"])}
         >
           <option value="new_session_per_run">New session per run</option>
           <option value="reusable_session">Reusable session</option>
-        </select>
-        <select
-          className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-sm"
+        </Select>
+        <Select
           value={form.overlapPolicy}
           onChange={(event) => update("overlapPolicy", event.target.value as ScheduledTask["overlapPolicy"])}
         >
           <option value="allow_concurrent">Allow concurrent</option>
           <option value="skip">Skip overlapping</option>
           <option value="buffer_one">Buffer one</option>
-        </select>
+        </Select>
       </div>
-      <label className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+      <label className="flex items-center gap-2 text-xs text-fg-muted">
         <input
           type="checkbox"
           checked={form.includeOpenGeniTool}

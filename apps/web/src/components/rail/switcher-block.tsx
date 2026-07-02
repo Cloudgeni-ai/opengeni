@@ -91,7 +91,7 @@ export function SwitcherBlock() {
           <button
             type="button"
             aria-label={`Workspace: ${activeWorkspace?.name ?? "switch workspace"}`}
-            className="mx-auto flex size-9 items-center justify-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/60 text-sm font-semibold text-[color:var(--color-fg)] transition-colors hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)] focus-visible:outline-none"
+            className="mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
           >
             {workspaceInitial(activeWorkspace)}
           </button>
@@ -122,17 +122,17 @@ export function SwitcherBlock() {
       >
         <button
           type="button"
-          className="group flex w-full items-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/50 px-2 py-1.5 text-left transition-colors hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)] focus-visible:outline-none"
+          className="group flex w-full items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none"
         >
           <Avatar size="sm" className="rounded-md">
-            <AvatarFallback className="rounded-md bg-[color:var(--color-brand-strong)]/25 text-[11px] font-semibold text-[color:var(--color-brand)]">
+            <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
               {workspaceInitial(activeWorkspace)}
             </AvatarFallback>
           </Avatar>
           <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
             {activeWorkspace?.name ?? "Select workspace"}
           </span>
-          <ChevronsUpDownIcon className="size-3.5 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
         </button>
       </WorkspaceMenu>
 
@@ -158,7 +158,7 @@ function OrgLine(props: {
   // Exactly one org: a static muted label, no useless switcher.
   if (props.orgs.length <= 1) {
     return (
-      <span className="flex min-w-0 items-center gap-1 px-0.5 text-[11px] font-medium text-[color:var(--color-fg-subtle)]" title={props.currentLabel}>
+      <span className="flex min-w-0 items-center gap-1 px-0.5 text-2xs font-medium text-fg-subtle" title={props.currentLabel}>
         <BuildingIcon className="size-3 shrink-0" />
         <span className="min-w-0 truncate">{props.currentLabel}</span>
       </span>
@@ -170,7 +170,7 @@ function OrgLine(props: {
         <button
           type="button"
           aria-label="Switch organization"
-          className="flex min-w-0 items-center gap-1 rounded px-0.5 py-0.5 text-[11px] font-medium text-[color:var(--color-fg-subtle)] transition-colors hover:text-[color:var(--color-fg-muted)] focus-visible:outline-none"
+          className="flex min-w-0 items-center gap-1 rounded px-0.5 py-0.5 text-2xs font-medium text-fg-subtle transition-colors hover:text-fg-muted focus-visible:outline-none"
         >
           <BuildingIcon className="size-3 shrink-0" />
           <span className="min-w-0 truncate">{props.currentLabel}</span>
@@ -178,7 +178,7 @@ function OrgLine(props: {
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-56">
-        <DropdownMenuLabel className="text-[color:var(--color-fg-subtle)]">Organizations</DropdownMenuLabel>
+        <DropdownMenuLabel className="text-fg-subtle">Organizations</DropdownMenuLabel>
         {props.orgs.map((org) => (
           <DropdownMenuItem
             key={org.accountId}
@@ -188,11 +188,11 @@ function OrgLine(props: {
               }
             }}
           >
-            <span className="flex size-5 items-center justify-center rounded bg-[color:var(--color-surface-3)] text-[10px] font-semibold">
+            <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
               {org.label.replace(/^Org\s+/, "").slice(0, 2).toUpperCase()}
             </span>
             <span className="min-w-0 flex-1 truncate">{org.label}</span>
-            {org.accountId === props.activeAccountId ? <CheckIcon className="size-4 text-[color:var(--color-brand)]" /> : null}
+            {org.accountId === props.activeAccountId ? <CheckIcon className="size-4 text-brand" /> : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
@@ -226,17 +226,17 @@ function WorkspaceMenu(props: {
         {rail.collapsed ? <TooltipContent side="right">Switch workspace</TooltipContent> : null}
       </Tooltip>
       <DropdownMenuContent align={props.align} className="min-w-60" side={rail.collapsed ? "right" : "bottom"}>
-        <DropdownMenuLabel className="text-[color:var(--color-fg-subtle)]">Workspaces</DropdownMenuLabel>
+        <DropdownMenuLabel className="text-fg-subtle">Workspaces</DropdownMenuLabel>
         {props.workspaces.map((workspace) => (
           <DropdownMenuItem
             key={workspace.id}
             onSelect={() => props.onSelect(workspace.id)}
           >
-            <span className="flex size-5 items-center justify-center rounded bg-[color:var(--color-surface-3)] text-[10px] font-semibold">
+            <span className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold">
               {workspaceInitial(workspace)}
             </span>
             <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
-            {workspace.id === props.activeWorkspaceId ? <CheckIcon className="size-4 text-[color:var(--color-brand)]" /> : null}
+            {workspace.id === props.activeWorkspaceId ? <CheckIcon className="size-4 text-brand" /> : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />

@@ -40,24 +40,24 @@ export function SessionInspector(props: {
 
   return (
     <div className="flex h-full min-h-[28rem] w-full min-w-0 flex-col overflow-hidden">
-      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-[color:var(--color-border)] px-3 py-3">
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-3 py-3">
         <div className="flex min-w-0 items-center gap-2">
-          <FileJsonIcon className="size-4 shrink-0 text-[color:var(--color-brand)]" />
+          <FileJsonIcon className="size-4 shrink-0 text-brand" />
           <div className="min-w-0">
             <div className="text-sm font-medium">{terminalSession ? "Archived debug" : "Debug"}</div>
-            <div className="truncate text-xs text-[color:var(--color-fg-subtle)]">{props.events.length} events{terminalSession ? " · sanitized" : ""}</div>
+            <div className="truncate text-xs text-fg-subtle">{props.events.length} events{terminalSession ? " · sanitized" : ""}</div>
           </div>
         </div>
         <ConnectionPill state={props.connectionState} />
       </div>
 
       <Tabs defaultValue="overview" className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden">
-        <div className="min-w-0 border-b border-[color:var(--color-border)] px-2 py-2">
-          <TabsList className="grid h-8 w-full min-w-0 grid-cols-4 rounded-md bg-[color:var(--color-bg)] p-1">
-            <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-[11px]">Overview</TabsTrigger>
-            <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-[11px]">Events</TabsTrigger>
-            <TabsTrigger value="timeline" className="h-6 min-w-0 rounded px-1 text-[11px]">Timeline</TabsTrigger>
-            <TabsTrigger value="raw" className="h-6 min-w-0 rounded px-1 text-[11px]">Raw</TabsTrigger>
+        <div className="min-w-0 border-b border-border px-2 py-2">
+          <TabsList className="grid h-8 w-full min-w-0 grid-cols-4 rounded-md bg-bg p-1">
+            <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-2xs">Overview</TabsTrigger>
+            <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-2xs">Events</TabsTrigger>
+            <TabsTrigger value="timeline" className="h-6 min-w-0 rounded px-1 text-2xs">Timeline</TabsTrigger>
+            <TabsTrigger value="raw" className="h-6 min-w-0 rounded px-1 text-2xs">Raw</TabsTrigger>
           </TabsList>
         </div>
 
@@ -87,16 +87,16 @@ export function SessionInspector(props: {
 
               <InspectorSection title="Repositories">
                 {repositories.length === 0 ? (
-                  <p className="text-xs text-[color:var(--color-fg-subtle)]">No repositories selected for this session.</p>
+                  <p className="text-xs text-fg-subtle">No repositories selected for this session.</p>
                 ) : (
                   <div className="min-w-0 space-y-2">
                     {repositories.map((resource, index) => (
-                      <div key={`${resource.uri}:${index}`} className="min-w-0 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
+                      <div key={`${resource.uri}:${index}`} className="min-w-0 rounded-md border border-border bg-bg/35 p-2">
                         <div className="min-w-0 truncate text-xs font-medium">{repositoryDisplayName(resource)}</div>
-                        <div className="mt-1 min-w-0 truncate font-mono text-[11px] text-[color:var(--color-fg-subtle)]">{resource.uri}</div>
-                        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">
-                          <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">ref {resource.ref}</span>
-                          {resource.mountPath ? <span className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5">{resource.mountPath}</span> : null}
+                        <div className="mt-1 min-w-0 truncate font-mono text-2xs text-fg-subtle">{resource.uri}</div>
+                        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-2xs text-fg-subtle">
+                          <span className="max-w-full truncate rounded border border-border px-1.5 py-0.5">ref {resource.ref}</span>
+                          {resource.mountPath ? <span className="max-w-full truncate rounded border border-border px-1.5 py-0.5">{resource.mountPath}</span> : null}
                         </div>
                       </div>
                     ))}
@@ -119,12 +119,12 @@ export function SessionInspector(props: {
           <ScrollArea className="h-full min-w-0">
             <div className="min-w-0 space-y-2 p-3">
               {lifecycleEvents.map((event) => (
-                <div key={event.id} className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
+                <div key={event.id} className="rounded-md border border-border bg-bg/35 p-2">
                   <div className="flex items-center justify-between gap-2 text-xs">
                     <span className="truncate font-medium">{eventLabel(event.type)}</span>
-                    <span className="shrink-0 font-mono text-[11px] text-[color:var(--color-fg-subtle)]">#{event.sequence}</span>
+                    <span className="shrink-0 font-mono text-2xs text-fg-subtle">#{event.sequence}</span>
                   </div>
-                  <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">{formatTimestamp(event.occurredAt)}</div>
+                  <div className="mt-1 text-2xs text-fg-subtle">{formatTimestamp(event.occurredAt)}</div>
                 </div>
               ))}
             </div>
@@ -142,21 +142,21 @@ export function SessionInspector(props: {
 function EventDebugRow({ event }: { event: SessionEvent }) {
   const [open, setOpen] = useState(false);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 overflow-hidden rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35">
+    <Collapsible open={open} onOpenChange={setOpen} className="min-w-0 overflow-hidden rounded-md border border-border bg-bg/35">
       <CollapsibleTrigger asChild>
         <button type="button" className="flex w-full min-w-0 items-center justify-between gap-2 p-2 text-left">
           <div className="min-w-0">
             <div className="truncate text-xs font-medium">{eventLabel(event.type)}</div>
-            <div className="mt-1 truncate font-mono text-[11px] text-[color:var(--color-fg-subtle)]">{event.turnId ?? event.id}</div>
+            <div className="mt-1 truncate font-mono text-2xs text-fg-subtle">{event.turnId ?? event.id}</div>
           </div>
           <div className="shrink-0 text-right">
-            <div className="font-mono text-[11px] text-[color:var(--color-fg-muted)]">#{event.sequence}</div>
-            <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">{formatTimestamp(event.occurredAt)}</div>
+            <div className="font-mono text-2xs text-fg-muted">#{event.sequence}</div>
+            <div className="mt-1 text-2xs text-fg-subtle">{formatTimestamp(event.occurredAt)}</div>
           </div>
         </button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <pre className="max-h-72 max-w-full overflow-auto border-t border-[color:var(--color-border)] p-2 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">
+        <pre className="max-h-72 max-w-full overflow-auto border-t border-border p-2 text-2xs leading-5 text-fg-muted">
           {JSON.stringify(event.payload, null, 2)}
         </pre>
       </CollapsibleContent>
@@ -168,7 +168,7 @@ function RawJsonPane({ value }: { value: unknown }) {
   const json = JSON.stringify(value, null, 2);
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-      <div className="flex items-center justify-end border-b border-[color:var(--color-border)] p-2">
+      <div className="flex items-center justify-end border-b border-border p-2">
         <Button
           type="button"
           variant="ghost"
@@ -183,7 +183,7 @@ function RawJsonPane({ value }: { value: unknown }) {
         </Button>
       </div>
       <ScrollArea className="min-h-0 min-w-0 flex-1">
-        <pre className="max-w-full overflow-auto p-3 text-[11px] leading-5 text-[color:var(--color-fg-muted)]">{json}</pre>
+        <pre className="max-w-full overflow-auto p-3 text-2xs leading-5 text-fg-muted">{json}</pre>
       </ScrollArea>
     </div>
   );
