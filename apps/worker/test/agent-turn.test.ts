@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -369,6 +369,50 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     expect(backend).toBe("selfhosted");
     expect(pointerReads).toBe(1);
     expect(kindReads).toBe(1);
+  });
+});
+
+describe("on-turn recording gate (selfhosted machines have no in-box capture plumbing)", () => {
+  const base: Parameters<typeof shouldStartOnTurnRecording>[0] = {
+    recordingEnabled: true,
+    desktopEnabled: true,
+    establishedBackendId: "modal",
+    effectiveBackend: undefined,
+  };
+
+  test("modal cloud box: records (unchanged behavior)", () => {
+    expect(shouldStartOnTurnRecording({ ...base })).toBe(true);
+  });
+
+  test("selfhosted EFFECTIVE backend: does NOT start recording (no recording.started emitted)", () => {
+    // The machine-primary turn establishes the SelfhostedSession (backendId
+    // "selfhosted", which is desktop-capable), so the desktop-capable check alone
+    // would over-trigger. The effective-backend gate is what suppresses it.
+    expect(
+      shouldStartOnTurnRecording({ ...base, establishedBackendId: "selfhosted", effectiveBackend: "selfhosted" }),
+    ).toBe(false);
+  });
+
+  test("modal-home session swapped ONTO a machine: skips (gate is the effective backend, not home)", () => {
+    // Home backend is a cloud box (established could even still read modal in the
+    // degraded no-enrollment edge), but the ACTIVE pointer resolves selfhosted —
+    // recording must skip.
+    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "modal", effectiveBackend: "selfhosted" })).toBe(false);
+  });
+
+  test("machine-home turn degraded back to its cloud group box: records (effective backend undefined)", () => {
+    expect(
+      shouldStartOnTurnRecording({ ...base, establishedBackendId: "modal", effectiveBackend: undefined }),
+    ).toBe(true);
+  });
+
+  test("recording disabled by policy: skips regardless of backend", () => {
+    expect(shouldStartOnTurnRecording({ ...base, recordingEnabled: false })).toBe(false);
+    expect(shouldStartOnTurnRecording({ ...base, desktopEnabled: false })).toBe(false);
+  });
+
+  test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
+    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
   });
 });
 

@@ -326,6 +326,45 @@ export async function resolveActiveSandboxBackend(
 }
 
 /**
+ * Decide whether to start on-turn desktop recording for THIS turn.
+ *
+ * On-turn recording runs ffmpeg/x11grab INSIDE the box and reads the .mp4 back
+ * out of the box's /tmp — plumbing that exists only for OpenGeni-operated cloud
+ * boxes (the Modal desktop backend). A turn whose EFFECTIVE backend is a connected
+ * machine ("selfhosted") runs on the user's REAL computer, which has none of that
+ * capture plumbing (and the platform must never shell ffmpeg onto a user's machine
+ * — the same reason the runtime skips its setup hooks for selfhosted). Left ungated
+ * it films nothing, finds no /tmp file, and emits recording.started followed by
+ * recording.failed{box-death} on EVERY machine-primary turn — misleading timeline
+ * noise + wasted work. So gate it off, exactly like a recording-disabled deployment:
+ * skip silently, emit nothing (no new event shape).
+ *
+ * `effectiveBackend` is the resolved ACTIVE backend for the turn
+ * (resolveActiveSandboxBackend) — NOT the session's home backend. A modal-home
+ * session actively swapped onto a machine resolves to "selfhosted" here and
+ * correctly skips; a machine-home turn that degraded back to its cloud group box
+ * (swap-away / flag-off) resolves to undefined and records as before.
+ *
+ * EDGE — mid-turn swap: this is evaluated ONCE at turn start (the box is only filmed
+ * for the duration of one turn). A swap AFTER the recording starts is deliberately
+ * ignored — a partial-turn recording already has defined failure semantics, so we do
+ * not add machinery to stop/restart it mid-turn.
+ */
+export function shouldStartOnTurnRecording(params: {
+  recordingEnabled: boolean;
+  desktopEnabled: boolean;
+  establishedBackendId: string;
+  effectiveBackend: Settings["sandboxBackend"] | undefined;
+}): boolean {
+  return (
+    params.recordingEnabled
+    && params.desktopEnabled
+    && desktopCapableBackend(params.establishedBackendId)
+    && params.effectiveBackend !== "selfhosted"
+  );
+}
+
+/**
  * SELF-HEAL helper for the all-capped rotation idle (invariant 4: BOUNDED, no thrash).
  * The turn hot path never refreshes Codex usage — only the usage API route does — so a
  * window that has actually reset still reads OVER-threshold from the stale cache, which
@@ -1046,9 +1085,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // `finally` (read+PUT in this same activity — never a Temporal payload).
       if (
         resolvedSandbox
-        && settings.sandboxDesktopEnabled
-        && settings.recordingEnabled
-        && desktopCapableBackend(resolvedSandbox.established.backendId)
+        && shouldStartOnTurnRecording({
+          recordingEnabled: settings.recordingEnabled,
+          desktopEnabled: settings.sandboxDesktopEnabled,
+          establishedBackendId: resolvedSandbox.established.backendId,
+          // EFFECTIVE (active) backend, not the session home: a machine-primary turn
+          // resolves to "selfhosted" and skips; a swap back to the cloud group box
+          // resolves to undefined and records as before.
+          effectiveBackend: activeSandboxBackend,
+        })
       ) {
         try {
           const begun = await beginRecording({
