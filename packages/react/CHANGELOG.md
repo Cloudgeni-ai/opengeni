@@ -1,5 +1,19 @@
 # @opengeni/react
 
+## 0.7.0
+
+### Minor Changes
+
+- 5e56bcd: Add tail-first session event loading with reverse durable pagination, older-history loading controls, and timeline props for smooth prepend pagination.
+
+### Patch Changes
+
+- 068c647: A no-op pinned-follow scroll assignment left the programmatic-scroll mark set (no scroll event fires to consume it), which made the reader's next real scroll-up read as programmatic and get eaten — the view snapped back to the bottom and upward backfill could never engage. The mark now self-clears when an assignment doesn't move the scroller.
+- d84eef8: Session load and backfill no longer flicker: the timeline stays invisible until its first bottom-anchored frame (a flash of the window top is structurally impossible), rows decide at mount whether they animate so bulk paints never replay entrance animations across the timeline, the scroller disables native browser scroll anchoring (it fought the reader-anchor corrections during backfill), and programmatic scroll echoes can no longer unpin the bottom-follow (which could strand the view just short of the bottom).
+- Updated dependencies [15deca0]
+- Updated dependencies [5e56bcd]
+  - @opengeni/sdk@0.7.0
+
 ## 0.6.3
 
 ### Patch Changes

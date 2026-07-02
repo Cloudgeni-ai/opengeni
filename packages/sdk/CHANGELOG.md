@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.7.0
+
+### Minor Changes
+
+- 15deca0: Add per-session third-party MCP servers with write-only encrypted headers, metadata-only responses/events, `mcp_servers:attach` permission gating, and per-message credential rotation.
+- 5e56bcd: Add tail-first session event loading with reverse durable pagination, older-history loading controls, and timeline props for smooth prepend pagination.
+
 ## 0.6.3
 
 ### Patch Changes

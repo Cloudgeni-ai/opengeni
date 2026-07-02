@@ -1,5 +1,24 @@
 # @opengeni/api-router
 
+## 0.3.0
+
+### Minor Changes
+
+- 15deca0: Add per-session third-party MCP servers with write-only encrypted headers, metadata-only responses/events, `mcp_servers:attach` permission gating, and per-message credential rotation.
+
+### Patch Changes
+
+- Updated dependencies [15deca0]
+  - @opengeni/contracts@0.5.0
+  - @opengeni/db@0.3.0
+  - @opengeni/core@0.3.0
+  - @opengeni/config@0.2.3
+  - @opengeni/documents@0.2.3
+  - @opengeni/events@0.2.3
+  - @opengeni/github@0.2.3
+  - @opengeni/runtime@0.2.3
+  - @opengeni/storage@0.2.3
+
 ## 0.2.2
 
 ### Patch Changes

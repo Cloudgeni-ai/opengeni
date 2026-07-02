@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/github",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",

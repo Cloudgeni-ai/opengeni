@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.5.0
+
+### Minor Changes
+
+- 15deca0: Add per-session third-party MCP servers with write-only encrypted headers, metadata-only responses/events, `mcp_servers:attach` permission gating, and per-message credential rotation.
+
 ## 0.4.0
 
 ### Minor Changes
