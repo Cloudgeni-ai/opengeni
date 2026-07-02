@@ -25,15 +25,24 @@ symptoms, never by counts**: the no-progress detector and budget exhaustion are
 the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
-Two recoverable conditions end a turn gracefully (idle the session, keep the
+Recoverable conditions end a turn gracefully (idle the session, keep the
 context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured) and provider rate-limit backpressure —
-with an active goal the continuation loop resumes after a pacing delay, and
-without one the session idles until the next user message (a long-lived
-session between goals must not go terminal because the provider had a bad
-minute). A budget/credit exhaustion between model calls likewise idles the
-turn rather than failing the session, so a top-up lets the same session
-continue.
+model-call cap (if one is configured), provider rate-limit backpressure, and
+budget/credit exhaustion. With an active goal, provider backpressure resumes
+after a pacing delay; without one, the session idles until the next user message
+(a long-lived session between goals must not go terminal because the provider
+had a bad minute). Budget/credit exhaustion likewise idles the turn rather than
+failing the session, so a top-up lets the same session continue.
+
+Provider context-window overflow is also handled inside the activity, not by a
+Temporal retry. When an OpenAI/Azure context overflow is classified,
+`runAgentTurn` forces client-side compaction and makes one bounded recovery
+attempt. If no model/tool progress was persisted for this turn, it retries the
+run once in the same activity against the compacted history. If progress was
+already persisted, it does not replay the trigger; it publishes a clear
+`turn.failed` recovery message, leaves the session `idle`, and the next user
+message continues on compacted history. A second overflow in the same turn falls
+through to the normal failure path so recovery cannot loop.
 
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with

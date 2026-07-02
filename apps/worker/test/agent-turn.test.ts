@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { computerToolModeForTurn, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { classifyContextWindowOverflowError, computerToolModeForTurn, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -430,6 +430,36 @@ describe("worker shutdown preemption", () => {
   test("resume notice tells the agent to verify in-flight side effects", () => {
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("TURN RESUMED AFTER WORKER RESTART");
     expect(WORKER_SHUTDOWN_RESUME_TEXT).toContain("check whether it already happened");
+  });
+});
+
+describe("context window overflow classifier", () => {
+  test("matches OpenAI/Azure context-window variants", () => {
+    const byCode = Object.assign(new Error("Bad Request"), { code: "context_length_exceeded", status: 400 });
+    expect(classifyContextWindowOverflowError(byCode)?.code).toBe("context_length_exceeded");
+
+    expect(
+      classifyContextWindowOverflowError(new Error("Your input exceeds the context window of this model"))?.message,
+    ).toContain("exceeds the context window");
+
+    expect(
+      classifyContextWindowOverflowError(new Error("This model's maximum context length is 128000 tokens"))?.message,
+    ).toContain("maximum context length");
+
+    const nested = {
+      status: 400,
+      error: {
+        code: "BadRequest",
+        message: "The request failed because the input exceeds the context window.",
+      },
+    };
+    expect(classifyContextWindowOverflowError(nested)?.detail).toContain("exceeds the context window");
+  });
+
+  test("does not match unrelated provider failures", () => {
+    expect(classifyContextWindowOverflowError(new Error("Too Many Requests"))).toBeNull();
+    expect(classifyContextWindowOverflowError(Object.assign(new Error("invalid tool call"), { status: 400 }))).toBeNull();
+    expect(classifyContextWindowOverflowError({ code: "rate_limit_exceeded", message: "rate limit" })).toBeNull();
   });
 });
 

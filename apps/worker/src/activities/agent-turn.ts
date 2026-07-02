@@ -158,6 +158,54 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
 }
 
+export const CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE =
+  "The conversation grew past the model's context window — it has been compacted; send a message to continue.";
+
+export function classifyContextWindowOverflowError(error: unknown): { message: string; code?: string; detail?: string } | null {
+  const fields = collectErrorStrings(error);
+  const matched = fields.find((value) =>
+    /context[_\s-]*length[_\s-]*exceeded/i.test(value)
+    || /exceeds?\s+(?:the\s+)?context\s+window/i.test(value)
+    || /maximum\s+context\s+length/i.test(value)
+    || /context\s+window[^.]*exceed/i.test(value)
+  );
+  if (!matched) {
+    return null;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  const code = fields.find((value) => /context[_\s-]*length[_\s-]*exceeded/i.test(value));
+  return {
+    message,
+    ...(code ? { code } : {}),
+    ...(matched && matched !== message ? { detail: matched } : {}),
+  };
+}
+
+function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): string[] {
+  if (typeof value === "string") {
+    return [value];
+  }
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  if (seen.has(value)) {
+    return [];
+  }
+  seen.add(value);
+  const out: string[] = [];
+  const record = value as Record<string, unknown>;
+  for (const key of ["message", "code", "type", "name", "param"]) {
+    const field = record[key];
+    if (typeof field === "string" && field.length > 0) {
+      out.push(field);
+    }
+  }
+  for (const key of ["error", "cause", "response", "data"]) {
+    out.push(...collectErrorStrings(record[key], seen));
+  }
+  return out;
+}
+
 /**
  * Compute the conversation-truth rows a reconcile pass should append, given the
  * SDK's current `state.history` and the count already persisted.
@@ -234,6 +282,19 @@ export function historyRowsToAppend(
     item: item as Record<string, unknown>,
   }));
   return { rows, nextWatermark: sanitized.length, nextPosition: nextPosition + rows.length };
+}
+
+function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolean {
+  if (item.type === "message") {
+    return item.role === "assistant";
+  }
+  if (item.type === "reasoning" || item.type === "compaction") {
+    return true;
+  }
+  if (typeof item.type === "string") {
+    return item.type !== "message";
+  }
+  return false;
 }
 
 /**
@@ -474,6 +535,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // static frame of an untouched desktop is not worth uploading).
     let didComputerUse = false;
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
+    const flushRuntimeBatcher = async () => {
+      const current = batcher as ReturnType<typeof createRuntimeBatcher> | null;
+      await current?.flush().catch(() => undefined);
+    };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
     let publish: ((events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>) | null = null;
     let turnStartedPublished = false;
@@ -502,12 +567,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // actually persisted, so a non-monotonic history can never desync it.
     let persistedHistoryCount = 0;
     let historyCountAtTurnStart = 0;
+    let modelOrToolProgressPersisted = false;
     // Next free WHOLE-NUMBER absolute position to append at. Tracked separately
     // from persistedHistoryCount (the in-memory slice index) because a compaction
     // inserts a fractional summary position, so total rows no longer equal
     // max(position)+1 and the slice index can no longer double as the position.
     let nextHistoryPosition = 0;
-    const reconcileConversationTruth = async () => {
+    const reconcileConversationTruth = async (options: { skipInputOnlyRows?: boolean } = {}) => {
       if (!stream || !turnId) {
         return;
       }
@@ -519,7 +585,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             persistedHistoryCount,
             nextHistoryPosition,
           );
-          if (rows.length > 0) {
+          const hasModelOrToolProgress = rows.some((row) => isModelOrToolProgressHistoryItem(row.item));
+          const shouldAppendRows = rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
+          if (shouldAppendRows) {
             await appendSessionHistoryItems(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -533,8 +601,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               items: rows,
             });
           }
-          persistedHistoryCount = nextWatermark;
-          nextHistoryPosition = nextPosition;
+          if (shouldAppendRows || !options.skipInputOnlyRows) {
+            persistedHistoryCount = nextWatermark;
+            nextHistoryPosition = nextPosition;
+          }
+          if (hasModelOrToolProgress) {
+            modelOrToolProgressPersisted = true;
+          }
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
         if (envelope) {
@@ -1261,6 +1334,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
           : {}),
       });
+      const compactSummarizer = resolvedModel
+        ? (s: Settings, m: { system: string; user: string }) => withCodex(() => summarizeForCompaction(s, m, {
+            client: resolvedModel.client,
+            api: resolvedModel.provider.api,
+            model: resolvedModel.configured.id,
+            maxOutputTokens: s.contextSummaryMaxTokens,
+          }))
+        : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the last turn's input tokens crossed the
       // soft budget, this summarizes the orphan-safe old prefix into one user
@@ -1285,14 +1366,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // registry provider, summarize on THAT provider's client + wire API
             // (a chat provider can't summarize through OpenAI/Azure). Null
             // resolution keeps the default built-in Responses summarizer.
-            resolvedModel
-              ? (s, m) => withCodex(() => summarizeForCompaction(s, m, {
-                client: resolvedModel.client,
-                api: resolvedModel.provider.api,
-                model: resolvedModel.configured.id,
-                maxOutputTokens: s.contextSummaryMaxTokens,
-              }))
-              : undefined,
+            compactSummarizer,
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {
@@ -1315,226 +1389,333 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // "current account" the single strip rule compares against (null is the
       // built-in/Azure account, so a non-codex turn still drops codex-produced
       // reasoning, and a no-codex-history session is a byte-for-byte no-op).
-      const { input: runInput, modelHistoryFromItems } = await turnInput(
-        db,
-        runtime,
-        agent,
-        trigger,
-        runSettings,
-        { currentCodexCredentialId: effectiveCodexCredentialId },
-      );
-      // Slice index = the length of the model-facing (active) history this turn
-      // is seeded from; new items beyond it (the trigger message + this turn's
-      // generated items) are the ones to persist. After a compaction this is the
-      // short [summary, ...tail] active set, NOT the total row count. The
-      // absolute write position is tracked separately (next whole number past
-      // the max existing position) because the fractional summary row means
-      // total rows no longer equal max(position)+1. Pre-compaction both reduce to
-      // the old total-count value, so the common path is unchanged.
-      //
-      // CRITICAL: seed from the SANITIZED active-row length, not the raw active
-      // count. `prepareRunInput` builds `state.history` from
-      // `sanitizeHistoryItemsForModel(activeRows)`, so when sanitization drops K
-      // rows (a legacy orphan/dangling pair), the in-memory history this turn
-      // starts from is K shorter than the raw row count. The reconcile slices the
-      // re-sanitized `state.history` off `persistedHistoryCount`; seeding it from
-      // the raw count (K too high) skips K genuinely-new items, and a
-      // `function_call` left in that skipped region can later have its
-      // `function_call_result` persisted alone — the orphan that 400s on replay
-      // and bricks the session (issue-61). The sanitized seed is already
-      // orphan-free, so it is a stable prefix of the re-sanitized history and the
-      // slice begins exactly at the first genuinely-new item.
-      const activeSeedRows = await getActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
-      // Seed the reconcile watermark from EXACTLY the view the model's
-      // `state.history` was seeded from (items strip on the items path = HOLE D; NO
-      // strip on the run-state blob path, where foreign reasoning is neutralized but
-      // KEPT = HOLE E), so the model-input length and the watermark never disagree.
-      persistedHistoryCount = reconcileSeedCount(
-        activeSeedRows,
-        modelHistoryFromItems,
-        { currentCodexCredentialId: effectiveCodexCredentialId },
-      );
-      historyCountAtTurnStart = persistedHistoryCount;
-      nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
-      let responseUsageCount = 0;
-      // Actual input tokens of the most recent model response this turn; the
-      // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-      let lastInputTokensObserved: number | null = null;
-      throwIfWorkerShuttingDown();
-      const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> => runtime.runStream(agent, runInput, runSettings, {
-        sandboxEnvironment,
-        onRuntimeEvent: async (event) => {
-          await publish!([{ type: event.type, payload: event.payload }], true);
-        },
-        // P1.2: inject the resumed box NON-OWNED (the SDK never reaps it — the
-        // keystone). Absent when the flag is off -> legacy build-and-discard.
-        ...(resolvedSandbox
-          ? {
-            ownedSandbox: {
-              client: resolvedSandbox.established.client,
-              session: resolvedSandbox.established.session,
-              sessionState: resolvedSandbox.established.sessionState,
-              // Pin platform setup (hooks + file materialization) to the un-proxied
-              // established box — never through the routing proxy, which would
-              // re-route those execs onto a machine swapped in mid-turn.
-              ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
-            },
-          }
-          : {}),
-      });
-      stream = await withCodex(runStreamOnce);
-      batcher = createRuntimeBatcher(async (events) => {
-        await publish!(events);
-      });
+      const activeTurnId = turnId;
+      if (!activeTurnId) {
+        throw new Error("Turn id was not initialized");
+      }
+      let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
+      const prepareRunAttemptInput = async () => {
+        const prepared = await turnInput(
+          db,
+          runtime,
+          agent,
+          trigger,
+          runSettings,
+          { currentCodexCredentialId: effectiveCodexCredentialId },
+        );
+        runInput = prepared.input;
+        // Slice index = the length of the model-facing (active) history this turn
+        // is seeded from; new items beyond it (the trigger message + this turn's
+        // generated items) are the ones to persist. After a compaction this is the
+        // short [summary, ...tail] active set, NOT the total row count. The
+        // absolute write position is tracked separately (next whole number past
+        // the max existing position) because the fractional summary row means
+        // total rows no longer equal max(position)+1. Pre-compaction both reduce to
+        // the old total-count value, so the common path is unchanged.
+        //
+        // CRITICAL: seed from the SANITIZED active-row length, not the raw active
+        // count. `prepareRunInput` builds `state.history` from
+        // `sanitizeHistoryItemsForModel(activeRows)`, so when sanitization drops K
+        // rows (a legacy orphan/dangling pair), the in-memory history this turn
+        // starts from is K shorter than the raw row count. The reconcile slices the
+        // re-sanitized `state.history` off `persistedHistoryCount`; seeding it from
+        // the raw count (K too high) skips K genuinely-new items, and a
+        // `function_call` left in that skipped region can later have its
+        // `function_call_result` persisted alone — the orphan that 400s on replay
+        // and bricks the session (issue-61). The sanitized seed is already
+        // orphan-free, so it is a stable prefix of the re-sanitized history and the
+        // slice begins exactly at the first genuinely-new item.
+        const activeSeedRows = await getActiveSessionHistoryItems(db, input.workspaceId, input.sessionId);
+        // Seed the reconcile watermark from EXACTLY the view the model's
+        // `state.history` was seeded from (items strip on the items path = HOLE D; NO
+        // strip on the run-state blob path, where foreign reasoning is neutralized but
+        // KEPT = HOLE E), so the model-input length and the watermark never disagree.
+        persistedHistoryCount = reconcileSeedCount(
+          activeSeedRows,
+          prepared.modelHistoryFromItems,
+          { currentCodexCredentialId: effectiveCodexCredentialId },
+        );
+        historyCountAtTurnStart = persistedHistoryCount;
+        nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
+      };
 
-      const iterator = stream.toStream()[Symbol.asyncIterator]();
-      let streamDone = false;
-      try {
-        while (true) {
-          const next = await nextStreamEvent(iterator, activityContext);
-          if (next.done) {
-            streamDone = true;
-            break;
-          }
-          const responseUsage = modelResponseUsageFromSdkEvent(next.value);
-          if (responseUsage) {
-            responseUsageCount += 1;
-            const observed = responseUsage.usage?.inputTokens;
-            if (typeof observed === "number" && observed > 0) {
-              lastInputTokensObserved = observed;
+      const forceContextOverflowCompaction = async () => {
+        const clientCompactionSettings: Settings = { ...runSettings, contextCompactionMode: "client" };
+        const outcome = await maybeCompactContext(
+          db,
+          clientCompactionSettings,
+          { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId: activeTurnId },
+          session.lastInputTokens,
+          compactSummarizer,
+          { force: true },
+        );
+        if (outcome.compacted) {
+          await publish!([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, trigger: "overflow" } }]);
+        }
+        return outcome;
+      };
+
+      const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
+        if (!runInput) {
+          throw new Error("Run input was not prepared");
+        }
+        stream = undefined;
+        batcher = null;
+        let responseUsageCount = 0;
+        // Actual input tokens of the most recent model response this turn; the
+        // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
+        let lastInputTokensObserved: number | null = null;
+        throwIfWorkerShuttingDown();
+        const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> => runtime.runStream(agent, runInput!, runSettings, {
+          sandboxEnvironment,
+          onRuntimeEvent: async (event) => {
+            await publish!([{ type: event.type, payload: event.payload }], true);
+          },
+          // P1.2: inject the resumed box NON-OWNED (the SDK never reaps it — the
+          // keystone). Absent when the flag is off -> legacy build-and-discard.
+          ...(resolvedSandbox
+            ? {
+              ownedSandbox: {
+                client: resolvedSandbox.established.client,
+                session: resolvedSandbox.established.session,
+                sessionState: resolvedSandbox.established.sessionState,
+                // Pin platform setup (hooks + file materialization) to the un-proxied
+                // established box — never through the routing proxy, which would
+                // re-route those execs onto a machine swapped in mid-turn.
+                ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
+              },
             }
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-              model: turn.model,
-              isCodexTurn,
-              usage: responseUsage.usage,
-              sourceKey: modelUsageSourceKey({
-                responseId: responseUsage.responseId,
-                dispatchId,
-                positionalKey: `response-${responseUsageCount}`,
-              }),
-            });
-            await reconcileConversationTruth();
-            try {
-              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn, entitlements);
-            } catch (limitError) {
-              // Capture the run state at the boundary so the budget valve in
-              // the outer catch can end this segment gracefully with full
-              // conversation context preserved for the post-top-up resume.
-              let serializedRunState: string | null = null;
-              try {
-                serializedRunState = stream.state.toString();
-              } catch {
-                serializedRunState = null;
+            : {}),
+        });
+        stream = await withCodex(runStreamOnce);
+        batcher = createRuntimeBatcher(async (events) => {
+          await publish!(events);
+        });
+
+        const iterator = stream.toStream()[Symbol.asyncIterator]();
+        let streamDone = false;
+        try {
+          while (true) {
+            const next = await nextStreamEvent(iterator, activityContext);
+            if (next.done) {
+              streamDone = true;
+              break;
+            }
+            const responseUsage = modelResponseUsageFromSdkEvent(next.value);
+            if (responseUsage) {
+              responseUsageCount += 1;
+              const observed = responseUsage.usage?.inputTokens;
+              if (typeof observed === "number" && observed > 0) {
+                lastInputTokensObserved = observed;
               }
-              throw new BudgetExhaustedError(
-                limitError instanceof Error ? limitError.message : String(limitError),
-                serializedRunState,
-              );
+              await recordModelUsageAndDebitCredits(settings, db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                model: turn.model,
+                isCodexTurn,
+                usage: responseUsage.usage,
+                sourceKey: modelUsageSourceKey({
+                  responseId: responseUsage.responseId,
+                  dispatchId,
+                  positionalKey: `response-${responseUsageCount}`,
+                }),
+              });
+              await reconcileConversationTruth();
+              try {
+                await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn, entitlements);
+              } catch (limitError) {
+                // Capture the run state at the boundary so the budget valve in
+                // the outer catch can end this segment gracefully with full
+                // conversation context preserved for the post-top-up resume.
+                let serializedRunState: string | null = null;
+                try {
+                  serializedRunState = stream.state.toString();
+                } catch {
+                  serializedRunState = null;
+                }
+                throw new BudgetExhaustedError(
+                  limitError instanceof Error ? limitError.message : String(limitError),
+                  serializedRunState,
+                );
+              }
+            }
+            // Recording gate: a computer-use tool actually ran when an SDK
+            // `tool_call_item` whose rawItem.type is "computer_call" streams through
+            // (screenshot/click/type/scroll/etc. — the first computer action proves
+            // the desktop was driven). Match the raw SDK event (ground truth) BEFORE
+            // normalization. Only meaningful when a recording is live.
+            if (activeRecording && !didComputerUse && isComputerCallStreamEvent(next.value)) {
+              didComputerUse = true;
+            }
+            const normalized = normalizeSdkEvent(next.value);
+            for (const event of normalized) {
+              await batcher.push(event);
             }
           }
-          // Recording gate: a computer-use tool actually ran when an SDK
-          // `tool_call_item` whose rawItem.type is "computer_call" streams through
-          // (screenshot/click/type/scroll/etc. — the first computer action proves
-          // the desktop was driven). Match the raw SDK event (ground truth) BEFORE
-          // normalization. Only meaningful when a recording is live.
-          if (activeRecording && !didComputerUse && isComputerCallStreamEvent(next.value)) {
-            didComputerUse = true;
-          }
-          const normalized = normalizeSdkEvent(next.value);
-          for (const event of normalized) {
-            await batcher.push(event);
+        } finally {
+          if (!streamDone) {
+            await iterator.return?.();
           }
         }
-      } finally {
-        if (!streamDone) {
-          await iterator.return?.();
+        await batcher.flush();
+        await stream.completed.catch(() => undefined);
+        if (responseUsageCount === 0) {
+          const aggregateInput = (stream.state.usage as { inputTokens?: unknown } | undefined)?.inputTokens;
+          if (typeof aggregateInput === "number" && aggregateInput > 0) {
+            lastInputTokensObserved = aggregateInput;
+          }
+          await recordModelUsageAndDebitCredits(settings, db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            model: turn.model,
+            isCodexTurn,
+            usage: stream.state.usage,
+            sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
+          });
         }
-      }
-      await batcher.flush();
-      await stream.completed.catch(() => undefined);
-      if (responseUsageCount === 0) {
-        const aggregateInput = (stream.state.usage as { inputTokens?: unknown } | undefined)?.inputTokens;
-        if (typeof aggregateInput === "number" && aggregateInput > 0) {
-          lastInputTokensObserved = aggregateInput;
+        if (lastInputTokensObserved !== null) {
+          await setSessionLastInputTokens(db, input.workspaceId, input.sessionId, lastInputTokensObserved)
+            .catch((error) => console.error("persist last_input_tokens failed (non-fatal)", error));
         }
-        await recordModelUsageAndDebitCredits(settings, db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          model: turn.model,
-          isCodexTurn,
-          usage: stream.state.usage,
-          sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
-        });
-      }
-      if (lastInputTokensObserved !== null) {
-        await setSessionLastInputTokens(db, input.workspaceId, input.sessionId, lastInputTokensObserved)
-          .catch((error) => console.error("persist last_input_tokens failed (non-fatal)", error));
-      }
 
-      if (stream.interruptions.length > 0) {
+        if (stream.interruptions.length > 0) {
+          await reconcileConversationTruth();
+          const approvals = runtime.serializeApprovals(stream.interruptions);
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            serializedRunState: stream.state.toString(),
+            pendingApprovals: approvals,
+            // Record the account freezing this state so a resume on a DIFFERENT
+            // codex account strips its account-bound reasoning before replay (HOLE C).
+            frozenCodexCredentialId: effectiveCodexCredentialId,
+          });
+          await publish!([
+            { type: "session.requiresAction", payload: { approvals } },
+            { type: "session.status.changed", payload: { status: "requires_action" } },
+          ], true);
+          await finishTurn(db, input.workspaceId, activeTurnId, "requires_action");
+          await setSessionStatus(db, input.workspaceId, input.sessionId, "requires_action", activeTurnId);
+          activityStatus = "requires_action";
+          return { status: "requires_action" };
+        }
+
+        const finalOutput = String(stream.finalOutput ?? "");
         await reconcileConversationTruth();
-        const approvals = runtime.serializeApprovals(stream.interruptions);
-        await saveRunState(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          serializedRunState: stream.state.toString(),
-          pendingApprovals: approvals,
-          // Record the account freezing this state so a resume on a DIFFERENT
-          // codex account strips its account-bound reasoning before replay (HOLE C).
-          frozenCodexCredentialId: effectiveCodexCredentialId,
-        });
-        await publish([
-          { type: "session.requiresAction", payload: { approvals } },
-          { type: "session.status.changed", payload: { status: "requires_action" } },
+        if (settings.sessionHistorySource !== "items") {
+          // Legacy conversation memory; in items mode the blob is only written
+          // for requires_action pauses (the one RunState-only resume path).
+          await saveRunState(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            serializedRunState: stream.state.toString(),
+            pendingApprovals: [],
+            frozenCodexCredentialId: effectiveCodexCredentialId,
+          });
+        }
+        await publish!([
+          { type: "agent.message.completed", payload: { text: finalOutput } },
+          { type: "turn.completed", payload: { output: finalOutput } },
+          { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
-        await finishTurn(db, input.workspaceId, turnId, "requires_action");
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "requires_action", turnId);
-        activityStatus = "requires_action";
-        return { status: "requires_action" };
-      }
-
-      const finalOutput = String(stream.finalOutput ?? "");
-      await reconcileConversationTruth();
-      if (settings.sessionHistorySource !== "items") {
-        // Legacy conversation memory; in items mode the blob is only written
-        // for requires_action pauses (the one RunState-only resume path).
-        await saveRunState(db, {
+        await finishTurn(db, input.workspaceId, activeTurnId, "idle");
+        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+        await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          serializedRunState: stream.state.toString(),
-          pendingApprovals: [],
-          frozenCodexCredentialId: effectiveCodexCredentialId,
+          eventType: "agent_run.completed",
+          quantity: 1,
+          unit: "run",
+          sourceResourceType: "session_turn",
+          sourceResourceId: activeTurnId,
+          idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
         });
+        activityStatus = "idle";
+        return { status: "idle" };
+      };
+
+      await prepareRunAttemptInput();
+      let overflowRecoveryAttempted = false;
+      let retriedAfterOverflow = false;
+      while (true) {
+        try {
+          const result = await runStreamAttempt();
+          if (retriedAfterOverflow) {
+            observability.info("context overflow recovery succeeded after in-activity retry", {
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+            });
+          }
+          return result;
+        } catch (attemptError) {
+          const overflow = classifyContextWindowOverflowError(attemptError);
+          if (!overflow || !publish || !turnStartedPublished || overflowRecoveryAttempted) {
+            throw attemptError;
+          }
+          overflowRecoveryAttempted = true;
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({ skipInputOnlyRows: true });
+          const progressPersisted = modelOrToolProgressPersisted;
+          observability.warn("context overflow recovery attempted", {
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            progressPersisted,
+            code: overflow.code,
+            error: overflow.message,
+          });
+          let compacted = false;
+          try {
+            const outcome = await forceContextOverflowCompaction();
+            compacted = outcome.compacted;
+          } catch (compactError) {
+            observability.warn("context overflow recovery compaction failed", {
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              error: compactError instanceof Error ? compactError.message : String(compactError),
+            });
+          }
+          if (progressPersisted) {
+            await publish!([
+              {
+                type: "turn.failed",
+                payload: {
+                  error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
+                  code: "context_window_overflow_compacted",
+                  retryable: false,
+                  recovery: "user_message",
+                  compacted,
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ], true);
+            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+            activityStatus = "idle";
+            activityError = attemptError;
+            observability.info("context overflow recovery succeeded by compacting and idling", {
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              compacted,
+            });
+            return { status: "idle" };
+          }
+          retriedAfterOverflow = true;
+          observability.info("context overflow recovery retrying turn after compaction", {
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            compacted,
+          });
+          await prepareRunAttemptInput();
+        }
       }
-      await publish([
-        { type: "agent.message.completed", payload: { text: finalOutput } },
-        { type: "turn.completed", payload: { output: finalOutput } },
-        { type: "session.status.changed", payload: { status: "idle" } },
-      ], true);
-      await finishTurn(db, input.workspaceId, turnId, "idle");
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-      await recordUsageEvent(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        eventType: "agent_run.completed",
-        quantity: 1,
-        unit: "run",
-        sourceResourceType: "session_turn",
-        sourceResourceId: turnId,
-        idempotencyKey: `usage:agent_run.completed:${turnId}`,
-      });
-      activityStatus = "idle";
-      return { status: "idle" };
     } catch (error) {
       // Graceful worker shutdown (deploy / rollout restart): checkpoint and
       // hand the turn back instead of failing the session. Conversation truth
@@ -1572,7 +1753,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       if (isWorkerShutdownCancellation(error) && preemptTurnId) {
         try {
-          await batcher?.flush().catch(() => undefined);
+          await flushRuntimeBatcher();
           await reconcileConversationTruth();
           // An approval-decision rerun always replays its original trigger:
           // the decision is applied through the approval resume path reading
@@ -1639,7 +1820,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof CancelledFailure) {
         activityStatus = "cancelled";
         activityError = error;
-        await batcher?.flush().catch(() => undefined);
+        await flushRuntimeBatcher();
         if (preemptTurnId) {
           await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
         }
@@ -1652,7 +1833,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // that resumption.
       const maxTurns = maxTurnsExceededRunState(error);
       if (maxTurns && publish && turnId && turnStartedPublished) {
-        await batcher?.flush().catch(() => undefined);
+        await flushRuntimeBatcher();
         // The SDK attaches the run state at the throw site; persisting it lets
         // the continuation resume with this segment's full context. If capture
         // ever fails, the continuation falls back to the previous snapshot --
@@ -1703,7 +1884,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (usageLimit && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
-        await batcher?.flush().catch(() => undefined);
+        await flushRuntimeBatcher();
         await reconcileConversationTruth();
         const serializedRunState = agentsErrorRunState(error);
         const runStateSaved = Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
@@ -1834,7 +2015,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // top-up). An active goal pauses visibly with reason "limits" at the
       // next continuation evaluation, without consuming continuation budget.
       if (error instanceof BudgetExhaustedError && publish && turnId && turnStartedPublished) {
-        await batcher?.flush().catch(() => undefined);
+        await flushRuntimeBatcher();
         await reconcileConversationTruth();
         const runStateSaved = Boolean(error.serializedRunState) && settings.sessionHistorySource !== "items";
         if (error.serializedRunState && settings.sessionHistorySource !== "items") {
@@ -1880,7 +2061,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (failure.retryable && publish && turnId && turnStartedPublished) {
         const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
         const goalActive = Boolean(goal && goal.status === "active");
-        await batcher?.flush().catch(() => undefined);
+        await flushRuntimeBatcher();
         // Provider errors rarely carry SDK run state; a null falls back to
         // the previous snapshot, same degraded-context contract as the
         // max-turns path above.

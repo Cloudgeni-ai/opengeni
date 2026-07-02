@@ -54,7 +54,7 @@ import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime, MaxTurnsExceededError, type OpenGeniRuntime } from "@opengeni/runtime";
 import { createActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
+import { CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE, PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
 import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
@@ -509,6 +509,179 @@ describe("worker activities integration", () => {
     })).resolves.toEqual({ status: "failed" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+  });
+
+  test("context overflow before model/tool progress compacts and retries once in-activity", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "overflow then retry",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "overflow then retry" } },
+    ]);
+    const model = new ScriptedModel([
+      { error: contextOverflowError("Your input exceeds the context window of this model.") },
+      { outputText: "recovered", chunks: ["recovered"] },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-overflow-retry",
+    })).resolves.toEqual({ status: "idle" });
+
+    expect(model.calls).toBe(2);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+  });
+
+  test("context overflow after persisted progress compacts and idles without failing the session", async () => {
+    const noopWorkflowClient: SessionWorkflowClient = {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      signalApprovalDecision: async () => undefined,
+      signalInterrupt: async () => undefined,
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTaskSchedule: async () => undefined,
+      triggerScheduledTask: async () => undefined,
+    };
+    const grant = await testGrant(dbClient.db);
+    const apiSettings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      productAccessMode: "configured",
+      delegationSecret: "test-delegation-secret",
+    });
+    const app = createApp({ settings: apiSettings, db: dbClient.db, bus, workflowClient: noopWorkflowClient });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    try {
+      const settings = testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 1_000_000,
+        contextReservedOutputTokens: 0,
+        contextCompactSoftFraction: 0.99,
+        contextKeepRecentTokens: 20,
+        mcpServers: [{
+          id: "opengeni",
+          name: "OpenGeni",
+          url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
+          timeoutMs: undefined,
+          cacheToolsList: false,
+        }],
+      });
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "overflow after progress",
+        resources: [],
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+      });
+      await appendSessionHistoryItems(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        items: [
+          { position: 0, item: { type: "message", role: "user", content: "old context" } },
+          { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+          { position: 2, item: { type: "message", role: "user", content: "recent context" } },
+          { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "recent answer" }] } },
+        ],
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "overflow after progress" } },
+      ]);
+      const model = new ScriptedModel([
+        { id: "overflow-progress-1", output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")] },
+        { error: contextOverflowError("maximum context length exceeded") },
+      ]);
+      const activities = createActivities({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: runtimeWithFakeCompactionSummarizer(model, "forced recovery summary"),
+      });
+
+      await expect(activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-overflow-progress",
+      })).resolves.toEqual({ status: "idle" });
+
+      expect(model.calls).toBe(2);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
+      const failed = events.find((event) => event.type === "turn.failed");
+      expect(failed?.payload).toMatchObject({
+        error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
+        code: "context_window_overflow_compacted",
+        recovery: "user_message",
+      });
+      expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
+      expect(latestStatus(events)).toBe("idle");
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+      const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+      expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("a second context overflow in the same turn follows the normal failure path", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "overflow twice",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "overflow twice" } },
+    ]);
+    const model = new ScriptedModel([
+      { error: contextOverflowError("Your input exceeds the context window of this model.") },
+      { error: contextOverflowError("Your input exceeds the context window of this model again.") },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-overflow-twice",
+    })).resolves.toEqual({ status: "failed" });
+
+    expect(model.calls).toBe(2);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(true);
+    expect(latestStatus(events)).toBe("failed");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
   });
 
@@ -3163,6 +3336,30 @@ async function createOwnedScheduledTask(
     workspaceId: grant.workspaceId,
     ...input,
   });
+}
+
+function contextOverflowError(message: string): Error {
+  const error = new Error(message);
+  Object.assign(error, { status: 400, code: "context_length_exceeded" });
+  return error;
+}
+
+function runtimeWithFakeCompactionSummarizer(model: ScriptedModel, summary: string): OpenGeniRuntime {
+  const runtime = createProductionAgentRuntime({ model });
+  const fakeClient = {
+    responses: {
+      create: async () => ({ output_text: summary }),
+    },
+  };
+  return {
+    ...runtime,
+    resolveTurnModel: () => ({
+      provider: { kind: "api-key", api: "responses", compactionMode: "client" },
+      client: fakeClient,
+      model: {} as never,
+      configured: { id: "scripted-model", hostedWebSearch: false },
+    } as never),
+  };
 }
 
 function fakeObjectStorage(body: string): ObjectStorage {

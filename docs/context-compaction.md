@@ -15,13 +15,17 @@ Code wins over this doc. The canonical sources are:
   (`resolveContextCompactionMode`, `contextInputBudgetTokens`,
   `contextServerCompactThreshold`).
 - `packages/runtime/src/index.ts` — `buildAgentCapabilities` (server path),
-  `summarizeForCompaction` (the summarizer model call).
+  `summarizeForCompaction` (the summarizer model call), and the per-model-call
+  `callModelInputFilter` guard.
+- `packages/runtime/src/image-history.ts` — the pure screenshot-history elision
+  policy used before every model call.
 - `packages/runtime/src/context-compaction.ts` — the pure client-side planner
   (`planCompaction`, `findKeepBoundary`, summary prompt + item shaping).
 - `apps/worker/src/activities/context-compaction.ts` — `maybeCompactContext`,
   the pre-turn client-path orchestrator.
 - `apps/worker/src/activities/agent-turn.ts` — where the trigger is wired into
-  the turn and where `last_input_tokens` is recorded.
+  the turn, where `last_input_tokens` is recorded, and where provider context
+  overflow is classified/recovered.
 - `packages/db/src/index.ts` — `applyContextCompaction`,
   `getActiveSessionHistoryItems`, `setSessionLastInputTokens`,
   `nextSessionHistoryPosition`.
@@ -217,6 +221,50 @@ It is wired **only on the Azure client path** (`readPathBudgetTokens` returns a
 budget only when `resolveContextCompactionMode(settings) === "client"`); on the
 server path the SDK enforces the window. So in production (Azure) a single
 over-budget assembled input can never reach the model.
+
+### Per-call guard and screenshot elision
+
+The read-path guard above runs when the turn input is assembled. It cannot see
+history generated later in the same SDK loop, which is exactly where
+computer-use screenshots can balloon a turn. Every provider call therefore also
+runs a `callModelInputFilter` in `packages/runtime/src/index.ts`:
+
+- First, `elideStaleScreenshotImages` keeps only the last three screenshot image
+  payloads in model input and replaces older screenshots with
+  `[screenshot omitted: an older desktop frame — the full image remains in the session event log]`.
+  It recognizes hosted `computer_call_output`/`computer_call_result` images,
+  structured `input_image` tool outputs, and bare `data:image/*;base64,` strings
+  embedded in function-text tool output. It never rewrites system prompts, user
+  messages, or non-image tool output.
+- Then, only when the resolved compaction mode is `client`, the same input
+  budget `B` is enforced on the per-call input. In `server` and `off` modes the
+  image policy still applies, but the hard budget trim is skipped.
+
+These filters are request-local: they do not mutate `session_history_items` or
+the SDK `RunState`. The full screenshots remain available in the durable event
+log; only stale image bytes are omitted from subsequent model inputs.
+
+### Reactive overflow recovery
+
+If the provider still rejects a request with a context-window overflow
+(`context_length_exceeded`, `exceeds the context window`, `maximum context
+length`, and Azure/OpenAI wording variants), `runAgentTurn` handles it before the
+generic failure path:
+
+1. It flushes any batched runtime events and reconciles conversation truth only
+   when model/tool progress exists. A lone trigger message is not persisted just
+   before an in-activity retry, because rebuilding from history plus the same
+   trigger would duplicate the user's input.
+2. It forces client-side compaction for the session, independent of the configured
+   mode for that one recovery action.
+3. If no model/tool progress was persisted for the turn, it retries the run once
+   inside the same activity. This is not a Temporal retry; the activity still has
+   `maximumAttempts: 1`.
+4. If model/tool progress was already persisted, it does not replay the trigger.
+   It publishes `turn.failed` with a human-readable recovery message, leaves the
+   session `idle`, and the next user message continues from the compacted history.
+5. A second overflow in the same turn is allowed to fall through to the normal
+   failure path so recovery cannot loop forever.
 
 ### Boundary rule (orphan safety — critical)
 
@@ -435,10 +483,13 @@ SELECT id, last_input_tokens FROM sessions WHERE last_input_tokens IS NOT NULL;
   call (≤ `contextSummaryMaxTokens` output). On a busy long session this recurs;
   it is bounded by the single-live-summary fold-forward but is not free. Monitor
   via the compaction events if cost matters.
-- **Trigger granularity is per-turn, pre-read.** Compaction cannot shrink a
-  single turn that itself overflows the window in one shot (an enormous single
-  tool result). The read-path sanitizer and `contextReservedOutputTokens`
-  headroom are the backstops; a pathological single item is out of scope here.
+- **Trigger granularity is still mostly per-turn, pre-read.** The per-call image
+  elision and budget guard now cover mid-turn growth, and classified provider
+  overflow forces compaction plus one bounded in-activity retry when no
+  model/tool progress was persisted. A pathological non-image single item can
+  still exceed the window; in that case the activity compacts, idles after
+  persisted progress, or falls through to the normal failure path on a second
+  same-turn overflow.
 - **Server-path live behavior is unexercised in our production.** We run on
   Azure, so the `server` path (and its `store: false` + `StaticCompactionPolicy`)
   is covered by unit tests and the SDK's own contract, but not by our own
@@ -456,10 +507,11 @@ supersedes (never deletes) the prefix, and assembles a bounded
 bound. **The two self-heal holes are closed (PR #69):** the
 `max(recorded, estimate)` trigger defeats the stale-positive `last_input_tokens`
 re-brick, the hard-force path shrinks the keep-recent tail so an over-budget
-history always yields a summarizable prefix, and the `enforceInputBudget`
-read-path guard guarantees a single over-budget assembled input is never put on
-the wire. Server-side compaction is **preserved and used** automatically on the
-OpenAI platform (correct 645,400 threshold, `store: false`), with no
+  history always yields a summarizable prefix, the `enforceInputBudget`
+  read-path/per-call guards keep over-budget client-mode inputs off the wire, and
+  the image-history policy elides stale screenshot payloads before every model
+  call. Server-side compaction is **preserved and used** automatically on the
+  OpenAI platform (correct 645,400 threshold, `store: false`), with no
 client-side double-compaction. The code is merged (PR #62 + audit-trail fix #63
 + self-heal/hard-force #69), deployed to staging **and** production
 (`/healthz` = `21315832`, re-read live 2026-06-14), and schema-migrated. The one

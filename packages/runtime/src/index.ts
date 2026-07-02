@@ -1,5 +1,5 @@
 import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextInputBudgetTokens, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
@@ -82,6 +82,7 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
+import { elideStaleScreenshotImages } from "./image-history";
 import { installCodexToolSearch } from "./codex-tool-search";
 import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
 import {
@@ -150,6 +151,11 @@ export {
   SUMMARY_INSTRUCTIONS,
 } from "./context-compaction";
 export type { CompactionItem, CompactionPlan, PlanCompactionInput } from "./context-compaction";
+export {
+  elideStaleScreenshotImages,
+  SCREENSHOT_OMITTED_PLACEHOLDER,
+} from "./image-history";
+export type { ElideStaleScreenshotsOptions, ElideStaleScreenshotsResult } from "./image-history";
 
 ensureReadableStreamFrom();
 
@@ -1656,6 +1662,40 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
   ) as unknown as AgentInputItem[],
 });
 
+export function contextRobustnessFilterForSettings(settings: Settings): CallModelInputFilter {
+  const inputBudgetTokens = modelCallBudgetTokens(settings);
+  return ({ modelData }) => {
+    const images = elideStaleScreenshotImages(modelData.input);
+    if (images.elidedCount > 0) {
+      console.warn(
+        `per-call image history policy elided ${images.elidedCount} older screenshot image(s), keeping the last ${Math.min(3, images.imageCount)} full image(s)`,
+      );
+    }
+    let input = images.items;
+    if (inputBudgetTokens !== undefined) {
+      const guarded = enforceInputBudget(
+        input as unknown as Array<Record<string, unknown>>,
+        inputBudgetTokens,
+      );
+      if (guarded.trimmed) {
+        console.warn(
+          `per-call budget guard trimmed ${guarded.droppedCount} oldest history item(s) to fit input budget (${inputBudgetTokens} tokens); the over-budget model call was NOT sent`,
+        );
+        input = guarded.items as unknown as AgentInputItem[];
+      }
+    }
+    return { ...modelData, input };
+  };
+}
+
+function modelCallBudgetTokens(settings: Settings): number | undefined {
+  if (resolveContextCompactionMode(settings) !== "client") {
+    return undefined;
+  }
+  const budget = contextInputBudgetTokens(settings);
+  return budget > 0 ? budget : undefined;
+}
+
 /**
  * Compose a list of callModelInputFilters into one, applied left-to-right so
  * each sees the prior filter's output.
@@ -1674,13 +1714,15 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
- * selects it.
+ * selects it; the context-robustness guard then elides stale screenshots on
+ * every mode and applies hard budget trimming only on the client-compaction path.
  */
 export function callModelInputFilterForSettings(settings: Settings): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [normalizeComputerCallsFilter];
   if (settings.openaiProviderItemIds === "strip") {
     filters.push(stripProviderItemIdsFilter);
   }
+  filters.push(contextRobustnessFilterForSettings(settings));
   return composeCallModelInputFilters(filters);
 }
 
@@ -1806,10 +1848,11 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     ?? (prepared.serializedRunStateForSandbox && client
       ? await restoredSandboxSessionState(await RunState.fromString(agent, prepared.serializedRunStateForSandbox), client)
       : undefined);
-  // Strip provider item ids first, then apply any per-turn filter (genesis
-  // title directive). Composed left-to-right so the directive lands on the
-  // already-id-stripped input. A callModelInputFilter only shapes the per-call
-  // model input, never the persisted run-state history.
+  // Apply the built-in per-call filters (computer-call normalization, optional
+  // provider-id stripping, image/budget guard), then any per-turn filter
+  // (genesis title directive). A callModelInputFilter only shapes the per-call
+  // model input; the SDK persists filtered clones into its session view, while
+  // OpenGeni's durable conversation truth is still reconciled explicitly below.
   const callModelInputFilter = composeCallModelInputFilters(
     [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
       (f): f is CallModelInputFilter => Boolean(f),
@@ -1818,11 +1861,10 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   const runOptions: Parameters<typeof run>[2] = {
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
-    // Strip provider-assigned item ids from every model call (turn-start
-    // history replay AND mid-turn follow-ups) so requests never depend on the
-    // provider's server-side response store. A stored response can vanish
-    // between two calls of the same turn, failing the run with 400 "Item with
-    // id 'rs_…' not found"; with the ids gone the request is self-contained.
+    // Built-in per-call guard chain: normalize computer calls, optionally strip
+    // provider ids, elide stale screenshots in every mode, and trim to the input
+    // budget on the client-compaction path. This runs for turn-start replay AND
+    // every mid-turn follow-up.
     callModelInputFilter,
   };
   void settings.disableOpenaiTracing;

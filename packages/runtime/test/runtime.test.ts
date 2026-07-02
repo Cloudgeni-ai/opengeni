@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -1715,6 +1715,68 @@ describe("provider item id stripping", () => {
     expect("actions" in preserved).toBe(true);
     expect("action" in preserved).toBe(false);
     expect(preserved.id).toBe("cu_abc");
+  });
+
+  test("callModelInputFilterForSettings elides stale screenshots in server mode without budget trimming", async () => {
+    const filter = callModelInputFilterForSettings(testSettings({
+      openaiProvider: "openai",
+      contextCompactionMode: "auto",
+      contextWindowTokens: 100,
+      contextReservedOutputTokens: 0,
+    }))!;
+    const oldHuge = { type: "message", role: "assistant", content: "x".repeat(10_000) } as any;
+    const image = (n: number) => `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
+    const out = await filter({
+      modelData: {
+        input: [
+          { type: "message", role: "user", content: "old" },
+          oldHuge,
+          { type: "function_call_result", callId: "a", output: image(1) },
+          { type: "function_call_result", callId: "b", output: image(2) },
+          { type: "function_call_result", callId: "c", output: image(3) },
+          { type: "function_call_result", callId: "d", output: image(4) },
+          { type: "message", role: "user", content: "recent" },
+        ] as any,
+      },
+      agent: {} as any,
+      context: undefined,
+    });
+
+    // Server mode: image policy is always safe and always on.
+    expect((out.input[2] as any).output).toBe(SCREENSHOT_OMITTED_PLACEHOLDER);
+    expect((out.input[3] as any).output).toBe(image(2));
+    expect((out.input[4] as any).output).toBe(image(3));
+    expect((out.input[5] as any).output).toBe(image(4));
+    // Budget guard is client-mode only, so the oversized assistant item remains.
+    expect(out.input).toHaveLength(7);
+    expect(out.input).toContainEqual(oldHuge);
+  });
+
+  test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {
+    const clientFilter = callModelInputFilterForSettings(testSettings({
+      openaiProvider: "azure",
+      contextCompactionMode: "client",
+      contextWindowTokens: 100,
+      contextReservedOutputTokens: 0,
+    }))!;
+    const serverFilter = callModelInputFilterForSettings(testSettings({
+      openaiProvider: "openai",
+      contextCompactionMode: "server",
+      contextWindowTokens: 100,
+      contextReservedOutputTokens: 0,
+    }))!;
+    const input = [
+      { type: "message", role: "user", content: "old turn" },
+      { type: "message", role: "assistant", content: "x".repeat(1_000) },
+      { type: "message", role: "user", content: "recent turn" },
+      { type: "message", role: "assistant", content: "ok" },
+    ] as any;
+
+    const clientOut = await clientFilter({ modelData: { input }, agent: {} as any, context: undefined });
+    const serverOut = await serverFilter({ modelData: { input }, agent: {} as any, context: undefined });
+
+    expect(clientOut.input).toEqual(input.slice(2));
+    expect(serverOut.input).toEqual(input);
   });
 
   test("buildOpenGeniAgent requests encrypted reasoning content unless disabled", () => {
