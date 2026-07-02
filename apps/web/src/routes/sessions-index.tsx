@@ -15,11 +15,12 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { useEnvironments, type ComposerState } from "@opengeni/react";
+import { useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
-import { useNavigate } from "@tanstack/react-router";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
@@ -31,8 +32,11 @@ import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
+import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
@@ -47,7 +51,7 @@ import {
   type SessionDraft,
 } from "@/lib/session-create";
 import { cn } from "@/lib/utils";
-import type { SandboxBackend } from "@/types";
+import type { SandboxBackend, Session } from "@/types";
 
 const examples = [
   "Inspect the repository and summarize the infrastructure layout.",
@@ -132,7 +136,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           attachments={attachments}
           autoFocus
           fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-          placeholder="Describe a task for the agent..."
+          placeholder="Describe a task for the agent…"
           controls={<SessionControlStrip workspaceId={workspaceId} />}
         />
 
@@ -173,7 +177,79 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           disabled={context.busy}
         />
       </div>
+
+      <RecentSessions workspaceId={workspaceId} />
     </div>
+  );
+}
+
+// ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
+// A calm section below the composer: the most recent sessions as compact rows
+// (status dot, title, repo/model meta, relative time), linking straight in. It
+// reuses the same useWorkspaceSessions hook the rail runs on and renders only
+// when sessions exist, so the hero stays the composer.
+function RecentSessions({ workspaceId }: { workspaceId: string }) {
+  const { sessions } = useWorkspaceSessions({ limit: 12, pollIntervalMs: 30_000 });
+  const recent = useMemo(() => {
+    const { running, grouped } = groupSessionsForRail(sessions);
+    return [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
+  }, [sessions]);
+
+  if (recent.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="mt-12">
+      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Recent sessions
+      </h2>
+      <ul className="grid gap-1">
+        {recent.map((session) => (
+          <RecentSessionRow key={session.id} workspaceId={workspaceId} session={session} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
+  queued: "queued",
+  running: "running",
+  requires_action: "waiting",
+  idle: "idle",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
+/** A short `owner/repo` label from the session's first repository resource. */
+function sessionRepoLabel(session: Session): string | null {
+  const repo = session.resources.find((resource) => resource.kind === "repository");
+  if (!repo || repo.kind !== "repository") {
+    return null;
+  }
+  const parts = repo.uri.replace(/\.git$/, "").split("/").filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join("/") : parts.at(-1) ?? null;
+}
+
+function RecentSessionRow({ workspaceId, session }: { workspaceId: string; session: Session }) {
+  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  const meta = [session.model, sessionRepoLabel(session)].filter(Boolean).join(" · ");
+  return (
+    <li>
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: session.id }}
+        className="group flex items-center gap-3 rounded-lg border border-border bg-surface/40 px-3 py-2.5 transition-colors hover:border-border-strong hover:bg-surface-2/60"
+      >
+        <StatusDot tone={SESSION_STATUS_TONE[session.status]} pulse={session.status === "running"} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg">{title}</span>
+          {meta ? <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{meta}</span> : null}
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">{relativeTimeLabel(session.updatedAt)}</span>
+      </Link>
+    </li>
   );
 }
 
@@ -282,6 +358,11 @@ function ComputeTargetControl(props: {
   const fleet = useMachines({ pollIntervalMs: 10000 });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
+  // A 404 is the expected "self-hosted machines are disabled here" signal, not a
+  // failure — only a genuine load error (network/5xx) is surfaced, so the machine
+  // option isn't silently swallowed by a transient outage (states #4).
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   // Preserve the last managed backend override across kind toggles (lossless) so
   // toggling machine→sandbox returns to the prior choice, not a forced reset.
   const lastBackend = useRef<SandboxBackend | "">(draft.compute.kind === "sandbox" ? draft.compute.backend : "");
@@ -341,6 +422,7 @@ function ComputeTargetControl(props: {
           onChange={onChange}
           disabled={props.disabled}
         />
+        {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
         <RevealConnectedMachinesButton onClick={revealConnectedMachines} disabled={props.disabled} />
       </section>
     );
@@ -356,19 +438,21 @@ function ComputeTargetControl(props: {
           selected={draft.compute.kind === "sandbox"}
           disabled={props.disabled}
           icon={<BoxIcon className="size-4 shrink-0" />}
-          title="Managed Sandbox"
-          subtitle="A fresh box, set up for you"
+          title="Managed sandbox"
+          subtitle="A fresh sandbox, set up for you"
           onClick={() => selectKind("sandbox")}
         />
         <ComputeKindButton
           selected={draft.compute.kind === "machine"}
           disabled={props.disabled || fleetEmpty}
           icon={<ServerIcon className="size-4 shrink-0" />}
-          title="Connected Machine"
-          subtitle={fleetEmpty ? "Connect one to use it" : "Run on your own machine"}
+          title="Connected machine"
+          subtitle={fleetLoadFailed ? "Couldn't load machines" : fleetEmpty ? "Connect one to use it" : "Run on your own machine"}
           onClick={() => selectKind("machine")}
         />
       </div>
+
+      {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
         <ManagedSandboxFields
@@ -470,7 +554,7 @@ function ManagedSandboxFields(props: {
         </div>
         <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
           <FolderIcon className="size-3 shrink-0" />
-          Cloned into <span className="font-mono text-fg-muted">/workspace</span>, the fixed sandbox root.
+          Repositories are cloned into <span className="font-mono text-fg-muted">/workspace</span>.
         </p>
       </div>
 
@@ -503,7 +587,7 @@ function ManagedSandboxFields(props: {
           <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
           <span>Advanced</span>
           <span className="text-fg-subtle/70">·</span>
-          <span className="truncate">backend {backendSummary}</span>
+          <span className="truncate">backend: {backendSummary}</span>
         </summary>
         <div className="grid gap-2 px-3 pb-3">
           <Select
@@ -698,6 +782,24 @@ function RevealConnectedMachinesButton(props: { onClick: () => void; disabled: b
   );
 }
 
+// A genuine fleet-load failure (not the expected selfhosted-disabled 404): a
+// calm, retryable note so the machine option is never silently swallowed.
+function FleetErrorNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Notice
+      tone="muted"
+      className="p-2.5 text-xs"
+      action={
+        <button type="button" onClick={onRetry} className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg">
+          Retry
+        </button>
+      }
+    >
+      Couldn&apos;t load your connected machines.
+    </Notice>
+  );
+}
+
 function FolderRadio(props: {
   checked: boolean;
   disabled: boolean;
@@ -829,7 +931,7 @@ function OptionalSessionOptions(props: {
               />
             ) : (
               <p className="text-2xs text-fg-subtle">
-                By default the session&apos;s OpenGeni MCP tool can use the platform on your behalf inside this workspace.
+                By default this session can use OpenGeni tools on your behalf in this workspace.
               </p>
             )}
           </div>

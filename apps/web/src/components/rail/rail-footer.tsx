@@ -42,14 +42,14 @@ export function RailFooter() {
   const image = context.authSession?.user.image ?? undefined;
 
   return (
-    <div className="mt-auto border-t border-border p-2">
+    <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
       <div className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label="Account menu"
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none"
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
             >
               <Avatar size="sm">
                 {image ? <AvatarImage src={image} alt="" /> : null}

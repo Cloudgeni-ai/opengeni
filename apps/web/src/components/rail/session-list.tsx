@@ -1,8 +1,8 @@
 // The session list — the rail's home. Reuses the same useWorkspaceSessions
 // hook the old sessions index used, groups by recency (running pinned on top),
 // and supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
-// dot + single-line truncated title + hover-revealed relative time. The active
-// session (from the URL) is highlighted with an accent bar.
+// dot + single-line truncated title + relative time (visible at rest). The
+// active session (from the URL) is highlighted with an accent bar.
 import { useWorkspaceSessions } from "@opengeni/react";
 import { useRouterState } from "@tanstack/react-router";
 import { EllipsisIcon, MessagesSquareIcon, PencilIcon, PlusIcon } from "lucide-react";
@@ -215,7 +215,7 @@ function SessionRow(props: {
   const rename = useInlineRename(props.session, props.onRename);
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors",
+    "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-10",
     "hover:bg-surface-2",
     props.active
       ? "bg-surface-3 font-medium text-fg"
@@ -277,7 +277,10 @@ function SessionRow(props: {
           {/* min-w-0 + truncate: the title must always ellipsis, never butt the
               rail border. */}
           <span className="min-w-0 flex-1 truncate pr-1">{title}</span>
-          <span className="shrink-0 text-2xs tabular-nums text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-0">
+          {/* Relative time is visible at rest (the list is grouped by recency),
+              and steps aside on hover/focus so the rename overflow can slot in.
+              On coarse pointers there is no hover, so the time stays visible. */}
+          <span className="shrink-0 text-2xs tabular-nums text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
             {relativeTimeLabel(props.session.updatedAt)}
           </span>
           <RowRenameMenu onRename={rename.startEditing} />
@@ -384,8 +387,14 @@ function EmptySessions({ onStart }: { onStart: () => void }) {
  */
 export function CollapsedSessionsButton() {
   const rail = useRail();
-  const { sessions } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
+  const { sessions, loading, error } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
   const runningCount = useMemo(() => groupSessionsForRail(sessions).running.length, [sessions]);
+  // The collapsed rail can't render the expanded list's loading/error copy, so
+  // it mirrors those states: a failed load shows a failed-tone marker + tooltip
+  // (expanding reveals the retry), a first load shows a gentle pulse.
+  const failed = Boolean(error) && sessions.length === 0;
+  const firstLoad = loading && sessions.length === 0;
+  const tooltip = failed ? "Session history is unavailable" : "Sessions";
   return (
     <div className="flex flex-1 flex-col items-center gap-1 px-2 pt-1">
       <Tooltip>
@@ -394,19 +403,21 @@ export function CollapsedSessionsButton() {
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label={`Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`}
+            aria-label={failed ? "Sessions (history unavailable)" : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`}
             onClick={() => rail.setCollapsed(false)}
             className="relative text-fg-muted hover:text-fg"
           >
-            <MessagesSquareIcon className="size-4" />
-            {runningCount > 0 ? (
+            <MessagesSquareIcon className={cn("size-4", firstLoad && "motion-safe:animate-pulse")} />
+            {failed ? (
+              <span className="absolute -right-0.5 -top-0.5 flex size-2 rounded-full bg-status-failed" />
+            ) : runningCount > 0 ? (
               <span className="absolute -right-0.5 -top-0.5 flex min-w-3.5 items-center justify-center rounded-full bg-brand-strong px-1 text-2xs font-semibold leading-tight text-brand-fg">
                 {runningCount}
               </span>
             ) : null}
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">Sessions</TooltipContent>
+        <TooltipContent side="right">{tooltip}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>

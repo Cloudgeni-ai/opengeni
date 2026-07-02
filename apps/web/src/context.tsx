@@ -168,7 +168,14 @@ export function RootRouteComponent() {
   // so each open session keeps its own choice independently.
   const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // The dock is open by default on desktop, but on narrow viewports (<1024px)
+  // the dock renders as a full-screen overlay — so it must start CLOSED there or
+  // a phone opening a session would land with the overlay covering the
+  // transcript. Only the initial default is viewport-aware; the user's later
+  // toggles are never overridden.
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() =>
+    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 1023px)").matches,
+  );
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
@@ -346,8 +353,11 @@ export function RootRouteComponent() {
     }
     setWorkspaces((current) => upsertWorkspace(current, created));
     // Refresh grants so the new workspace's owner permissions apply at once;
-    // the workspace itself is already usable if this refresh fails.
-    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    // the workspace itself is already usable if this refresh fails — surface a
+    // soft warning so a stale permission set doesn't fail silently.
+    await client.getAccessContext().then(setAccessContext).catch(() => {
+      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
+    });
     return created;
   }
 
@@ -387,7 +397,9 @@ export function RootRouteComponent() {
       return false;
     }
     setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    await client.getAccessContext().then(setAccessContext).catch(() => {
+      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
+    });
     return true;
   }
 
@@ -691,7 +703,7 @@ export function RootRouteComponent() {
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
       ) : !defaultWorkspaceId ? (
-        <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />
+        <ProblemPanel title="No workspace access" description="You don't have access to any workspace yet." />
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
@@ -755,7 +767,7 @@ function AccessKeyPanel(props: {
           className="mt-2"
           autoFocus
         />
-        <Button type="submit" className="mt-4 w-full">
+        <Button type="submit" className="mt-4 w-full" disabled={props.accessKeyDraft.trim().length === 0}>
           <CheckIcon className="size-4" />
           Continue
         </Button>
