@@ -1,5 +1,11 @@
 # @opengeni/worker-bundle
 
+## 0.2.3
+
+### Patch Changes
+
+- 711edc6: `createOpenGeniWorker` accepts an optional `workflowsPath` so embedded hosts can point Temporal's workflow bundler at a relocated copy of `workflows.ts` — the in-package default under `node_modules` is not transpiled by Temporal's webpack. Standalone behavior is unchanged when unset.
+
 ## 0.2.2
 
 ### Patch Changes
