@@ -99,8 +99,18 @@ export function MessageTimeline({
   const [revealed, setRevealed] = useState(false);
   // Our own scrollTop assignments echo back as scroll events; those must never
   // UNPIN the reader (they are not reader intent). Marked around every
-  // programmatic assignment and consumed by onScroll.
+  // programmatic assignment and consumed by onScroll. When an assignment is a
+  // NO-OP (already at the target) no scroll event will fire, so the mark must
+  // self-clear — a stale mark would eat the reader's next real scroll-up.
   const programmaticScrollRef = useRef(false);
+  const assignScrollTop = useCallback((node: HTMLElement, value: number) => {
+    const previous = node.scrollTop;
+    programmaticScrollRef.current = true;
+    node.scrollTop = value;
+    if (node.scrollTop === previous) {
+      programmaticScrollRef.current = false;
+    }
+  }, []);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
   const pinnedRef = useRef(true);
@@ -148,13 +158,12 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (node && autoFollow && pinned) {
-      programmaticScrollRef.current = true;
-      node.scrollTop = node.scrollHeight;
+      assignScrollTop(node, node.scrollHeight);
     }
     if (!revealed && groups.length > 0) {
       setRevealed(true);
     }
-  }, [resolvedItems, working, autoFollow, pinned, revealed, groups.length]);
+  }, [resolvedItems, working, autoFollow, pinned, revealed, groups.length, assignScrollTop]);
 
   // A cleared timeline (stream identity change) re-arms the reveal so the next
   // session also first paints at its bottom.
@@ -213,8 +222,7 @@ export function MessageTimeline({
         return;
       }
       if (autoFollow && pinnedRef.current) {
-        programmaticScrollRef.current = true;
-        current.scrollTop = current.scrollHeight;
+        assignScrollTop(current, current.scrollHeight);
       } else {
         const anchor = anchorRef.current;
         if (anchor && anchor.el.isConnected) {
@@ -222,8 +230,7 @@ export function MessageTimeline({
           const now = anchor.el.getBoundingClientRect().top - containerTop;
           const diff = now - anchor.top;
           if (diff !== 0) {
-            programmaticScrollRef.current = true;
-            current.scrollTop += diff;
+            assignScrollTop(current, current.scrollTop + diff);
           }
         }
       }
@@ -231,7 +238,7 @@ export function MessageTimeline({
     });
     observer.observe(inner);
     return () => observer.disconnect();
-  }, [autoFollow, captureAnchor]);
+  }, [autoFollow, captureAnchor, assignScrollTop]);
 
   const onScroll = () => {
     const node = scrollRef.current;
