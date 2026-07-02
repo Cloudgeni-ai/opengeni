@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -173,6 +173,87 @@ describe("runtime event normalization", () => {
 
     expect(event?.type).toBe("agent.toolCall.created");
     expect((event?.payload as { id: string }).id).toBe("call-1");
+  });
+
+  test("compacts a codex computer_screenshot Uint8Array output to a data-URL string in the event", () => {
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const [event] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        id: "item-shot",
+        type: "tool_call_output_item",
+        rawItem: { callId: "call-shot", type: "function_call_result" },
+        output: { type: "image", image: { data: pngBytes, mediaType: "image/png" } },
+      },
+    } as any);
+
+    expect(event?.type).toBe("agent.toolCall.output");
+    const payload = event?.payload as { id: string; output: unknown };
+    expect(payload.id).toBe("call-shot");
+    expect(payload.output).toBe(`data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`);
+    // No raw typed-array / object-of-numbers survives into the serialized event.
+    expect(JSON.stringify(event)).not.toContain('"0":137');
+  });
+
+  describe("normalizeToolOutputForEvent", () => {
+    test("Uint8Array structured image → data-URL string", () => {
+      const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes, mediaType: "image/png" } })).toBe(
+        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
+      );
+    });
+
+    test("object-of-numbers (JSON-round-tripped Uint8Array) → data-URL string", () => {
+      const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
+      const roundTripped = JSON.parse(JSON.stringify({ type: "image", image: { data: bytes, mediaType: "image/jpeg" } }));
+      expect(normalizeToolOutputForEvent(roundTripped)).toBe(
+        `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
+      );
+    });
+
+    test("defaults media type to image/png when absent", () => {
+      const bytes = new Uint8Array([1, 2, 3]);
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toBe(
+        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
+      );
+    });
+
+    test("base64 string / data-URL image data pass through as a data-URL", () => {
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: "aGk=", mediaType: "image/webp" } })).toBe(
+        "data:image/webp;base64,aGk=",
+      );
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: "data:image/png;base64,aGk=" } })).toBe(
+        "data:image/png;base64,aGk=",
+      );
+    });
+
+    test("already-normalized input_image content item → its data-URL", () => {
+      expect(normalizeToolOutputForEvent({ type: "input_image", image: "data:image/png;base64,aGk=" })).toBe(
+        "data:image/png;base64,aGk=",
+      );
+    });
+
+    test("a single-image array unwraps to the bare data-URL string", () => {
+      const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38]);
+      expect(normalizeToolOutputForEvent([{ type: "image", image: { data: bytes, mediaType: "image/gif" } }])).toBe(
+        `data:image/gif;base64,${Buffer.from(bytes).toString("base64")}`,
+      );
+    });
+
+    test("text outputs pass through unchanged", () => {
+      expect(normalizeToolOutputForEvent("plain tool output")).toBe("plain tool output");
+      expect(normalizeToolOutputForEvent("data:image/png;base64,aGk=")).toBe("data:image/png;base64,aGk=");
+    });
+
+    test("hosted computer_call data-URL string output is unchanged", () => {
+      const hosted = "data:image/png;base64,iVBORw0KGgo=";
+      expect(normalizeToolOutputForEvent(hosted)).toBe(hosted);
+    });
+
+    test("MCP isError object output is unchanged", () => {
+      const mcp = { isError: true, content: [{ type: "text", text: "delivery failed" }] };
+      expect(normalizeToolOutputForEvent(mcp)).toEqual(mcp);
+    });
   });
 
   test("uses normal Azure CLI service principal login hook", () => {
