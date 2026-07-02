@@ -54,6 +54,7 @@
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
     "postgres": "^3.4.9",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "tsup": "^8.5.0"
   }
 }
