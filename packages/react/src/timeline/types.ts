@@ -145,4 +145,13 @@ export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxIt
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }
-  | { kind: "activity"; id: string; items: ActivityItem[]; outcome?: TurnOutcome; failureText?: string };
+  | { kind: "activity"; id: string; items: ActivityItem[]; outcome?: TurnOutcome; failureText?: string }
+  | {
+      kind: "turn";
+      id: string;
+      outcome: TurnOutcome;
+      failureText?: string;
+      startedAt: string;
+      endedAt: string;
+      groups: TimelineGroup[];
+    };

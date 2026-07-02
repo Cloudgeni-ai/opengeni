@@ -544,6 +544,8 @@ export function completedTurnEvents(): SessionEvent[] {
     },
     turn,
   );
+  log.push("agent.message.delta", { text: "Dependencies are installed; I found one helper import missing in the test setup." }, turn);
+  log.push("agent.message.completed", { text: "Dependencies are installed; I found one helper import missing in the test setup." }, turn);
   log.tool(
     {
       name: "apply_patch_call",
@@ -560,6 +562,8 @@ export function completedTurnEvents(): SessionEvent[] {
     },
     turn,
   );
+  log.push("agent.message.delta", { text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot." }, turn);
+  log.push("agent.message.completed", { text: "The helper is patched. I am rerunning the suite before taking the dashboard screenshot." }, turn);
   log.tool(
     {
       name: "exec_command",
@@ -573,10 +577,10 @@ export function completedTurnEvents(): SessionEvent[] {
     { name: "computer_call", id: "td-3", raw: { type: "computer_call", action: { type: "screenshot" } }, output: SHOT_DASH },
     turn,
   );
-  log.push("turn.completed", {}, turn);
   log.push("agent.message.completed", {
     text: "Done. The suite is green (128/128) after patching the missing fixture import in `test-helpers.ts`, and here is the dashboard once it built. Want me to wire up CI next?",
   }, turn);
+  log.push("turn.completed", {}, turn);
   return log.events;
 }
 
@@ -584,6 +588,8 @@ export function failedTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-fail";
   log.push("user.message", { text: "Deploy the preview to staging." });
+  log.push("agent.message.delta", { text: "I am applying the chart and watching the rollout until Kubernetes reports readiness." }, turn);
+  log.push("agent.message.completed", { text: "I am applying the chart and watching the rollout until Kubernetes reports readiness." }, turn);
   log.tool(
     {
       name: "exec_command",

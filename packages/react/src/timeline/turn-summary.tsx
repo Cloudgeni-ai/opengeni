@@ -11,10 +11,10 @@ export type { TurnOutcome } from "./types";
 /* ----------------------------------------------------------------------------
    Turn summary
 
-   A completed (or failed/cancelled) turn's activity folds behind one quiet
-   summary chip: "N steps · M files · K commands · 1 screenshot". The chip is the
-   default surface; expanding it reveals the full activity rail (the caller's
-   rendered rows). A live turn never folds — render its rows directly.
+   A completed (or failed/cancelled) turn folds behind one quiet summary chip:
+   "N steps · M files · K commands · 1 screenshot · 4m". The chip is the default
+   surface; expanding it reveals the full settled turn body. A live turn never
+   folds — render its rows directly.
 
    This keeps the timeline calm: a finished turn is a single line until the
    reader chooses to look inside it.
@@ -26,18 +26,20 @@ export type TurnSummaryProps = {
   outcome: TurnOutcome;
   /** A short failure reason shown inline on a failed chip (never hidden). */
   failureText?: string | undefined;
+  /** Elapsed turn duration; shown as a trailing facet when at least 1s. */
+  durationMs?: number | undefined;
   /** Start expanded. */
   defaultOpen?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: React.ReactNode;
 };
 
-export function TurnSummary({ items, outcome, failureText, defaultOpen, children }: TurnSummaryProps) {
+export function TurnSummary({ items, outcome, failureText, durationMs, defaultOpen, children }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
-  const facets = summarizeTurn(items);
+  const facets = summarizeTurn(items, durationMs);
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen} className="animate-og-enter">
@@ -91,7 +93,7 @@ export function TurnSummary({ items, outcome, failureText, defaultOpen, children
 }
 
 /** Compose the facet summary line ("14 steps · 3 files · 2 commands · 1 screenshot · 4m"). */
-function summarizeTurn(items: ActivityItem[]): string {
+function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
   let files = 0;
   let commands = 0;
   let screenshots = 0;
@@ -120,5 +122,26 @@ function summarizeTurn(items: ActivityItem[]): string {
   if (screenshots) {
     parts.push(`${screenshots} ${screenshots === 1 ? "screenshot" : "screenshots"}`);
   }
+  const duration = formatDurationFacet(durationMs);
+  if (duration) {
+    parts.push(duration);
+  }
   return parts.join(" · ");
+}
+
+function formatDurationFacet(durationMs: number | undefined): string | null {
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 1000) {
+    return null;
+  }
+  const totalSeconds = Math.floor(durationMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }

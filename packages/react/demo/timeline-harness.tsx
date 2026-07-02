@@ -8,6 +8,9 @@ import {
   LightboxProvider,
   MessageTimeline,
   TimelineRow,
+  TurnSummary,
+  type ActivityItem,
+  type TimelineGroup,
 } from "../src/index";
 import {
   cancelledTurnEvents,
@@ -129,12 +132,12 @@ function Harness() {
 
             <Section
               title="Completed turn — folded to a summary chip"
-              hint="A settled turn folds behind one quiet chip. Click to expand."
+              hint="Prompt bubble → one turn chip → final answer; expand for narration and nested tool clusters."
             >
               <MessageTimeline events={completedTurnEvents()} className="max-h-none" />
             </Section>
 
-            <Section title="Failed turn — folds, but the error is never hidden">
+            <Section title="Failed turn — folds, but the error is never hidden" hint="Failed turns start open so the error and folded context stay visible.">
               <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
             </Section>
 
@@ -168,15 +171,76 @@ function RawRail({ events }: { events: ReturnType<typeof tourEvents> }) {
   const groups = useMemo(() => groupTimeline(buildTimeline(events)), [events]);
   return (
     <div className="flex flex-col gap-4">
-      {groups.map((group) =>
-        group.kind === "activity" ? (
-          <ActivityRail key={group.id} items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
-        ) : (
-          <TimelineRow key={group.item.id} item={group.item} />
-        ),
-      )}
+      {groups.map((group) => (
+        <RawGroup key={rawGroupKey(group)} group={group} />
+      ))}
     </div>
   );
+}
+
+function RawGroup({ group }: { group: TimelineGroup }) {
+  switch (group.kind) {
+    case "activity":
+      return group.outcome ? (
+        <TurnSummary
+          items={group.items}
+          outcome={group.outcome}
+          failureText={group.failureText}
+          defaultOpen={group.outcome === "failed" ? true : undefined}
+        >
+          <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+        </TurnSummary>
+      ) : (
+        <ActivityRail items={group.items} onOpenSession={(id) => window.alert(`Open session ${id}`)} />
+      );
+    case "turn":
+      return (
+        <TurnSummary
+          items={flattenActivities(group.groups)}
+          outcome={group.outcome}
+          failureText={group.failureText}
+          durationMs={durationBetween(group.startedAt, group.endedAt)}
+          defaultOpen={group.outcome === "failed" ? true : undefined}
+        >
+          <div className="flex flex-col gap-4">
+            {group.groups.map((child) => (
+              <RawGroup key={rawGroupKey(child)} group={child} />
+            ))}
+          </div>
+        </TurnSummary>
+      );
+    case "item":
+      return <TimelineRow item={group.item} />;
+  }
+}
+
+function rawGroupKey(group: TimelineGroup): string {
+  switch (group.kind) {
+    case "activity":
+      return group.id;
+    case "turn":
+      return group.id;
+    case "item":
+      return group.item.id;
+  }
+}
+
+function flattenActivities(groups: TimelineGroup[]): ActivityItem[] {
+  const items: ActivityItem[] = [];
+  for (const group of groups) {
+    if (group.kind === "activity") {
+      items.push(...group.items);
+    } else if (group.kind === "turn") {
+      items.push(...flattenActivities(group.groups));
+    }
+  }
+  return items;
+}
+
+function durationBetween(startedAt: string, endedAt: string): number | undefined {
+  const started = Date.parse(startedAt);
+  const ended = Date.parse(endedAt);
+  return Number.isFinite(started) && Number.isFinite(ended) && ended >= started ? ended - started : undefined;
 }
 
 createRoot(document.getElementById("root")!).render(<Harness />);

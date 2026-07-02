@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
+import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
 import type { ToolCallItem, SandboxItem } from "../src/timeline";
@@ -36,10 +37,26 @@ function resetTimelineEvents(): void {
   timelineSequence = 0;
 }
 
+function timelineEventAt(type: string, payload: unknown, occurredAt: string, turnId: string | null = "turn-1"): SessionEvent {
+  timelineSequence += 1;
+  return {
+    id: `timeline-evt-${timelineSequence}`,
+    workspaceId: "ws-1",
+    sessionId: "session-1",
+    sequence: timelineSequence,
+    type,
+    payload,
+    occurredAt,
+    turnId,
+  };
+}
+
+function turnSummaryTriggers(container: HTMLElement): HTMLButtonElement[] {
+  return Array.from(container.querySelectorAll("button")).filter((button) => /\d+ steps?/.test(button.textContent ?? ""));
+}
+
 function turnSummaryTrigger(container: HTMLElement): HTMLButtonElement | null {
-  return (
-    Array.from(container.querySelectorAll("button")).find((button) => /\d+ steps?/.test(button.textContent ?? "")) ?? null
-  );
+  return turnSummaryTriggers(container)[0] ?? null;
 }
 
 function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
@@ -59,21 +76,35 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
 }
 
 describe("MessageTimeline — settled turn folding", () => {
-  test("settled turn activity renders behind a TurnSummary trigger", async () => {
+  test("settled turn renders one top-level chip, final answer, and folded narration", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Run the checks" }),
-      timelineEvent("agent.reasoning.delta", { text: "Checking the suite." }),
       timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }),
-      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "first pass failed" }),
+      timelineEvent("agent.message.completed", { text: "Narration: one fixture needs a quick patch." }),
+      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "bun test --watch=false" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "Final answer: checks are green." }),
       timelineEvent("turn.completed", {}),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
     await flush();
 
+    expect(turnSummaryTriggers(r.container)).toHaveLength(1);
+    expect(r.container.textContent).toContain("Final answer: checks are green.");
+    expect(r.container.textContent).not.toContain("Narration: one fixture needs a quick patch.");
+
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.textContent).toContain("2 steps");
-    expect(trigger?.textContent).toContain("1 command");
+    expect(trigger?.textContent).toContain("2 commands");
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(r.container.textContent).toContain("Narration: one fixture needs a quick patch.");
+    expect(turnSummaryTriggers(r.container).length).toBeGreaterThan(1);
 
     await r.unmount();
   });
@@ -90,6 +121,41 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(turnSummaryTrigger(r.container)).toBeNull();
     expect(r.container.textContent).toContain("Checking the suite.");
+
+    await r.unmount();
+  });
+
+  test("duration facet renders when the settled turn lasts at least one second", async () => {
+    resetTimelineEvents();
+    const start = Date.UTC(2024, 5, 10, 12, 0, 0);
+    const events = [
+      timelineEventAt("user.message", { text: "Run the checks" }, new Date(start).toISOString(), null),
+      timelineEventAt("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, new Date(start + 1000).toISOString()),
+      timelineEventAt("agent.toolCall.output", { id: "call-1", output: "ok" }, new Date(start + 2000).toISOString()),
+      timelineEventAt("agent.message.completed", { text: "Done." }, new Date(start + 290000).toISOString()),
+      timelineEventAt("turn.completed", {}, new Date(start + 301000).toISOString()),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    expect(turnSummaryTrigger(r.container)?.textContent).toContain("5m");
+
+    await r.unmount();
+  });
+
+  test("duration facet stays hidden below one second", async () => {
+    resetTimelineEvents();
+    const start = Date.UTC(2024, 5, 10, 12, 0, 0);
+    const events = [
+      timelineEventAt("user.message", { text: "Run the checks" }, new Date(start).toISOString(), null),
+      timelineEventAt("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, new Date(start + 100).toISOString()),
+      timelineEventAt("agent.toolCall.output", { id: "call-1", output: "ok" }, new Date(start + 200).toISOString()),
+      timelineEventAt("turn.completed", {}, new Date(start + 999).toISOString()),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    expect(turnSummaryTrigger(r.container)?.textContent).not.toContain("1s");
 
     await r.unmount();
   });

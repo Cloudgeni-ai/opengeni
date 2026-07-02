@@ -21,9 +21,11 @@ import {
   defaultToolRegistry,
   groupTimeline,
   LightboxProvider,
+  type ActivityItem,
   type AgentMessageItem,
   type GoalItem,
   type NoticeItem,
+  type TimelineGroup,
   type TimelineItem,
   type ToolRegistry,
   type UserMessageItem,
@@ -104,25 +106,15 @@ export function MessageTimeline({
           {groups.length === 0 && !working
             ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)
             : null}
-          {groups.map((group) =>
-            group.kind === "activity" ? (
-              group.outcome ? (
-                <TurnSummary
-                  key={group.id}
-                  items={group.items}
-                  outcome={group.outcome}
-                  failureText={group.failureText}
-                  defaultOpen={group.outcome === "failed" ? true : undefined}
-                >
-                  <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
-                </TurnSummary>
-              ) : (
-                <ActivityRail key={group.id} items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
-              )
-            ) : (
-              <TimelineRow key={group.item.id} item={group.item} renderMessageText={renderMessageText} />
-            ),
-          )}
+          {groups.map((group) => (
+            <TimelineGroupView
+              key={timelineGroupKey(group)}
+              group={group}
+              renderMessageText={renderMessageText}
+              onOpenSession={onOpenSession}
+              toolRegistry={toolRegistry}
+            />
+          ))}
           {working ? (
             <div className="animate-og-enter flex items-center gap-2 text-sm">
               <span className="og-shimmer-text font-medium">Working…</span>
@@ -160,6 +152,92 @@ export function MessageTimeline({
     </div>
     </LightboxProvider>
   );
+}
+
+function TimelineGroupView({
+  group,
+  renderMessageText,
+  onOpenSession,
+  toolRegistry,
+}: {
+  group: TimelineGroup;
+  renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
+  toolRegistry: ToolRegistry;
+}) {
+  switch (group.kind) {
+    case "activity":
+      return group.outcome ? (
+        <TurnSummary
+          items={group.items}
+          outcome={group.outcome}
+          failureText={group.failureText}
+          defaultOpen={group.outcome === "failed" ? true : undefined}
+        >
+          <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+        </TurnSummary>
+      ) : (
+        <ActivityRail items={group.items} onOpenSession={onOpenSession} toolRegistry={toolRegistry} />
+      );
+    case "turn": {
+      const activityItems = flattenActivityItems(group.groups);
+      return (
+        <TurnSummary
+          items={activityItems}
+          outcome={group.outcome}
+          failureText={group.failureText}
+          durationMs={durationBetween(group.startedAt, group.endedAt)}
+          defaultOpen={group.outcome === "failed" ? true : undefined}
+        >
+          <div className="flex flex-col gap-4">
+            {group.groups.map((child) => (
+              <TimelineGroupView
+                key={timelineGroupKey(child)}
+                group={child}
+                renderMessageText={renderMessageText}
+                onOpenSession={onOpenSession}
+                toolRegistry={toolRegistry}
+              />
+            ))}
+          </div>
+        </TurnSummary>
+      );
+    }
+    case "item":
+      return <TimelineRow item={group.item} renderMessageText={renderMessageText} />;
+  }
+}
+
+function timelineGroupKey(group: TimelineGroup): string {
+  switch (group.kind) {
+    case "item":
+      return group.item.id;
+    case "activity":
+      return group.id;
+    case "turn":
+      return group.id;
+  }
+}
+
+function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {
+  const items: ActivityItem[] = [];
+  for (const group of groups) {
+    if (group.kind === "activity") {
+      items.push(...group.items);
+    } else if (group.kind === "turn") {
+      items.push(...flattenActivityItems(group.groups));
+    }
+  }
+  return items;
+}
+
+function durationBetween(startedAt: string, endedAt: string): number | undefined {
+  const started = Date.parse(startedAt);
+  const ended = Date.parse(endedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) {
+    return undefined;
+  }
+  return ended - started;
 }
 
 /* --- single rows ------------------------------------------------------------ */

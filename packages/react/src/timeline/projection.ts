@@ -380,7 +380,8 @@ export function sessionStatusFromEvents(events: SessionEvent[]): SessionStatus |
 
 /* ----------------------------------------------------------------------------
    Visual grouping: consecutive activity items (reasoning / tools / workers /
-   sandbox) cluster into one collapsible block between chat messages.
+   sandbox) cluster into collapsible blocks. Once a turn settles, the full
+   non-user span folds behind a turn group, with activity blocks nested inside.
    -------------------------------------------------------------------------- */
 
 /**
@@ -414,6 +415,7 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
     }
     if (item.kind === "turn-end") {
       stampTurnOutcome(groups, item);
+      foldSettledTurn(groups, item);
       continue;
     }
     groups.push({ kind: "item", item });
@@ -476,6 +478,96 @@ function applyTurnOutcome(group: Extract<TimelineGroup, { kind: "activity" }>, t
   group.outcome = turnEnd.outcome;
   if (turnEnd.failureText) {
     group.failureText = turnEnd.failureText;
+  }
+}
+
+function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
+  let startIndex = groups.length;
+  let stoppedAtForeignTurn = false;
+  while (startIndex > 0) {
+    const previous = groups[startIndex - 1];
+    if (isTurnBoundary(previous)) {
+      break;
+    }
+    if (belongsToDifferentTurn(previous, turnEnd.turnId)) {
+      stoppedAtForeignTurn = true;
+      break;
+    }
+    startIndex -= 1;
+  }
+  if (stoppedAtForeignTurn) {
+    while (startIndex < groups.length && isBetweenTurnDivider(groups[startIndex])) {
+      startIndex += 1;
+    }
+  }
+
+  const collected = groups.slice(startIndex);
+  if (collected.length === 0) {
+    return;
+  }
+
+  const finalMessage = extractFinalAgentMessage(collected, turnEnd);
+  const body = finalMessage ? collected.slice(0, -1) : collected;
+  if (body.length === 0) {
+    return;
+  }
+
+  const firstOccurredAt = groupStartedAt(body[0]) ?? turnEnd.occurredAt;
+  const turnGroup: TimelineGroup = {
+    kind: "turn",
+    id: `turn-${turnEnd.turnId ?? turnEnd.id}`,
+    outcome: turnEnd.outcome,
+    startedAt: firstOccurredAt,
+    endedAt: turnEnd.occurredAt,
+    groups: body,
+  };
+  if (turnEnd.failureText) {
+    turnGroup.failureText = turnEnd.failureText;
+  }
+
+  groups.splice(startIndex, collected.length, ...(finalMessage ? [turnGroup, finalMessage] : [turnGroup]));
+}
+
+function isTurnBoundary(group: TimelineGroup | undefined): boolean {
+  return group?.kind === "turn" || (group?.kind === "item" && group.item.kind === "user-message");
+}
+
+function belongsToDifferentTurn(group: TimelineGroup | undefined, turnId: string | null): boolean {
+  if (!group || !turnId) {
+    return false;
+  }
+  if (group.kind === "activity") {
+    return group.items.length > 0 && group.items.every((item) => item.turnId !== null && item.turnId !== turnId);
+  }
+  return group.kind === "item" && group.item.kind === "agent-message" && group.item.turnId !== null && group.item.turnId !== turnId;
+}
+
+function isBetweenTurnDivider(group: TimelineGroup | undefined): boolean {
+  return group?.kind === "item" && group.item.kind === "session-status" && group.item.status !== "running";
+}
+
+function extractFinalAgentMessage(groups: TimelineGroup[], turnEnd: TurnEndItem): Extract<TimelineGroup, { kind: "item" }> | null {
+  const tail = groups[groups.length - 1];
+  if (tail?.kind !== "item" || tail.item.kind !== "agent-message" || tail.item.streaming) {
+    return null;
+  }
+  if (tail.item.turnId && turnEnd.turnId && tail.item.turnId !== turnEnd.turnId) {
+    return null;
+  }
+  return tail;
+}
+
+function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
+  if (!group) {
+    return undefined;
+  }
+  switch (group.kind) {
+    case "item":
+      return group.item.occurredAt;
+    case "activity":
+      return group.items[0]?.occurredAt;
+    case "turn":
+      return group.startedAt;
   }
 }
 
