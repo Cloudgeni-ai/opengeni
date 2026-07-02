@@ -381,6 +381,29 @@ async function dropEstablishedHandle(established: EstablishedSandboxSession | un
 // is the out-of-band signal to the OTHER viewers of the same session.
 // ============================================================================
 
+/**
+ * The desktop WIRE transport for the session's ACTIVE sandbox — the single
+ * invariant that keeps the advertised transport in lockstep with where
+ * mintDesktopStream routed the pixels. It MUST be derived from the ACTIVE sandbox
+ * (not the session's HOME backend that negotiateCapabilities keys on): a selfhosted
+ * machine serves the RELAY framebuffer (PNG-per-frame → "relay-frames"/"frames",
+ * view-only in v1), and a Modal group box serves noVNC/RFB over the 6080 tunnel
+ * (→ "vnc-ws"/"novnc", take-control unless the deployment disabled it). Advertising
+ * relay-frames for a Modal box (the swap-away case) hands the client a dead relay
+ * socket → "desktop stream closed before it opened"; the reverse hands a machine's
+ * relay URL to the noVNC renderer. `selfhostedActive` == (activeSandboxId set AND the
+ * active sandbox kind is "selfhosted") — EXACTLY mintDesktopStream's routing predicate.
+ */
+export function resolveActiveDesktopTransport(
+  selfhostedActive: boolean,
+  interactive: boolean,
+): { transport: "relay-frames" | "vnc-ws"; client: "frames" | "novnc"; mode: "read-only" | "interactive" } {
+  if (selfhostedActive) {
+    return { transport: "relay-frames", client: "frames", mode: "read-only" };
+  }
+  return { transport: "vnc-ws", client: "novnc", mode: interactive ? "interactive" : "read-only" };
+}
+
 /** The minted pixel cell the handshake/attach folds into the DesktopStream
  *  capability. Null when degraded (no secret, headless backend, display-stack
  *  failure, provider tunnel failure) — degradation is a value, never a throw. */

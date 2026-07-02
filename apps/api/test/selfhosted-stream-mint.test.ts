@@ -2,7 +2,7 @@ import { afterAll, describe, expect, mock, test } from "bun:test";
 import { resolveStreamTokenSecret } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { verifyStreamToken } from "@opengeni/runtime/sandbox";
-import { mintSelfhostedStream } from "../src/sandbox/viewer";
+import { mintSelfhostedStream, resolveActiveDesktopTransport } from "../src/sandbox/viewer";
 
 // M8b — the SELFHOSTED relay stream-mint seam (viewer.ts mintSelfhostedStream).
 //
@@ -238,5 +238,26 @@ describe("mintTerminalStream / mintDesktopStream — selfhosted-active dispatch 
       // No lease → GATE 2 returns null (Modal path, not selfhosted).
     });
     expect(cell).toBeNull();
+  });
+});
+
+// The swap-case transport advertisement invariant: the advertised wire transport MUST
+// match where mintDesktopStream routed the pixels (relay IFF the active sandbox is a
+// selfhosted machine), in BOTH swap directions. A mismatch is the "desktop stream
+// closed before it opened" bug — the client picked the wrong renderer for the URL.
+describe("resolveActiveDesktopTransport — advertisement matches active-sandbox routing (both swap directions)", () => {
+  test("selfhosted-active → RELAY framebuffer (relay-frames/frames, view-only)", () => {
+    // modal-HOME swapped onto a machine, OR a machine-primary session.
+    expect(resolveActiveDesktopTransport(true, true)).toEqual({ transport: "relay-frames", client: "frames", mode: "read-only" });
+    // interactive policy is irrelevant for the relay framebuffer (view-only in v1).
+    expect(resolveActiveDesktopTransport(true, false)).toEqual({ transport: "relay-frames", client: "frames", mode: "read-only" });
+  });
+
+  test("NOT selfhosted-active → Modal noVNC (vnc-ws/novnc); THE swap-away fix", () => {
+    // selfhosted-HOME swapped AWAY to the cloud group box (activeSandboxId=null or a
+    // non-selfhosted active sandbox): must be the Modal noVNC tunnel, NOT relay-frames.
+    expect(resolveActiveDesktopTransport(false, true)).toEqual({ transport: "vnc-ws", client: "novnc", mode: "interactive" });
+    // take-control disabled by deployment policy → read-only noVNC.
+    expect(resolveActiveDesktopTransport(false, false)).toEqual({ transport: "vnc-ws", client: "novnc", mode: "read-only" });
   });
 });

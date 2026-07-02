@@ -63,7 +63,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
+import { attachViewer, detachViewer, heartbeatViewer, mintDesktopStream, mintTerminalStream, readGroupLease, resolveActiveDesktopTransport, viewerHeartbeatIntervalMs, type DesktopStreamMint, type TerminalStreamMint } from "../sandbox/viewer";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
 import {
   normalizeResources,
@@ -584,28 +584,33 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         : {}),
     });
 
-    // SWAP-CASE desktop transport: the negotiation keyed on the HOME backend, but
-    // the desktop/terminal plane actually runs on the ACTIVE sandbox when one is
-    // pinned. If that active sandbox is a SELFHOSTED machine, its desktop is the
-    // RELAY framebuffer (PNG-per-frame) — the "relay-frames"/"frames" client, NOT
-    // the home box's noVNC. Override the cell so the viewer selects the frame
-    // renderer (the mint already served the machine's relay url). Machine-PRIMARY
-    // sessions (home backend already selfhosted) negotiate relay-frames directly,
-    // so the `=== "vnc-ws"` guard skips the extra lookup for them.
+    // SWAP-CASE desktop transport (BOTH directions): negotiateCapabilities keyed on
+    // the HOME backend, but the pixel plane actually runs on the ACTIVE sandbox — and
+    // the two backends use DIFFERENT wire transports. The advertised transport MUST
+    // match where mintDesktopStream routed the pixels (relay IFF the active sandbox is
+    // a selfhosted machine), or the client picks the wrong renderer and the socket
+    // closes before it opens:
+    //   • modal-HOME swapped ONTO a selfhosted machine: negotiate says vnc-ws, but the
+    //     machine's desktop is the RELAY framebuffer (PNG-per-frame) → flip to
+    //     relay-frames/frames. (#171)
+    //   • selfhosted-HOME swapped AWAY to the cloud group box (activeSandboxId=null OR a
+    //     non-selfhosted active sandbox): negotiate says relay-frames (home=selfhosted),
+    //     but there is NO relay producer on the Modal box → the client hangs on a dead
+    //     relay socket ("desktop stream closed before it opened"). Flip to the Modal
+    //     noVNC/RFB tunnel (vnc-ws/novnc). This is the mirror of #171 and the missing
+    //     half that this fixes.
+    // The single invariant: advertise relay-frames IFF (activeSandboxId set AND the
+    // active sandbox kind is "selfhosted") — EXACTLY mintDesktopStream's routing. When
+    // the desktop is available we set the transport from the ACTIVE sandbox in one
+    // place (resolveActiveDesktopTransport), covering BOTH swap directions.
     let responseCapabilities = capabilities;
-    if (session.activeSandboxId && capabilities.DesktopStream.transport === "vnc-ws") {
-      const activeSandbox = await getSandbox(db, workspaceId, session.activeSandboxId);
-      if (activeSandbox?.kind === "selfhosted") {
-        responseCapabilities = {
-          ...capabilities,
-          DesktopStream: {
-            ...capabilities.DesktopStream,
-            transport: "relay-frames",
-            client: "frames",
-            mode: "read-only",
-          },
-        };
-      }
+    if (capabilities.DesktopStream.transport !== null) {
+      const activeSandbox = session.activeSandboxId ? await getSandbox(db, workspaceId, session.activeSandboxId) : null;
+      const wire = resolveActiveDesktopTransport(activeSandbox?.kind === "selfhosted", settings.sandboxDesktopInteractive !== false);
+      responseCapabilities = {
+        ...capabilities,
+        DesktopStream: { ...capabilities.DesktopStream, ...wire },
+      };
     }
     return c.json(responseCapabilities);
   });
@@ -779,8 +784,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         streamToken: stream?.token ?? null,
         streamExpiresAt: stream?.expiresAt ?? null,
         resolution: stream?.resolution ?? null,
-        transport: stream ? ("vnc-ws" as const) : null,
-        client: stream ? ("novnc" as const) : null,
+        // Transport MUST match where the pixels were minted: a selfhosted-active box
+        // serves the RELAY framebuffer (relay-frames/frames), a Modal box serves noVNC
+        // (vnc-ws/novnc). Hardcoding vnc-ws here handed a machine's relay URL to the
+        // noVNC renderer (and vice-versa on the swap-away case) → "closed before it
+        // opened". Key off the SAME selfhostedActive the mint routed on.
+        transport: stream ? (selfhostedActive ? ("relay-frames" as const) : ("vnc-ws" as const)) : null,
+        client: stream ? (selfhostedActive ? ("frames" as const) : ("novnc" as const)) : null,
         // The REAL PTY terminal address (pty-ws), null when degraded.
         terminalUrl: terminal?.url ?? null,
         terminalToken: terminal?.token ?? null,
