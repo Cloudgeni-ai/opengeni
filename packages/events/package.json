@@ -31,5 +31,10 @@
   "devDependencies": {
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/events"
   }
 }
