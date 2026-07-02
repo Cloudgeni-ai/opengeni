@@ -591,17 +591,26 @@ function objectSchema(properties: Record<string, unknown>, required: string[]): 
 /**
  * The FUNCTION-transport computer tools for the codex / text backend, each routing
  * to the SAME bound `Computer` the hosted `computer_use_preview` tool would drive.
- * `computer_screenshot` returns the screen as a `data:image/png;base64,…` URL
- * (imageOutputFromBytes → renderImageForTextTransport — the SDK's text `view_image`
- * path) so the model SEES the desktop. Write tools return a concise confirmation;
- * when read-only they return {@link COMPUTER_READ_ONLY_MESSAGE} instead of throwing,
- * and any action error is returned as a string so a failed action never kills the
- * turn. Exported so it can be unit-tested against a fake `Computer`.
+ * `computer_screenshot` hands the model the desktop two ways, selected by
+ * `imageFunctionResults`:
+ *   • false (chat-completions providers, the default) → the text-transport
+ *     `data:image/png;base64,…` URL (imageOutputFromBytes → renderImageForTextTransport,
+ *     the SDK's text `view_image` path) — those backends can't read structured image
+ *     tool results.
+ *   • true (the codex/ChatGPT backend) → the structured `{type:'image'}` tool output,
+ *     which agents-core normalizes into an `input_image` content item inside the
+ *     function_call_output — the codex /responses backend accepts and SEES it (a text
+ *     data-URL there is just unreadable text). See index.ts for why it's on there.
+ * Write tools return a concise confirmation; when read-only they return
+ * {@link COMPUTER_READ_ONLY_MESSAGE} instead of throwing, and any action error is
+ * returned as a string so a failed action never kills the turn. Exported so it can be
+ * unit-tested against a fake `Computer`.
  */
 export function computerFunctionTools(
   computer: Computer,
   readOnly: boolean,
   needsApproval?: ComputerUseArgs["needsApproval"],
+  imageFunctionResults = false,
 ): Tool<unknown>[] {
   const approval = needsApproval !== undefined ? { needsApproval: needsApproval as never } : {};
   // Perform a WRITE action, surfacing read-only / failures as a model-readable
@@ -630,7 +639,12 @@ export function computerFunctionTools(
         // instead), so the model can't receive an empty image_url.
         const b64 = await computer.screenshot();
         const bytes = Uint8Array.from(Buffer.from(b64, "base64"));
-        return renderImageForTextTransport(imageOutputFromScreenshotBytes(bytes));
+        const image = imageOutputFromScreenshotBytes(bytes);
+        // On the codex backend return the structured image output so the model SEES
+        // the desktop (agents-core normalizes {type:'image'} → an input_image data-URL
+        // content item in the function_call_output); chat-completions providers get
+        // the text data-URL string they expect.
+        return imageFunctionResults ? image : renderImageForTextTransport(image);
       },
     }),
     tool({
@@ -752,6 +766,13 @@ export type ComputerUseArgs = {
   readOnly?: boolean;
   display?: string;
   needsApproval?: boolean | ((ctx: unknown, action: unknown) => boolean | Promise<boolean>);
+  // Deliver screenshots from the FUNCTION tools as a REAL image the model can see
+  // (a structured `{type:'image'}` tool output → agents-core normalizes it to an
+  // `input_image` content item inside the function_call_output) instead of the text
+  // data-URL string. Only the codex/ChatGPT backend can read structured image tool
+  // results; chat-completions providers cannot, so this stays OFF (text rendering)
+  // by default and is turned on only on the codex path (see index.ts).
+  imageFunctionResults?: boolean;
 };
 
 export function computerUse(args: ComputerUseArgs = {}): ComputerUseCapability {
@@ -809,6 +830,6 @@ export class ComputerUseCapability extends Capability {
         }) as unknown as Tool<unknown>,
       ];
     }
-    return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval);
+    return computerFunctionTools(computer, this.args.readOnly ?? false, this.args.needsApproval, this.args.imageFunctionResults ?? false);
   }
 }

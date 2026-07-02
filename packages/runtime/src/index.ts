@@ -1007,6 +1007,12 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      // On the codex path the function tools deliver screenshots as a real image the
+      // model can see. The ChatGPT/Codex backend rejects HOSTED tool types but DOES
+      // accept `input_image` content items inside a `function_call_output` (proven by
+      // openai/codex codex-rs, whose view_image tool ships exactly that shape) — so a
+      // structured image tool result is seen, where a text data-URL would be unreadable.
+      ...(options.structuredToolTransport === false ? { imageFunctionResults: true } : {}),
     });
     if (options.structuredToolTransport === false) {
       neutralizeStructuredToolTransport(computerCapability);
