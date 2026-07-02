@@ -134,6 +134,43 @@ describe("contracts", () => {
     expect(payload.reasoningEffort).toBe("xhigh");
   });
 
+  test("accepts and trims per-session instructions", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      instructions: "  You are the reviewer persona. Be terse.  ",
+    });
+    expect(payload.instructions).toBe("You are the reviewer persona. Be terse.");
+  });
+
+  test("omitting per-session instructions leaves it undefined (byte-identical to today)", () => {
+    const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
+    expect(payload.instructions).toBeUndefined();
+  });
+
+  test("rejects empty / whitespace-only per-session instructions", () => {
+    expect(() => CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      instructions: "",
+    })).toThrow();
+    expect(() => CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      instructions: "   ",
+    })).toThrow();
+  });
+
+  test("rejects per-session instructions over the 32768-char cap", () => {
+    expect(() => CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      instructions: "x".repeat(32769),
+    })).toThrow();
+    // Exactly at the cap is accepted.
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      instructions: "x".repeat(32768),
+    });
+    expect(payload.instructions?.length).toBe(32768);
+  });
+
   test("accepts client config payloads", () => {
     const payload = ClientConfig.parse({
       deploymentRevision: "test-sha",

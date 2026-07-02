@@ -270,6 +270,9 @@ export type Session = {
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
+  // Per-session agent persona/system instructions supplied at create; null when
+  // the session carried none. Org-visible metadata, never a timeline event.
+  instructions: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   metadata: Record<string, unknown>;
@@ -611,6 +614,11 @@ export type ScheduledTask = {
 
 export type CreateSessionRequest = {
   initialMessage: string;
+  // Per-session agent persona/system instructions (org-visible metadata, not a
+  // secret). Delivered system-level, composed AFTER the per-workspace persona —
+  // how a host supplies per-agent-type prompts without leaking them into the
+  // user-visible timeline. Trimmed, non-empty, max 32768 chars.
+  instructions?: string | undefined;
   resources?: ResourceRef[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;

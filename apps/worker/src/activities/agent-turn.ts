@@ -1335,6 +1335,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : { computerToolMode: computerToolModeForTurn(null) }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
+        // Per-session persona tier (session > workspace > deployment default).
+        // Composed system-level AFTER the workspace persona so it refines it for
+        // this one session; absent ⇒ byte-identical to today's composition.
+        ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
         ...(workspaceEnvironment
           ? {
             workspaceEnvironment: {

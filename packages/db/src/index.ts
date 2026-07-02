@@ -3274,6 +3274,9 @@ export async function createSession(db: Database, input: {
   sandboxBackend: SandboxBackend;
   environmentId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
+  // Per-session agent persona/system instructions (org-visible, not a secret).
+  // Null/omitted ⇒ the session carries none (composed instructions unchanged).
+  instructions?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
   // The shared-sandbox group to join. Omit (or null) for a singleton group:
@@ -3301,6 +3304,7 @@ export async function createSession(db: Database, input: {
       sandboxGroupId: input.sandboxGroupId ?? id,
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey ?? null,
       status: "queued",
@@ -3339,6 +3343,8 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
   sandboxBackend: SandboxBackend;
   environmentId?: string | null;
   firstPartyMcpPermissions?: Permission[] | null;
+  // Per-session agent persona/system instructions (org-visible, not a secret).
+  instructions?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey: string;
   // The shared-sandbox group to join. Omit (or null) for a singleton group
@@ -3365,6 +3371,7 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       sandboxGroupId: input.sandboxGroupId ?? id,
       environmentId: input.environmentId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
       status: "queued",
@@ -7701,6 +7708,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: Sessio
     initialMessage: row.initialMessage,
     title: row.title ?? null,
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
+    instructions: row.instructions ?? null,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     metadata: row.metadata,

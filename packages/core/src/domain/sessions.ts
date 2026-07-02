@@ -232,6 +232,11 @@ export async function createAndStartSession(input: {
   // Names/ids only; the session.created payload never carries variable values.
   environment?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
+  // Per-session agent persona/system instructions (org-visible metadata, not a
+  // secret). Persisted on the session row and composed system-level AFTER the
+  // workspace agentInstructions at turn time; never emitted as a timeline event.
+  // Null/omitted ⇒ the session carries none.
+  instructions?: string | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
   // Encrypted DB rows plus matching safe metadata for create-time per-session
@@ -293,6 +298,7 @@ export async function createAndStartSession(input: {
       sandboxBackend: input.sandboxBackend,
       environmentId: input.environment?.id ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
       sandboxGroupId: input.sandboxGroupId ?? null,
@@ -315,6 +321,7 @@ export async function createAndStartSession(input: {
     sandboxBackend: input.sandboxBackend,
     environmentId: input.environment?.id ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+    instructions: input.instructions ?? null,
     parentSessionId: input.parentSessionId ?? null,
     sandboxGroupId: input.sandboxGroupId ?? null,
     ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
@@ -855,6 +862,10 @@ export async function createSessionForRequest(
     metadata: payload.metadata,
     environment: environment ? { id: environment.id, name: environment.name } : null,
     goal: payload.goal ?? null,
+    // Per-session persona instructions (already trimmed/validated by the
+    // contracts schema). Persisted on the row; composed system-level at turn
+    // time. Not surfaced as an event.
+    instructions: payload.instructions ?? null,
     firstPartyMcpPermissions,
     mcpServers: sessionMcpServers.dbServers,
     sessionMcpServers: sessionMcpServers.metadata,

@@ -2183,6 +2183,10 @@ export const Session = z.object({
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
+  // Per-session agent persona/system instructions supplied at create. Org-visible
+  // metadata (exposed like title/goal), never a secret and never a timeline event.
+  // null when the session carried none.
+  instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
   metadata: z.record(z.string(), z.unknown()),
@@ -2779,6 +2783,15 @@ export type SessionEvent = z.infer<typeof SessionEvent>;
 
 export const CreateSessionRequest = z.object({
   initialMessage: z.string().min(1),
+  // Per-session agent persona/system instructions (org-visible metadata, NOT a
+  // secret). Rides the SAME system-level instructions channel the per-workspace
+  // agentInstructions rides, composed AFTER the workspace persona so it refines
+  // it for this one session — how a host delivers per-agent-type prompts without
+  // leaking them into the user-visible timeline (it is NEVER emitted as an
+  // event, unlike goal/initialMessage). Trimmed, non-empty. The 32768-char cap
+  // matches the codebase's largest free-form string convention (workspace
+  // environment variable values). Absent ⇒ byte-identical to today.
+  instructions: z.string().trim().min(1).max(32768).optional(),
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),

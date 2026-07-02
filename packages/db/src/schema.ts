@@ -187,6 +187,13 @@ export const sessions = pgTable("sessions", {
   initialMessage: text("initial_message").notNull(),
   title: text("title"),
   titleSource: text("title_source"),
+  // Per-session agent persona/system instructions supplied at create (the
+  // per-agent-type prompt lever for embedding hosts). NULL ⇒ the session
+  // carried none, so the composed agent instructions are byte-identical to a
+  // workspace-only persona (no backfill, no behavior change for existing rows).
+  // Composed system-level AFTER the workspace agentInstructions; never emitted
+  // as a timeline event.
+  instructions: text("instructions"),
   resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
   tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),

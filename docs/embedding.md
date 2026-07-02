@@ -17,6 +17,15 @@ acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input)
 
 Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
+### Agent persona: two levers
+
+A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + environment block) always substituted in.
+
+- **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for *every* session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-*session* refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
+
+Prefer `instructions` over stuffing persona text into `initialMessage`: `initialMessage` renders as visible timeline content, has weaker instruction authority, and is readable by anyone with the session. Reach for workspace `agentInstructions` when the persona is the same for the whole tenant; reach for session `instructions` when it varies per session. Omitting `instructions` is byte-identical to today's composition. It is trimmed, non-empty, and capped at 32768 characters.
+
 ## Ports
 
 ### Identity Resolver Chain

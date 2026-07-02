@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -585,6 +585,46 @@ describe("runtime event normalization", () => {
     const withOverride = buildOpenGeniAgent(settings, [], { instructionsTemplate: `WORKSPACE OVERRIDE ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}` });
     expect(withOverride.instructions.startsWith("WORKSPACE OVERRIDE ")).toBe(true);
     expect(withOverride.instructions).not.toContain("DEPLOY DEFAULT");
+  });
+
+  test("per-session instructions compose AFTER the workspace persona + CORE (session-specific last)", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+    });
+    // Exact ordering: workspace persona + CORE first, session instructions last.
+    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} SESSION RULE: always answer in French.`);
+    // And it rides the same instructions string (system-level), never a message.
+    expect(agent.instructions.endsWith("SESSION RULE: always answer in French.")).toBe(true);
+  });
+
+  test("per-session instructions layer onto the DEFAULT persona too (no workspace override)", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Be terse.",
+    });
+    expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
+  });
+
+  test("absent per-session instructions are byte-identical to today's composition", () => {
+    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { sessionInstructions: undefined });
+    // A blank/whitespace-only value is also a no-op (trimmed to nothing).
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { sessionInstructions: "   " });
+    expect(withUndefined.instructions).toBe(base.instructions);
+    expect(withBlank.instructions).toBe(base.instructions);
+    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("the genesis title directive stays LAST, after per-session instructions", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Session-scoped rule.",
+      genesisTitleHint: true,
+    });
+    expect(agent.instructions).toContain("Session-scoped rule.");
+    // Genesis directive is appended after everything, including the session slice.
+    expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
+    expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE));
   });
 
   test("builds native S3 mount entries for file resources", () => {

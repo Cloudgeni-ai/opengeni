@@ -743,6 +743,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       initialMessage: title,
       title: null,
       titleSource: null,
+      instructions: null,
       resources: [],
       tools: [],
       metadata: { title },

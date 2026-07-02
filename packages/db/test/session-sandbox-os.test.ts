@@ -20,6 +20,7 @@ function baseSession() {
     initialMessage: "hi",
     title: null,
     titleSource: null,
+    instructions: null,
     resources: [],
     tools: [],
     metadata: {},

@@ -629,6 +629,11 @@ function registerWorkspaceOrchestrationTools(
       description: "Spawn a new agent session (a worker) with an initial message and optional goal, resources (e.g. repositories from github_repositories_list), tools, and workspace environment attachment. Environment attachment happens at creation only — it cannot be added to a running session — and requires the environments:use permission. When targetSandboxId names a machine, workingDir sets the working directory (cwd) the spawned session runs under on that machine.",
       inputSchema: {
         initialMessage: z4.string().min(1),
+        // Per-session agent persona/system instructions for the spawned worker
+        // (a per-agent-type prompt). Delivered system-level, composed AFTER the
+        // workspace persona; never shown in the worker's timeline. Trimmed,
+        // non-empty, max 32768 chars (re-validated by the contracts schema).
+        instructions: z4.string().min(1).max(32768).optional(),
         goal: z4.unknown().optional(),
         resources: z4.array(z4.unknown()).optional(),
         tools: z4.array(z4.unknown()).optional(),

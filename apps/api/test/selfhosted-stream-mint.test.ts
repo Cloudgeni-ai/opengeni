@@ -166,6 +166,7 @@ const baseSession = {
   repoInstallationId: null,
   title: null,
   titleSource: null,
+  instructions: null,
   errorCode: null,
   errorMessage: null,
   queuedTurnId: null,

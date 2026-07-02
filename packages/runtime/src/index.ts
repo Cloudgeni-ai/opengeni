@@ -711,6 +711,14 @@ export type BuildAgentOptions = {
   // restyle the persona but never drop the goal-loop contract or environment
   // block.
   instructionsTemplate?: string;
+  // Per-SESSION persona/system instructions (the per-agent-type prompt lever an
+  // embedding host supplies at session create). Composed AFTER the workspace
+  // instructionsTemplate + the non-bypassable CORE, so it refines the workspace
+  // persona for this one session without dropping the goal-loop/environment
+  // contract. Rides the SAME instructions channel (system-level) — NEVER a user/
+  // timeline message. Omitted ⇒ the composed instructions are byte-identical to
+  // a workspace-only persona.
+  sessionInstructions?: string;
   // Skills delivered by enabled capability packs. They join the bundled
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
@@ -793,6 +801,27 @@ export function composeAgentInstructions(template: string, workspaceEnvironment?
   return core ? `${template} ${core}` : template;
 }
 
+/**
+ * Appends the per-session persona instructions to the already-composed
+ * (workspace + CORE) instructions, joined by " " — exactly the join used
+ * throughout the persona composition. The session slice is intentionally LAST
+ * (session-specific refinement of the workspace persona). An absent/blank value
+ * is a no-op that returns the composed string byte-for-byte.
+ */
+export function appendSessionInstructions(composed: string, sessionInstructions?: string): string {
+  const trimmed = sessionInstructions?.trim();
+  return trimmed ? `${composed} ${trimmed}` : composed;
+}
+
+/**
+ * Appends the one-shot genesis title directive (genesis turn only), joined by
+ * " " and always LAST so a white-label persona template or a per-session
+ * instruction can't drop it. A no-op when the hint is absent.
+ */
+export function appendGenesisTitleDirective(instructions: string, genesisTitleHint?: boolean): string {
+  return genesisTitleHint ? `${instructions} ${GENESIS_TITLE_DIRECTIVE}` : instructions;
+}
+
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // TOKEN-BROKER (B1): the per-turn git token seed, stashed alongside the agent's
@@ -837,9 +866,21 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     // ownership + workspace-environment block) at the {{core}} marker, or
     // appends it when the template omits the marker. With the default template
     // and no environment this is byte-identical to the historical preamble.
-    instructions: options.genesisTitleHint
-      ? `${composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment)} ${GENESIS_TITLE_DIRECTIVE}`
-      : composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+    // Persona composition order (all one system-level instructions string):
+    //   1. workspace instructionsTemplate (or deployment default) with the
+    //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
+    //   2. + the per-session persona instructions (session-specific, LAST so it
+    //      refines the workspace persona),
+    //   3. + the one-shot genesis title directive (genesis turn only).
+    // With no session instructions and no genesis hint this is byte-identical to
+    // the historical composed instructions.
+    instructions: appendGenesisTitleDirective(
+      appendSessionInstructions(
+        composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+        options.sessionInstructions,
+      ),
+      options.genesisTitleHint,
+    ),
     modelSettings: {
       reasoning: { effort: options.reasoningEffort ?? settings.openaiReasoningEffort, summary: "detailed" },
       // Server-side compaction (OpenAI platform) requires store=false: the

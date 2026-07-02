@@ -60,6 +60,57 @@ describe("API component integration", () => {
     expect(sessions.some((item) => item.id === session.id && item.workspaceId === workspaceId && item.initialMessage === "hello")).toBe(true);
   });
 
+  test("create-with-instructions persists and reads back the field without leaking a timeline event", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    const response = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "review this PR",
+        model: "scripted-model",
+        // Trailing whitespace exercises the contracts .trim() on the create path.
+        instructions: "  You are the PR-reviewer persona: be terse and cite files.  ",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.status).toBe(202);
+    const created = await response.json() as { id: string; instructions: string | null };
+    // Create response exposes the (trimmed) instructions.
+    expect(created.instructions).toBe("You are the PR-reviewer persona: be terse and cite files.");
+
+    // Read path (GET /sessions/:id) returns it too.
+    const read = await app.request(workspacePath(workspaceId, `/sessions/${created.id}`));
+    expect(read.status).toBe(200);
+    const fetched = await read.json() as { instructions: string | null };
+    expect(fetched.instructions).toBe("You are the PR-reviewer persona: be terse and cite files.");
+
+    // Persisted on the row (core/db roundtrip).
+    const row = await requireSession(dbClient.db, workspaceId, created.id);
+    expect(row.instructions).toBe("You are the PR-reviewer persona: be terse and cite files.");
+
+    // It must NEVER surface as a timeline event, and no payload may carry it.
+    const events = await listSessionEvents(dbClient.db, workspaceId, created.id);
+    expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+    const serialized = JSON.stringify(events.map((event) => event.payload));
+    expect(serialized).not.toContain("PR-reviewer persona");
+
+    // Absent instructions read back as null (byte-identical to today).
+    const plain = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({ initialMessage: "no instructions", model: "scripted-model" }),
+      headers: { "content-type": "application/json" },
+    });
+    const plainSession = await plain.json() as { id: string; instructions: string | null };
+    expect(plainSession.instructions).toBeNull();
+  });
+
   test("create idempotency key dedups double-submit and concurrent creates to one session over the API", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({

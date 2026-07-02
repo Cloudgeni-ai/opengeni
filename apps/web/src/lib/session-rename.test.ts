@@ -25,6 +25,7 @@ function session(patch: Partial<Session> = {}): Session {
     initialMessage: "Inspect the repo",
     title: null,
     titleSource: null,
+    instructions: null,
     resources: [],
     tools: [],
     metadata: {},
