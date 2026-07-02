@@ -52,8 +52,11 @@ export type MessageTimelineProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
+  /** Older durable history exists above the current window (see useSessionEvents). */
   hasOlder?: boolean | undefined;
+  /** An older window is being fetched; shows the quiet top shimmer. */
   loadingOlder?: boolean | undefined;
+  /** Called when the reader nears the top and older history should backfill. */
   onLoadOlder?: (() => void) | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
@@ -85,10 +88,9 @@ export function MessageTimeline({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
-  const previousLayoutRef = useRef<{ scrollHeight: number; firstKey: string | null } | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
-<<<<<<< HEAD
+  const [bulkActive, setBulkActive] = useState(true);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
   const pinnedRef = useRef(true);
@@ -97,17 +99,18 @@ export function MessageTimeline({
   // height change, it lets us hold the reader's position when content above the
   // viewport expands or collapses (e.g. a turn folds when it settles).
   const anchorRef = useRef<{ el: Element; top: number } | null>(null);
-=======
-  const [bulkActive, setBulkActive] = useState(true);
->>>>>>> ccb5cba (feat: tail-first session loading with density-driven reverse pagination)
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming = lastItem !== undefined && (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") && lastItem.streaming;
   const working = status === "running" && !streaming;
+  // Bulk paints (the initial tail window, a prepended older window — detected
+  // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk = previousBulkFirstKeyRef.current !== undefined && previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = groups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
-  // later reflow can restore it to the same spot.
+  // later reflow can restore it to the same spot. Transient chrome (the backfill
+  // sentinel and shimmer) is skipped — anchoring to a row that unmounts when the
+  // older window lands would drop the correction mid-prepend.
   const captureAnchor = useCallback(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -117,6 +120,9 @@ export function MessageTimeline({
     }
     const containerTop = node.getBoundingClientRect().top;
     for (const child of Array.from(inner.children)) {
+      if (child instanceof HTMLElement && child.dataset.ogTimelineChrome !== undefined) {
+        continue;
+      }
       const rect = child.getBoundingClientRect();
       if (rect.bottom > containerTop + 1) {
         anchorRef.current = { el: child, top: rect.top - containerTop };
@@ -127,20 +133,17 @@ export function MessageTimeline({
   }, []);
 
   // Follow the stream while pinned to the bottom; never fight the reader.
+  // A LAYOUT effect so the very first paint of a freshly loaded session is
+  // already anchored at the bottom — no visible traversal down the history.
   useLayoutEffect(() => {
     const node = scrollRef.current;
-    if (!node) {
-      return;
-    }
-    const previous = previousLayoutRef.current;
-    if (autoFollow && pinned) {
+    if (node && autoFollow && pinned) {
       node.scrollTop = node.scrollHeight;
-    } else if (previous && previous.firstKey !== firstGroupKey) {
-      node.scrollTop += node.scrollHeight - previous.scrollHeight;
     }
-    previousLayoutRef.current = { scrollHeight: node.scrollHeight, firstKey: firstGroupKey };
-  }, [groups, firstGroupKey, working, autoFollow, pinned]);
+  }, [resolvedItems, working, autoFollow, pinned]);
 
+  // Clear the bulk-paint marker a frame after it renders, so rows appended
+  // live (streams, new turns) animate exactly as before.
   useLayoutEffect(() => {
     previousBulkFirstKeyRef.current = firstGroupKey;
     if (!bulkRender) {
@@ -151,6 +154,10 @@ export function MessageTimeline({
     return () => cancelFrame(frame);
   }, [bulkRender, firstGroupKey]);
 
+  // Prefetch older history well before the reader reaches the top: the
+  // sentinel sits above the first group and trips 1600px early, so backfill
+  // is usually rendered (and anchored by the ResizeObserver below) before the
+  // top of the window ever becomes visible.
   useEffect(() => {
     const root = scrollRef.current;
     const target = topSentinelRef.current;
@@ -161,10 +168,7 @@ export function MessageTimeline({
       if (entries.some((entry) => entry.isIntersecting)) {
         onLoadOlder();
       }
-    }, {
-      root,
-      rootMargin: "1600px 0px 0px 0px",
-    });
+    }, { root, rootMargin: "1600px 0px 0px 0px" });
     observer.observe(target);
     return () => observer.disconnect();
   }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
@@ -224,9 +228,9 @@ export function MessageTimeline({
           {groups.length === 0 && !working
             ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)
             : null}
-          {hasOlder ? <div ref={topSentinelRef} data-og-top-sentinel="" aria-hidden="true" className="h-px w-full shrink-0" /> : null}
+          {hasOlder ? <div ref={topSentinelRef} data-og-top-sentinel="" data-og-timeline-chrome="" aria-hidden="true" className="h-px w-full shrink-0" /> : null}
           {loadingOlder ? (
-            <div className="flex items-center gap-2 text-sm">
+            <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
               <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
             </div>
           ) : null}
