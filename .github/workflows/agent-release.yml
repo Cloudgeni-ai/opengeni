@@ -210,6 +210,73 @@ jobs:
         if: matrix.kind == 'macos' && steps.creds.outputs.has_macos != 'true'
         run: echo "::notice::macOS binary is UNSIGNED (no Apple Developer ID secret) — minisign-attested only. Gatekeeper warns on a fresh download (category-4, see dossier §24.3)."
 
+      # ---- macOS app bundle: assemble + Developer-ID sign + notarize (guarded). ----
+      # WHY a bundle in addition to the bare binary: macOS TCC (Screen Recording /
+      # Accessibility) grants attach to the code-signing identity + bundle id. A
+      # Developer-ID-signed + notarized .app has a STABLE identity, so its grants
+      # SURVIVE agent updates — the bare binary (or a locally-assembled ad-hoc
+      # bundle) cannot offer that. install.sh prefers this asset when the release
+      # serves it. Guarded on the Apple creds so it lights up exactly when signing +
+      # notarization are possible; absent → install.sh assembles an ad-hoc bundle
+      # locally and this asset simply does not exist (installer handles that).
+      - name: macOS assemble + sign + notarize .app bundle (if creds present)
+        if: matrix.kind == 'macos' && steps.creds.outputs.has_macos == 'true'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ASC_KEY: ${{ secrets.APPLE_ASC_KEY }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="OpenGeni Agent.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS"
+          # The universal binary built above becomes the bundle's executable. Its
+          # CFBundleExecutable is `opengeni-agent` (matches install.sh's local path).
+          cp "${{ matrix.asset }}" "$APP/Contents/MacOS/opengeni-agent"
+          chmod 0755 "$APP/Contents/MacOS/opengeni-agent"
+          # Info.plist kept in sync with install.sh's write_info_plist (same keys +
+          # STABLE bundle id ai.opengeni.agent; LSUIElement hides the Dock icon).
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key><string>OpenGeni Agent</string>
+              <key>CFBundleDisplayName</key><string>OpenGeni Agent</string>
+              <key>CFBundleIdentifier</key><string>ai.opengeni.agent</string>
+              <key>CFBundleExecutable</key><string>opengeni-agent</string>
+              <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+              <key>CFBundleVersion</key><string>${VERSION}</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>LSUIElement</key><true/>
+              <key>LSMinimumSystemVersion</key><string>12.0</string>
+          </dict>
+          </plist>
+          PLIST
+          # rcodesign is installed by the prior codesign step; ensure it regardless.
+          cargo install --locked apple-codesign || true
+          echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
+          # Sign the WHOLE bundle with the hardened runtime + the stable identifier.
+          rcodesign sign --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
+            --code-signature-flags runtime --identifier ai.opengeni.agent "$APP"
+          # Zip with the .app dir as the archive root (install.sh extracts into
+          # ~/Applications and expects exactly that layout).
+          ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"
+          echo "$APPLE_ASC_KEY" > /tmp/asc.json
+          # Notarize the zip; on success STAPLE the ticket into the .app and re-zip
+          # so Gatekeeper passes offline. A notarization failure is non-fatal — ship
+          # the signed-but-unstapled bundle with a loud warning (category-4 posture).
+          if rcodesign notary-submit --api-key-path /tmp/asc.json --wait "OpenGeni-Agent.app.zip"; then
+            rcodesign staple "$APP" || echo "::warning::rcodesign staple failed; bundle is notarized but not stapled"
+            rm -f "OpenGeni-Agent.app.zip"
+            ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"
+          else
+            echo "::warning::bundle notarization failed; shipping signed-but-unnotarized OpenGeni-Agent.app.zip"
+          fi
+          rm -f /tmp/cert.p12 /tmp/asc.json
+
       # ---- Windows Authenticode (POLISH, guarded). ----
       - name: Windows Authenticode (if cert present)
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows == 'true'
@@ -259,6 +326,17 @@ jobs:
           else
             shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
           fi
+          # macOS: the notarized .app bundle (produced above only when Apple creds
+          # are present) gets the SAME minisign + sha256 sidecars so install.sh
+          # verifies it through the identical two gates as the bare binary.
+          if [ -f "OpenGeni-Agent.app.zip" ]; then
+            rsign sign -W -s /tmp/minisign.key -x "OpenGeni-Agent.app.zip.minisig" "OpenGeni-Agent.app.zip"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "OpenGeni-Agent.app.zip" > "OpenGeni-Agent.app.zip.sha256"
+            else
+              shasum -a 256 "OpenGeni-Agent.app.zip" > "OpenGeni-Agent.app.zip.sha256"
+            fi
+          fi
           rm -f /tmp/minisign.key
 
       - name: minisign missing note
@@ -283,6 +361,9 @@ jobs:
             ${{ matrix.asset }}
             ${{ matrix.asset }}.sha256
             ${{ matrix.asset }}.minisig
+            OpenGeni-Agent.app.zip
+            OpenGeni-Agent.app.zip.sha256
+            OpenGeni-Agent.app.zip.minisig
           if-no-files-found: warn
 
   # The publish job needs ALL builds, so NO partial release. It assembles the

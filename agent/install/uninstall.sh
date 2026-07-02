@@ -66,11 +66,23 @@ if [ -x "$bin" ]; then
   fi
 fi
 
-# Remove the binary.
-if [ -e "$bin" ]; then
+# Remove the binary. On macOS this path is a SYMLINK into the app bundle (see
+# install.sh); `rm -f` drops the symlink itself, not its target — the bundle is
+# removed separately below.
+if [ -e "$bin" ] || [ -L "$bin" ]; then
   rm -f "$bin" && log "removed $bin"
 else
   log "no binary found at $bin (already removed?)"
+fi
+
+# macOS: the installer puts the real binary in an app bundle under ~/Applications
+# (the code-signing identity that carries the TCC grants). Uninstall is explicit
+# user intent, so remove the whole bundle — ad-hoc or Developer-ID signed alike.
+if [ "$(uname -s)" = "Darwin" ]; then
+  app="${HOME}/Applications/OpenGeni Agent.app"
+  if [ -d "$app" ]; then
+    rm -rf "$app" && log "removed $app"
+  fi
 fi
 
 # Purge credentials only when asked.

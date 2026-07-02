@@ -51,6 +51,24 @@
 #                              via clap ($OPENGENI_WORKSPACE_ID); the one-liner
 #                              from the Machines page sets it so no UUID is typed.
 #                              Not used on the OPENGENI_ENROLL_TOKEN path.
+#   OPENGENI_INSTALL_REPLACE_APP=1  macOS only. Force-replace an EXISTING
+#                              Developer-ID/Apple-Development-signed
+#                              "OpenGeni Agent.app" bundle. Off by default: a
+#                              non-ad-hoc bundle holds the user's Screen
+#                              Recording / Accessibility (TCC) grants, and any
+#                              binary swap breaks them, so the installer preserves
+#                              it and only re-points the CLI symlink unless this is
+#                              set. (An ad-hoc bundle — our own prior install — is
+#                              always replaced in place: its grants break on any
+#                              update regardless.)
+#
+# macOS install shape. On macOS the verified binary is installed INSIDE an app
+# bundle at "$HOME/Applications/OpenGeni Agent.app" (a STABLE CFBundleIdentifier,
+# ai.opengeni.agent) and ~/.local/bin/opengeni-agent is a SYMLINK into that bundle
+# — one code-signing identity for both the CLI and the background app. macOS TCC
+# (Screen Recording / Accessibility) grants attach to that identity + bundle id, so
+# the agent's screen/computer-use features work from either entry point. The two
+# system permission prompts fire at `opengeni-agent enroll`, not on first use.
 #
 # Immutable-per-version + GH-Releases fallback. The edge serves the latest
 # release at $BASE/install.sh and immutable copies at $BASE/v/<ver>/install.sh.
@@ -88,6 +106,19 @@ OPENGENI_MINISIGN_PUBKEY='RWSaqgF1EVFuci7hXvDJO7cBh2xf2k0XKhCpvl23aWKG+nMAGfZ6D2
 OPENGENI_INSTALL_DEFAULT_BASE_URL="https://get.opengeni.ai"
 BASE_URL="${OPENGENI_INSTALL_BASE_URL:-$OPENGENI_INSTALL_DEFAULT_BASE_URL}"
 VERSION="${OPENGENI_AGENT_VERSION:-latest}"
+
+# --- macOS app-bundle identity (constants) -----------------------------------
+# The bundle id is the STABLE anchor for macOS TCC (Screen Recording /
+# Accessibility) grants: the OS keys a grant to the code-signing identity + bundle
+# id, so this MUST NOT change across releases or the user re-approves every update.
+# It matches the id the release workflow signs the notarized bundle with and the
+# id the agent's enroll-time preflight prompts under.
+OPENGENI_APP_BUNDLE_ID="ai.opengeni.agent"
+OPENGENI_APP_NAME="OpenGeni Agent"
+# The optional prebuilt bundle asset the release serves once Apple secrets are set
+# (a Developer-ID-signed + notarized .app zipped with its .app dir as the archive
+# root). Absent today → the installer assembles an ad-hoc bundle locally instead.
+OPENGENI_APP_BUNDLE_ASSET="OpenGeni-Agent.app.zip"
 
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }
 err()  { printf '%s\n' "opengeni-install: ERROR: $*" >&2; }
@@ -271,9 +302,187 @@ resolve_install_dir() {
   echo "${HOME}/.local/bin"
 }
 
+# --- macOS app-bundle helpers ------------------------------------------------
+# Everything below is only ever called on Darwin (main() branches on `uname -s`),
+# so it may lean on macOS-guaranteed tools (codesign, ditto, unzip).
+
+# The CFBundleShortVersionString for the assembled bundle. Prefer a pinned VERSION;
+# on "latest" ask the (already verified) binary; else a neutral placeholder — the
+# version is cosmetic, the bundle id (not the version) anchors the TCC grant.
+resolve_app_version() {
+  _bin="$1"
+  if [ "$VERSION" != "latest" ]; then printf '%s' "$VERSION"; return; fi
+  _v="$("$_bin" --version 2>/dev/null | awk 'NR==1{print $NF}')"
+  if [ -n "$_v" ]; then printf '%s' "$_v"; else printf '%s' "0.0.0"; fi
+}
+
+# Write the bundle's Info.plist. LSUIElement=true keeps the background agent out of
+# the Dock. Kept in sync with the release workflow's plist (same keys + bundle id).
+write_info_plist() {
+  _plist="$1"; _ver="$2"
+  cat > "$_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>$OPENGENI_APP_NAME</string>
+    <key>CFBundleDisplayName</key><string>$OPENGENI_APP_NAME</string>
+    <key>CFBundleIdentifier</key><string>$OPENGENI_APP_BUNDLE_ID</string>
+    <key>CFBundleExecutable</key><string>opengeni-agent</string>
+    <key>CFBundleShortVersionString</key><string>$_ver</string>
+    <key>CFBundleVersion</key><string>$_ver</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>LSUIElement</key><true/>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+</dict>
+</plist>
+PLIST
+}
+
+# True iff an app bundle exists AND carries a NON-ad-hoc code signature (a real
+# Apple identity — Developer ID / Apple Development — so a TeamIdentifier is set).
+# WHY it matters: such a bundle HOLDS the user's TCC grants; replacing its binary
+# breaks them (TCC keys on the identity/cdhash) and forces a re-approve. So we
+# never overwrite one. An ad-hoc bundle (`Signature=adhoc`, `TeamIdentifier=not
+# set` — our own prior install) is safe to replace in place: its grants break on
+# any binary update regardless of what we do.
+macos_bundle_is_signed_nonadhoc() {
+  _app="$1"
+  [ -d "$_app" ] || return 1
+  command -v codesign >/dev/null 2>&1 || return 1
+  _info="$(codesign -dv "$_app" 2>&1)" || return 1
+  case "$_info" in *Signature=adhoc*) return 1 ;; esac
+  case "$_info" in *"TeamIdentifier=not set"*) return 1 ;; esac
+  case "$_info" in *TeamIdentifier=*) return 0 ;; esac
+  return 1
+}
+
+# Point the CLI symlink at the bundle's binary and echo its path.
+# WHY a symlink INTO the bundle (not a second copy): the CLI (`opengeni-agent …`)
+# and the background app must be the SAME binary / code-signing identity. A second
+# copy would have its own cdhash → its own (missing) TCC grants → screen capture
+# silently fails from the CLI. The symlink guarantees the process the user runs is
+# the exact signed binary that holds the grants.
+link_macos_cli() {
+  _app="$1"; _install_dir="$2"
+  mkdir -p "$_install_dir" 2>/dev/null || die 2 "cannot create install dir $_install_dir"
+  ln -sf "$_app/Contents/MacOS/opengeni-agent" "$_install_dir/opengeni-agent"
+  printf '%s' "$_install_dir/opengeni-agent"
+}
+
+# Assemble an ad-hoc-signed app bundle around the verified binary and symlink the
+# CLI into it. Echoes the CLI path on stdout (logs go to stderr via log()).
+install_macos_local_bundle() {
+  _bin="$1"; _install_dir="$2"
+  _app="$HOME/Applications/$OPENGENI_APP_NAME.app"
+
+  # Preserve a real-Apple-signed bundle unless explicitly told to replace it.
+  if macos_bundle_is_signed_nonadhoc "$_app"; then
+    if [ "${OPENGENI_INSTALL_REPLACE_APP:-0}" != "1" ]; then
+      log "kept the existing signed \"$OPENGENI_APP_NAME.app\" (its signature holds your macOS Screen Recording/Accessibility grants). Set OPENGENI_INSTALL_REPLACE_APP=1 to replace it."
+      link_macos_cli "$_app" "$_install_dir"
+      return 0
+    fi
+    log "OPENGENI_INSTALL_REPLACE_APP=1 — replacing the existing signed app bundle"
+  fi
+
+  # Assemble fresh. Reached only for an absent bundle, an ad-hoc bundle (safe to
+  # replace), or an explicit forced replace.
+  rm -rf "$_app"
+  mkdir -p "$_app/Contents/MacOS" || die 2 "cannot create $_app"
+  cp "$_bin" "$_app/Contents/MacOS/opengeni-agent" || die 2 "cannot populate $_app"
+  chmod 0755 "$_app/Contents/MacOS/opengeni-agent"
+  write_info_plist "$_app/Contents/Info.plist" "$(resolve_app_version "$_app/Contents/MacOS/opengeni-agent")"
+
+  # Ad-hoc sign the WHOLE bundle with the stable identifier (codesign ships with
+  # macOS). `--force` re-signs cleanly; a failure is non-fatal (the agent still
+  # runs) but is called out because it means macOS may re-prompt for permissions.
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --sign - --identifier "$OPENGENI_APP_BUNDLE_ID" "$_app" >/dev/null 2>&1 \
+      || log "warning: ad-hoc codesign failed; the app runs but macOS may re-prompt for permissions"
+  else
+    log "warning: codesign not found (unexpected on macOS); skipping ad-hoc signing"
+  fi
+  log "installed app bundle at $_app"
+  link_macos_cli "$_app" "$_install_dir"
+}
+
+# Non-fatal probe: does the release serve the prebuilt bundle asset? A successful
+# fetch of its small .sha256 sidecar means yes; any failure (404 / redirect to a
+# missing GitHub asset) means no → we assemble locally. NEVER die here.
+bundle_asset_available() {
+  _url="$(asset_url "$OPENGENI_APP_BUNDLE_ASSET").sha256"
+  _probe="$TMPDIR_OG/bundle-probe.sha256"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$_url" -o "$_probe" 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$_url" -O "$_probe" 2>/dev/null
+  else
+    return 1
+  fi
+}
+
+# Download + verify (BOTH gates) + install the prebuilt Developer-ID/notarized
+# bundle. Preferred over local assembly when available because its grants SURVIVE
+# updates (a stable Apple identity), which an ad-hoc bundle cannot offer. Echoes
+# the CLI path on stdout.
+install_macos_prebuilt_bundle() {
+  _install_dir="$1"
+  _zip_url="$(asset_url "$OPENGENI_APP_BUNDLE_ASSET")"
+  _zip="$TMPDIR_OG/$OPENGENI_APP_BUNDLE_ASSET"
+  _zip_sha="$_zip.sha256"
+  _zip_sig="$_zip.minisig"
+
+  log "downloading prebuilt bundle $OPENGENI_APP_BUNDLE_ASSET + checksum + signature"
+  fetch "$_zip_url" "$_zip" || die 3 "failed to download $_zip_url"
+  fetch "${_zip_url}.sha256" "$_zip_sha" || die 3 "failed to download ${_zip_url}.sha256"
+  fetch "${_zip_url}.minisig" "$_zip_sig" || die 3 "failed to download ${_zip_url}.minisig"
+
+  # SAME two gates as the bare binary: checksum then pinned-key minisign.
+  want="$(cut -d' ' -f1 < "$_zip_sha")"
+  got="$(sha256_of "$_zip")"
+  if [ "$want" != "$got" ]; then
+    err "checksum mismatch for the bundle: expected $want got $got"
+    exit 4
+  fi
+  log "sha256 checksum OK (bundle)"
+  verify_signature "$_zip" "$_zip_sig"
+
+  _apps="$HOME/Applications"
+  _app="$_apps/$OPENGENI_APP_NAME.app"
+  if macos_bundle_is_signed_nonadhoc "$_app" && [ "${OPENGENI_INSTALL_REPLACE_APP:-0}" != "1" ]; then
+    log "kept the existing signed \"$OPENGENI_APP_NAME.app\" (its signature holds your macOS grants). Set OPENGENI_INSTALL_REPLACE_APP=1 to replace it."
+  else
+    mkdir -p "$_apps" || die 2 "cannot create $_apps"
+    rm -rf "$_app"
+    # ditto/unzip both ship with macOS; the archive's root entry is the .app dir.
+    if command -v ditto >/dev/null 2>&1; then
+      ditto -x -k "$_zip" "$_apps" || die 3 "failed to extract the app bundle"
+    else
+      unzip -oq "$_zip" -d "$_apps" || die 3 "failed to extract the app bundle"
+    fi
+    log "installed notarized app bundle at $_app"
+  fi
+  link_macos_cli "$_app" "$_install_dir"
+}
+
 main() {
   asset="$(detect_asset)"
   TMPDIR_OG="$(mktemp -d 2>/dev/null || mktemp -d -t opengeni)"
+  os="$(uname -s)"
+
+  # macOS: prefer a prebuilt Developer-ID + notarized bundle when the release serves
+  # one — its TCC grants survive updates. Absent today (Apple secrets unset) → fall
+  # through to the bare-binary download + local ad-hoc bundle assembly below.
+  if [ "$os" = "Darwin" ] && bundle_asset_available; then
+    log "prebuilt macOS bundle available; installing it (version: $VERSION) from $BASE_URL"
+    install_dir="$(resolve_install_dir)"
+    dest="$(install_macos_prebuilt_bundle "$install_dir")"
+    path_hint "$install_dir"
+    finish "$dest"
+    return 0
+  fi
+
   log "installing $asset (version: $VERSION) from $BASE_URL"
 
   bin_url="$(asset_url "$asset")"
@@ -301,22 +510,33 @@ main() {
   # GATE 2: minisign signature against the pinned key (fail-closed, no skip).
   verify_signature "$bin_tmp" "$sig_tmp"
 
-  # Atomic install: chmod then rename into place so a re-install never leaves a
-  # half-written binary on PATH.
   install_dir="$(resolve_install_dir)"
-  mkdir -p "$install_dir" 2>/dev/null || die 2 "cannot create install dir $install_dir"
-  dest="$install_dir/opengeni-agent"
-  chmod 0755 "$bin_tmp"
-  mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
-  log "installed verified binary to $dest"
+  if [ "$os" = "Darwin" ]; then
+    # macOS: install the verified binary INSIDE an ad-hoc-signed app bundle and make
+    # the CLI a symlink into it, so CLI + background app share ONE code-signing
+    # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
+    dest="$(install_macos_local_bundle "$bin_tmp" "$install_dir")"
+  else
+    # Linux: atomic install — chmod then rename into place so a re-install never
+    # leaves a half-written binary on PATH.
+    mkdir -p "$install_dir" 2>/dev/null || die 2 "cannot create install dir $install_dir"
+    dest="$install_dir/opengeni-agent"
+    chmod 0755 "$bin_tmp"
+    mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
+    log "installed verified binary to $dest"
+  fi
 
-  # PATH hint (the current shell is not refreshed).
-  case ":${PATH}:" in
-    *":$install_dir:"*) : ;;
-    *) log "NOTE: add $install_dir to your PATH:  export PATH=\"$install_dir:\$PATH\"" ;;
-  esac
-
+  path_hint "$install_dir"
   finish "$dest"
+}
+
+# PATH hint (the current shell is not refreshed by an install).
+path_hint() {
+  _install_dir="$1"
+  case ":${PATH}:" in
+    *":$_install_dir:"*) : ;;
+    *) log "NOTE: add $_install_dir to your PATH:  export PATH=\"$_install_dir:\$PATH\"" ;;
+  esac
 }
 
 # Print the enroll+run instructions, or — in CI mode — enroll non-interactively.
@@ -341,16 +561,16 @@ finish() {
     return 0
   fi
 
-  printf '%s\n' "opengeni-agent installed at: $_bin"
-  printf '%s\n' ""
-  printf '%s\n' "Next steps (the agent runs in the FOREGROUND — it does NOT install a service):"
+  # Concise post-install: at most 3 short lines, one clear next command. The
+  # always-on service + uninstall hints fold into a single `--help` pointer.
+  #
   # The interactive device-flow enroll needs the workspace id (and, for a
-  # non-default deployment, the api url). When this script ran as `curl | sh`,
-  # those env vars existed ONLY for this piped process — they do NOT survive
-  # into the user's interactive shell, and the pipe has no TTY so we cannot run
-  # the interactive enroll here. So a bare `enroll` they paste later would fail
-  # with "enrollment requires a workspace id". Bake the known values into the
-  # command we print so it is copy-paste correct.
+  # non-default deployment, the api url). When this ran as `curl | sh`, those env
+  # vars existed ONLY for this piped process — they do NOT survive into the user's
+  # shell, and the pipe has no TTY so we cannot enroll here. So a bare `enroll`
+  # they paste later would fail with "enrollment requires a workspace id". When we
+  # know them, bake them into the printed command so the copy-paste is correct;
+  # otherwise the single next step is exactly `opengeni-agent enroll`.
   _enroll_env=""
   if [ -n "${OPENGENI_WORKSPACE_ID:-}" ]; then
     _enroll_env="OPENGENI_WORKSPACE_ID=$OPENGENI_WORKSPACE_ID"
@@ -362,17 +582,13 @@ finish() {
       _enroll_env="OPENGENI_API_URL=$OPENGENI_API_URL"
     fi
   fi
+  printf '%s\n' "opengeni-agent installed."
   if [ -n "$_enroll_env" ]; then
-    printf '%s\n' "  1. Enroll this machine:"
-    printf '%s\n' "       $_enroll_env \"$_bin\" enroll"
+    printf '%s\n' "Next: $_enroll_env $_bin enroll   (then: $_bin run)"
   else
-    printf '%s\n' "  1. Enroll this machine:   $_bin enroll"
+    printf '%s\n' "Next: $_bin enroll   (then: $_bin run)"
   fi
-  printf '%s\n' "  2. Run it (online while this runs, offline when you stop it):"
-  printf '%s\n' "       $_bin run"
-  printf '%s\n' ""
-  printf '%s\n' "Want an always-on machine instead? That is opt-in:  $_bin service install"
-  printf '%s\n' "Uninstall any time:  $_bin uninstall   (or curl -fsSL $BASE_URL/uninstall.sh | sh)"
+  printf '%s\n' "Always-on service, uninstall, and more: $_bin --help"
 
   # Only auto-start a foreground run when on a real TTY and not opted out.
   if [ "${OPENGENI_NO_RUN:-0}" != "1" ] && [ -t 0 ]; then
