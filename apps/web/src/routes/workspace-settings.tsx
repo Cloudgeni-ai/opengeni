@@ -23,9 +23,10 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -34,8 +35,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import {
@@ -68,9 +72,11 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
+  const [apiKeysLoaded, setApiKeysLoaded] = useState(false);
   const [apiKeyName, setApiKeyName] = useState("Default API key");
   const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(() => new Set(defaultApiKeyPermissions));
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
   const canManageApiKeys = hasWorkspacePermission(context.accessContext, workspaceId, "api_keys:manage");
   const workspaceGrant = context.accessContext.workspaceGrants.find((grant) => grant.workspaceId === workspaceId) ?? null;
@@ -92,6 +98,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     if (!canManageApiKeys) {
       setApiKeys([]);
       setApiKeysError(null);
+      setApiKeysLoaded(true);
       return;
     }
     try {
@@ -100,6 +107,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     } catch (error) {
       setApiKeys([]);
       setApiKeysError(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      setApiKeysLoaded(true);
     }
   }
 
@@ -137,6 +146,15 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       toast.error("Failed to create API key", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function copyToken(token: string) {
+    try {
+      await navigator.clipboard.writeText(token);
+      toast.success("Token copied");
+    } catch {
+      toast.error("Couldn't copy the token", { description: "Copy it manually instead." });
     }
   }
 
@@ -251,15 +269,20 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             <p className="mt-1 text-xs text-fg-muted">Workspace-scoped keys for calling OpenGeni from another product.</p>
           </div>
           {createdToken ? (
-            <div className="rounded-md border border-status-idle/30 bg-status-idle/10 p-3">
-              <div className="text-xs font-medium text-status-idle">Token shown once</div>
+            <Notice tone="success" title="Copy this token now — it won't be shown again.">
               <div className="mt-2 flex min-w-0 items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs">{createdToken}</code>
-                <Button type="button" variant="ghost" size="icon-sm" onClick={() => void navigator.clipboard.writeText(createdToken)}>
+                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 text-xs text-fg">{createdToken}</code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Copy token"
+                  onClick={() => void copyToken(createdToken)}
+                >
                   <CopyIcon className="size-3.5" />
                 </Button>
               </div>
-            </div>
+            </Notice>
           ) : null}
           {canManageApiKeys ? (
             <>
@@ -284,20 +307,35 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
               />
             </>
           ) : (
-            <p className="text-xs text-fg-subtle">This subject cannot manage API keys for this workspace.</p>
+            <p className="text-xs text-fg-subtle">You don't have permission to manage API keys here.</p>
           )}
           <div className="grid gap-2">
             {apiKeysError ? (
               <LoadErrorState title="Couldn't load API keys" error={apiKeysError} onRetry={() => void refreshApiKeys()} />
+            ) : !apiKeysLoaded ? (
+              <>
+                {[0, 1].map((key) => (
+                  <div key={key} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
+                    <div className="min-w-0 space-y-1.5">
+                      <Skeleton className="h-4 w-32" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                    <Skeleton className="h-8 w-20 rounded-md" />
+                  </div>
+                ))}
+              </>
             ) : apiKeys.length === 0 ? (
-              <EmptyState>No API keys.</EmptyState>
+              <EmptyState
+                title="No API keys yet"
+                description={canManageApiKeys ? "Create one above to call OpenGeni from another product." : "Keys created here call OpenGeni from another product."}
+              />
             ) : apiKeys.map((apiKey) => (
               <div key={apiKey.id} className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-bg/35 px-3 py-2">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">{apiKey.name}</div>
-                  <div className="mt-1 truncate text-xs text-fg-subtle">{apiKey.prefix}... · {apiKey.revokedAt ? "revoked" : "active"}</div>
+                  <div className="mt-1 truncate text-xs text-fg-subtle">{apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}</div>
                 </div>
-                <Button type="button" variant="ghost" size="sm" disabled={busy || Boolean(apiKey.revokedAt)} onClick={() => void revokeKey(apiKey.id)}>
+                <Button type="button" variant="ghost" size="sm" disabled={busy || Boolean(apiKey.revokedAt)} onClick={() => setRevokingKey(apiKey)}>
                   <Trash2Icon className="size-3.5" />
                   Revoke
                 </Button>
@@ -305,6 +343,19 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             ))}
           </div>
         </section>
+
+        <ConfirmDialog
+          open={revokingKey !== null}
+          onOpenChange={(next) => setRevokingKey(next ? revokingKey : null)}
+          title={`Revoke API key “${revokingKey?.name ?? ""}”?`}
+          description={`Any product calling OpenGeni with ${revokingKey?.prefix ?? ""}… stops working immediately. This can't be undone.`}
+          confirmLabel="Revoke key"
+          onConfirm={async () => {
+            if (revokingKey) {
+              await revokeKey(revokingKey.id);
+            }
+          }}
+        />
 
         {/* Danger zone */}
         <DangerZone
@@ -329,6 +380,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [editPermissions, setEditPermissions] = useState<Set<string>>(() => new Set());
+  const [removingMember, setRemovingMember] = useState<WorkspaceMember | null>(null);
   const callerSubjectId = context.accessContext.subjectId;
 
   // Only USER subjects are people; api_key subjects belong to the API keys
@@ -414,9 +466,6 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
   }
 
   async function removeMember(member: WorkspaceMember) {
-    if (!window.confirm(`Remove ${member.subjectLabel ?? member.subjectId} from this workspace?`)) {
-      return;
-    }
     setBusy(true);
     try {
       await client.removeWorkspaceMember(workspaceId, member.subjectId);
@@ -473,7 +522,10 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
             Loading members
           </div>
         ) : userMembers.length === 0 ? (
-          <EmptyState>No people have access yet.</EmptyState>
+          <EmptyState
+            title="Only you have access"
+            description={canManage ? "Add a teammate by email above to share this workspace." : undefined}
+          />
         ) : userMembers.map((member) => (
           <div key={member.subjectId} className="grid gap-2 rounded-lg border border-border bg-bg/35 px-3 py-2">
             <div className="flex min-w-0 items-center justify-between gap-3">
@@ -492,7 +544,7 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
                     <ChevronDownIcon className={`size-3.5 transition-transform ${editing === member.subjectId ? "rotate-180" : ""}`} />
                     Edit
                   </Button>
-                  <Button type="button" variant="ghost" size="sm" disabled={busy || member.subjectId === callerSubjectId} onClick={() => void removeMember(member)}>
+                  <Button type="button" variant="ghost" size="sm" disabled={busy || member.subjectId === callerSubjectId} onClick={() => setRemovingMember(member)}>
                     <Trash2Icon className="size-3.5" />
                     Remove
                   </Button>
@@ -518,6 +570,19 @@ function MembersSection({ workspaceId, canManage }: { workspaceId: string; canMa
           </div>
         ))}
       </div>
+
+      <ConfirmDialog
+        open={removingMember !== null}
+        onOpenChange={(next) => setRemovingMember(next ? removingMember : null)}
+        title={`Remove ${removingMember?.subjectLabel ?? removingMember?.subjectId ?? ""} from this workspace?`}
+        description="They lose access to this workspace immediately. You can add them again later."
+        confirmLabel="Remove access"
+        onConfirm={async () => {
+          if (removingMember) {
+            await removeMember(removingMember);
+          }
+        }}
+      />
     </section>
   );
 }

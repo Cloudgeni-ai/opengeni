@@ -33,6 +33,7 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
   const organizationLabel = accountId ? orgLabel(accountId, context.accessContext.accountGrants) : "Organization";
   const [billing, setBilling] = useState<BillingSummary | null>(null);
   const [billingError, setBillingError] = useState<Error | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
   const [entitlements, setEntitlements] = useState<BillingEntitlementsResponse | null>(null);
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [topupAmount, setTopupAmount] = useState("25.00");
@@ -71,12 +72,15 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
       setBillingError(null);
       return;
     }
+    setBillingLoading(true);
     try {
       setBilling(await client.getBilling({ accountId }));
       setBillingError(null);
     } catch (error) {
       setBilling(null);
       setBillingError(error instanceof Error ? error : new Error(String(error)));
+    } finally {
+      setBillingLoading(false);
     }
   }
 
@@ -145,14 +149,16 @@ export function OrgSettingsRoute({ workspaceId, checkout }: { workspaceId: strin
           <div className="flex items-center justify-between gap-3">
             <div>
               <h2 className="text-sm font-medium">Credits</h2>
-              <p className="mt-1 text-xs text-fg-muted">
+              <p className="mt-1 flex items-center gap-1.5 text-xs text-fg-muted">
                 {billing
                   ? `${formatMoneyMicros(billing.balance.balanceMicros, billing.balance.currency)} available`
                   : !canReadBilling || !accountId
-                    ? "This subject cannot read billing for the organization."
+                    ? "You don't have permission to view billing."
                     : billingError
-                      ? "Billing balance failed to load."
-                      : "Billing balance unavailable"}
+                      ? "Couldn't load your balance"
+                      : billingLoading
+                        ? <><Loader2Icon className="size-3.5 animate-spin" />Loading balance…</>
+                        : "Billing balance unavailable"}
               </p>
             </div>
             <span className="rounded-full border border-border px-2 py-1 text-xs text-fg-muted">
@@ -258,7 +264,7 @@ function EntitlementsSection(props: {
       </div>
 
       {!props.enabled ? (
-        <p className="text-xs text-fg-subtle">This subject cannot read billing entitlements for the organization.</p>
+        <p className="text-xs text-fg-subtle">You don't have permission to view plan limits.</p>
       ) : props.error ? (
         <LoadErrorState title="Couldn't load entitlements" error={props.error} onRetry={props.onRetry} />
       ) : !props.entitlements ? (
@@ -298,7 +304,7 @@ function UsageSection(props: {
             <ActivityIcon className="size-3.5 text-brand" />
             Usage
           </h2>
-          <p className="mt-1 text-xs text-fg-muted">Recent metered events for this organization, straight from the billing ledger.</p>
+          <p className="mt-1 text-xs text-fg-muted">Recent metered usage for this organization.</p>
         </div>
         <Button type="button" variant="ghost" size="sm" disabled={!props.enabled || props.loading} onClick={props.onRefresh}>
           <RefreshCwIcon className={props.loading ? "size-3.5 animate-spin" : "size-3.5"} />
@@ -307,7 +313,7 @@ function UsageSection(props: {
       </div>
 
       {!props.enabled ? (
-        <p className="text-xs text-fg-subtle">This subject cannot read billing usage for the organization.</p>
+        <p className="text-xs text-fg-subtle">You don't have permission to view usage.</p>
       ) : props.error && props.usage.length === 0 ? (
         // Honest failed-load state: a failed usage read must never render as
         // "No usage recorded yet." (usage already on screen keeps rendering).
@@ -318,7 +324,7 @@ function UsageSection(props: {
           Loading usage
         </div>
       ) : props.usage.length === 0 ? (
-        <p className="text-xs text-fg-subtle">No usage recorded yet.</p>
+        <p className="text-xs text-fg-subtle">No usage recorded yet</p>
       ) : (
         <>
           <div className="flex flex-wrap gap-2">
@@ -378,10 +384,10 @@ function MembersSection(props: { workspaceId: string; canManage: boolean; subjec
           </h2>
           <p className="mt-1 text-xs text-fg-muted">Who can act in this organization.</p>
         </div>
-        <Button asChild type="button" variant="ghost" size="sm">
+        <Button asChild type="button" variant="secondary" size="sm">
           <Link to="/workspaces/$workspaceId/settings" params={{ workspaceId: props.workspaceId }}>
             <UsersIcon className="size-3.5" />
-            Manage members
+            People with access
           </Link>
         </Button>
       </div>
