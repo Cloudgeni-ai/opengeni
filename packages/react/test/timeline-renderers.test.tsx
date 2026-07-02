@@ -125,6 +125,33 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("pending queued user messages show the quiet queued hint only while pending", async () => {
+    resetTimelineEvents();
+    const pendingEvents = [
+      timelineEvent("user.message", { text: "Follow up after this turn" }, null),
+      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" }, "turn-b"),
+    ];
+    const pending = await renderComponent(<MessageTimeline events={pendingEvents} />);
+    await flush();
+
+    expect(pending.container.textContent).toContain("Follow up after this turn");
+    expect(pending.container.textContent).toContain("queued");
+    await pending.unmount();
+
+    resetTimelineEvents();
+    const anchoredEvents = [
+      timelineEvent("user.message", { text: "Follow up after this turn" }, null),
+      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-1", source: "user" }, "turn-b"),
+      timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }, "turn-b"),
+    ];
+    const anchored = await renderComponent(<MessageTimeline events={anchoredEvents} />);
+    await flush();
+
+    expect(anchored.container.textContent).toContain("Follow up after this turn");
+    expect(anchored.container.textContent).not.toContain("queued");
+    await anchored.unmount();
+  });
+
   test("duration facet renders when the settled turn lasts at least one second", async () => {
     resetTimelineEvents();
     const start = Date.UTC(2024, 5, 10, 12, 0, 0);

@@ -30,6 +30,19 @@ function event(type: string, payload: unknown, options: { turnId?: string | null
   };
 }
 
+function eventAt(sequenceNumber: number, type: string, payload: unknown, options: { turnId?: string | null } = {}): SessionEvent {
+  return {
+    id: `evt-${sequenceNumber}`,
+    workspaceId: "ws-1",
+    sessionId: "session-1",
+    sequence: sequenceNumber,
+    type,
+    payload,
+    occurredAt: new Date(1718000000000 + sequenceNumber * 1000).toISOString(),
+    turnId: options.turnId === undefined ? "turn-1" : options.turnId,
+  };
+}
+
 function reset(): void {
   sequence = 0;
 }
@@ -51,6 +64,10 @@ function activityGroups(groups: TimelineGroup[]): ActivityGroup[] {
 
 function turnGroups(groups: TimelineGroup[]): TurnGroup[] {
   return groups.filter((group): group is TurnGroup => group.kind === "turn");
+}
+
+function flattenActivityIds(group: TurnGroup | undefined): string[] {
+  return activityGroups(group?.groups ?? []).flatMap((activity) => activity.items.map((item) => item.id));
 }
 
 describe("buildTimeline", () => {
@@ -101,6 +118,135 @@ describe("buildTimeline", () => {
     ]);
     expect((items[0] as ToolCallItem).status).toBe("running");
     expect(items[1]?.kind).toBe("user-message");
+  });
+
+  test("legacy user messages with no queued turn keep their ledger position", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }, { turnId: "turn-a" }),
+      event("user.message", { text: "legacy steering" }, { turnId: null }),
+      event("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "make test" } }, { turnId: "turn-a" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["tool-call", "user-message", "tool-call"]);
+    expect((items[1] as UserMessageItem).text).toBe("legacy steering");
+  });
+
+  test("a genesis user message with queued and started events stays first", () => {
+    const items = buildTimeline([
+      eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(9, "agent.message.completed", { text: "First answer." }, { turnId: "turn-a" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message"]);
+    expect((items[0] as UserMessageItem).text).toBe("First message");
+  });
+
+  test("a queued user message anchors where its turn starts instead of its ledger sequence", () => {
+    const groups = groupTimeline(
+      buildTimeline([
+        eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+        eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+        eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+        eventAt(9, "agent.toolCall.created", { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } }, { turnId: "turn-a" }),
+        eventAt(16, "user.message", { text: "QUEUED-MSG" }, { turnId: null }),
+        eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+        eventAt(41, "agent.toolCall.created", { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } }, { turnId: "turn-a" }),
+        eventAt(57, "agent.message.completed", { text: "Turn A final answer." }, { turnId: "turn-a" }),
+        eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
+        eventAt(61, "turn.started", { triggerEventId: "evt-16" }, { turnId: "turn-b" }),
+        eventAt(62, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "queued work" } }, { turnId: "turn-b" }),
+        eventAt(80, "agent.message.completed", { text: "Turn B final answer." }, { turnId: "turn-b" }),
+        eventAt(94, "turn.completed", {}, { turnId: "turn-b" }),
+      ]),
+    );
+
+    expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
+      "item:user-message",
+      "turn",
+      "item:agent-message",
+      "item:user-message",
+      "turn",
+      "item:agent-message",
+    ]);
+    const turns = turnGroups(groups);
+    expect(turns).toHaveLength(2);
+    expect(flattenActivityIds(turns[0])).toEqual(["evt-9", "evt-41"]);
+    expect(flattenActivityIds(turns[1])).toEqual(["evt-62"]);
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({ kind: "agent-message", text: "Turn A final answer." });
+    expect(groups[3]?.kind === "item" ? groups[3].item : null).toMatchObject({ kind: "user-message", text: "QUEUED-MSG" });
+  });
+
+  test("a queued user message stays pending at the end until the queued turn starts", () => {
+    const pendingItems = buildTimeline([
+      eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(9, "agent.message.delta", { text: "Still working." }, { turnId: "turn-a" }),
+      eventAt(16, "user.message", { text: "Queued follow-up" }, { turnId: null }),
+      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+    ]);
+    expect(pendingItems.at(-1)).toMatchObject({ kind: "user-message", text: "Queued follow-up", pending: true });
+
+    const anchoredItems = buildTimeline([
+      eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(9, "agent.message.delta", { text: "Still working." }, { turnId: "turn-a" }),
+      eventAt(16, "user.message", { text: "Queued follow-up" }, { turnId: null }),
+      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+      eventAt(57, "agent.message.completed", { text: "Turn A done." }, { turnId: "turn-a" }),
+      eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
+      eventAt(61, "turn.started", { triggerEventId: "evt-16" }, { turnId: "turn-b" }),
+      eventAt(62, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } }, { turnId: "turn-b" }),
+    ]);
+    const followUpIndex = anchoredItems.findIndex((item) => item.kind === "user-message" && item.text === "Queued follow-up");
+    const turnBIndex = anchoredItems.findIndex((item) => item.kind === "tool-call" && item.turnId === "turn-b");
+    expect(followUpIndex).toBeGreaterThan(-1);
+    expect(turnBIndex).toBeGreaterThan(followUpIndex);
+    expect(anchoredItems[followUpIndex]).not.toHaveProperty("pending");
+  });
+
+  test("a queued user message cancelled before start is omitted without touching a running turn", () => {
+    const groups = groupTimeline(
+      buildTimeline([
+        eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+        eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+        eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+        eventAt(9, "agent.toolCall.created", { id: "call-a-1", name: "exec_command", arguments: { cmd: "first step" } }, { turnId: "turn-a" }),
+        eventAt(16, "user.message", { text: "Retracted follow-up" }, { turnId: null }),
+        eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+        eventAt(18, "turn.cancelled", { turnId: "turn-b", triggerEventId: "evt-16" }, { turnId: "turn-b" }),
+        eventAt(41, "agent.toolCall.created", { id: "call-a-2", name: "exec_command", arguments: { cmd: "second step" } }, { turnId: "turn-a" }),
+        eventAt(57, "agent.message.completed", { text: "Turn A final answer." }, { turnId: "turn-a" }),
+        eventAt(58, "turn.completed", {}, { turnId: "turn-a" }),
+      ]),
+    );
+
+    expect(JSON.stringify(groups)).not.toContain("Retracted follow-up");
+    expect(JSON.stringify(groups)).not.toContain("Interrupted.");
+    expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
+      "item:user-message",
+      "turn",
+      "item:agent-message",
+    ]);
+    const [turn] = turnGroups(groups);
+    expect(turn?.outcome).toBe("complete");
+    expect(flattenActivityIds(turn)).toEqual(["evt-9", "evt-41"]);
+  });
+
+  test("a queued turn without turn.started anchors on the first same-turn activity", () => {
+    const items = buildTimeline([
+      eventAt(2, "user.message", { text: "First message" }, { turnId: null }),
+      eventAt(4, "turn.queued", { turnId: "turn-a", triggerEventId: "evt-2", source: "user" }, { turnId: "turn-a" }),
+      eventAt(6, "turn.started", { triggerEventId: "evt-2" }, { turnId: "turn-a" }),
+      eventAt(16, "user.message", { text: "Crash-resumed follow-up" }, { turnId: null }),
+      eventAt(17, "turn.queued", { turnId: "turn-b", triggerEventId: "evt-16", source: "user" }, { turnId: "turn-b" }),
+      eventAt(61, "agent.toolCall.created", { id: "call-b-1", name: "exec_command", arguments: { cmd: "follow-up" } }, { turnId: "turn-b" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message", "user-message", "tool-call"]);
+    expect(items[1]).toMatchObject({ kind: "user-message", text: "Crash-resumed follow-up" });
+    expect(items[1]).not.toHaveProperty("pending");
   });
 
   test("user messages carry their attached resources and requested tools", () => {
@@ -313,6 +459,7 @@ describe("buildTimeline", () => {
       // Attention statuses earn a divider, collapsed on repeat.
       event("session.status.changed", { status: "requires_action" }),
       event("session.status.changed", { status: "requires_action" }),
+      event("turn.started", { triggerEventId: "evt-start" }),
       event("turn.failed", { error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
@@ -340,6 +487,7 @@ describe("buildTimeline", () => {
     const items = buildTimeline([
       event("turn.completed", {}, { turnId: "turn-complete" }),
       event("turn.failed", { error: "model provider unavailable" }, { turnId: "turn-failed" }),
+      event("turn.started", { triggerEventId: "evt-cancelled" }, { turnId: "turn-cancelled" }),
       event("turn.cancelled", {}, { turnId: "turn-cancelled" }),
     ]);
     const turnEnds = items.filter((item): item is TurnEndItem => item.kind === "turn-end");
@@ -379,7 +527,7 @@ describe("buildTimeline", () => {
 
   test("cancelled turns without activity keep the interruption notice", () => {
     reset();
-    const items = buildTimeline([event("turn.cancelled", {})]);
+    const items = buildTimeline([event("turn.started", { triggerEventId: "evt-start" }), event("turn.cancelled", {})]);
     expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
     expect(items[1]).toMatchObject({ tone: "cancelled", text: "Interrupted." });
   });
@@ -695,7 +843,19 @@ describe("groupTimeline", () => {
     expect(activities[1]?.failureText).toBe("deploy failed");
   });
 
-  test("a null-turn turn-end stamps the trailing activity group", () => {
+  test("a null-turn failure stamps the trailing activity group", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "tail logs" } }, { turnId: null }),
+        event("turn.failed", { error: "tail failed" }, { turnId: null }),
+      ]),
+    );
+    const [activity] = activityGroups(groups);
+    expect(activity?.outcome).toBe("failed");
+  });
+
+  test("a null-turn cancellation keeps the legacy finalize path (not a queued retraction)", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
@@ -704,7 +864,10 @@ describe("groupTimeline", () => {
       ]),
     );
     const [activity] = activityGroups(groups);
+    // Null turnId proves nothing about queued-turn retraction; the trailing
+    // group still settles as cancelled exactly as before.
     expect(activity?.outcome).toBe("cancelled");
+    expect(activity?.items[0]).toMatchObject({ status: "cancelled" });
   });
 });
 

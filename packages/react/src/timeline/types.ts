@@ -13,6 +13,8 @@ export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
+  /** Queued for a future turn whose start has not appeared in the event log. */
+  pending?: boolean;
   /** Resources attached to this message (file uploads, repositories). */
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */

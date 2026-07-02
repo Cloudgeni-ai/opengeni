@@ -287,8 +287,11 @@ function UserMessageRow({
 }) {
   return (
     <div className="animate-og-enter flex justify-end">
-      <div className="max-w-[85%] min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
-        {renderMessageText ? renderMessageText(item.text, item) : <Markdown>{item.text}</Markdown>}
+      <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
+        {item.pending ? <span className="px-1 text-og-xs text-og-fg-subtle">queued</span> : null}
+        <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+          {renderMessageText ? renderMessageText(item.text, item) : <Markdown>{item.text}</Markdown>}
+        </div>
       </div>
     </div>
   );

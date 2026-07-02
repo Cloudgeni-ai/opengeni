@@ -34,7 +34,8 @@ const WORKER_INTERRUPT_TOOL = "session_interrupt";
 
 export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
-  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
+  const prescan = prescanTurnAnchors(events);
+  const ordered = orderTimelineEvents(events, prescan);
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
 
@@ -76,6 +77,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "user-message",
           id: event.id,
           text: typeof payload.text === "string" ? payload.text : "",
+          ...(event.pendingUserMessage ? { pending: true } : {}),
           resources: resourceRefs(payload.resources),
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
@@ -332,6 +334,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.cancelled": {
+        // A retraction of a never-started queued turn is not a turn ending —
+        // the message was withdrawn before any work happened; show nothing.
+        // A null turnId proves nothing, so it keeps the legacy finalize path.
+        if (turnId && !prescan.startedTurnIds.has(turnId)) {
+          break;
+        }
         const hadActivity = hasTurnActivity(items, turnId);
         finalizeOpen(turnId, "cancelled");
         items.push(turnEndItem(event, "cancelled", null));
@@ -432,6 +440,128 @@ export function groupTimeline(items: TimelineItem[]): TimelineGroup[] {
 }
 
 /* --- helpers ---------------------------------------------------------------- */
+
+type TimelineEvent = SessionEvent & { pendingUserMessage?: true };
+
+type TurnAnchorPrescan = {
+  queuedTurnByTrigger: Map<string, string>;
+  startSeqByTrigger: Map<string, number>;
+  cancelledBeforeStartTriggers: Set<string>;
+  startedTurnIds: Set<string>;
+};
+
+function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
+  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
+  const queuedTurnByTrigger = new Map<string, string>();
+  const startSeqByTrigger = new Map<string, number>();
+  const cancelledTurnIds = new Set<string>();
+  const fallbackSeqByTurn = new Map<string, number>();
+  const startedTurnIds = new Set<string>();
+
+  for (const event of ordered) {
+    const payload = asRecord(event.payload);
+    const turnId = event.turnId ?? null;
+    if (event.type === "turn.queued") {
+      const triggerEventId = typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
+      const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
+      if (triggerEventId && queuedTurnId) {
+        queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
+      }
+      continue;
+    }
+    if (event.type === "turn.started") {
+      const triggerEventId = typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
+      if (triggerEventId) {
+        startSeqByTrigger.set(triggerEventId, event.sequence);
+      }
+      if (turnId) {
+        startedTurnIds.add(turnId);
+      }
+    } else if (event.type === "turn.cancelled" && turnId) {
+      cancelledTurnIds.add(turnId);
+    }
+
+    if (turnId && event.type !== "turn.queued" && event.type !== "turn.cancelled") {
+      const previous = fallbackSeqByTurn.get(turnId);
+      if (previous === undefined || event.sequence < previous) {
+        fallbackSeqByTurn.set(turnId, event.sequence);
+      }
+    }
+    if (turnId && isAgentActivityEvent(event.type)) {
+      startedTurnIds.add(turnId);
+    }
+  }
+
+  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
+    if (!startSeqByTrigger.has(triggerEventId)) {
+      const fallbackSeq = fallbackSeqByTurn.get(turnId);
+      if (fallbackSeq !== undefined) {
+        startSeqByTrigger.set(triggerEventId, fallbackSeq);
+      }
+    }
+  }
+
+  const cancelledBeforeStartTriggers = new Set<string>();
+  for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
+    if (cancelledTurnIds.has(turnId) && !startSeqByTrigger.has(triggerEventId) && !fallbackSeqByTurn.has(turnId)) {
+      cancelledBeforeStartTriggers.add(triggerEventId);
+    }
+  }
+
+  return { queuedTurnByTrigger, startSeqByTrigger, cancelledBeforeStartTriggers, startedTurnIds };
+}
+
+function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan): TimelineEvent[] {
+  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
+  const insertions = new Map<number, TimelineEvent[]>();
+  const pending: TimelineEvent[] = [];
+
+  for (const event of ordered) {
+    if (event.type !== "user.message") {
+      continue;
+    }
+    const queuedTurnId = prescan.queuedTurnByTrigger.get(event.id);
+    if (!queuedTurnId) {
+      pushInsertion(insertions, event.sequence, event);
+      continue;
+    }
+    if (prescan.cancelledBeforeStartTriggers.has(event.id)) {
+      continue;
+    }
+    const startSeq = prescan.startSeqByTrigger.get(event.id);
+    if (startSeq !== undefined) {
+      pushInsertion(insertions, startSeq, event);
+      continue;
+    }
+    pending.push({ ...event, pendingUserMessage: true });
+  }
+
+  const projected: TimelineEvent[] = [];
+  for (const event of ordered) {
+    const before = insertions.get(event.sequence);
+    if (before) {
+      projected.push(...before);
+    }
+    if (event.type !== "user.message") {
+      projected.push(event);
+    }
+  }
+  projected.push(...pending);
+  return projected;
+}
+
+function pushInsertion(insertions: Map<number, TimelineEvent[]>, sequence: number, event: SessionEvent): void {
+  const bucket = insertions.get(sequence);
+  if (bucket) {
+    bucket.push(event);
+  } else {
+    insertions.set(sequence, [event]);
+  }
+}
+
+function isAgentActivityEvent(type: string): boolean {
+  return type.startsWith("agent.") || type.startsWith("sandbox.");
+}
 
 function turnEndItem(
   event: SessionEvent,
