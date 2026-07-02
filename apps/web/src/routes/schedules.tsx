@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   CalendarClockIcon,
+  ChevronDownIcon,
   HistoryIcon,
   Loader2Icon,
   PauseIcon,
@@ -17,12 +18,17 @@ import {
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { ScheduledTaskRepositoryPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
+import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
@@ -46,10 +52,15 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [runs, setRuns] = useState<Record<string, ScheduledTaskRun[]>>({});
+  // Per-task run-history load failures, so a failed history fetch shows an
+  // error with retry instead of a false "No runs yet".
+  const [runErrors, setRunErrors] = useState<Record<string, boolean>>({});
+  const [reloadingRunsFor, setReloadingRunsFor] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [historyTaskId, setHistoryTaskId] = useState<string | null>(null);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const canAttachOpenGeniTool = context.clientConfig.mcpServers.some((server) => server.id === "opengeni");
   // Honest list state: the initial fetch renders as loading and a failed load
   // as an error with retry — never as the "No scheduled tasks." empty state.
@@ -69,14 +80,38 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       const next = await client.listScheduledTasks(workspaceId);
       setTasks(next);
       setLoadError(null);
-      const entries = await Promise.all(next.slice(0, 12).map(async (task) =>
-        [task.id, await client.listScheduledTaskRuns(workspaceId, task.id).catch(() => [] as ScheduledTaskRun[])] as const));
-      setRuns(Object.fromEntries(entries));
+      // Track each task's run-history load outcome separately: a failed history
+      // fetch must surface as an error row, never as a false "No runs yet".
+      const entries = await Promise.all(next.slice(0, 12).map(async (task) => {
+        try {
+          return [task.id, { runs: await client.listScheduledTaskRuns(workspaceId, task.id), error: false }] as const;
+        } catch {
+          return [task.id, { runs: [] as ScheduledTaskRun[], error: true }] as const;
+        }
+      }));
+      setRuns(Object.fromEntries(entries.map(([id, value]) => [id, value.runs])));
+      setRunErrors(Object.fromEntries(entries.map(([id, value]) => [id, value.error])));
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
       toast.error("Failed to load scheduled tasks", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setLoading(false);
+    }
+  }
+
+  // Retry a single task's run history after a failed load, without reloading
+  // the whole list.
+  async function reloadRuns(taskId: string) {
+    setReloadingRunsFor(taskId);
+    try {
+      const taskRuns = await client.listScheduledTaskRuns(workspaceId, taskId);
+      setRuns((current) => ({ ...current, [taskId]: taskRuns }));
+      setRunErrors((current) => ({ ...current, [taskId]: false }));
+    } catch (error) {
+      setRunErrors((current) => ({ ...current, [taskId]: true }));
+      toast.error("Couldn't load run history", { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setReloadingRunsFor(null);
     }
   }
 
@@ -132,6 +167,13 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
     }
   }
 
+  const ACTION_ERROR: Record<"pause" | "resume" | "trigger" | "delete", string> = {
+    pause: "Couldn't pause the task",
+    resume: "Couldn't resume the task",
+    trigger: "Couldn't run the task",
+    delete: "Couldn't delete the task",
+  };
+
   async function taskAction(task: ScheduledTask, action: "pause" | "resume" | "trigger" | "delete") {
     setBusyTaskId(task.id);
     try {
@@ -149,7 +191,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
       }
       await refresh();
     } catch (error) {
-      toast.error("Scheduled task action failed", { description: error instanceof Error ? error.message : String(error) });
+      toast.error(ACTION_ERROR[action], { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setBusyTaskId(null);
     }
@@ -163,21 +205,21 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         description="Recurring or one-shot agent runs with run history per task."
         actions={(
           <>
-            <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()} className="h-9">
-              <RefreshCwIcon className="size-3.5" />
+            <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading} className="h-9 pointer-coarse:min-h-10">
+              <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
               Refresh
             </Button>
             <Button
               type="button"
               size="sm"
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
               onClick={() => {
                 setOpen((value) => !value);
                 setEditingTaskId(null);
               }}
             >
               <PlusIcon className="size-3.5" />
-              New
+              New schedule
             </Button>
           </>
         )}
@@ -204,7 +246,24 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
         ) : tasksView === "error" ? (
           <LoadErrorState title="Couldn't load scheduled tasks" error={loadError} onRetry={() => void refresh()} />
         ) : tasksView === "empty" ? (
-          <EmptyState>No scheduled tasks.</EmptyState>
+          <EmptyState
+            icon={<CalendarClockIcon className="size-4" />}
+            title="No scheduled tasks yet"
+            description="Create one to run the agent on a schedule — recurring or one-shot."
+            action={(
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => {
+                  setOpen(true);
+                  setEditingTaskId(null);
+                }}
+              >
+                <PlusIcon className="size-3.5" />
+                New schedule
+              </Button>
+            )}
+          />
         ) : tasks.map((task) => {
           const taskRuns = runs[task.id] ?? [];
           const lastRun = summarizeLastRun(taskRuns);
@@ -214,16 +273,9 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-2">
                     <span className="truncate text-sm font-medium">{task.name}</span>
-                    <span
-                      className={cn(
-                        "shrink-0 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
-                        task.status === "active"
-                          ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
-                          : "border-status-waiting/30 bg-status-waiting/10 text-status-waiting",
-                      )}
-                    >
-                      {task.status}
-                    </span>
+                    <MetaChip dot={task.status === "active" ? "idle" : "waiting"} rounded="full">
+                      {task.status === "active" ? "Active" : "Paused"}
+                    </MetaChip>
                   </div>
                   <div className="mt-1 text-xs text-fg-subtle">
                     {scheduleLabel(task.schedule)} · {task.runMode.replaceAll("_", " ")}
@@ -301,7 +353,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                   onSubmit={(form) => void saveTask(task, form)}
                   onCancel={() => setEditingTaskId(null)}
                   secondaryActions={(
-                    <Button type="button" variant="destructive" size="sm" disabled={busyTaskId === task.id} onClick={() => void taskAction(task, "delete")}>
+                    <Button type="button" variant="destructive" size="sm" disabled={busyTaskId === task.id} onClick={() => setConfirmDelete(task)}>
                       <Trash2Icon className="size-3.5" />
                       Delete
                     </Button>
@@ -311,8 +363,26 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
 
               {historyTaskId === task.id ? (
                 <div className="mt-3 border-t border-border pt-2">
-                  {taskRuns.length === 0 ? (
-                    <p className="px-1 py-2 text-xs text-fg-subtle">No runs recorded for this task yet.</p>
+                  {runErrors[task.id] ? (
+                    <Notice
+                      tone="failed"
+                      action={(
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          disabled={reloadingRunsFor === task.id}
+                          onClick={() => void reloadRuns(task.id)}
+                        >
+                          {reloadingRunsFor === task.id ? <Loader2Icon className="size-3 animate-spin" /> : <RefreshCwIcon className="size-3" />}
+                          Retry
+                        </Button>
+                      )}
+                    >
+                      Couldn't load this task's run history.
+                    </Notice>
+                  ) : taskRuns.length === 0 ? (
+                    <p className="px-1 py-2 text-xs text-fg-subtle">No runs yet</p>
                   ) : (
                     <ol className="grid gap-1" aria-label={`${task.name} run history`}>
                       {taskRuns.map((run) => (
@@ -326,14 +396,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                             className="flex w-full items-center justify-between gap-2 rounded border border-border px-2 py-1.5 text-left text-xs text-fg-muted hover:bg-surface-2 disabled:opacity-60"
                           >
                             <span className="flex min-w-0 items-center gap-2">
-                              <span
-                                className={cn(
-                                  "size-2 shrink-0 rounded-full",
-                                  run.status === "dispatched" && "bg-status-idle",
-                                  run.status === "failed" && "bg-status-failed",
-                                  run.status === "queued" && "bg-status-waiting",
-                                )}
-                              />
+                              <StatusDot tone={runStatusTone(run.status)} />
                               <span className="shrink-0">{run.triggerType}</span>
                               <span className="shrink-0">{run.status}</span>
                               {run.error ? <span className="min-w-0 truncate text-status-failed">{run.error}</span> : null}
@@ -351,8 +414,28 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           );
         })}
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        onOpenChange={(next) => (next ? undefined : setConfirmDelete(null))}
+        title={confirmDelete ? `Delete “${confirmDelete.name}”?` : "Delete scheduled task?"}
+        description="This deletes the schedule and stops future runs. Sessions it already created are kept."
+        confirmLabel="Delete task"
+        onConfirm={async () => {
+          if (confirmDelete) {
+            await taskAction(confirmDelete, "delete");
+            setConfirmDelete(null);
+          }
+        }}
+      />
     </div>
   );
+}
+
+function runStatusTone(status: ScheduledTaskRun["status"]): StatusTone {
+  if (status === "dispatched") return "idle";
+  if (status === "failed") return "failed";
+  return "waiting";
 }
 
 function ScheduledTaskForm(props: {
@@ -385,18 +468,15 @@ function ScheduledTaskForm(props: {
             onChange={(event) => update("scheduleType", event.target.value as ScheduledTaskFormState["scheduleType"])}
           >
             <option value="once">Once</option>
-            <option value="interval">Interval</option>
-            <option value="calendar">Daily</option>
+            <option value="interval">Repeat on an interval</option>
+            <option value="calendar">Daily at a time</option>
           </Select>
         </div>
       </div>
-      <textarea
-        value={form.prompt}
-        onChange={(event) => update("prompt", event.target.value)}
-        className="min-h-20 rounded-md border border-border bg-bg px-3 py-2 text-sm"
-        placeholder="What should the agent do on schedule?"
-      />
-      <div className="grid gap-2 sm:grid-cols-3">
+      <div className="grid gap-1.5">
+        <Label>
+          {form.scheduleType === "once" ? "Run at" : form.scheduleType === "interval" ? "Every (minutes)" : "Time of day"}
+        </Label>
         {form.scheduleType === "once" ? (
           <Input type="datetime-local" value={form.runAt} onChange={(event) => update("runAt", event.target.value)} />
         ) : form.scheduleType === "interval" ? (
@@ -404,41 +484,69 @@ function ScheduledTaskForm(props: {
         ) : (
           <Input type="time" value={form.calendarTime} onChange={(event) => update("calendarTime", event.target.value)} />
         )}
-        <Select
-          value={form.runMode}
-          onChange={(event) => update("runMode", event.target.value as ScheduledTask["runMode"])}
-        >
-          <option value="new_session_per_run">New session per run</option>
-          <option value="reusable_session">Reusable session</option>
-        </Select>
-        <Select
-          value={form.overlapPolicy}
-          onChange={(event) => update("overlapPolicy", event.target.value as ScheduledTask["overlapPolicy"])}
-        >
-          <option value="allow_concurrent">Allow concurrent</option>
-          <option value="skip">Skip overlapping</option>
-          <option value="buffer_one">Buffer one</option>
-        </Select>
       </div>
-      <label className="flex items-center gap-2 text-xs text-fg-muted">
-        <input
-          type="checkbox"
-          checked={form.includeOpenGeniTool}
-          disabled={!props.canAttachOpenGeniTool}
-          onChange={(event) => update("includeOpenGeniTool", event.target.checked)}
+      <div className="grid gap-1.5">
+        <Label>Prompt</Label>
+        <textarea
+          value={form.prompt}
+          onChange={(event) => update("prompt", event.target.value)}
+          className="min-h-20 rounded-md border border-border bg-bg px-3 py-2 text-sm"
+          placeholder="What should the agent do on schedule?"
         />
-        Attach OpenGeni MCP tool
-      </label>
-      <ScheduledTaskRepositoryPicker
-        configured={context.githubStatus?.configured === true}
-        repositories={context.githubRepos}
-        groups={context.repositoryGroups}
-        resources={form.resources}
-        busy={props.busy}
-        repoBusy={context.repoBusy}
-        onRefresh={() => context.refreshGitHub(props.workspaceId, undefined, { sync: true })}
-        onResourcesChange={(resources) => update("resources", resources)}
-      />
+      </div>
+
+      <details className="group rounded-md border border-border bg-surface/30 transition-colors open:bg-surface/50">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+          <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+          <span>Advanced</span>
+          <span className="text-fg-subtle/70">·</span>
+          <span className="truncate">session reuse, overlaps, tools, repositories</span>
+        </summary>
+        <div className="grid gap-3 px-3 pb-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label>Session</Label>
+              <Select
+                value={form.runMode}
+                onChange={(event) => update("runMode", event.target.value as ScheduledTask["runMode"])}
+              >
+                <option value="new_session_per_run">New session each run</option>
+                <option value="reusable_session">Reuse one session</option>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>If a run is still going</Label>
+              <Select
+                value={form.overlapPolicy}
+                onChange={(event) => update("overlapPolicy", event.target.value as ScheduledTask["overlapPolicy"])}
+              >
+                <option value="allow_concurrent">Run both at once</option>
+                <option value="skip">Skip the new run</option>
+                <option value="buffer_one">Queue one run</option>
+              </Select>
+            </div>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-fg-muted">
+            <input
+              type="checkbox"
+              checked={form.includeOpenGeniTool}
+              disabled={!props.canAttachOpenGeniTool}
+              onChange={(event) => update("includeOpenGeniTool", event.target.checked)}
+            />
+            Let the agent use OpenGeni tools
+          </label>
+          <ScheduledTaskRepositoryPicker
+            configured={context.githubStatus?.configured === true}
+            repositories={context.githubRepos}
+            groups={context.repositoryGroups}
+            resources={form.resources}
+            busy={props.busy}
+            repoBusy={context.repoBusy}
+            onRefresh={() => context.refreshGitHub(props.workspaceId, undefined, { sync: true })}
+            onResourcesChange={(resources) => update("resources", resources)}
+          />
+        </div>
+      </details>
       <div className="flex flex-wrap items-center justify-end gap-2">
         {props.onCancel ? (
           <Button type="button" variant="ghost" size="sm" disabled={props.busy} onClick={props.onCancel}>

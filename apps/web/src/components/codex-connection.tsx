@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
@@ -115,7 +116,8 @@ function AccountUsage({
 }
 
 function accountDisplay(account: CodexAccount): string {
-  return account.label ?? account.email ?? account.plan ?? account.chatgptAccountId ?? "Codex account";
+  // Never fall back to the raw chatgpt account id as a display label.
+  return account.label ?? account.email ?? account.plan ?? "Codex account";
 }
 
 export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
@@ -270,7 +272,7 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
       await refreshAccounts();
       toast.success("Rotation settings updated");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update rotation");
+      toast.error(error instanceof Error ? error.message : "Failed to update rotation settings");
     } finally {
       setBusy(false);
     }
@@ -283,7 +285,7 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
       await refreshAccounts();
       toast.success("Subscription disconnected");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to disconnect");
+      toast.error(error instanceof Error ? error.message : "Failed to disconnect subscription");
     } finally {
       setBusy(false);
     }
@@ -296,7 +298,7 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
       await client.renameCodexAccount(workspaceId, accountId, label.trim() === "" ? null : label.trim());
       await refreshAccounts();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to rename");
+      toast.error(error instanceof Error ? error.message : "Failed to rename subscription");
     } finally {
       setBusy(false);
     }
@@ -431,14 +433,12 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                     )}
                     <div className="mt-0.5 truncate text-xs text-fg-subtle">
                       {account.email ? `${account.email} · ` : ""}
-                      {account.status === "active" ? "Token valid" : account.status}
+                      {account.status === "active" ? "Token valid" : account.status.replaceAll("_", " ")}
                       {account.expiresAt ? ` · expires ${new Date(account.expiresAt).toLocaleString()}` : ""}
                     </div>
                   </div>
                   {account.plan ? (
-                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-idle/30 bg-status-idle/10 px-2 py-0.5 text-xs text-status-idle">
-                      {account.plan} plan
-                    </span>
+                    <MetaChip dot="idle" rounded="full">{account.plan} plan</MetaChip>
                   ) : null}
                   {(() => {
                     const coolingSecs = account.exhaustedUntil
@@ -446,9 +446,9 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                       : 0;
                     if (coolingSecs > 0) {
                       return (
-                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-waiting/30 bg-status-waiting/10 px-2 py-0.5 text-2xs text-status-waiting" title="Rotated off after hitting its cap; skipped until reset">
-                          cooling down · {resetLabel(coolingSecs)}
-                        </span>
+                        <MetaChip dot="waiting" rounded="full" title="Rotated off after hitting its cap; skipped until reset">
+                          Cooling down · {resetLabel(coolingSecs)}
+                        </MetaChip>
                       );
                     }
                     if (isActive) {

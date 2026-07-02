@@ -7,7 +7,6 @@
 import { useEnvironments, usePacks } from "@opengeni/react";
 import {
   CalendarClockIcon,
-  CheckIcon,
   ChevronDownIcon,
   ContainerIcon,
   FileCode2Icon,
@@ -27,10 +26,14 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { Select } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
   capabilityCounts,
@@ -65,6 +68,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const [registryQuery, setRegistryQuery] = useState("");
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResults, setRegistryResults] = useState<CapabilityCatalogItem[]>([]);
+  // The query that produced the results on screen, so a completed search that
+  // found nothing reads as "No matches" rather than the initial help text.
+  const [registrySearched, setRegistrySearched] = useState<string | null>(null);
   const [addForm, setAddForm] = useState<CapabilityFormState>(() => emptyCapabilityForm());
   // Packs are their own data source (manifests + installations) so the rich
   // subsection can register/unregister and attach environments; the generic
@@ -104,6 +110,13 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     }
   }
 
+  // The header refresh reloads both data sources (catalog + packs), so the
+  // page has ONE refresh affordance and no per-section duplicate.
+  function refreshAll() {
+    void refresh();
+    void packs.refresh();
+  }
+
   async function toggleCapability(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
@@ -127,12 +140,18 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   }
 
   async function searchRegistry() {
+    if (!registryQuery.trim()) return;
     setRegistryBusy(true);
     try {
       const response = await client.discoverMcpCapabilities(workspaceId, { query: registryQuery, limit: 30 });
       setRegistryResults(response.items);
+      setRegistrySearched(registryQuery.trim());
     } catch (error) {
-      toast.error("MCP Registry search failed", { description: error instanceof Error ? error.message : String(error) });
+      // Clear stale results so a failed search never leaves prior matches
+      // reading as current; the toast carries the cause.
+      setRegistryResults([]);
+      setRegistrySearched(null);
+      toast.error("Registry search failed", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setRegistryBusy(false);
     }
@@ -149,9 +168,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       if (enableAfterAdd) {
         onRuntimeChanged();
       }
-      toast.success(enableAfterAdd ? "Public MCP added and enabled" : "Public MCP added");
+      toast.success(enableAfterAdd ? "Remote MCP added and enabled" : "Remote MCP added");
     } catch (error) {
-      const copy = capabilityErrorToast(error, "Failed to add public MCP");
+      const copy = capabilityErrorToast(error, "Failed to add remote MCP");
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -188,6 +207,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   // --- Packs subsection actions ------------------------------------------------------------
 
+  // Mutation helpers return { ok } after a real awaited result. Errors are
+  // caught synchronously here (from the client call) instead of read back from
+  // the hook's mutationError, which React only commits on a later render — the
+  // read-after-await race that used to drop or misreport pack failures.
   async function registerPackManifest(manifestDraft: string): Promise<boolean> {
     let manifest: unknown;
     try {
@@ -196,18 +219,16 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       toast.error("Manifest must be valid JSON");
       return false;
     }
-    const registered = await packs.register(manifest as Parameters<typeof packs.register>[0]);
-    if (registered) {
-      toast.success(`Pack ${registered.pack.id}@${registered.pack.version} registered`);
-      await refresh();
+    try {
+      const registered = await client.registerPack(workspaceId, manifest as Parameters<typeof client.registerPack>[1]);
+      await Promise.all([packs.refresh(), refresh()]);
+      toast.success(`Registered ${registered.pack.name} v${registered.pack.version}`);
       return true;
-    }
-    if (packs.mutationError) {
-      const copy = capabilityErrorToast(packs.mutationError, "Failed to register pack");
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to register pack");
       toast.error(copy.title, { description: copy.description });
-      packs.clearMutationError();
+      return false;
     }
-    return false;
   }
 
   async function enablePack(pack: CapabilityPack, environmentId: string | undefined) {
@@ -218,7 +239,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       await client.enableCapability(workspaceId, `pack:${pack.id}`, environmentId ? { environmentId } : {});
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Pack ${pack.name} enabled`);
+      toast.success(`Enabled ${pack.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to enable pack");
       toast.error(copy.title, { description: copy.description });
@@ -234,7 +255,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       await client.disableCapability(workspaceId, `pack:${pack.id}`);
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Pack ${pack.name} disabled`);
+      toast.success(`Disabled ${pack.name}`);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to disable pack");
       toast.error(copy.title, { description: copy.description });
@@ -246,15 +267,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   async function unregisterPack(pack: CapabilityPack) {
     setBusyId(`pack:${pack.id}`);
     try {
-      const removed = await packs.remove(pack.id);
-      if (removed) {
-        toast.success(`Pack ${pack.id} unregistered`);
-        await refresh();
-      } else if (packs.mutationError) {
-        const copy = capabilityErrorToast(packs.mutationError, "Failed to unregister pack");
-        toast.error(copy.title, { description: copy.description });
-        packs.clearMutationError();
-      }
+      await client.deletePack(workspaceId, pack.id);
+      await Promise.all([packs.refresh(), refresh()]);
+      toast.success(`Unregistered ${pack.name}`);
+    } catch (error) {
+      const copy = capabilityErrorToast(error, "Failed to unregister pack");
+      toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
     }
@@ -266,15 +284,15 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         <PageHeader
           icon={<PlugIcon className="size-4" />}
           title="Capabilities"
-          description="Enable runtime packs and MCPs, and track APIs, skills, and plugins for this workspace."
+          description="Enable packs and MCPs, and track APIs, skills, and plugins."
           actions={(
             <>
               <div className="relative min-w-56 flex-1 sm:flex-none">
                 <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-fg-subtle" />
                 <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search catalog" className="h-9 pl-8 text-sm" />
               </div>
-              <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading} className="h-9">
-                <RefreshCwIcon className={cn("size-3.5", loading && "animate-spin")} />
+              <Button type="button" variant="ghost" size="sm" onClick={refreshAll} disabled={loading || packs.loading} className="h-9 pointer-coarse:min-h-10">
+                <RefreshCwIcon className={cn("size-3.5", (loading || packs.loading) && "animate-spin")} />
                 Refresh
               </Button>
             </>
@@ -308,21 +326,36 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                 onRegister={registerPackManifest}
                 onEnable={(pack, environmentId) => void enablePack(pack, environmentId)}
                 onDisable={(pack) => void disablePack(pack)}
-                onUnregister={(pack) => void unregisterPack(pack)}
+                onUnregister={unregisterPack}
               />
             ) : null}
 
             {filter === "pack" ? null : catalogView === "loading" ? (
-              <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
-                <Loader2Icon className="size-4 animate-spin" />
-                Loading capabilities
+              <div className="grid gap-2">
+                {[0, 1, 2].map((row) => (
+                  <div key={row} className="rounded-lg border border-border bg-surface/45 p-3">
+                    <div className="flex items-center gap-2">
+                      <Skeleton className="size-7 rounded-md" />
+                      <Skeleton className="h-4 w-40" />
+                    </div>
+                    <Skeleton className="mt-2 h-3 w-3/4" />
+                  </div>
+                ))}
               </div>
             ) : catalogView === "error" ? (
               <LoadErrorState title="Couldn't load capabilities" error={loadError} onRetry={() => void refresh()} />
             ) : visibleItems.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-fg-muted">
-                {catalogView === "empty" ? "No capabilities in this workspace yet." : "No capabilities match this filter."}
-              </div>
+              catalogView === "empty" ? (
+                <EmptyState
+                  icon={<PlugIcon className="size-4" />}
+                  title="No capabilities yet"
+                  description="Add remote MCP servers, APIs, skills, and plugins from the panel on the right, then enable them here."
+                />
+              ) : (
+                <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-fg-muted">
+                  No capabilities match this filter
+                </div>
+              )
             ) : (
               <div className="grid gap-2">
                 {visibleItems.map((item) => (
@@ -341,7 +374,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
             <section className="rounded-lg border border-border bg-surface/45 p-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <GlobeIcon className="size-4 text-brand" />
-                Public MCP Registry
+                Public MCP registry
               </div>
               <div className="mt-3 flex gap-2">
                 <Input
@@ -353,46 +386,53 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                     if (event.key === "Enter") void searchRegistry();
                   }}
                 />
-                <Button type="button" size="sm" disabled={registryBusy} onClick={() => void searchRegistry()} className="h-8 shrink-0 text-xs">
+                <Button type="button" variant="secondary" size="sm" disabled={registryBusy || !registryQuery.trim()} onClick={() => void searchRegistry()} className="h-8 shrink-0 text-xs">
                   {registryBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
                   Search
                 </Button>
               </div>
               <div className="mt-3 max-h-[28rem] space-y-2 overflow-auto pr-1">
-                {registryResults.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
-                    Search returns public remote MCP servers that expose streamable HTTP endpoints.
-                  </div>
-                ) : registryResults.map((item) => (
-                  <div key={item.id} className="rounded-md border border-border bg-bg/35 p-2">
-                    <div className="min-w-0 truncate text-xs font-medium">{item.name}</div>
-                    {item.description ? <p className="mt-1 line-clamp-2 text-2xs text-fg-muted">{item.description}</p> : null}
-                    <div className="mt-2 truncate font-mono text-2xs text-fg-subtle">{item.endpointUrl}</div>
-                    <div className="mt-2 flex justify-end gap-1.5">
-                      <Button type="button" variant="ghost" size="xs" disabled={busyId === item.id} onClick={() => void addRegistryItem(item, false)}>
-                        <PlusIcon className="size-3" />
-                        Add
-                      </Button>
-                      <Button
-                        type="button"
-                        size="xs"
-                        disabled={busyId === item.id || !item.runtime.available}
-                        title={!item.runtime.available ? item.runtime.notes ?? "This MCP is not available for runtime use yet." : undefined}
-                        onClick={() => void addRegistryItem(item, true)}
-                      >
-                        {busyId === item.id ? <Loader2Icon className="size-3 animate-spin" /> : <CheckIcon className="size-3" />}
-                        Enable
-                      </Button>
+                {registryResults.length > 0 ? (
+                  registryResults.map((item) => (
+                    <div key={item.id} className="rounded-md border border-border bg-bg/35 p-2">
+                      <div className="min-w-0 truncate text-xs font-medium">{item.name}</div>
+                      {item.description ? <p className="mt-1 line-clamp-2 text-2xs text-fg-muted">{item.description}</p> : null}
+                      <div className="mt-2 truncate font-mono text-2xs text-fg-subtle">{item.endpointUrl}</div>
+                      <div className="mt-2 flex justify-end gap-1.5">
+                        <Button type="button" variant="ghost" size="xs" disabled={busyId === item.id} onClick={() => void addRegistryItem(item, false)}>
+                          <PlusIcon className="size-3" />
+                          Add
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="xs"
+                          disabled={busyId === item.id || !item.runtime.available}
+                          title={!item.runtime.available ? item.runtime.notes ?? "This MCP isn't available for runtime use yet" : undefined}
+                          onClick={() => void addRegistryItem(item, true)}
+                        >
+                          {busyId === item.id ? <Loader2Icon className="size-3 animate-spin" /> : <PlusIcon className="size-3" />}
+                          Add and enable
+                        </Button>
+                      </div>
                     </div>
+                  ))
+                ) : registrySearched ? (
+                  <div className="rounded-md border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
+                    No registry servers match “{registrySearched}”.
                   </div>
-                ))}
+                ) : (
+                  <div className="rounded-md border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
+                    Search public remote MCP servers to add to this workspace.
+                  </div>
+                )}
               </div>
             </section>
 
             <section className="rounded-lg border border-border bg-surface/45 p-3">
               <div className="flex items-center gap-2 text-sm font-medium">
                 <PlusIcon className="size-4 text-brand" />
-                Add Capability
+                Add capability
               </div>
               <div className="mt-3 grid gap-2">
                 <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2">
@@ -408,17 +448,27 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                   </Select>
                   <Input value={addForm.name} onChange={(event) => setAddForm((current) => ({ ...current, name: event.target.value }))} placeholder="Name" className="h-8 text-xs" />
                 </div>
-                <Input value={addForm.endpointUrl} onChange={(event) => setAddForm((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="Endpoint URL" className="h-8 text-xs" />
-                <Input value={addForm.homepageUrl} onChange={(event) => setAddForm((current) => ({ ...current, homepageUrl: event.target.value }))} placeholder="Homepage URL" className="h-8 text-xs" />
-                <Input value={addForm.installUrl} onChange={(event) => setAddForm((current) => ({ ...current, installUrl: event.target.value }))} placeholder="Install URL" className="h-8 text-xs" />
-                <Input value={addForm.category} onChange={(event) => setAddForm((current) => ({ ...current, category: event.target.value }))} placeholder="Category" className="h-8 text-xs" />
-                <Input value={addForm.tags} onChange={(event) => setAddForm((current) => ({ ...current, tags: event.target.value }))} placeholder="Tags, comma separated" className="h-8 text-xs" />
-                <textarea
-                  value={addForm.description}
-                  onChange={(event) => setAddForm((current) => ({ ...current, description: event.target.value }))}
-                  placeholder="Description"
-                  className="min-h-16 rounded-md border border-border bg-bg px-3 py-2 text-xs"
-                />
+                <details className="group rounded-md border border-border bg-surface/30 transition-colors open:bg-surface/50">
+                  <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
+                    <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+                    <span>Advanced</span>
+                    <span className="text-fg-subtle/70">·</span>
+                    <span className="truncate">URLs, category, tags, description</span>
+                  </summary>
+                  <div className="grid gap-2 px-3 pb-3">
+                    <Input value={addForm.endpointUrl} onChange={(event) => setAddForm((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="Endpoint URL" className="h-8 text-xs" />
+                    <Input value={addForm.homepageUrl} onChange={(event) => setAddForm((current) => ({ ...current, homepageUrl: event.target.value }))} placeholder="Homepage URL" className="h-8 text-xs" />
+                    <Input value={addForm.installUrl} onChange={(event) => setAddForm((current) => ({ ...current, installUrl: event.target.value }))} placeholder="Install URL" className="h-8 text-xs" />
+                    <Input value={addForm.category} onChange={(event) => setAddForm((current) => ({ ...current, category: event.target.value }))} placeholder="Category" className="h-8 text-xs" />
+                    <Input value={addForm.tags} onChange={(event) => setAddForm((current) => ({ ...current, tags: event.target.value }))} placeholder="Tags, comma separated" className="h-8 text-xs" />
+                    <textarea
+                      value={addForm.description}
+                      onChange={(event) => setAddForm((current) => ({ ...current, description: event.target.value }))}
+                      placeholder="Description"
+                      className="min-h-16 rounded-md border border-border bg-bg px-3 py-2 text-xs"
+                    />
+                  </div>
+                </details>
                 <label className="flex items-center gap-2 text-xs text-fg-muted">
                   <input
                     type="checkbox"
@@ -449,9 +499,15 @@ function CapabilityRow({ item, busy, onToggle }: {
   const canToggle = item.enabled
     ? item.kind === "pack" || (item.source !== "built_in" && item.source !== "configured")
     : item.kind !== "mcp" || item.runtime.available;
+  const isRuntime = item.kind === "pack" || item.kind === "mcp";
   const toggleTitle = !canToggle && item.kind === "mcp"
-    ? item.runtime.notes ?? "This MCP is not available for runtime use yet."
+    ? item.runtime.notes ?? "This MCP isn't available for runtime use yet"
     : undefined;
+  // State lives in the pill; the button carries only the action. An enabled
+  // built-in/configured capability has no action, so it shows no button.
+  const actionLabel = item.enabled
+    ? canToggle ? (isRuntime ? "Disable" : "Untrack") : null
+    : isRuntime ? "Enable" : "Track";
   const packContents = summarizePackContents(item);
   return (
     <article className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface/45 p-3 lg:grid-cols-[minmax(0,1fr)_auto]">
@@ -463,27 +519,26 @@ function CapabilityRow({ item, busy, onToggle }: {
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <h3 className="truncate text-sm font-medium">{item.name}</h3>
-              <CapabilityStatusPill enabled={item.enabled} source={item.source} reason={item.enabledReason} />
+              <CapabilityStatusChip enabled={item.enabled} source={item.source} reason={item.enabledReason} />
             </div>
             <div className="mt-0.5 flex min-w-0 flex-wrap gap-1.5 text-2xs text-fg-subtle">
               <span>{item.kind}</span>
               <span>{item.source.replaceAll("_", " ")}</span>
               <span>{item.category}</span>
-              {item.runtime.mcpServerId ? <span className="font-mono">{item.runtime.mcpServerId}</span> : null}
             </div>
           </div>
         </div>
         {item.description ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-fg-muted">{item.description}</p> : null}
         <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
           {item.tags.slice(0, 5).map((tag) => (
-            <span key={tag} className="max-w-full truncate rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">{tag}</span>
+            <MetaChip key={tag}>{tag}</MetaChip>
           ))}
-          {item.endpointUrl ? <CapabilityLink href={item.endpointUrl} label="endpoint" /> : null}
-          {item.homepageUrl ? <CapabilityLink href={item.homepageUrl} label="home" /> : null}
-          {item.installUrl && item.installUrl !== item.homepageUrl ? <CapabilityLink href={item.installUrl} label="install" /> : null}
+          {item.endpointUrl ? <CapabilityLink href={item.endpointUrl} label="Endpoint" /> : null}
+          {item.homepageUrl ? <CapabilityLink href={item.homepageUrl} label="Home" /> : null}
+          {item.installUrl && item.installUrl !== item.homepageUrl ? <CapabilityLink href={item.installUrl} label="Install" /> : null}
         </div>
       </div>
-      <div className="flex items-center justify-end gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2">
         {packContents?.hasContents ? (
           <Button
             type="button"
@@ -497,18 +552,22 @@ function CapabilityRow({ item, busy, onToggle }: {
             Contents
           </Button>
         ) : null}
-        <Button
-          type="button"
-          size="sm"
-          variant={item.enabled ? "secondary" : "default"}
-          disabled={busy || !canToggle}
-          onClick={onToggle}
-          className="h-8 min-w-24 text-xs"
-          title={toggleTitle}
-        >
-          {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : item.enabled ? <CheckIcon className="size-3.5" /> : <PlusIcon className="size-3.5" />}
-          {capabilityToggleLabel(item, canToggle)}
-        </Button>
+        {actionLabel ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={busy || !canToggle}
+            onClick={onToggle}
+            className="h-8 min-w-24 text-xs pointer-coarse:min-h-10"
+            title={toggleTitle}
+          >
+            {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : item.enabled ? <XIcon className="size-3.5" /> : <PlusIcon className="size-3.5" />}
+            {actionLabel}
+          </Button>
+        ) : (
+          <span title={toggleTitle} className="text-2xs text-fg-subtle">Built in</span>
+        )}
       </div>
       {packContents && expanded ? <PackContentsPanel contents={packContents} /> : null}
     </article>
@@ -522,7 +581,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
         {contents.mcpServerIds.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {contents.mcpServerIds.map((id) => (
-              <span key={id} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{id}</span>
+              <MetaChip key={id} className="font-mono">{id}</MetaChip>
             ))}
           </div>
         ) : <PackEmptyText />}
@@ -537,7 +596,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
         {contents.skills.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {contents.skills.map((skill) => (
-              <span key={skill} className="rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">{skill}</span>
+              <MetaChip key={skill}>{skill}</MetaChip>
             ))}
           </div>
         ) : <PackEmptyText />}
@@ -550,7 +609,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
               <div key={connector.id} className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <span className="truncate text-xs font-medium">{connector.name}</span>
-                  {connector.required ? <span className="rounded border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">required</span> : null}
+                  {connector.required ? <MetaChip dot="waiting">Required</MetaChip> : null}
                 </div>
                 <div className="mt-0.5 text-2xs text-fg-subtle">
                   {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
@@ -600,38 +659,20 @@ function PackContentsSection({ title, children }: { title: string; children: Rea
 }
 
 function PackEmptyText() {
-  return <div className="text-2xs text-fg-subtle">None declared.</div>;
+  return <div className="text-2xs text-fg-subtle">None declared</div>;
 }
 
-function CapabilityStatusPill(props: { enabled: boolean; source: string; reason: string | null }) {
-  return (
-    <span
-      className={cn(
-        "shrink-0 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
-        props.enabled
-          ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
-          : "border-border bg-bg text-fg-subtle",
-      )}
-    >
-      {props.enabled ? props.reason ?? "enabled" : props.source === "manual" ? "added" : "available"}
-    </span>
-  );
-}
-
-function capabilityToggleLabel(item: CapabilityCatalogItem, canToggle: boolean): string {
-  if (item.kind !== "pack" && item.kind !== "mcp") {
-    if (!item.enabled) {
-      return "Track";
-    }
-    return canToggle ? "Untrack" : "Tracked";
+function CapabilityStatusChip(props: { enabled: boolean; source: string; reason: string | null }) {
+  if (props.enabled) {
+    return <MetaChip dot="idle" rounded="full">{props.reason ?? "Enabled"}</MetaChip>;
   }
-  return item.enabled ? canToggle ? "Disable" : "Ready" : "Enable";
+  return <MetaChip rounded="full">{props.source === "manual" ? "Added" : "Available"}</MetaChip>;
 }
 
 function CapabilityLink({ href, label }: { href: string; label: string }) {
   return (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="max-w-full truncate rounded border border-border px-1.5 py-0.5 text-2xs text-brand hover:bg-surface-2">
-      {label}
+    <a href={href} target="_blank" rel="noreferrer noopener" className="inline-flex max-w-full items-center rounded-md border border-border bg-surface-2/60 px-1.5 py-0.5 text-2xs font-medium text-brand hover:bg-surface-2">
+      <span className="min-w-0 truncate">{label}</span>
     </a>
   );
 }
@@ -659,13 +700,13 @@ function PacksSection(props: {
   onRegister: (manifestDraft: string) => Promise<boolean>;
   onEnable: (pack: CapabilityPack, environmentId: string | undefined) => void;
   onDisable: (pack: CapabilityPack) => void;
-  onUnregister: (pack: CapabilityPack) => void;
+  onUnregister: (pack: CapabilityPack) => Promise<void>;
 }) {
   const { packs } = props;
   const [registerOpen, setRegisterOpen] = useState(false);
   const [manifestDraft, setManifestDraft] = useState("");
   // Honest list state: a failed load renders as an error with retry, never as
-  // the "No packs are available…" empty state.
+  // the empty state.
   const packsView = listViewState({ loading: packs.loading, error: packs.error, count: packs.packs.length });
 
   async function register() {
@@ -688,32 +729,29 @@ function PacksSection(props: {
             Complete agent capabilities: a sandbox image, skills, tools, connectors, knowledge, and schedule templates that enable as one unit.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button type="button" variant="ghost" size="sm" onClick={() => void packs.refresh()} disabled={packs.loading} className="h-8 text-xs">
-            <RefreshCwIcon className={cn("size-3.5", packs.loading && "animate-spin")} />
-            Refresh
-          </Button>
-          <Button type="button" size="sm" onClick={() => setRegisterOpen((open) => !open)} className="h-8 text-xs">
-            <PlusIcon className="size-3.5" />
-            Register manifest
-          </Button>
-        </div>
+        <Button type="button" variant="secondary" size="sm" onClick={() => setRegisterOpen((open) => !open)} className="h-8 shrink-0 text-xs">
+          <PlusIcon className="size-3.5" />
+          Add manifest
+        </Button>
       </div>
 
       {registerOpen ? (
         <div className="mt-3 grid gap-2 rounded-lg border border-border bg-bg/35 p-3">
+          <p className="text-2xs leading-5 text-fg-subtle">
+            Paste a pack manifest as JSON. It registers a workspace-scoped pack you can then enable.
+          </p>
           <textarea
             value={manifestDraft}
             onChange={(event) => setManifestDraft(event.target.value)}
-            placeholder='{"id": "my-pack", "name": "My pack", "description": "...", "role": "...", "category": "...", "version": "1.0.0", ...}'
+            placeholder='{"id": "my-pack", "name": "My pack", "description": "…", "role": "…", "category": "…", "version": "1.0.0", …}'
             className="min-h-40 rounded-md border border-border bg-bg px-3 py-2 font-mono text-xs leading-5"
             aria-label="Pack manifest JSON"
           />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={() => setRegisterOpen(false)}>Cancel</Button>
             <Button type="button" size="sm" disabled={packs.mutating || !manifestDraft.trim()} onClick={() => void register()}>
-              {packs.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
-              Register
+              {packs.mutating ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
+              Register pack
             </Button>
           </div>
         </div>
@@ -721,14 +759,24 @@ function PacksSection(props: {
 
       <div className="mt-3 grid gap-3">
         {packsView === "loading" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border bg-bg/35 p-4 text-sm text-fg-muted">
-            <Loader2Icon className="size-4 animate-spin" />
-            Loading packs
+          <div className="rounded-lg border border-border bg-bg/35 p-3">
+            <Skeleton className="h-4 w-44" />
+            <Skeleton className="mt-2 h-3 w-3/4" />
           </div>
         ) : packsView === "error" ? (
           <LoadErrorState title="Couldn't load packs" error={packs.error} onRetry={() => void packs.refresh()} />
         ) : packsView === "empty" ? (
-          <EmptyState>No packs are available to this workspace.</EmptyState>
+          <EmptyState
+            icon={<PackageIcon className="size-4" />}
+            title="No packs yet"
+            description="Register a pack manifest to add a complete agent capability to this workspace."
+            action={(
+              <Button type="button" size="sm" onClick={() => setRegisterOpen(true)}>
+                <PlusIcon className="size-3.5" />
+                Add manifest
+              </Button>
+            )}
+          />
         ) : (
           packs.packs.map((pack) => (
             <PackCard
@@ -755,12 +803,13 @@ function PackCard(props: {
   busy: boolean;
   onEnable: (environmentId: string | undefined) => void;
   onDisable: () => void;
-  onUnregister: () => void;
+  onUnregister: () => Promise<void>;
 }) {
   const { pack, installation } = props;
   const enabled = installation?.status === "active";
   const [expanded, setExpanded] = useState(false);
   const [environmentId, setEnvironmentId] = useState("");
+  const [confirmUnregister, setConfirmUnregister] = useState(false);
   const needsEnvironment = pack.environment?.required === true;
 
   return (
@@ -769,17 +818,12 @@ function PackCard(props: {
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h3 className="truncate text-sm font-medium">{pack.name}</h3>
-            <span className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">v{pack.version}</span>
-            <span
-              className={cn(
-                "rounded-full border px-1.5 py-0.5 text-2xs font-medium",
-                enabled
-                  ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
-                  : "border-border bg-bg text-fg-subtle",
-              )}
-            >
-              {enabled ? "enabled" : installation ? "disabled" : "available"}
-            </span>
+            <MetaChip className="font-mono">v{pack.version}</MetaChip>
+            {enabled ? (
+              <MetaChip dot="idle" rounded="full">Enabled</MetaChip>
+            ) : (
+              <MetaChip rounded="full">{installation ? "Disabled" : "Available"}</MetaChip>
+            )}
           </div>
           <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">{pack.description}</p>
           <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-fg-subtle">
@@ -795,36 +839,37 @@ function PackCard(props: {
           {pack.skills.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {pack.skills.map((skill) => (
-                <span key={skill.name} title={skill.description} className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">
-                  <SparkleIcon className="size-3" />
+                <MetaChip key={skill.name} title={skill.description}>
+                  <SparkleIcon className="size-3 shrink-0" />
                   {skill.name}
-                </span>
+                </MetaChip>
               ))}
             </div>
           ) : null}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-2">
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center justify-end gap-1.5">
             <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>
               <ChevronDownIcon className={cn("size-3.5 transition-transform", expanded && "rotate-180")} />
               Contents
             </Button>
             {enabled ? (
-              <Button type="button" variant="secondary" size="sm" className="h-8 min-w-24 text-xs" disabled={props.busy} onClick={props.onDisable}>
+              <Button type="button" variant="secondary" size="sm" className="h-8 min-w-24 text-xs pointer-coarse:min-h-10" disabled={props.busy} onClick={props.onDisable}>
                 {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <XIcon className="size-3.5" />}
                 Disable
               </Button>
             ) : (
               <Button
                 type="button"
+                variant="secondary"
                 size="sm"
-                className="h-8 min-w-24 text-xs"
+                className="h-8 min-w-24 text-xs pointer-coarse:min-h-10"
                 disabled={props.busy || (needsEnvironment && !environmentId)}
-                title={needsEnvironment && !environmentId ? "This pack requires an environment attachment" : undefined}
+                title={needsEnvironment && !environmentId ? "This pack needs an environment attached first" : undefined}
                 onClick={() => props.onEnable(environmentId || undefined)}
               >
-                {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+                {props.busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
                 Enable
               </Button>
             )}
@@ -832,11 +877,11 @@ function PackCard(props: {
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label={`Unregister pack ${pack.id}`}
+              aria-label={`Unregister ${pack.name}`}
               className="hover:text-status-failed"
               disabled={props.busy}
-              title="Unregister this workspace pack (built-ins cannot be removed)"
-              onClick={props.onUnregister}
+              title="Unregister this pack (built-ins can't be removed)"
+              onClick={() => setConfirmUnregister(true)}
             >
               <Trash2Icon className="size-3.5" />
             </Button>
@@ -865,7 +910,7 @@ function PackCard(props: {
             {pack.tools.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {pack.tools.map((tool) => (
-                  <span key={`${tool.kind}:${tool.id}`} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{tool.id}</span>
+                  <MetaChip key={`${tool.kind}:${tool.id}`} className="font-mono">{tool.id}</MetaChip>
                 ))}
               </div>
             ) : <PackNone />}
@@ -893,7 +938,7 @@ function PackCard(props: {
                   <div key={connector.id} className="min-w-0">
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="truncate text-xs font-medium">{connector.name}</span>
-                      {connector.required ? <span className="rounded border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">required</span> : null}
+                      {connector.required ? <MetaChip dot="waiting">Required</MetaChip> : null}
                     </div>
                     <div className="text-2xs text-fg-subtle">
                       {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
@@ -936,7 +981,7 @@ function PackCard(props: {
               {pack.environment.requiredVariables.length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
                   {pack.environment.requiredVariables.map((name) => (
-                    <span key={name} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{name}</span>
+                    <MetaChip key={name} className="font-mono">{name}</MetaChip>
                   ))}
                 </div>
               ) : null}
@@ -944,6 +989,17 @@ function PackCard(props: {
           ) : null}
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={confirmUnregister}
+        onOpenChange={setConfirmUnregister}
+        title={`Unregister ${pack.name}?`}
+        description={enabled
+          ? "This pack is enabled. Unregistering removes it from the workspace and disables it for every session."
+          : "This removes the pack from the workspace. You can register its manifest again later."}
+        confirmLabel="Unregister pack"
+        onConfirm={props.onUnregister}
+      />
     </article>
   );
 }
@@ -961,5 +1017,5 @@ function PackSection({ title, icon, children }: { title: string; icon: ReactNode
 }
 
 function PackNone() {
-  return <div className="text-2xs text-fg-subtle">None declared.</div>;
+  return <div className="text-2xs text-fg-subtle">None declared</div>;
 }
