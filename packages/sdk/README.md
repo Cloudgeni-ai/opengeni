@@ -44,6 +44,10 @@ contiguous `sequence` number:
 - Ends gracefully when the provided `AbortSignal` aborts; throws on
   non-retryable failures (e.g. 401/403/404).
 
+Use `client.listEvents(workspaceId, sessionId, { before, after, limit })` for
+durable replay pages. `before` is an exclusive sequence cursor that returns the
+newest matching page, still ordered ascending in the response.
+
 ```ts
 const controller = new AbortController();
 for await (const event of client.streamEvents(workspaceId, sessionId, {

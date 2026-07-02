@@ -54,11 +54,10 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   const context = useAppContext();
   const navigate = useNavigate();
 
-  // Session record + live event log via @opengeni/react. The stream replays
-  // the full durable log (after=0), reconnects with resume-by-sequence, and
-  // carries the live session status.
+  // Session record + live event log via @opengeni/react. Fresh opens load a
+  // bounded tail, then stream live events with resume-by-sequence.
   const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
-  const { events, sessionStatus, connectionState, error: streamError } = useSessionEvents(sessionId);
+  const { events, sessionStatus, connectionState, hasOlder, loadingOlder, loadOlder, error: streamError } = useSessionEvents(sessionId);
   const session = useMemo(
     () => fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
     [fetchedSession, sessionStatus],
@@ -152,6 +151,9 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       approvals={approvals}
       failure={failure}
       goal={goal}
+      hasOlder={hasOlder}
+      loadingOlder={loadingOlder}
+      onLoadOlder={loadOlder}
       onClearView={clearView}
       onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
       onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
@@ -255,6 +257,9 @@ function SessionChatPane(props: {
   approvals: PendingApproval[];
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   goal: ReturnType<typeof useGoal>;
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  onLoadOlder: () => Promise<boolean>;
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -372,6 +377,9 @@ function SessionChatPane(props: {
               status={props.session.status}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
+              hasOlder={props.hasOlder}
+              loadingOlder={props.loadingOlder}
+              onLoadOlder={() => void props.onLoadOlder()}
               emptyState={(
                 <EmptyState
                   className="min-h-[24rem]"

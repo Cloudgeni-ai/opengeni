@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -345,6 +345,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by goal MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
 
     // Without the worker-asserted sessionId claim, goal tools do not exist.
@@ -2323,6 +2324,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by scheduled task MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     }, grant);
 
     workflow.syncError = new Error("temporal unavailable");
@@ -2361,6 +2363,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by scheduled task MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     }, grant);
     const task = await callMcpTool<{ id: string }>(allowedMcp, "scheduled_tasks_create", {
       name: `mcp-limit-trigger-${crypto.randomUUID()}`,
@@ -2384,6 +2387,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by scheduled task MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     }, grant);
 
     await expect(callMcpTool(blockedCreateMcp, "scheduled_tasks_create", {
@@ -2419,6 +2423,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by scheduled task MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     }, grant);
     await expect(callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", { id: task.id })).rejects.toThrow("monthly agent run limit reached");
     expect(workflow.triggers).toHaveLength(0);
@@ -2752,6 +2757,27 @@ describe("API component integration", () => {
     const initialEvents = await listed.json() as SessionEvent[];
     expect(initialEvents.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
 
+    const bulkEventCount = 2005;
+    await appendSessionEvents(dbClient.db, workspaceId, session.id, Array.from({ length: bulkEventCount }, (_, index) => ({
+      type: "agent.message.delta",
+      payload: { text: `bulk-${index}` },
+    })));
+    const latestSequence = initialEvents.length + bulkEventCount;
+    const newest = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?before=${Number.MAX_SAFE_INTEGER}&limit=3`));
+    expect(newest.status).toBe(200);
+    expect((await newest.json() as SessionEvent[]).map((event) => event.sequence)).toEqual([latestSequence - 2, latestSequence - 1, latestSequence]);
+
+    const ranged = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?after=4&before=8&limit=10`));
+    expect(ranged.status).toBe(200);
+    expect((await ranged.json() as SessionEvent[]).map((event) => event.sequence)).toEqual([5, 6, 7]);
+
+    const clampedMax = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`));
+    expect(clampedMax.status).toBe(200);
+    expect((await clampedMax.json() as SessionEvent[])).toHaveLength(2000);
+    const clampedMin = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?limit=0`));
+    expect(clampedMin.status).toBe(200);
+    expect((await clampedMin.json() as SessionEvent[])).toHaveLength(1);
+
     const replayAbort = new AbortController();
     const replay = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=0`)}`, {
       signal: replayAbort.signal,
@@ -2761,10 +2787,10 @@ describe("API component integration", () => {
 
     const liveAbortA = new AbortController();
     const liveAbortB = new AbortController();
-    const liveA = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=${initialEvents.at(-1)!.sequence}`)}`, {
+    const liveA = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=${latestSequence}`)}`, {
       signal: liveAbortA.signal,
     }));
-    const liveB = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=${initialEvents.at(-1)!.sequence}`)}`, {
+    const liveB = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=${latestSequence}`)}`, {
       signal: liveAbortB.signal,
     }));
     const readA = readSseEvents(liveA, 1, liveAbortA);
@@ -3496,6 +3522,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by environment MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const adminMcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const environment = await createWorkspaceEnvironment(dbClient.db, {
@@ -3553,6 +3580,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
@@ -3689,6 +3717,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const managerGrant = { ...grant, permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[] };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
@@ -3826,6 +3855,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const managerGrant = { ...grant, permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[] };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
@@ -3856,6 +3886,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const environment = await createWorkspaceEnvironment(dbClient.db, {
       accountId: grant.accountId,
@@ -3920,6 +3951,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
@@ -3960,6 +3992,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const environmentName = `geni-cloud-${crypto.randomUUID()}`;
@@ -4057,6 +4090,7 @@ describe("API component integration", () => {
       getDocumentServices: () => {
         throw new Error("document services are not used by manager MCP tests");
       },
+      resumeBoxById: fakeResumeBoxById,
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
     const link = await callMcpTool<{ configured: boolean; appSlug: string; installUrl: string; expiresInSeconds: number }>(mcp, "github_connect_link", {});
@@ -4246,8 +4280,14 @@ function mcpText(result: unknown): string {
   throw new Error(`MCP result did not contain text content: ${JSON.stringify(result)}`);
 }
 
+async function fakeResumeBoxById(): Promise<never> {
+  throw new Error("sandbox resume is not used by API integration MCP tests");
+}
+
 async function defaultAccessContext(app: ReturnType<typeof createApp>, headers?: HeadersInit): Promise<AccessContext> {
-  const response = await app.request("/v1/access/me", { headers });
+  const response = await app.request("/v1/access/me", {
+    ...(headers ? { headers } : {}),
+  });
   expect(response.status).toBe(200);
   return await response.json() as AccessContext;
 }

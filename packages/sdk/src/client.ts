@@ -330,14 +330,15 @@ export class OpenGeniClient {
 
   // --- Events: replay, send, stream ----------------------------------------
 
-  /** Replay durable events by sequence: events with `sequence > after`, ascending. */
+  /** Replay durable events by sequence, ascending. `before` is exclusive and returns the newest matching window. */
   async listEvents(
     workspaceId: string,
     sessionId: string,
-    options: { after?: number; limit?: number } = {},
+    options: { after?: number; before?: number; limit?: number } = {},
   ): Promise<SessionEvent[]> {
     return await this.requestJson<SessionEvent[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, undefined, {
       ...(options.after !== undefined ? { after: String(options.after) } : {}),
+      ...(options.before !== undefined ? { before: String(options.before) } : {}),
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
     });
   }

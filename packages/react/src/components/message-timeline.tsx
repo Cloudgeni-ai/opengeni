@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
 import { Markdown } from "./markdown";
@@ -52,6 +52,12 @@ export type MessageTimelineProps = {
   toolRegistry?: ToolRegistry | undefined;
   /** Follow new events when pinned to the bottom. Defaults to true. */
   autoFollow?: boolean | undefined;
+  /** Older durable history exists above the current window (see useSessionEvents). */
+  hasOlder?: boolean | undefined;
+  /** An older window is being fetched; shows the quiet top shimmer. */
+  loadingOlder?: boolean | undefined;
+  /** Called when the reader nears the top and older history should backfill. */
+  onLoadOlder?: (() => void) | undefined;
   emptyState?: ReactNode | undefined;
   className?: string | undefined;
 };
@@ -70,14 +76,21 @@ export function MessageTimeline({
   onOpenSession,
   toolRegistry = defaultToolRegistry,
   autoFollow = true,
+  hasOlder = false,
+  loadingOlder = false,
+  onLoadOlder,
   emptyState,
   className,
 }: MessageTimelineProps) {
   const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
   const groups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const firstGroupKey = groups[0] ? timelineGroupKey(groups[0]) : null;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const topSentinelRef = useRef<HTMLDivElement | null>(null);
+  const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
+  const [bulkActive, setBulkActive] = useState(true);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
   const pinnedRef = useRef(true);
@@ -89,9 +102,15 @@ export function MessageTimeline({
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming = lastItem !== undefined && (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") && lastItem.streaming;
   const working = status === "running" && !streaming;
+  // Bulk paints (the initial tail window, a prepended older window — detected
+  // by the first group key changing) must not run per-row entrance animations.
+  const firstKeyChangedForBulk = previousBulkFirstKeyRef.current !== undefined && previousBulkFirstKeyRef.current !== firstGroupKey;
+  const bulkRender = groups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
-  // later reflow can restore it to the same spot.
+  // later reflow can restore it to the same spot. Transient chrome (the backfill
+  // sentinel and shimmer) is skipped — anchoring to a row that unmounts when the
+  // older window lands would drop the correction mid-prepend.
   const captureAnchor = useCallback(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -101,6 +120,9 @@ export function MessageTimeline({
     }
     const containerTop = node.getBoundingClientRect().top;
     for (const child of Array.from(inner.children)) {
+      if (child instanceof HTMLElement && child.dataset.ogTimelineChrome !== undefined) {
+        continue;
+      }
       const rect = child.getBoundingClientRect();
       if (rect.bottom > containerTop + 1) {
         anchorRef.current = { el: child, top: rect.top - containerTop };
@@ -111,12 +133,45 @@ export function MessageTimeline({
   }, []);
 
   // Follow the stream while pinned to the bottom; never fight the reader.
-  useEffect(() => {
+  // A LAYOUT effect so the very first paint of a freshly loaded session is
+  // already anchored at the bottom — no visible traversal down the history.
+  useLayoutEffect(() => {
     const node = scrollRef.current;
     if (node && autoFollow && pinned) {
       node.scrollTop = node.scrollHeight;
     }
   }, [resolvedItems, working, autoFollow, pinned]);
+
+  // Clear the bulk-paint marker a frame after it renders, so rows appended
+  // live (streams, new turns) animate exactly as before.
+  useLayoutEffect(() => {
+    previousBulkFirstKeyRef.current = firstGroupKey;
+    if (!bulkRender) {
+      return;
+    }
+    setBulkActive(true);
+    const frame = requestFrame(() => setBulkActive(false));
+    return () => cancelFrame(frame);
+  }, [bulkRender, firstGroupKey]);
+
+  // Prefetch older history well before the reader reaches the top: the
+  // sentinel sits above the first group and trips 1600px early, so backfill
+  // is usually rendered (and anchored by the ResizeObserver below) before the
+  // top of the window ever becomes visible.
+  useEffect(() => {
+    const root = scrollRef.current;
+    const target = topSentinelRef.current;
+    if (!root || !target || !hasOlder || loadingOlder || !onLoadOlder || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onLoadOlder();
+      }
+    }, { root, rootMargin: "1600px 0px 0px 0px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
 
   // Scroll anchoring: when the content reflows (a fold expands/collapses, a
   // stream appends), keep following the bottom if pinned; otherwise pin the
@@ -167,12 +222,18 @@ export function MessageTimeline({
 
   return (
     <LightboxProvider>
-    <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+    <div data-og-bulk={bulkRender ? "" : undefined} className={cn("og-root relative flex min-h-0 flex-col", className)}>
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {groups.length === 0 && !working
             ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)
             : null}
+          {hasOlder ? <div ref={topSentinelRef} data-og-top-sentinel="" data-og-timeline-chrome="" aria-hidden="true" className="h-px w-full shrink-0" /> : null}
+          {loadingOlder ? (
+            <div data-og-timeline-chrome="" className="flex items-center gap-2 text-sm">
+              <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
+            </div>
+          ) : null}
           {groups.map((group) => (
             <TimelineGroupView
               key={timelineGroupKey(group)}
@@ -220,6 +281,21 @@ export function MessageTimeline({
     </div>
     </LightboxProvider>
   );
+}
+
+function requestFrame(callback: FrameRequestCallback): number {
+  if (typeof requestAnimationFrame === "function") {
+    return requestAnimationFrame(callback);
+  }
+  return window.setTimeout(() => callback(performance.now()), 16);
+}
+
+function cancelFrame(id: number): void {
+  if (typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(id);
+    return;
+  }
+  window.clearTimeout(id);
 }
 
 function TimelineGroupView({

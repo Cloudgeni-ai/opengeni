@@ -53,12 +53,19 @@ import {
 const client = new OpenGeniClient({ baseUrl: "/api/opengeni" }); // proxy through your API
 
 function OpsChannel({ sessionId }: { sessionId: string }) {
-  const { timeline, sessionStatus } = useSessionEvents(sessionId);
+  const { timeline, sessionStatus, hasOlder, loadingOlder, loadOlder } = useSessionEvents(sessionId);
   const composer = useComposer(sessionId);
   return (
     <div className="flex h-full flex-col">
       {sessionStatus ? <SessionStatus status={sessionStatus} /> : null}
-      <MessageTimeline items={timeline} status={sessionStatus} className="min-h-0 flex-1" />
+      <MessageTimeline
+        items={timeline}
+        status={sessionStatus}
+        hasOlder={hasOlder}
+        loadingOlder={loadingOlder}
+        onLoadOlder={() => void loadOlder()}
+        className="min-h-0 flex-1"
+      />
       <ChatComposer composer={composer} status={sessionStatus} />
     </div>
   );
@@ -75,10 +82,12 @@ export function App() {
 
 ## Hooks
 
-- `useSessionEvents(sessionId)` — live stream + replay on the SDK's
-  exactly-once/ordered event delivery; returns the raw `events`, the projected
-  `timeline`, the latest `sessionStatus`, and the connection state. Updates are
-  batched per animation-frame-ish window so long replays stay smooth.
+- `useSessionEvents(sessionId)` — loads a bounded tail window by default, then
+  live-streams on the SDK's exactly-once/ordered event delivery. It returns the
+  raw windowed `events`, projected `timeline`, latest `sessionStatus`,
+  connection state, and older-history controls (`hasOlder`, `loadingOlder`,
+  `loadOlder`). Pass `replay: "full"` to opt back into full replay; a nonzero
+  `after` keeps the previous resume semantics.
 - `useComposer(sessionId, { sendExtras, defaultMode })` — draft/send/interrupt
   state plus the compose-time **queue-vs-steer** choice (`mode`/`setMode`,
   default `"queue"`): queue stacks the message behind the running turn, steer

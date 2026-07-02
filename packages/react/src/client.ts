@@ -17,6 +17,7 @@ export type SessionClientLike = Pick<
   | "steerMessage"
   | "interrupt"
   | "sendApprovalDecision"
+  | "listEvents"
   | "streamEvents"
   // Turn queue
   | "listTurns"
