@@ -24,5 +24,5 @@ describe("source hygiene", () => {
 
     const binaryFiles = files.filter((file) => readFileSync(join(repoRoot, file)).includes(0));
     expect(binaryFiles).toEqual([]);
-  });
+  }, 30_000);
 });

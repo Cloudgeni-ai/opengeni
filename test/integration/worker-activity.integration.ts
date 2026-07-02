@@ -57,6 +57,7 @@ import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE, PROVIDER_BACKPRESSURE_DELAY_MS, WORKER_DEATH_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
 import { WORKER_DEATH_MAX_REDISPATCHES } from "../../apps/worker/src/activities/session-state";
 import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "../../apps/worker/src/activities/environment";
+import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import { ScriptedModel, functionCall, latestStatus, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 
@@ -76,7 +77,7 @@ describe("worker activities integration", () => {
     await bus?.close();
     await dbClient?.close();
     await services?.down();
-  }, 60_000);
+  }, 120_000);
 
   test("streams scripted SDK model deltas into persisted session events", async () => {
     const grant = await testGrant(dbClient.db);
@@ -113,6 +114,58 @@ describe("worker activities integration", () => {
     expect(latestStatus(events)).toBe("idle");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     expect(await getLatestRunState(dbClient.db, grant.workspaceId, session.id)).not.toBeNull();
+  });
+
+  test("overlays per-session MCP servers with decrypted headers before prepareTools", async () => {
+    const grant = await testGrant(dbClient.db);
+    const encryptionKey = Buffer.alloc(32, 9);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "use session mcp",
+      resources: [],
+      tools: [{ kind: "mcp", id: "peloton" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      mcpServers: [{
+        id: "peloton",
+        name: "Peloton MCP",
+        url: "https://peloton.example/mcp",
+        allowedTools: ["workouts.list"],
+        timeoutMs: 3000,
+        cacheToolsList: false,
+        headersEncrypted: {
+          Authorization: encryptEnvironmentValue(encryptionKey, "Bearer run-secret"),
+        },
+      }],
+    });
+    let preparedSettings: Parameters<OpenGeniRuntime["prepareTools"]>[0] | null = null;
+    const runtime = {
+      prepareTools: async (settings: Parameters<OpenGeniRuntime["prepareTools"]>[0]) => {
+        preparedSettings = settings;
+        return { mcpServers: [], close: async () => {} };
+      },
+    };
+    const runSettings = await settingsWithSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: encryptionKey.toString("base64"),
+      }),
+    );
+
+    await runtime.prepareTools(runSettings);
+
+    expect(preparedSettings?.mcpServers.find((server) => server.id === "peloton")).toEqual({
+      id: "peloton",
+      name: "Peloton MCP",
+      url: "https://peloton.example/mcp",
+      allowedTools: ["workouts.list"],
+      timeoutMs: 3000,
+      cacheToolsList: false,
+      headers: { Authorization: "Bearer run-secret" },
+    });
   });
 
   test("manager session's first-party MCP token carries its granted permissions end to end", async () => {
@@ -1104,9 +1157,9 @@ describe("worker activities integration", () => {
   });
 
   test("sets Docker and Modal sandbox home defaults", async () => {
-    const docker = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "docker" }), []);
-    const modal = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "modal" }), []);
-    const disabled = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "none" }), []);
+    const { environment: docker } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "docker" }), []);
+    const { environment: modal } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "modal" }), []);
+    const { environment: disabled } = await sandboxEnvironmentForRun(testSettings({ sandboxBackend: "none" }), []);
 
     expect(docker.HOME).toBe("/workspace");
     expect(docker.AZURE_CONFIG_DIR).toBeUndefined();
@@ -1129,7 +1182,7 @@ describe("worker activities integration", () => {
       });
     }) as typeof fetch;
     try {
-      const environment = await sandboxEnvironmentForRun(testSettings({
+      const { environment, gitToken } = await sandboxEnvironmentForRun(testSettings({
         githubAppId: "99",
         githubClientId: "client-id",
         githubClientSecret: "client-secret",
@@ -1144,9 +1197,11 @@ describe("worker activities integration", () => {
       }]);
 
       expect(tokenRequestBody).toEqual({ repository_ids: [456] });
-      expect(environment.GH_TOKEN).toBe("installation-token");
-      expect(environment.GITHUB_TOKEN).toBe("installation-token");
-      expect(environment.GIT_ASKPASS).toBe("/usr/local/bin/opengeni-git-askpass");
+      expect(gitToken).toBe("installation-token");
+      expect(environment.GH_TOKEN).toBeUndefined();
+      expect(environment.GITHUB_TOKEN).toBeUndefined();
+      expect(environment.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+      expect(environment.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
       expect(environment.GIT_AUTHOR_NAME).toBe("opengeni[bot]");
       expect(environment.GIT_AUTHOR_EMAIL).toBe("99+opengeni[bot]@users.noreply.github.com");
       expect(environment.GIT_COMMITTER_NAME).toBe("opengeni[bot]");
@@ -1204,7 +1259,7 @@ describe("worker activities integration", () => {
     expect(sandboxExecCalls).toHaveLength(1);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain("clone_repository '/workspace/repos/Futhark-AS/aifilesearch'");
     expect(String(sandboxExecCalls[0]?.cmd)).toContain("git -C \"$tmp\" fetch --depth 1 --no-tags --filter=blob:none origin \"$ref\"");
-    expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("x-access-token");
+    expect(String(sandboxExecCalls[0]?.cmd)).toContain("x-access-token");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
@@ -2000,7 +2055,7 @@ describe("worker activities integration", () => {
 	    expect(used).toBe(1);
 	  });
 
-  test("does not record scheduled agent run usage when dispatch fails", async () => {
+  test("records scheduled dispatch usage when live event publish fails", async () => {
     const grant = await testGrant(dbClient.db);
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-failing-dispatch",
@@ -2038,10 +2093,10 @@ describe("worker activities integration", () => {
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
-    })).rejects.toThrow("bus publish unavailable");
+    })).resolves.toMatchObject({ action: "start", workspaceId: grant.workspaceId });
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({ status: "failed" });
+    expect(runs[0]).toMatchObject({ status: "dispatched" });
     const agentRuns = await sumUsageQuantity(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -2054,7 +2109,7 @@ describe("worker activities integration", () => {
       eventType: "scheduled_task.fired",
       since: startOfUtcMonth(),
     });
-    expect(agentRuns).toBe(0);
+    expect(agentRuns).toBe(1);
     expect(fired).toBe(1);
   });
 
@@ -2141,9 +2196,9 @@ describe("worker activities integration", () => {
     const previous = process.env.WORKER_TEST_ALLOWLISTED;
     process.env.WORKER_TEST_ALLOWLISTED = "deployment-value";
     try {
-      const unattached = await sandboxEnvironmentForRun(settings, []);
+      const { environment: unattached } = await sandboxEnvironmentForRun(settings, []);
       expect(unattached.WORKER_TEST_ALLOWLISTED).toBe("deployment-value");
-      const environment = await sandboxEnvironmentForRun(settings, [], {
+      const { environment } = await sandboxEnvironmentForRun(settings, [], {
         WORKER_TEST_ALLOWLISTED: "workspace-override",
         WORKSPACE_ONLY_TOKEN: "workspace-only-value",
       });

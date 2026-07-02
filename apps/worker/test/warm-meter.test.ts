@@ -111,6 +111,13 @@ async function warmSecondsCount(workspaceId: string, groupId: string): Promise<n
   return r!.n;
 }
 
+async function replayWarmMeterTick(workspaceId: string, groupId: string): Promise<void> {
+  await admin`
+    update sandbox_leases set last_meter_tick = 0,
+      last_meter_at = now() - interval '8 seconds'
+    where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+}
+
 async function readLiveness(workspaceId: string, groupId: string): Promise<string | undefined> {
   const [r] = await admin<{ liveness: string }[]>`
     select liveness from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
@@ -187,8 +194,9 @@ describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied 
     await reapSandboxLeases();                       // accrue tick 1
     expect(await warmSecondsCount(ws.workspaceId, group)).toBe(1);
 
-    // A second sweep with NO further elapsed time → no new accrual (cursor was
-    // advanced atomically with the insert; no whole second elapsed).
+    // Replay the same tick index; the idempotency key must prevent a duplicate
+    // usage row even if a re-fired sweep observes elapsed wall-clock time.
+    await replayWarmMeterTick(ws.workspaceId, group);
     await reapSandboxLeases();
     expect(await warmSecondsCount(ws.workspaceId, group)).toBe(1);
   }, 90_000);
