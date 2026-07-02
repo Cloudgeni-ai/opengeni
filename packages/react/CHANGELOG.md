@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 0.6.2
+
+### Patch Changes
+
+- a63bc1f: Anchor queued user messages at the turn that actually executes them in the timeline projection, show still-pending queued messages quietly, and ignore cancellation events for queued turns that never started.
+
 ## 0.6.1
 
 ### Patch Changes
