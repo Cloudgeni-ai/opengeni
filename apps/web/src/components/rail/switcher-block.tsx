@@ -21,12 +21,27 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
-import { organizationsForSubject, orgLabel, workspacesInOrg } from "@/lib/org";
+import { organizationsForSubject, workspacesInOrg } from "@/lib/org";
 import { workspaceCreationAccountId } from "@/lib/workspaces";
-import type { Workspace } from "@/types";
+import type { AccountGrant, Workspace } from "@/types";
 
 function workspaceInitial(workspace: Workspace | null): string {
   return (workspace?.name.trim()[0] ?? "W").toUpperCase();
+}
+
+/**
+ * The org's human name if the access grant carries one, else null. The
+ * always-visible switcher line prefers this and falls back to a generic
+ * "Organization" — never a raw account id (the id stays available in the
+ * org-switch menu and settings, which keep `orgLabel`'s id fallback).
+ */
+function orgDisplayName(accountId: string | null, grants: AccountGrant[]): string | null {
+  if (!accountId) {
+    return null;
+  }
+  const grant = grants.find((candidate) => candidate.accountId === accountId);
+  const name = grant?.metadata && typeof grant.metadata.accountName === "string" ? grant.metadata.accountName : undefined;
+  return name?.trim() || null;
 }
 
 export function SwitcherBlock() {
@@ -36,7 +51,7 @@ export function SwitcherBlock() {
   const activeAccountId = activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
-  const currentOrgLabel = activeAccountId ? orgLabel(activeAccountId, context.accessContext.accountGrants) : "Organization";
+  const currentOrgLabel = orgDisplayName(activeAccountId, context.accessContext.accountGrants) ?? "Organization";
   const orgWorkspaces = activeAccountId ? workspacesInOrg(context.workspaces, activeAccountId) : context.workspaces;
 
   const createAccountId = workspaceCreationAccountId(context.accessContext, activeWorkspace?.accountId ?? null);

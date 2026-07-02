@@ -6,7 +6,7 @@
 import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon, SparkleIcon } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { RailFooter } from "@/components/rail/rail-footer";
@@ -28,7 +28,7 @@ import type { Session } from "@/types";
 function RailBody() {
   const rail = useRail();
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface/40">
+    <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
       {/* Brand */}
       <div className={cn("flex h-12 shrink-0 items-center", rail.collapsed ? "justify-center px-2" : "px-3")}>
         <Link
@@ -46,13 +46,15 @@ function RailBody() {
 
       <SwitcherBlock />
 
-      <div className="mt-2">
-        <WorkspaceNav />
+      {/* Sessions — the product's primary object — sit directly under the
+          switcher (D4.1); the secondary workspace-config group drops below. */}
+      <div className="mt-2 flex min-h-0 flex-1 flex-col">
+        {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
       </div>
 
       <div className="my-2 border-t border-border" />
 
-      {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
+      <WorkspaceNav />
 
       <RailFooter />
     </div>
@@ -62,6 +64,10 @@ function RailBody() {
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
+  // controlled Sheet with no in-tree trigger, so radix can't restore focus on
+  // its own — we point it back at the hamburger that opened it.
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
 
   // Close the mobile drawer on route change.
   useEffect(() => {
@@ -109,7 +115,15 @@ export function RailShell({ children }: { children: ReactNode }) {
         {/* Mobile overlay drawer. */}
         {rail.isMobile ? (
           <Sheet open={rail.drawerOpen} onOpenChange={rail.setDrawerOpen}>
-            <SheetContent side="left" showCloseButton={false} className="w-[260px] gap-0 p-0">
+            <SheetContent
+              side="left"
+              showCloseButton={false}
+              className="w-[260px] max-w-[85vw] gap-0 p-0"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                hamburgerRef.current?.focus();
+              }}
+            >
               <nav aria-label="Primary" className="h-full">
                 <RailBody />
               </nav>
@@ -119,7 +133,7 @@ export function RailShell({ children }: { children: ReactNode }) {
 
         {/* Main canvas. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <CanvasTopStrip />
+          <CanvasTopStrip hamburgerRef={hamburgerRef} />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
         </div>
       </div>
@@ -132,7 +146,7 @@ export function RailShell({ children }: { children: ReactNode }) {
  * session routes it also carries the session title/status, the connection and
  * lock pills, and the inspector toggle — moved here from the old top header.
  */
-function CanvasTopStrip() {
+function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const context = useAppContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -148,6 +162,7 @@ function CanvasTopStrip() {
     <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4">
       {rail.isMobile ? (
         <Button
+          ref={hamburgerRef}
           type="button"
           variant="ghost"
           size="icon-sm"
