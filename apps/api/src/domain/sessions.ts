@@ -20,6 +20,7 @@ import {
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
   getAnySessionInGroup,
+  getEnrollment,
   listDistinctEnvironmentIdsInGroup,
   getSandbox,
   getSession,
@@ -80,6 +81,11 @@ export async function createAndStartSession(input: {
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
   // shared/{groupId} spawn passes the resolved group so both run in ONE box.
   sandboxGroupId?: string | null;
+  // The OS axis of the session's box (sessions.sandbox_os). Omitted ⇒ the
+  // "linux" default; set only for a machine-targeted top-level create, where the
+  // targeted machine's enrollment OS is threaded in so the row + resume path +
+  // OS-labeling surfaces honestly reflect the machine.
+  sandboxOs?: Session["sandboxOs"];
   // Create-time machine targeting (A-2a, RACE-FREE): the enrolled machine (a
   // sandbox id) to run this session on. When set, the active-sandbox pointer is
   // resolved+validated+seeded (epoch-fenced) INSIDE finishStartSession, AFTER the
@@ -120,6 +126,7 @@ export async function createAndStartSession(input: {
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
       sandboxGroupId: input.sandboxGroupId ?? null,
+      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
     });
     if (!created) {
       return keyed;
@@ -139,6 +146,7 @@ export async function createAndStartSession(input: {
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
     parentSessionId: input.parentSessionId ?? null,
     sandboxGroupId: input.sandboxGroupId ?? null,
+    ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
   });
   return await finishStartSession(input, session);
 }
@@ -609,7 +617,16 @@ export async function createSessionForRequest(
   // worker ignores the active pointer and a home="selfhosted" turn would fall to
   // the registry client with no bound agentId and throw; with the flags off we
   // keep the cloud default and the machine layers as a (pre-honest-label) overlay.
+  // sandbox_os (the OS axis the worker's group-box resume + the OS-labeling
+  // surfaces key off) must ALSO reflect the targeted machine, not the "linux"
+  // schema default — a session run on a macOS Connected Machine that labels
+  // itself linux lies to those surfaces. Derived under the SAME guards as the
+  // backend relabel; the enrollment (joined via the sandbox's enrollmentId)
+  // carries the OS. enrollmentOsValues and the sessions.sandbox_os value set are
+  // both ("linux","macos","windows"), so a known value maps 1:1; any other value
+  // is left to the "linux" default (never write a value no reader understands).
   let machineHomeBackend: Session["sandboxBackend"] | undefined;
+  let machineHomeOs: Session["sandboxOs"] | undefined;
   if (
     payload.targetSandboxId
     && inheritedBackend === undefined
@@ -619,6 +636,12 @@ export async function createSessionForRequest(
     const targetSandbox = await getSandbox(db, workspaceId, payload.targetSandboxId);
     if (targetSandbox?.kind === "selfhosted") {
       machineHomeBackend = "selfhosted";
+      if (targetSandbox.enrollmentId) {
+        const enrollment = await getEnrollment(db, workspaceId, targetSandbox.enrollmentId);
+        if (enrollment && (enrollment.os === "macos" || enrollment.os === "windows" || enrollment.os === "linux")) {
+          machineHomeOs = enrollment.os;
+        }
+      }
     }
   }
   await requireLimit(deps, { accountId: grant.accountId, workspaceId, action: "agent_run:create", quantity: 1, model });
@@ -640,6 +663,10 @@ export async function createSessionForRequest(
     // (machineHomeBackend), overriding the caller/deployment default so the row
     // matches where the session actually runs.
     sandboxBackend: inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+    // Mirror the backend relabel on the OS axis: only a machine-targeted
+    // top-level create carries a derived OS; everything else is omitted and the
+    // "linux" default holds (shared spawns keep the parent-box behavior).
+    ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
     sandboxGroupId,
     metadata: payload.metadata,
     environment: environment ? { id: environment.id, name: environment.name } : null,
