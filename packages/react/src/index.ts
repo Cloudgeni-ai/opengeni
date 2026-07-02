@@ -242,4 +242,4 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
-export { formatBytes, formatRelativeTime, stringifyPayload, truncate, tryParseJson } from "./lib/format";
+export { formatBytes, formatRelativeTime, humanizeFailureReason, stringifyPayload, truncate, tryParseJson } from "./lib/format";

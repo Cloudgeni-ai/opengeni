@@ -273,7 +273,10 @@ export function useSandboxWorkspaceTabs({
       if (pending || caps.state === "error") {
         tabs.push({
           id: "sandbox",
-          label: "Sandbox",
+          // Named for its state, not a noun: a cold user reading "Sandbox"
+          // learns nothing; "Connecting…" / "Sandbox offline" say exactly why
+          // Files/Terminal/Desktop aren't here yet.
+          label: caps.state === "error" ? "Sandbox offline" : "Connecting…",
           content: withMachineBar(
             <SandboxStatusPanel isError={caps.state === "error"} error={caps.error} onRetry={caps.renegotiate} />,
           ),

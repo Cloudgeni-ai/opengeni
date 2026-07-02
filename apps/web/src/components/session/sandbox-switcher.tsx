@@ -47,7 +47,8 @@ export function SessionSandboxSwitcher({
     return (
       <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-subtle">
         <ServerIcon className="size-3 shrink-0" />
-        <span className="truncate">{activeName}</span>
+        <span className="shrink-0">on</span>
+        <span className="truncate text-fg-muted">{activeName}</span>
       </span>
     );
   }
@@ -62,9 +63,10 @@ export function SessionSandboxSwitcher({
           className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-subtle hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <ServerIcon className="size-3 shrink-0" />
-          {/* Just the target's name — "Run on" is the dropdown's label, not
-              header-line grammar. */}
-          <span className="truncate">{activeName}</span>
+          {/* Natural-language "on {target}" — semantic without the colon-label
+              grammar; "Run on" remains the dropdown menu's label. */}
+          <span className="shrink-0">on</span>
+          <span className="truncate text-fg-muted">{activeName}</span>
           {fleet.attaching ? (
             <Loader2Icon className="size-3 shrink-0 animate-spin" />
           ) : (

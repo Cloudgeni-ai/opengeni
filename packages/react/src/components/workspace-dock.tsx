@@ -106,6 +106,12 @@ export function WorkspaceDock({
   const [maximized, setMaximized] = useState(false);
   const [internalTab, setInternalTab] = useState(tabs[0]?.id ?? "");
   const collapsed = collapsedProp ?? internalCollapsed;
+  // When the host supplies `collapsed` it owns the open/close affordance (e.g.
+  // the app header's panel toggle) — the dock must not offer a SECOND
+  // open/close control (duplicate buttons with near-identical icons read as a
+  // bug). Standalone (uncontrolled) usage keeps the built-in collapse button
+  // and the thin re-open rail as its only affordances.
+  const hostControlled = collapsedProp !== undefined;
 
   // Persisted layout (width split) keyed by autoSaveId.
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -223,13 +229,11 @@ export function WorkspaceDock({
           >
             {maximized ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
           </ChromeButton>
-          <ChromeButton
-            onClick={maximized ? () => setMaximized(false) : collapse}
-            title={maximized ? "Restore" : "Collapse"}
-            label={maximized ? "Restore dock" : "Collapse dock"}
-          >
-            <PanelRightCloseIcon className="size-3.5" />
-          </ChromeButton>
+          {hostControlled ? null : (
+            <ChromeButton onClick={collapse} title="Collapse" label="Collapse dock">
+              <PanelRightCloseIcon className="size-3.5" />
+            </ChromeButton>
+          )}
         </>
       }
     />
@@ -281,8 +285,9 @@ export function WorkspaceDock({
         </Panel>
       </Group>
 
-      {/* Collapsed rail: a thin tab on the right edge that re-opens the dock. */}
-      {collapsed && !maximized && (
+      {/* Collapsed rail: the standalone fallback re-open affordance. Hidden
+          when the host controls collapse — its own toggle is the one way in. */}
+      {collapsed && !maximized && !hostControlled && (
         <button
           type="button"
           onClick={expand}

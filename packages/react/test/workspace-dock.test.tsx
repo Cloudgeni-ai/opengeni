@@ -51,24 +51,40 @@ async function withNarrowViewport(run: () => Promise<void>): Promise<void> {
 }
 
 describe("WorkspaceDock", () => {
-  test("dock collapse controls can be owned by the host", async () => {
-    const changes: boolean[] = [];
+  test("a host-controlled dock offers no built-in open/close controls", async () => {
+    // The host's own toggle is the ONE open/close affordance: no chrome
+    // Collapse button (it duplicated the host toggle) and no re-open rail.
     const rendered = await renderComponent(
-      <ControlledDock onCollapsedChange={(collapsed) => changes.push(collapsed)} />,
+      <ControlledDock onCollapsedChange={() => {}} />,
     );
 
     expect(rendered.container.textContent ?? "").toContain("Run content");
+    expect(rendered.container.querySelector('[title="Collapse"]')).toBeNull();
     expect(rendered.container.querySelector('[title="Open workspace"]')).toBeNull();
+    // Maximize remains: a distinct mode, not an open/close duplicate.
+    expect(rendered.container.querySelector('[title="Maximize"]')).not.toBeNull();
+
+    await rendered.unmount();
+  });
+
+  test("an uncontrolled dock keeps its own collapse button and re-open rail", async () => {
+    const rendered = await renderComponent(
+      <WorkspaceDock
+        autoSaveId="og.test.workspace-dock-uncontrolled"
+        primary={<div>Chat pane</div>}
+        tabs={[{ id: "run", label: "Run", content: <div>Run content</div> }]}
+      />,
+    );
+
+    expect(rendered.container.textContent ?? "").toContain("Run content");
 
     await click(rendered.container.querySelector('[title="Collapse"]'));
 
-    expect(changes.at(-1)).toBe(true);
     expect(rendered.container.textContent ?? "").not.toContain("Run content");
     expect(rendered.container.querySelector('[title="Open workspace"]')).not.toBeNull();
 
     await click(rendered.container.querySelector('[title="Open workspace"]'));
 
-    expect(changes.at(-1)).toBe(false);
     expect(rendered.container.textContent ?? "").toContain("Run content");
 
     await rendered.unmount();

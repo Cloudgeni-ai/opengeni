@@ -24,6 +24,8 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { OpenGeniApiError } from "@opengeni/sdk";
+
 import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
@@ -84,6 +86,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   // (falling back to the page origin), never a hardcoded marketing domain.
   const origin = apiBaseUrl || (typeof window !== "undefined" ? window.location.origin : "");
 
+  // A 404 from the machines API means the deployment doesn't enable connected
+  // machines at all. That's a configuration fact, not a failure — render a calm
+  // explanation instead of a red load error with a pointless retry (mirrors the
+  // composer's handling in sessions-index).
+  const featureUnavailable = machines.error instanceof OpenGeniApiError && machines.error.status === 404;
+
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
       <PageHeader
@@ -93,17 +101,23 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       />
 
       <div className="mt-5">
-        <MachinesDashboard
-          machines={machines.machines}
-          activeSandboxId={machines.activeSandboxId}
-          loading={machines.loading}
-          error={machines.error}
-          onRefresh={() => void machines.refresh()}
-          onEnroll={() => setEnrollOpen(true)}
-          {...(machines.canAttach
-            ? { onAttach: (m) => void machines.attach(m.sandboxId), attachingSandboxId: machines.attachingSandboxId }
-            : {})}
-        />
+        {featureUnavailable ? (
+          <Notice tone="muted">
+            Connected machines aren't enabled on this deployment. Sessions run on the managed sandbox.
+          </Notice>
+        ) : (
+          <MachinesDashboard
+            machines={machines.machines}
+            activeSandboxId={machines.activeSandboxId}
+            loading={machines.loading}
+            error={machines.error}
+            onRefresh={() => void machines.refresh()}
+            onEnroll={() => setEnrollOpen(true)}
+            {...(machines.canAttach
+              ? { onAttach: (m) => void machines.attach(m.sandboxId), attachingSandboxId: machines.attachingSandboxId }
+              : {})}
+          />
+        )}
       </div>
 
       <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
