@@ -20,6 +20,7 @@ import {
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
   getAnySessionInGroup,
+  listDistinctEnvironmentIdsInGroup,
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
@@ -534,6 +535,11 @@ export async function createSessionForRequest(
   // credentialed worker spawned from a credential-less manager just works), and
   // an EXPLICIT shared/{groupId} request with a mismatched Environment fails
   // fast at create (422) instead of poisoning the session's first turn.
+  // The env conflict is a BOX property, so a boxless group is exempt: a
+  // backend:"none" session runs in-process with no sandbox, no manifest, and no
+  // provided-session attach — no shared box state exists to conflict, and
+  // env-differing spawns from such parents shared safely before the env-aware
+  // check. They keep sharing (and keep inheriting "none").
   const requestedEnvironmentId = payload.environmentId ?? null;
   const environmentMatchesGroup = (memberEnvironmentId: string | null): boolean =>
     memberEnvironmentId === requestedEnvironmentId;
@@ -545,14 +551,16 @@ export async function createSessionForRequest(
     if (!parent) {
       throw new HTTPException(404, { message: `parent session not found in workspace: ${parentSessionId}` });
     }
-    if (!environmentMatchesGroup(parent.environmentId ?? null)) {
+    if (parent.sandboxBackend !== "none" && !environmentMatchesGroup(parent.environmentId ?? null)) {
       if (payload.sandbox === "shared") {
         // The caller explicitly asked to share while carrying a different
         // Environment — surface the conflict at create time, not turn time.
         throw new HTTPException(422, { message: "sandbox:'shared' requires the same environment as the creator's box (the box environment is fixed at creation); omit sandbox or pass 'new' when attaching a different environment." });
       }
       // Inherited default: deterministic separation on the genuine shared-state
-      // conflict — the worker gets its own box and its turn runs.
+      // conflict — the worker gets its own box (resolved like a top-level
+      // create: payload.sandboxBackend, else the deployment default) and its
+      // turn runs.
     } else {
       sandboxGroupId = parent.sandboxGroupId;
       inheritedBackend = parent.sandboxBackend;
@@ -562,8 +570,16 @@ export async function createSessionForRequest(
     if (!member) {
       throw new HTTPException(404, { message: `sandbox group not found in workspace: ${sandboxChoice.groupId}` });
     }
-    if (!environmentMatchesGroup(member.environmentId ?? null)) {
-      throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.` });
+    if (member.sandboxBackend !== "none") {
+      // Compare against EVERY member, not one arbitrary row: a legacy env-blind
+      // group can carry mixed environmentIds, and an any-member read would make
+      // the join verdict nondeterministic. Post-env-aware groups are homogeneous
+      // (both join paths enforce equality), so this reads one distinct value in
+      // the common case; a mixed legacy group deterministically rejects.
+      const memberEnvironmentIds = await listDistinctEnvironmentIdsInGroup(db, workspaceId, sandboxChoice.groupId);
+      if (!memberEnvironmentIds.every((memberEnvironmentId) => environmentMatchesGroup(memberEnvironmentId))) {
+        throw new HTTPException(422, { message: `sandbox group ${sandboxChoice.groupId} runs a different environment (the box environment is fixed at creation); create with the group's environment or omit sandbox for an own box.` });
+      }
     }
     sandboxGroupId = sandboxChoice.groupId;
     inheritedBackend = member.sandboxBackend;

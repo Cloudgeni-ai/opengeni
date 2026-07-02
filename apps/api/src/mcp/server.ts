@@ -674,7 +674,7 @@ function registerWorkspaceOrchestrationTools(
           z4.literal("new"),
           z4.object({ groupId: z4.string().uuid() }),
         ]).describe(
-          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT environment than the creator's box, the platform automatically gives it its own box (the box environment is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same image and the same environment; a conflict is rejected at create.",
+          "Sandbox placement. OMIT (default) to SHARE the creator's box — one filesystem/repo/desktop, N independent conversations; this is the safe default. If the new session attaches a DIFFERENT environment than the creator's box, the platform automatically gives it its own box (the box environment is fixed at creation), so omitting stays safe. Pass 'new' for a fresh isolated box (different repo set or a genuinely separate filesystem). Pass {groupId} to join a specific sibling's box — requires the same environment (a mismatch is rejected at create) and the same image (a conflicting image is rejected when the box warms).",
         ).optional(),
         // The parent (manager) session is auto-inferred from the caller's
         // worker-signed sessionId claim, so a spawned worker's completion wakes

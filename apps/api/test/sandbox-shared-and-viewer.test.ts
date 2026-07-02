@@ -215,9 +215,11 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     const { accountId, workspaceId } = await freshWorkspace();
     const environmentId = await freshEnvironment(accountId, workspaceId);
     const bus = new MemoryEventBus();
-    // A: credential-less manager (top-level, no environment).
+    // A: credential-less manager (top-level, no environment) on a REAL backend
+    // (the boxless backend:"none" is exempt from the env-aware check).
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
       initialMessage: "manager",
+      sandboxBackend: "modal",
     });
     // B: credentialed worker spawned FROM INSIDE A, sandbox OMITTED. The old
     // env-blind default joined A's box and the first turn died on the SDK's
@@ -241,6 +243,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     const a = await createSessionForRequest(deps(bus), g0, workspaceId, {
       initialMessage: "credentialed founder",
       environmentId,
+      sandboxBackend: "modal",
     });
     const g1 = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
     const b = await createSessionForRequest(deps(bus), g1, workspaceId, {
@@ -257,6 +260,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     const bus = new MemoryEventBus();
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
       initialMessage: "manager",
+      sandboxBackend: "modal",
     });
     const g = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
     await expect(createSessionForRequest(deps(bus), g, workspaceId, {
@@ -273,6 +277,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     const bus = new MemoryEventBus();
     const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
       initialMessage: "founder",
+      sandboxBackend: "modal",
     });
     const g = { ...grant(accountId, workspaceId), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
     await expect(createSessionForRequest(deps(bus), g, workspaceId, {
@@ -280,6 +285,65 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       environmentId,
       sandbox: { groupId: a.sandboxGroupId! },
     })).rejects.toThrow(/different environment/);
+  }, 60_000);
+
+  test("ENV-AWARE: a legacy MIXED-env group rejects a {groupId} join DETERMINISTICALLY (all members compared)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    // Founder: credential-less.
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "founder",
+      sandboxBackend: "modal",
+    });
+    // Simulate a LEGACY env-blind share: force an env-carrying member row into
+    // A's group directly (the env-aware check would refuse this today).
+    await admin`
+      insert into sessions (account_id, workspace_id, initial_message, environment_id, sandbox_group_id, model, sandbox_backend)
+      values (${accountId}, ${workspaceId}, 'legacy env-blind member', ${environmentId}, ${a.sandboxGroupId}, 'gpt-test', 'modal')`;
+    const g = { ...grant(accountId, workspaceId), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    // A joiner matching EITHER member must reject: the group is mixed, so no
+    // environment matches ALL members — the verdict cannot depend on which
+    // member an arbitrary single-row read happens to return.
+    await expect(createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "joiner with the env",
+      environmentId,
+      sandbox: { groupId: a.sandboxGroupId! },
+    })).rejects.toThrow(/different environment/);
+    await expect(createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "joiner without an env",
+      sandbox: { groupId: a.sandboxGroupId! },
+    })).rejects.toThrow(/different environment/);
+  }, 60_000);
+
+  test("ENV-AWARE EXEMPTION: a boxless backend:'none' parent SHARES with an env-differing child (no box ⇒ no conflict)", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const environmentId = await freshEnvironment(accountId, workspaceId);
+    const bus = new MemoryEventBus();
+    // Boxless parent (the harness default backend is "none").
+    const a = await createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+      initialMessage: "boxless manager",
+    });
+    expect(a.sandboxBackend).toBe("none");
+    const g = { ...grant(accountId, workspaceId, a.id), permissions: ["sessions:create", "sessions:read", "environments:use"] as AccessGrant["permissions"] };
+    // Env-carrying child, sandbox OMITTED: with no box there is no shared box
+    // state — the pre-env-aware sharing behavior (and the inherited "none"
+    // backend) must be preserved, NOT a silent fallback onto a billable cloud box.
+    const b = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "env child of boxless parent",
+      environmentId,
+    });
+    expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
+    expect(b.sandboxBackend).toBe("none");
+    // The explicit form shares too (nothing to conflict with).
+    const c = await createSessionForRequest(deps(bus), g, workspaceId, {
+      initialMessage: "explicit shared env child",
+      environmentId,
+      sandbox: "shared",
+    });
+    expect(c.sandboxGroupId).toBe(a.sandboxGroupId);
   }, 60_000);
 
   test("{groupId} explicit join (I13/OD-S5) ⇒ same group as the sibling", async () => {

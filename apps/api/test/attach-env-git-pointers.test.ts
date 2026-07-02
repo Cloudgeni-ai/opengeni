@@ -23,10 +23,11 @@ const settings = testSettings({
   githubAppSlug: "opengeni-test",
 });
 
-function sessionWith(resources: Session["resources"]): Session {
+function sessionWith(resources: Session["resources"], sandboxBackend = "modal"): Session {
   return {
     id: "11111111-1111-1111-1111-111111111111",
     environmentId: null,
+    sandboxBackend,
     resources,
   } as unknown as Session;
 }
@@ -55,6 +56,29 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([]));
     expect(attachEnv).toEqual(stableSandboxEnvironmentForRun(settings, {}));
     expect(attachEnv.GIT_ASKPASS).toBeUndefined();
+  });
+
+  test("the attach env is keyed off the SESSION's backend, not the deployment default (HOME + pointers move with it)", async () => {
+    // The box is established with backendOverride: session.sandboxBackend and the
+    // turn builds its env from the session's backend too — an attach env keyed
+    // off the deployment default would cold-create an e2b session's box with
+    // /workspace-rooted HOME/token-file/askpass while the turn declares
+    // /home/user-rooted ones, the same guard-killed first turn again.
+    const attachEnv = await sessionAttachEnvironment(services, "ws", sessionWith([{
+      kind: "repository",
+      uri: "https://github.com/acme/repo.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    }], "e2b"));
+    const expected = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun({ ...settings, sandboxBackend: "e2b" }, {}),
+      githubAppBotIdentity(settings),
+    );
+    expect(attachEnv).toEqual(expected);
+    expect(attachEnv.HOME).toBe("/home/user");
+    expect(attachEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/home/user/.opengeni/git-token");
+    expect(attachEnv.GIT_ASKPASS).toBe("/home/user/.opengeni/askpass");
   });
 
   test("a plain-URI repo (no installation ids) does not trigger the pointers — mirrors the turn's selection predicate", async () => {
