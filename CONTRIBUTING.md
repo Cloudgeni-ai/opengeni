@@ -50,6 +50,11 @@ Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename fi
 
 Release and publishing guidance starts here; executable truth lives in [`package.json`](package.json) and the workflow files under `.github/workflows/`. When publishable packages change, keep changesets, package manifests, and the release workflow expectations aligned.
 
+Two publish-coherence rules learned the hard way (all versions are 0.x):
+
+- **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.
+- **Publish-mode Release runs only on a Version-Packages-PR merge commit.** Any other push to `main` produces a version-mode run that just refreshes the Version PR. To ship a publish, merge the Version PR deliberately and watch that specific run.
+
 ## Code Style
 
 - Prefer existing repository patterns over new abstractions.
