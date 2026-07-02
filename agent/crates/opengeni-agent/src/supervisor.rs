@@ -12,9 +12,13 @@
 //!    [`Platform`] and replying on the message's reply inbox.
 //! 3. **Heartbeats** every 5s on the events subject with a metrics sample so the
 //!    control plane can dead-detect a vanished agent (§10.6 cadence).
-//! 4. On **any disconnect**, sleeps a full-jitter [`Backoff`] delay (base 1s, cap
-//!    60s) before reconnecting — NEVER a tight loop (the #1 outage cause). A
-//!    reconnect re-subscribes the RPC subject (a fresh subscription).
+//! 4. On **any disconnect**, sleeps a full-jitter [`Backoff::standard`] delay (a
+//!    ~30s FAST phase of ≤3s retries so a rolling-deploy blip recovers in
+//!    seconds, then exponential up to a 10s cap for a prolonged outage) before
+//!    reconnecting — NEVER a tight loop (the #1 outage cause). A reconnect
+//!    re-subscribes the RPC subject (a fresh subscription), which — together with
+//!    the ~5s heartbeat on this same connection — is what restores the machine's
+//!    `last_seen`/ping liveness the attach gate reads.
 //! 5. On a **clean stop** (SIGINT/SIGTERM) sends a [`GoingOffline`] event and
 //!    closes cleanly so the lease flips offline IMMEDIATELY (§23.0), rather than
 //!    waiting on heartbeat dead-detection.
