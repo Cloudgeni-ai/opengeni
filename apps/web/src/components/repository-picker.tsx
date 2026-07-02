@@ -28,8 +28,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { Notice } from "@/components/ui/notice";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { repoCountLabel } from "@/lib/format";
 import {
   gitHubRepositoryResource,
@@ -121,7 +119,7 @@ export function RepositoryContextPicker(props: {
   // absent and the settings form is the only way to reconnect or re-create.
   const settingsDisclosure = (
     <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
-      <div className="rounded-lg border border-border bg-bg/25">
+      <div className="border-t border-border/60 pt-1">
         <CollapsibleTrigger asChild>
           <button
             type="button"
@@ -132,7 +130,7 @@ export function RepositoryContextPicker(props: {
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <div className="border-t border-border p-3">{setupForm}</div>
+          <div className="px-1 pb-1 pt-2">{setupForm}</div>
         </CollapsibleContent>
       </div>
     </Collapsible>
@@ -194,8 +192,8 @@ export function RepositoryContextPicker(props: {
             </Button>
           </div>
 
-          <ScrollArea className="max-h-[min(70vh,620px)]">
-            <div className="space-y-3 p-3">
+          <div className="max-h-[min(calc(var(--radix-dropdown-menu-content-available-height,70vh)-3.5rem),620px)] overflow-y-auto overscroll-contain">
+            <div className="space-y-2.5 p-2.5">
               {!props.configured ? (
                 <div className="space-y-3">
                   <EmptyState
@@ -203,7 +201,7 @@ export function RepositoryContextPicker(props: {
                     title="No repositories connected"
                     description="Connect the GitHub app so the sandbox can clone your repositories, push branches, and open pull requests."
                   />
-                  <div className="rounded-lg border border-border bg-bg/25 p-3">{setupForm}</div>
+                  <div className="px-1 pt-1">{setupForm}</div>
                 </div>
               ) : props.repoBusy ? (
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-bg/25 p-3 text-xs text-fg-muted">
@@ -215,7 +213,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="The connected GitHub app isn't sharing any repositories with this workspace yet."
+                    description="The connected GitHub app isn't sharing any repositories with this workspace — if some are missing, the app may have been removed on GitHub. Reinstall it."
                     action={
                       props.installUrl ? (
                         <Button asChild type="button" variant="outline" size="sm" className="h-8 text-xs">
@@ -227,14 +225,11 @@ export function RepositoryContextPicker(props: {
                       ) : undefined
                     }
                   />
-                  <Notice tone="waiting">
-                    If repositories are missing, the app may have been removed on GitHub — reinstall it.
-                  </Notice>
                   {settingsDisclosure}
                 </div>
               ) : (
                 <>
-                  <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-bg/25 px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 px-1 py-0.5">
                     <div className="flex min-w-0 items-center gap-2">
                       <MetaChip dot="idle" rounded="full">GitHub app</MetaChip>
                       {props.org ? (
@@ -256,7 +251,7 @@ export function RepositoryContextPicker(props: {
                       <div className="min-w-0 truncate text-xs font-medium text-fg">Repositories</div>
                       <div className="shrink-0 text-2xs text-fg-subtle">{props.repositories.length} available</div>
                     </div>
-                    <div className="max-h-80 overflow-auto">
+                    <div>
                       {props.groups.map((group) => (
                         <div key={group.installationId} className="border-b border-border last:border-b-0">
                           <div className="flex items-center justify-between gap-3 bg-surface/45 px-3 py-1.5">
@@ -330,7 +325,7 @@ export function RepositoryContextPicker(props: {
               )}
 
               <Collapsible open={props.manualOpen} onOpenChange={props.onManualOpenChange}>
-                <div className="rounded-lg border border-border bg-bg/25">
+                <div className="border-t border-border/60 pt-1">
                   <div className="flex items-center justify-between gap-2 px-3 py-2">
                     <CollapsibleTrigger asChild>
                       <button type="button" className="flex min-w-0 flex-1 items-center gap-2 rounded-md text-left text-xs font-medium text-fg">
@@ -413,7 +408,7 @@ export function RepositoryContextPicker(props: {
                 </div>
               </Collapsible>
             </div>
-          </ScrollArea>
+          </div>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
