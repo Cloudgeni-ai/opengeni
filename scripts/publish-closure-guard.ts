@@ -2,52 +2,57 @@
 /**
  * Publish closure guard.
  *
- * The publishable client closure is exactly:
- *   @opengeni/contracts, @opengeni/sdk, @opengeni/react
+ * Stage C publishes the full @opengeni/* runtime closure needed by the client,
+ * API router, core, and worker bundle. This guard fails loudly if:
  *
- * This guard fails loudly (non-zero exit) if that closure is contaminated:
+ *   (a) a publishable package's published dependency maps point at an ignored or
+ *       private workspace package.
+ *   (b) a publishable package is missing npm-public package metadata or a build.
+ *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
+ *       the SDK remains zero-runtime-dep, and React only depends on SDK among
+ *       @opengeni/* packages.
+ *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
  *
- *   (a) @opengeni/sdk gains ANY @opengeni/* runtime dependency, or a non-empty
- *       `dependencies` map (it must stay zero-dependency — it hand-mirrors the
- *       contracts wire types instead of importing them).
- *   (b) @opengeni/react's runtime `dependencies` reference any @opengeni/*
- *       package other than @opengeni/sdk.
- *   (c) the BUILT sdk/react dist bundles reference any server-internal package
- *       (config, db, runtime, storage, documents, events, github,
- *       observability, deployment, testing) — i.e. a server import leaked into
- *       a published client bundle.
- *
- * Wired into ci.yml and the release gate. If you are reading this because the
- * guard went red: do NOT relax it. Remove the server import or move the type to
- * @opengeni/contracts / hand-mirror it in the SDK.
+ * Wired into the release gate and safe to run locally without publishing.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import {
+  PUBLISHED_DEP_FIELDS,
+  changesetIgnoreSet,
+  publishableWorkspacePackages,
+  repoRoot,
+  topologicallySortedPackages,
+  workspaceDependencyNames,
+  workspacePackageByName,
+  type PackageJson,
+  type WorkspacePackage,
+} from "./publishable-workspaces";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-const SERVER_INTERNAL_PACKAGES = [
+const SERVER_EMBED_PACKAGES = [
+  "agent-proto",
+  "api-router",
+  "codex",
   "config",
+  "core",
   "db",
-  "runtime",
-  "storage",
   "documents",
   "events",
   "github",
   "observability",
+  "runtime",
+  "storage",
+  "worker-bundle",
   "deployment",
   "testing",
 ] as const;
 
-type PackageJson = {
-  name?: string;
-  dependencies?: Record<string, string>;
-  peerDependencies?: Record<string, string>;
-};
-
 const failures: string[] = [];
+const publishable = topologicallySortedPackages(publishableWorkspacePackages());
+const publishableNames = new Set(publishable.map((pkg) => pkg.name));
+const ignored = changesetIgnoreSet();
+const workspaceNames = workspacePackageByName();
 
 function readPkg(pkgDir: string): PackageJson {
   return JSON.parse(readFileSync(join(repoRoot, pkgDir, "package.json"), "utf8")) as PackageJson;
@@ -55,6 +60,57 @@ function readPkg(pkgDir: string): PackageJson {
 
 function opengeniRuntimeDeps(pkg: PackageJson): string[] {
   return Object.keys(pkg.dependencies ?? {}).filter((name) => name.startsWith("@opengeni/"));
+}
+
+function assertPublishableMetadata(pkg: WorkspacePackage): void {
+  const json = pkg.packageJson as PackageJson & {
+    main?: string;
+    module?: string;
+    types?: string;
+    exports?: unknown;
+    files?: unknown;
+    publishConfig?: { access?: string; provenance?: boolean };
+  };
+  if (json.publishConfig?.access !== "public") {
+    failures.push(`${pkg.name} is publishable but missing publishConfig.access="public".`);
+  }
+  if (json.publishConfig?.provenance !== true) {
+    failures.push(`${pkg.name} is publishable but missing publishConfig.provenance=true.`);
+  }
+  if (!Array.isArray(json.files) || !json.files.includes("dist") || !json.files.includes("src")) {
+    failures.push(`${pkg.name} is publishable but its files list must include "dist" and "src".`);
+  }
+  if (json.main !== "./src/index.ts" || json.module !== "./src/index.ts" || json.types !== "./src/index.ts") {
+    failures.push(`${pkg.name} committed entry points must stay on ./src/index.ts for workspace source resolution.`);
+  }
+  if (!json.exports || typeof json.exports !== "object") {
+    failures.push(`${pkg.name} is publishable but has no exports map.`);
+  }
+  if (!json.scripts?.build) {
+    failures.push(`${pkg.name} is publishable but has no build script.`);
+  }
+}
+
+for (const pkg of publishable) {
+  assertPublishableMetadata(pkg);
+  for (const depName of workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS)) {
+    if (!publishableNames.has(depName)) {
+      const ignoredText = ignored.has(depName) ? "ignored" : "private";
+      failures.push(`${pkg.name} depends on ${ignoredText} workspace package ${depName} in a published dependency map.`);
+    }
+  }
+}
+
+for (const ignoredName of ignored) {
+  const pkg = workspaceNames.get(ignoredName);
+  if (!pkg || pkg.name === "opengeni-web") {
+    continue;
+  }
+  for (const consumer of publishable) {
+    if (workspaceDependencyNames(consumer, PUBLISHED_DEP_FIELDS).includes(ignoredName)) {
+      failures.push(`${ignoredName} is ignored but is a published dependency of ${consumer.name}.`);
+    }
+  }
 }
 
 // (a) SDK must be zero-dependency and carry no @opengeni runtime dep.
@@ -84,7 +140,7 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
   failures.push(`@opengeni/react must keep @opengeni/sdk as a runtime dependency.`);
 }
 
-// (c) Built dist bundles must not reference any server-internal package.
+// (d) Built dist bundles must not reference any server/embed package.
 //
 // The sdk/react tsup configs externalize all @opengeni/* (see their
 // tsup.config.ts), so a leaked `import "@opengeni/<server>"` survives in dist as
@@ -93,7 +149,7 @@ if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
 // package boundary (e.g. `@opengeni/db` but not a hypothetical
 // `@opengeni/dbutils`); the capture group reports just the clean package name.
 const serverInternalPattern = new RegExp(
-  `@opengeni/(${SERVER_INTERNAL_PACKAGES.join("|")})(?:/|["'\`]|$)`,
+  `@opengeni/(${SERVER_EMBED_PACKAGES.join("|")})(?:/|["'\`]|$)`,
 );
 
 function ensureBuilt(pkgDir: string): void {
@@ -111,8 +167,11 @@ function ensureBuilt(pkgDir: string): void {
   }
 }
 
-for (const pkgDir of ["packages/sdk", "packages/react"]) {
+for (const { dir: pkgDir } of publishable) {
   ensureBuilt(pkgDir);
+}
+
+for (const pkgDir of ["packages/sdk", "packages/react"]) {
   for (const file of ["dist/index.js", "dist/index.d.ts"]) {
     const path = join(repoRoot, pkgDir, file);
     if (!existsSync(path)) {
@@ -123,7 +182,7 @@ for (const pkgDir of ["packages/sdk", "packages/react"]) {
     if (match) {
       const leaked = match[1] ? `@opengeni/${match[1]}` : "<unknown>";
       failures.push(
-        `${pkgDir}/${file} references a server-internal package (${leaked}). ` +
+        `${pkgDir}/${file} references a server/embed package (${leaked}). ` +
           `A server import leaked into a published client bundle.`,
       );
     }
@@ -136,10 +195,10 @@ if (failures.length > 0) {
     process.stderr.write(`  ✗ ${failure}\n`);
   }
   process.stderr.write(
-    "\nThe publishable client closure {@opengeni/contracts, @opengeni/sdk, @opengeni/react} must stay free of " +
-      "server-internal packages. See scripts/publish-closure-guard.ts for the rules.\n",
+    "\nThe publishable @opengeni/* closure must not depend on ignored packages, and the client bundle must stay server-free. " +
+      "See scripts/publish-closure-guard.ts for the rules.\n",
   );
   process.exit(1);
 }
 
-process.stdout.write("Publish closure guard passed: client closure is clean.\n");
+process.stdout.write(`Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean.\n`);

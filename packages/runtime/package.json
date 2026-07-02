@@ -1,9 +1,9 @@
 {
   "name": "@opengeni/runtime",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": {
@@ -15,7 +15,16 @@
       "default": "./src/sandbox/index.ts"
     }
   },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -29,6 +38,7 @@
     "@opengeni/codex": "workspace:*"
   },
   "devDependencies": {
+    "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   }
 }

@@ -1,11 +1,26 @@
 {
   "name": "@opengeni/events",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "main": "./src/index.ts",
+  "module": "./src/index.ts",
   "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -14,6 +29,7 @@
     "nats": "^2.29.3"
   },
   "devDependencies": {
+    "tsup": "^8.5.0",
     "typescript": "^6.0.3"
   }
 }

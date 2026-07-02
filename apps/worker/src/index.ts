@@ -41,7 +41,7 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
     connection,
     namespace: settings.temporalNamespace,
     taskQueue: settings.temporalTaskQueue,
-    workflowsPath: new URL("./workflows.ts", import.meta.url).pathname,
+    workflowsPath: new URL("../src/workflows.ts", import.meta.url).pathname,
     activities,
   });
   return { worker, connection };

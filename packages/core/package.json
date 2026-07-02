@@ -40,14 +40,14 @@
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
+    "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
+    "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
+    "@opengeni/storage": "workspace:*",
     "hono": "^4.12.18"
   },
   "devDependencies": {
-    "@opengeni/documents": "workspace:*",
-    "@opengeni/observability": "workspace:*",
-    "@opengeni/storage": "workspace:*",
     "better-auth": "^1.6.14",
     "tsup": "^8.5.0",
     "typescript": "^6.0.3"

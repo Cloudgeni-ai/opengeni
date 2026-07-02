@@ -42,7 +42,7 @@
     "image:build:api": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target api -t opengeni-api:local .",
     "image:build:worker": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target worker -t opengeni-worker:local .",
     "image:build:web": "docker build --platform ${OPENGENI_IMAGE_PLATFORM:-linux/amd64} -f docker/opengeni.Dockerfile --target web -t opengeni-web:local .",
-    "build:packages": "cd packages/contracts && bun run build && cd ../sdk && bun run build && cd ../react && bun run build",
+    "build:packages": "bun scripts/build-publishable-packages.ts",
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
     "changeset:version": "changeset version",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",

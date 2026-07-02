@@ -2998,7 +2998,11 @@ export function azureOpenAIDefaultQuery(
 let stagedBundledSkillsDir: string | null = null;
 
 function bundledSkillsDir(): string {
-  const packaged = join(dirname(fileURLToPath(import.meta.url)), "bundled_hashicorp_terraform_skills");
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const packaged = [
+    join(moduleDir, "bundled_hashicorp_terraform_skills"),
+    join(moduleDir, "..", "src", "bundled_hashicorp_terraform_skills"),
+  ].find((candidate) => existsSync(candidate)) ?? join(moduleDir, "bundled_hashicorp_terraform_skills");
   if (isPathWithin(process.cwd(), packaged)) {
     return packaged;
   }

@@ -7,17 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": [
-    "opengeni-web",
-    "@opengeni/config",
-    "@opengeni/db",
-    "@opengeni/deployment",
-    "@opengeni/documents",
-    "@opengeni/events",
-    "@opengeni/github",
-    "@opengeni/observability",
-    "@opengeni/runtime",
-    "@opengeni/storage",
-    "@opengeni/testing"
-  ]
+  "ignore": ["opengeni-web", "@opengeni/deployment", "@opengeni/testing"]
 }

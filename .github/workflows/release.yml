@@ -3,7 +3,7 @@ name: Release
 # On every push to main, the changesets action opens/updates a "Version
 # Packages" PR collecting the pending changesets. When that PR is merged (the
 # package.json versions + CHANGELOGs land on main), the same action runs the
-# publish step and pushes the three client packages to npm.
+# publish step and pushes the publishable @opengeni/* closure to npm.
 #
 # The GHCR image job runs ONLY when that publish actually happens (the changesets
 # `published` output is 'true'), and tags images with the published release
@@ -67,7 +67,7 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Build client packages
+      - name: Build publishable packages
         run: bun run build:packages
 
       - name: SDK contract-parity test

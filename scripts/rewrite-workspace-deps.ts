@@ -43,53 +43,20 @@
  *   bun scripts/rewrite-workspace-deps.ts            # rewrite -> concrete
  *   bun scripts/rewrite-workspace-deps.ts --restore  # concrete -> workspace:*
  */
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-// The packages that actually get published to npm. Their published dependency
-// maps are the only ones that may not carry a `workspace:` spec.
-const PUBLISHABLE_PACKAGE_DIRS = ["packages/contracts", "packages/sdk", "packages/react"] as const;
-
-// Dependency maps that end up in the published tarball. devDependencies are
-// stripped by npm at publish time, so we deliberately do not touch them.
-const PUBLISHED_DEP_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
-
-type PackageJson = Record<string, unknown> & {
-  name?: string;
-  version?: string;
-};
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  PUBLISHED_DEP_FIELDS,
+  publishableWorkspacePackages,
+  repoRoot,
+  workspacePackageByName,
+  workspaceVersionMap,
+  type PackageJson,
+} from "./publishable-workspaces";
 
 const restore = process.argv.includes("--restore");
-
-/** Build name -> version for every package in the workspace. */
-function buildVersionMap(): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const group of ["packages", "apps"]) {
-    const groupDir = join(repoRoot, group);
-    let entries: string[];
-    try {
-      entries = readdirSync(groupDir);
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const pkgPath = join(groupDir, entry, "package.json");
-      let pkg: PackageJson;
-      try {
-        pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as PackageJson;
-      } catch {
-        continue;
-      }
-      if (pkg.name && pkg.version) {
-        map.set(pkg.name, pkg.version);
-      }
-    }
-  }
-  return map;
-}
+const versions = workspaceVersionMap();
+const workspaceNames = workspacePackageByName();
 
 /**
  * Translate a single `workspace:` spec to a concrete range using pnpm/bun rules.
@@ -119,11 +86,10 @@ function resolveWorkspaceSpec(depName: string, spec: string, versions: Map<strin
 
 let changed = 0;
 
-for (const pkgDir of PUBLISHABLE_PACKAGE_DIRS) {
+for (const { dir: pkgDir } of publishableWorkspacePackages()) {
   const pkgPath = join(repoRoot, pkgDir, "package.json");
   const raw = readFileSync(pkgPath, "utf8");
   const pkg = JSON.parse(raw) as PackageJson;
-  const versions = buildVersionMap();
   let pkgChanged = false;
 
   for (const field of PUBLISHED_DEP_FIELDS) {
@@ -134,7 +100,7 @@ for (const pkgDir of PUBLISHABLE_PACKAGE_DIRS) {
     for (const [depName, spec] of Object.entries(deps)) {
       if (restore) {
         // Put the workspace protocol back on @opengeni/* deps (local proving).
-        if (depName.startsWith("@opengeni/") && !spec.startsWith("workspace:")) {
+        if (workspaceNames.has(depName) && depName.startsWith("@opengeni/") && !spec.startsWith("workspace:")) {
           deps[depName] = "workspace:*";
           pkgChanged = true;
           changed += 1;

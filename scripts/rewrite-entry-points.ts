@@ -42,51 +42,83 @@
  *   bun scripts/rewrite-entry-points.ts --restore  # dist -> src (local proving)
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-
-// The packages that actually get published to npm. Their entry points must point
-// at dist in the published tarball, but at src in the committed (internal) tree.
-const PUBLISHABLE_PACKAGE_DIRS = ["packages/contracts", "packages/sdk", "packages/react"] as const;
-
-const SRC_MAIN = "./src/index.ts";
-const DIST_MAIN = "./dist/index.js";
-const DIST_TYPES = "./dist/index.d.ts";
+import { join } from "node:path";
+import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
 type ExportsEntry = { types?: string; import?: string; default?: string } | string;
-type PackageJson = Record<string, unknown> & {
-  name?: string;
-  main?: string;
-  module?: string;
-  types?: string;
-  exports?: Record<string, ExportsEntry>;
-};
 
 const restore = process.argv.includes("--restore");
+
+function srcToDist(value: string, kind: "runtime" | "types"): string {
+  if (!value.startsWith("./src/")) {
+    return value;
+  }
+  const withoutSourceRoot = value.slice("./src/".length).replace(/\.ts$/, kind === "types" ? ".d.ts" : ".js");
+  return `./dist/${withoutSourceRoot}`;
+}
+
+function distToSrc(value: string): string {
+  if (!value.startsWith("./dist/")) {
+    return value;
+  }
+  const withoutDistRoot = value.slice("./dist/".length).replace(/\.d\.ts$/, ".ts").replace(/\.js$/, ".ts");
+  return `./src/${withoutDistRoot}`;
+}
+
+function entryToDist(entry: ExportsEntry): ExportsEntry {
+  if (typeof entry === "string") {
+    return srcToDist(entry, "runtime");
+  }
+  const next: ExportsEntry = { ...entry };
+  const runtimeSource = entry.import ?? entry.default;
+  if (entry.types) {
+    next.types = srcToDist(entry.types, "types");
+  }
+  if (runtimeSource) {
+    next.import = srcToDist(runtimeSource, "runtime");
+    delete next.default;
+  }
+  return next;
+}
+
+function entryToSrc(entry: ExportsEntry): ExportsEntry {
+  if (typeof entry === "string") {
+    return distToSrc(entry);
+  }
+  const next: ExportsEntry = { ...entry };
+  const runtimeDist = entry.import ?? entry.default;
+  if (entry.types) {
+    next.types = distToSrc(entry.types);
+  }
+  if (runtimeDist) {
+    next.default = distToSrc(runtimeDist);
+    delete next.import;
+  }
+  return next;
+}
 
 /** Entry points in the dist form (published tarball). */
 function toDist(pkg: PackageJson): boolean {
   let changed = false;
-  if (pkg.main !== DIST_MAIN) {
-    pkg.main = DIST_MAIN;
+  if (typeof pkg.main === "string" && pkg.main !== srcToDist(pkg.main, "runtime")) {
+    pkg.main = srcToDist(pkg.main, "runtime");
     changed = true;
   }
-  if (pkg.module !== DIST_MAIN) {
-    pkg.module = DIST_MAIN;
+  if (typeof pkg.module === "string" && pkg.module !== srcToDist(pkg.module, "runtime")) {
+    pkg.module = srcToDist(pkg.module, "runtime");
     changed = true;
   }
-  if (pkg.types !== DIST_TYPES) {
-    pkg.types = DIST_TYPES;
+  if (typeof pkg.types === "string" && pkg.types !== srcToDist(pkg.types, "types")) {
+    pkg.types = srcToDist(pkg.types, "types");
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {
-    const dot = pkg.exports["."];
-    const next = { types: DIST_TYPES, import: DIST_MAIN };
-    if (JSON.stringify(dot) !== JSON.stringify(next)) {
-      pkg.exports["."] = next;
-      changed = true;
+    for (const [subpath, entry] of Object.entries(pkg.exports as Record<string, ExportsEntry>)) {
+      const next = entryToDist(entry);
+      if (JSON.stringify(entry) !== JSON.stringify(next)) {
+        (pkg.exports as Record<string, ExportsEntry>)[subpath] = next;
+        changed = true;
+      }
     }
   }
   return changed;
@@ -95,24 +127,25 @@ function toDist(pkg: PackageJson): boolean {
 /** Entry points in the src form (internal workspace resolution; committed tree). */
 function toSrc(pkg: PackageJson): boolean {
   let changed = false;
-  if (pkg.main !== SRC_MAIN) {
-    pkg.main = SRC_MAIN;
+  if (typeof pkg.main === "string" && pkg.main !== distToSrc(pkg.main)) {
+    pkg.main = distToSrc(pkg.main);
     changed = true;
   }
-  if (pkg.module !== SRC_MAIN) {
-    pkg.module = SRC_MAIN;
+  if (typeof pkg.module === "string" && pkg.module !== distToSrc(pkg.module)) {
+    pkg.module = distToSrc(pkg.module);
     changed = true;
   }
-  if (pkg.types !== SRC_MAIN) {
-    pkg.types = SRC_MAIN;
+  if (typeof pkg.types === "string" && pkg.types !== distToSrc(pkg.types)) {
+    pkg.types = distToSrc(pkg.types);
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {
-    const dot = pkg.exports["."];
-    const next = { types: SRC_MAIN, default: SRC_MAIN };
-    if (JSON.stringify(dot) !== JSON.stringify(next)) {
-      pkg.exports["."] = next;
-      changed = true;
+    for (const [subpath, entry] of Object.entries(pkg.exports as Record<string, ExportsEntry>)) {
+      const next = entryToSrc(entry);
+      if (JSON.stringify(entry) !== JSON.stringify(next)) {
+        (pkg.exports as Record<string, ExportsEntry>)[subpath] = next;
+        changed = true;
+      }
     }
   }
   return changed;
@@ -120,7 +153,7 @@ function toSrc(pkg: PackageJson): boolean {
 
 let changed = 0;
 
-for (const pkgDir of PUBLISHABLE_PACKAGE_DIRS) {
+for (const { dir: pkgDir } of publishableWorkspacePackages()) {
   const pkgPath = join(repoRoot, pkgDir, "package.json");
   const raw = readFileSync(pkgPath, "utf8");
   const pkg = JSON.parse(raw) as PackageJson;

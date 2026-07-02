@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publish the client packages to npm with provenance.
+# Publish the @opengeni/* npm closure with provenance.
 #
 # Invoked by changesets/action ONLY when a "Version Packages" PR is merged (i.e.
 # there are released versions to publish). It is intentionally guarded so a
@@ -28,7 +28,7 @@ bun scripts/publish-closure-guard.ts
 # package.json versions in the CI checkout) and right before publish: the plain
 # `npm publish` that `changeset publish` falls back to in this bun workspace
 # does NOT strip the workspace: protocol, so without this the published
-# @opengeni/react would carry `"@opengeni/sdk": "workspace:*"` and be
+# any published @opengeni/* dependency would carry `"workspace:*"` and be
 # uninstallable. The edit is confined to the ephemeral CI checkout and is never
 # committed; run with `--restore` locally to undo it.
 bun scripts/rewrite-workspace-deps.ts
