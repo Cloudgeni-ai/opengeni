@@ -8,7 +8,9 @@ import {
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
+  XIcon,
 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MetaChip } from "@/components/ui/meta-chip";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { repoCountLabel } from "@/lib/format";
 import {
@@ -66,6 +69,9 @@ export function RepositoryContextPicker(props: {
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
   const selectedCount = selectedInstalledCount + manualCount;
   const setupOpen = props.githubAppOpen;
+  // Two-step inline confirm for removing a manual repo, so a stray click in a
+  // dense picker doesn't drop a repo the user typed out.
+  const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
 
   return (
     <DropdownMenu>
@@ -138,16 +144,9 @@ export function RepositoryContextPicker(props: {
                         </span>
                       </span>
                       <span className="flex shrink-0 items-center gap-2">
-                        <span
-                          className={cn(
-                            "rounded-full border px-1.5 py-0.5 text-2xs font-medium",
-                            props.configured
-                              ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
-                              : "border-status-waiting/30 bg-status-waiting/10 text-status-waiting",
-                          )}
-                        >
-                          {props.configured ? "Ready" : "Setup"}
-                        </span>
+                        <MetaChip dot={props.configured ? "idle" : "waiting"} rounded="full">
+                          {props.configured ? "Configured" : "Not set up"}
+                        </MetaChip>
                         <ChevronDownIcon className={cn("size-3.5 text-fg-subtle transition-transform", setupOpen && "rotate-180")} />
                       </span>
                     </button>
@@ -255,9 +254,9 @@ export function RepositoryContextPicker(props: {
                                     </span>
                                   </span>
                                   {blocked ? (
-                                    <span className="rounded-full border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">other app</span>
+                                    <MetaChip dot="waiting" rounded="full">Other app</MetaChip>
                                   ) : checked ? (
-                                    <span className="rounded-full border border-status-idle/30 px-1.5 py-0.5 text-2xs text-status-idle">selected</span>
+                                    <MetaChip dot="idle" rounded="full">Selected</MetaChip>
                                   ) : null}
                                 </button>
                                 {checked ? (
@@ -326,9 +325,40 @@ export function RepositoryContextPicker(props: {
                                 className="h-8 pl-7 text-xs"
                               />
                             </div>
-                            <Button type="button" variant="ghost" size="icon-sm" onClick={() => props.onManualRemove(repo.id)} disabled={props.pending} aria-label="Remove repository" className="size-8">
-                              <Trash2Icon className="size-3.5" />
-                            </Button>
+                            {confirmRemoveId === repo.id ? (
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  type="button"
+                                  variant="destructive"
+                                  size="icon-sm"
+                                  onClick={() => {
+                                    props.onManualRemove(repo.id);
+                                    setConfirmRemoveId(null);
+                                  }}
+                                  disabled={props.pending}
+                                  aria-label="Confirm remove repository"
+                                  title="Remove"
+                                  className="size-8"
+                                >
+                                  <CheckIcon className="size-3.5" />
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  onClick={() => setConfirmRemoveId(null)}
+                                  aria-label="Keep repository"
+                                  title="Cancel"
+                                  className="size-8"
+                                >
+                                  <XIcon className="size-3.5" />
+                                </Button>
+                              </div>
+                            ) : (
+                              <Button type="button" variant="ghost" size="icon-sm" onClick={() => setConfirmRemoveId(repo.id)} disabled={props.pending} aria-label="Remove repository" title="Remove" className="size-8">
+                                <Trash2Icon className="size-3.5" />
+                              </Button>
+                            )}
                           </div>
                         ))
                       )}
@@ -378,7 +408,7 @@ export function ScheduledTaskRepositoryPicker(props: {
         nextResource,
       ]);
     } catch (error) {
-      toast.error("Repository could not be selected", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Couldn't select the repository", { description: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -454,9 +484,9 @@ export function ScheduledTaskRepositoryPicker(props: {
                           <span className="mt-0.5 block truncate text-2xs text-fg-subtle">default {repo.defaultBranch}</span>
                         </span>
                         {blocked ? (
-                          <span className="rounded-full border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">other app</span>
+                          <MetaChip dot="waiting" rounded="full">Other app</MetaChip>
                         ) : checked ? (
-                          <span className="rounded-full border border-status-idle/30 px-1.5 py-0.5 text-2xs text-status-idle">selected</span>
+                          <MetaChip dot="idle" rounded="full">Selected</MetaChip>
                         ) : null}
                       </button>
                       {resource ? (
