@@ -303,15 +303,21 @@ describe("buildTimeline", () => {
     expect(sandbox.output).toContain("connection refused");
   });
 
-  test("collapses repeated status changes and surfaces notices for failures and interrupts", () => {
+  test("only attention statuses project dividers; repeats collapse; failure/interrupt notices surface", () => {
     reset();
     const items = buildTimeline([
+      // Machinery telemetry — the header pill owns these; no timeline rows.
+      event("session.status.changed", { status: "queued" }),
       event("session.status.changed", { status: "running" }),
-      event("session.status.changed", { status: "running" }),
+      event("session.status.changed", { status: "idle" }),
+      // Attention statuses earn a divider, collapsed on repeat.
+      event("session.status.changed", { status: "requires_action" }),
+      event("session.status.changed", { status: "requires_action" }),
       event("turn.failed", { error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["session-status", "turn-end", "notice", "turn-end", "notice"]);
+    expect(items[0]).toMatchObject({ kind: "session-status", status: "requires_action" });
     expect(items[1]).toMatchObject({ outcome: "failed", failureText: "model provider unavailable" });
     expect(items[2]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
     expect(items[3]).toMatchObject({ outcome: "cancelled", failureText: null });
@@ -580,12 +586,13 @@ describe("groupTimeline", () => {
         event("turn.failed", { error: "deploy failed" }, { turnId: "turn-2" }),
       ]),
     );
-    expect(groups.map((group) => group.kind)).toEqual(["item", "turn", "item", "item", "item", "turn", "item"]);
+    // The idle/running ticks between and inside turns project no rows at all —
+    // the shape is purely user → turn → answer, twice.
+    expect(groups.map((group) => group.kind)).toEqual(["item", "turn", "item", "item", "turn", "item"]);
     const turns = turnGroups(groups);
     expect(turns.map((turn) => turn.id)).toEqual(["turn-turn-1", "turn-turn-2"]);
     expect(turns[0]?.groups.map((group) => group.kind)).toEqual(["activity"]);
-    expect(turns[1]?.groups.map((group) => group.kind)).toEqual(["item", "activity"]);
-    expect(groups[3]?.kind === "item" ? groups[3].item.kind : null).toBe("session-status");
+    expect(turns[1]?.groups.map((group) => group.kind)).toEqual(["activity"]);
   });
 
   test("sequential turns without a user boundary do not absorb the previous final message", () => {
@@ -601,10 +608,11 @@ describe("groupTimeline", () => {
         event("turn.completed", {}, { turnId: "turn-2" }),
       ]),
     );
+    // No divider row separates the turns anymore; the foreign-turn guard alone
+    // keeps turn-2's walk-back from absorbing turn-1's final message.
     expect(groups.map((group) => (group.kind === "item" ? `${group.kind}:${group.item.kind}` : group.kind))).toEqual([
       "turn",
       "item:agent-message",
-      "item:session-status",
       "turn",
       "item:agent-message",
     ]);
@@ -619,12 +627,13 @@ describe("groupTimeline", () => {
     expect(groups[0]?.kind === "item" ? groups[0].item : null).toMatchObject({ kind: "notice", tone: "failed" });
   });
 
-  test("session status ticks inside a settled turn fold into the body", () => {
+  test("machinery status ticks vanish; attention statuses inside a settled turn fold into the body", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
         event("user.message", { text: "run checks" }, { turnId: null }),
         event("session.status.changed", { status: "running" }, { turnId: null }),
+        event("session.status.changed", { status: "requires_action" }, { turnId: null }),
         event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "bun test" } }, { turnId: "turn-status" }),
         event("agent.message.completed", { text: "Checks passed." }, { turnId: "turn-status" }),
         event("turn.completed", {}, { turnId: "turn-status" }),
@@ -632,7 +641,10 @@ describe("groupTimeline", () => {
     );
     expect(groups.map((group) => group.kind)).toEqual(["item", "turn", "item"]);
     const [turn] = turnGroups(groups);
+    // The running tick projected nothing; the requires_action divider folds.
     expect(turn?.groups.map((group) => (group.kind === "item" ? group.item.kind : group.kind))).toEqual(["session-status", "activity"]);
+    const folded = turn?.groups[0];
+    expect(folded?.kind === "item" ? folded.item : null).toMatchObject({ kind: "session-status", status: "requires_action" });
   });
 
   test("live activity groups have no turn outcome", () => {

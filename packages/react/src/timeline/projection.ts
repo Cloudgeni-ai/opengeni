@@ -280,6 +280,14 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!isSessionStatus(status)) {
           break;
         }
+        // Only attention-worthy statuses earn a timeline divider. queued /
+        // running / idle are machinery telemetry: the header pill carries the
+        // live status, the shimmer says "running", and the turn chip's duration
+        // facet says how long — a stale "idle · 27s" row is pure noise,
+        // especially in historical traces.
+        if (!ATTENTION_STATUSES.has(status)) {
+          break;
+        }
         const previous = [...items].reverse().find((item): item is SessionStatusItem => item.kind === "session-status");
         if (previous?.status === status) {
           break;
@@ -576,6 +584,9 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 const SESSION_STATUSES: readonly SessionStatus[] = ["queued", "running", "idle", "requires_action", "failed", "cancelled"];
+
+/** Statuses that demand the reader's attention and so earn a timeline divider. */
+const ATTENTION_STATUSES: ReadonlySet<SessionStatus> = new Set(["requires_action", "failed", "cancelled"]);
 
 /** Keep only entries that match the wire shapes; user payloads are untyped. */
 function resourceRefs(value: unknown): import("@opengeni/sdk").ResourceRef[] {
