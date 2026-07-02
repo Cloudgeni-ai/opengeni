@@ -3194,30 +3194,41 @@ export async function updateSessionMcpServerCredentials(db: Database, input: {
   sessionId: string;
   updates: UpdateSessionMcpServerCredentialsInput[];
 }): Promise<UpdateSessionMcpServerCredentialsResult> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
-    const servers: SessionMcpServerMetadata[] = [];
-    const missingIds: string[] = [];
-    for (const update of input.updates) {
-      const [row] = await tx.update(schema.sessionMcpServers)
-        .set({
-          headersEncrypted: update.headersEncrypted,
-          credentialVersion: sql`${schema.sessionMcpServers.credentialVersion} + 1`,
-          updatedAt: new Date(),
-        })
-        .where(and(
-          eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
-          eq(schema.sessionMcpServers.sessionId, input.sessionId),
-          eq(schema.sessionMcpServers.serverId, update.id),
-        ))
-        .returning();
-      if (!row) {
-        missingIds.push(update.id);
-      } else {
-        servers.push(mapSessionMcpServerMetadata(row));
-      }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) =>
+    await updateSessionMcpServerCredentialsInTransaction(tx, input)
+  ));
+}
+
+async function updateSessionMcpServerCredentialsInTransaction(
+  tx: Pick<Database, "update">,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    updates: UpdateSessionMcpServerCredentialsInput[];
+  },
+): Promise<UpdateSessionMcpServerCredentialsResult> {
+  const servers: SessionMcpServerMetadata[] = [];
+  const missingIds: string[] = [];
+  for (const update of input.updates) {
+    const [row] = await tx.update(schema.sessionMcpServers)
+      .set({
+        headersEncrypted: update.headersEncrypted,
+        credentialVersion: sql`${schema.sessionMcpServers.credentialVersion} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.sessionId),
+        eq(schema.sessionMcpServers.serverId, update.id),
+      ))
+      .returning();
+    if (!row) {
+      missingIds.push(update.id);
+    } else {
+      servers.push(mapSessionMcpServerMetadata(row));
     }
-    return { servers, missingIds };
-  }));
+  }
+  return { servers, missingIds };
 }
 
 export async function listSessionMcpServersForRun(
@@ -7509,7 +7520,11 @@ export async function appendSessionEventsAndUpdateSession(db: Database, workspac
   }));
 }
 
-export async function appendSessionEventsWithLockedSessionUpdate(db: Database, workspaceId: string, sessionId: string, build: (session: Session) => {
+type LockedSessionUpdateContext = {
+  updateSessionMcpServerCredentials: (updates: UpdateSessionMcpServerCredentialsInput[]) => Promise<UpdateSessionMcpServerCredentialsResult>;
+};
+
+type LockedSessionUpdateResult = {
   events: AppendEventInput[];
   update?: {
     resources?: ResourceRef[];
@@ -7519,13 +7534,22 @@ export async function appendSessionEventsWithLockedSessionUpdate(db: Database, w
     status?: SessionStatus;
     activeTurnId?: string | null;
   };
-}): Promise<SessionEvent[]> {
+};
+
+export async function appendSessionEventsWithLockedSessionUpdate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  build: (session: Session, context: LockedSessionUpdateContext) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
+): Promise<SessionEvent[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
     const [sessionRow] = await tx.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).for("update").limit(1);
     if (!sessionRow) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const built = build(mapSession(sessionRow));
+    const built = await build(mapSession(sessionRow), {
+      updateSessionMcpServerCredentials: async (updates) => await updateSessionMcpServerCredentialsInTransaction(tx, { workspaceId, sessionId, updates }),
+    });
     if (built.events.length === 0) {
       return [];
     }

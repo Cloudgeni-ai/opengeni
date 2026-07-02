@@ -65,10 +65,11 @@ It cannot change URL, name, allowed tools, timeout, or cache behavior. Each
 successful rotation replaces the encrypted header map and increments
 `credentialVersion`.
 
-Rotation is effective on the next turn: the API applies credential updates before
-the `user.message` event is appended and the turn is queued, and the worker loads
-the latest decrypted headers during turn preparation immediately before
-`runtime.prepareTools`.
+Rotation is effective on the next turn: the API validates updates up front, then
+applies credential updates only after the session has accepted the `user.message`
+inside the locked append transaction, before the event is appended and the turn
+is queued. The worker loads the latest decrypted headers during turn preparation
+immediately before `runtime.prepareTools`.
 
 ## Runtime path
 
@@ -76,8 +77,9 @@ the latest decrypted headers during turn preparation immediately before
 collisions, encrypts headers, persists the rows in the same transaction as the
 session, and records only metadata in `session.created` events.
 
-`acceptSessionUserMessage` validates and applies `mcpCredentialUpdates` before
-posting the new turn. It passes only metadata into the persisted `user.message`
+`acceptSessionUserMessage` validates `mcpCredentialUpdates` before posting the
+new turn. The encrypted row update runs after the cancelled-session guard in the
+same locked acceptance path, and only metadata is persisted in the `user.message`
 event.
 
 `apps/worker/src/activities/agent-turn.ts` overlays session MCP servers after

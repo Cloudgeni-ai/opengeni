@@ -3972,6 +3972,81 @@ describe("API component integration", () => {
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
   });
 
+  test("cancelled-session user messages do not rotate per-session MCP credentials", async () => {
+    const wf = new FakeWorkflowClient();
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        environmentsEncryptionKey: environmentsTestKey,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: wf,
+    });
+    const attachAuth = `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "test:session-mcp-cancelled-rotation",
+      permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control", "mcp_servers:attach"],
+      exp: Math.floor(Date.now() / 1000) + 300,
+    })}`;
+
+    const createSecret = "Bearer create-secret";
+    const created = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the peloton server",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "peloton" }],
+        mcpServers: [{
+          id: "peloton",
+          name: "Peloton MCP",
+          url: "https://peloton.example/mcp",
+          headers: { Authorization: createSecret, "X-Initial": "1" },
+        }],
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(created.status).toBe(202);
+    const session = await created.json() as { id: string };
+    const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    const beforeCredentials = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(beforeCredentials[0]?.headers).toEqual({ Authorization: createSecret, "X-Initial": "1" });
+    expect(beforeCredentials[0]?.credentialVersion).toBe(1);
+
+    await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "cancelled", null);
+    const beforeEvents = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    const beforeTurns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 100);
+    const beforeUsage = await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 100 });
+    const wakeupsBefore = wf.wakeups.length;
+
+    const rejected = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}/events`), {
+      method: "POST",
+      body: JSON.stringify({
+        type: "user.message",
+        payload: {
+          text: "rotate after cancellation",
+          mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer rejected", "X-Initial": "2" } }],
+        },
+      }),
+      headers: { "content-type": "application/json", authorization: attachAuth },
+    });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.text()).toContain("cannot accept a new user message");
+
+    const afterCredentials = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, key);
+    expect(afterCredentials[0]?.headers).toEqual({ Authorization: createSecret, "X-Initial": "1" });
+    expect(afterCredentials[0]?.credentialVersion).toBe(1);
+    expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100)).toHaveLength(beforeEvents.length);
+    expect(await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 100)).toHaveLength(beforeTurns.length);
+    expect(await listUsageEvents(dbClient.db, { accountId: grant.accountId, workspaceId: grant.workspaceId, limit: 100 })).toHaveLength(beforeUsage.length);
+    expect(wf.wakeups.length).toBe(wakeupsBefore);
+  });
+
   test("goal-bearing sessions always hold goals:manage in their first-party MCP permissions", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);

@@ -33,9 +33,9 @@ import {
   requireSession,
   setTemporalWorkflowId,
   updateSessionTitle as updateSessionTitleRow,
-  updateSessionMcpServerCredentials,
   type CreateSessionMcpServerInput,
   type Database,
+  type UpdateSessionMcpServerCredentialsInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
@@ -183,14 +183,12 @@ function validateSessionMcpServersForCreate(
   return { runtimeServers, dbServers, metadata };
 }
 
-async function applySessionMcpCredentialUpdates(input: {
-  db: Database;
+function validateSessionMcpCredentialUpdates(input: {
   settings: Settings;
   grant: AccessGrant;
-  workspaceId: string;
   session: Session;
   updates: SessionMcpCredentialUpdateInput[];
-}): Promise<SessionMcpServerMetadata[]> {
+}): UpdateSessionMcpServerCredentialsInput[] {
   if (input.updates.length === 0) {
     return [];
   }
@@ -214,15 +212,7 @@ async function applySessionMcpCredentialUpdates(input: {
       ),
     };
   });
-  const result = await updateSessionMcpServerCredentials(input.db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.session.id,
-    updates: encryptedUpdates,
-  });
-  if (result.missingIds.length > 0) {
-    throw new HTTPException(422, { message: `unknown session MCP server id: ${result.missingIds[0]}` });
-  }
-  return result.servers;
+  return encryptedUpdates;
 }
 
 export async function createAndStartSession(input: {
@@ -539,7 +529,7 @@ export async function postUserMessageTurn(input: {
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
-  mcpCredentialUpdates?: SessionMcpServerMetadata[];
+  mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -547,7 +537,7 @@ export async function postUserMessageTurn(input: {
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, (lockedSession) => {
+  const appended = await appendSessionEventsWithLockedSessionUpdate(db, workspaceId, sessionId, async (lockedSession, lockedUpdate) => {
     // Cancelled is the one terminal state: an explicit user act. A FAILED
     // session stays revivable by talking to it — conversation truth lives in
     // session_history_items, so a failed turn does not invalidate history,
@@ -557,6 +547,12 @@ export async function postUserMessageTurn(input: {
     // run for the completed (failed) one, exactly as for idle sessions.
     if (lockedSession.status === "cancelled") {
       throw new HTTPException(409, { message: `session is ${lockedSession.status}; cannot accept a new user message` });
+    }
+    const mcpCredentialUpdates = input.mcpCredentialUpdates?.length
+      ? await lockedUpdate.updateSessionMcpServerCredentials(input.mcpCredentialUpdates)
+      : { servers: [], missingIds: [] };
+    if (mcpCredentialUpdates.missingIds.length > 0) {
+      throw new HTTPException(422, { message: `unknown session MCP server id: ${mcpCredentialUpdates.missingIds[0]}` });
     }
     const nextResources = mergeResourceRefs(lockedSession.resources, input.resources);
     const nextTools = mergeToolRefs(lockedSession.tools, input.tools);
@@ -571,7 +567,7 @@ export async function postUserMessageTurn(input: {
             ...(input.tools.length ? { tools: input.tools } : {}),
             ...(requestedModel ? { model: requestedModel } : {}),
             ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
-            ...(input.mcpCredentialUpdates?.length ? { mcpCredentialUpdates: input.mcpCredentialUpdates } : {}),
+            ...(mcpCredentialUpdates.servers.length ? { mcpCredentialUpdates: mcpCredentialUpdates.servers } : {}),
           },
           ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
         },
@@ -933,11 +929,9 @@ export async function acceptSessionUserMessage(
   }
   await validateFileResources(db, workspaceId, requestedResources);
   await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
-  const rotatedMcpServers = await applySessionMcpCredentialUpdates({
-    db,
+  const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
     settings,
     grant,
-    workspaceId,
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
@@ -954,7 +948,7 @@ export async function acceptSessionUserMessage(
     tools: requestedTools,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
-    mcpCredentialUpdates: rotatedMcpServers,
+    mcpCredentialUpdates,
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });
   await recordWorkspaceUsage(deps, {
