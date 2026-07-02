@@ -278,38 +278,38 @@ export function CodeEditor({
       style={editorVars}
     >
       {/* Save bar: dirty indicator + status + the explicit Save button. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))] px-2 py-1">
+      <div className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full transition-colors",
             readOnly
               ? "bg-transparent"
               : dirty
-                ? "bg-[color:var(--og-color-status-running,var(--color-warning,#d29922))]"
-                : "bg-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]",
+                ? "bg-og-status-running"
+                : "bg-og-status-idle",
           )}
           title={readOnly ? "read-only" : dirty ? "unsaved changes" : "saved"}
         />
-        <span className="truncate font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[11px] text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]">
+        <span className="truncate font-og-mono text-og-xs text-og-fg-muted">
           {fileName}
           {dirty && !readOnly ? " •" : ""}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {saveError && (
             <span
-              className="max-w-[220px] truncate text-[10px] text-[color:var(--og-color-danger,var(--color-danger,#f85149))]"
+              className="max-w-[220px] truncate text-og-xs text-og-status-failed"
               title={saveError.message}
             >
               {saveError.message}
             </span>
           )}
           {!saveError && savedTick && (
-            <span className="text-[10px] text-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]">
+            <span className="text-og-xs text-og-status-idle">
               Saved
             </span>
           )}
           {readOnly ? (
-            <span className="text-[10px] uppercase tracking-wide text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+            <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">
               Read-only
             </span>
           ) : (
@@ -318,10 +318,10 @@ export function CodeEditor({
               onClick={() => void save()}
               disabled={saving || !dirty}
               className={cn(
-                "flex items-center gap-1 rounded-[var(--og-radius-sm,4px)] border border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] px-1.5 py-0.5 text-[10px]",
+                "flex items-center gap-1 rounded-og-sm border border-og-border px-1.5 py-0.5 text-og-xs pointer-coarse:min-h-10",
                 saving || !dirty
-                  ? "cursor-default text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))] opacity-60"
-                  : "text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))] hover:bg-[color:var(--og-color-accent-soft,var(--color-surface-2,#222))]",
+                  ? "cursor-default text-og-fg-subtle opacity-60"
+                  : "text-og-fg hover:bg-og-accent-soft",
               )}
               title="Save (⌘/Ctrl+S)"
             >
@@ -347,7 +347,7 @@ export function CodeEditor({
             basicSetup={true}
             extensions={cmExtensions}
             height="100%"
-            className="og-cm-editor min-h-full text-[12.5px]"
+            className="og-cm-editor min-h-full text-og-sm"
             onChange={
               readOnly
                 ? undefined
@@ -365,8 +365,8 @@ export function CodeEditor({
 
 /** og-* themed CSS-var overrides handed to CodeMirror's container. */
 const editorVars = {
-  "--og-cm-bg": "var(--og-color-bg, #0d0d0d)",
-  fontFamily: "var(--og-font-mono, var(--font-mono, monospace))",
+  "--og-cm-bg": "var(--og-color-bg)",
+  fontFamily: "var(--og-font-mono)",
 } as CSSProperties;
 
 function PlainTextarea({
@@ -384,14 +384,14 @@ function PlainTextarea({
       readOnly={readOnly}
       spellCheck={false}
       onChange={(e) => onChange(e.target.value)}
-      className="h-full w-full resize-none bg-transparent p-2 font-[family-name:var(--og-font-mono,var(--font-mono,monospace))] text-[12px] leading-[18px] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))] outline-none"
+      className="h-full w-full resize-none bg-transparent p-2 font-og-mono text-og-sm text-og-fg outline-none"
     />
   );
 }
 
 function EditorSkeleton() {
   return (
-    <div className="p-3 text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+    <div className="p-3 text-og-sm text-og-fg-subtle">
       Loading editor…
     </div>
   );

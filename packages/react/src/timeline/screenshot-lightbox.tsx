@@ -136,7 +136,7 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                         {state.caption}
                       </figcaption>
                     ) : (
-                      <figcaption className="font-og-mono text-[10px] uppercase tracking-[0.1em] text-white/35">
+                      <figcaption className="font-og-mono text-og-xs uppercase tracking-[0.1em] text-white/35">
                         Esc or click outside to close
                       </figcaption>
                     )}

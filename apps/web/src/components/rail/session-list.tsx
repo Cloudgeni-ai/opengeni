@@ -1,8 +1,8 @@
 // The session list — the rail's home. Reuses the same useWorkspaceSessions
 // hook the old sessions index used, groups by recency (running pinned on top),
 // and supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
-// dot + single-line truncated title + hover-revealed relative time. The active
-// session (from the URL) is highlighted with an accent bar.
+// dot + single-line truncated title + relative time (visible at rest). The
+// active session (from the URL) is highlighted with an accent bar.
 import { useWorkspaceSessions } from "@opengeni/react";
 import { useRouterState } from "@tanstack/react-router";
 import { EllipsisIcon, MessagesSquareIcon, PencilIcon, PlusIcon } from "lucide-react";
@@ -96,7 +96,7 @@ export function SessionList() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex min-w-0 items-center justify-between gap-2 px-3 pb-1 pt-1">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+        <span className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
           Sessions
         </span>
         <Tooltip>
@@ -107,7 +107,7 @@ export function SessionList() {
               size="icon-xs"
               aria-label="New session"
               onClick={rail.startNewSession}
-              className="text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]"
+              className="text-fg-muted hover:text-fg"
             >
               <PlusIcon className="size-3.5" />
             </Button>
@@ -122,14 +122,14 @@ export function SessionList() {
         aria-label="Sessions"
         tabIndex={0}
         onKeyDown={onKeyDown}
-        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2 outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
+        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2 outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
       >
         {loading && sessions.length === 0 ? (
           <SessionListSkeleton />
         ) : error && sessions.length === 0 ? (
-          <div className="px-2 py-3 text-xs text-[color:var(--color-fg-subtle)]">
+          <div className="px-2 py-3 text-xs text-fg-subtle">
             Session history is unavailable.{" "}
-            <button type="button" className="underline hover:text-[color:var(--color-fg)]" onClick={() => void refresh()}>
+            <button type="button" className="underline hover:text-fg" onClick={() => void refresh()}>
               Retry
             </button>
           </div>
@@ -180,7 +180,7 @@ function SessionGroup(props: {
 }) {
   return (
     <div className="mb-1.5 min-w-0">
-      <p className="px-2 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+      <p className="px-2 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
         {props.label}
       </p>
       <div className="grid min-w-0 grid-cols-1 gap-px">
@@ -215,12 +215,12 @@ function SessionRow(props: {
   const rename = useInlineRename(props.session, props.onRename);
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors",
-    "hover:bg-[color:var(--color-surface-2)]",
+    "group relative flex h-8 w-full items-center gap-2 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-10",
+    "hover:bg-surface-2",
     props.active
-      ? "bg-[color:var(--color-surface-3)] font-medium text-[color:var(--color-fg)]"
-      : "text-[color:var(--color-fg-muted)]",
-    props.focused && !props.active ? "bg-[color:var(--color-surface-2)]/60" : "",
+      ? "bg-surface-3 font-medium text-fg"
+      : "text-fg-muted",
+    props.focused && !props.active ? "bg-surface-2/60" : "",
   );
 
   // While renaming, the row body becomes an inline input. Keep it as a
@@ -249,7 +249,7 @@ function SessionRow(props: {
           }}
           maxLength={SESSION_TITLE_MAX_LENGTH}
           aria-label="Session title"
-          className="min-w-0 flex-1 truncate rounded-sm bg-transparent text-sm outline-none ring-1 ring-[color:var(--color-ring)]/40 focus-visible:ring-[color:var(--color-ring)]"
+          className="min-w-0 flex-1 truncate rounded-sm bg-transparent text-sm outline-none ring-1 ring-ring/40 focus-visible:ring-ring"
         />
       </div>
     );
@@ -277,7 +277,10 @@ function SessionRow(props: {
           {/* min-w-0 + truncate: the title must always ellipsis, never butt the
               rail border. */}
           <span className="min-w-0 flex-1 truncate pr-1">{title}</span>
-          <span className="shrink-0 text-[10px] tabular-nums text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-0">
+          {/* Relative time is visible at rest (the list is grouped by recency),
+              and steps aside on hover/focus so the rename overflow can slot in.
+              On coarse pointers there is no hover, so the time stays visible. */}
+          <span className="shrink-0 text-2xs tabular-nums text-fg-subtle transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
             {relativeTimeLabel(props.session.updatedAt)}
           </span>
           <RowRenameMenu onRename={rename.startEditing} />
@@ -298,7 +301,7 @@ function ActiveAccent({ active }: { active: boolean }) {
   return (
     <span
       className={cn(
-        "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] transition-opacity",
+        "absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-brand transition-opacity",
         active ? "opacity-100" : "opacity-0",
       )}
     />
@@ -321,7 +324,7 @@ function RowRenameMenu({ onRename }: { onRename: () => void }) {
           size="icon-xs"
           aria-label="Session actions"
           onClick={(event) => event.stopPropagation()}
-          className="shrink-0 text-[color:var(--color-fg-subtle)] opacity-0 transition-opacity hover:text-[color:var(--color-fg)] focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
+          className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
         >
           <EllipsisIcon className="size-3.5" />
         </Button>
@@ -342,27 +345,25 @@ function RowRenameMenu({ onRename }: { onRename: () => void }) {
 }
 
 /**
- * Rail-local status dot with the rail's intent semantics: RUNNING reads as a
- * positive, active state (brand blue) with a breathing pulse; FAILED is danger
- * red; everything idle/terminal is a calm muted gray. This deliberately differs
- * from the shared package badge (whose running hue is amber) so a running
- * session in the list never reads as an error.
+ * Rail-local status dot with the app status tokens: running/queued pulse with
+ * the running tone, requires-action pulses with the waiting tone, failures use
+ * failed, and idle/terminal states fall back to cancelled.
  */
 function RailStatusDot({ status }: { status: Session["status"] }) {
   const running = status === "running" || status === "queued";
   const needsAttention = status === "requires_action";
   const failed = status === "failed";
-  const color = running
-    ? "var(--color-brand)"
+  const tone = running
+    ? "bg-status-running"
     : needsAttention
-      ? "var(--color-status-running)" // app's amber "attention" hue
+      ? "bg-status-waiting"
       : failed
-        ? "var(--color-status-failed)"
-        : "var(--color-fg-subtle)";
+        ? "bg-status-failed"
+        : "bg-status-cancelled";
   return (
-    <span className="relative inline-flex size-1.5 shrink-0 rounded-full" style={{ backgroundColor: `color-mix(in oklch, ${color} 92%, transparent)` }}>
+    <span className={cn("relative inline-flex size-1.5 shrink-0 rounded-full", tone)}>
       {running || needsAttention ? (
-        <span className="absolute inset-0 animate-og-pulse rounded-full" style={{ backgroundColor: color }} />
+        <span className={cn("absolute inset-0 animate-og-pulse rounded-full", tone)} />
       ) : null}
     </span>
   );
@@ -370,8 +371,8 @@ function RailStatusDot({ status }: { status: Session["status"] }) {
 
 function EmptySessions({ onStart }: { onStart: () => void }) {
   return (
-    <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-[color:var(--color-border)] px-3 py-4 text-center">
-      <p className="text-xs text-[color:var(--color-fg-subtle)]">No sessions yet</p>
+    <div className="mt-2 grid gap-2 rounded-lg border border-dashed border-border px-3 py-4 text-center">
+      <p className="text-xs text-fg-subtle">No sessions yet</p>
       <Button type="button" size="sm" onClick={onStart} className="mx-auto">
         <PlusIcon className="size-3.5" />
         Start your first session
@@ -386,8 +387,14 @@ function EmptySessions({ onStart }: { onStart: () => void }) {
  */
 export function CollapsedSessionsButton() {
   const rail = useRail();
-  const { sessions } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
+  const { sessions, loading, error } = useWorkspaceSessions({ limit: 50, pollIntervalMs: 15_000 });
   const runningCount = useMemo(() => groupSessionsForRail(sessions).running.length, [sessions]);
+  // The collapsed rail can't render the expanded list's loading/error copy, so
+  // it mirrors those states: a failed load shows a failed-tone marker + tooltip
+  // (expanding reveals the retry), a first load shows a gentle pulse.
+  const failed = Boolean(error) && sessions.length === 0;
+  const firstLoad = loading && sessions.length === 0;
+  const tooltip = failed ? "Session history is unavailable" : "Sessions";
   return (
     <div className="flex flex-1 flex-col items-center gap-1 px-2 pt-1">
       <Tooltip>
@@ -396,19 +403,21 @@ export function CollapsedSessionsButton() {
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label={`Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`}
+            aria-label={failed ? "Sessions (history unavailable)" : `Sessions${runningCount > 0 ? ` (${runningCount} running)` : ""}`}
             onClick={() => rail.setCollapsed(false)}
-            className="relative text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]"
+            className="relative text-fg-muted hover:text-fg"
           >
-            <MessagesSquareIcon className="size-4" />
-            {runningCount > 0 ? (
-              <span className="absolute -right-0.5 -top-0.5 flex min-w-3.5 items-center justify-center rounded-full bg-[color:var(--color-brand-strong)] px-1 text-[9px] font-semibold leading-tight text-[color:var(--color-brand-fg)]">
+            <MessagesSquareIcon className={cn("size-4", firstLoad && "motion-safe:animate-pulse")} />
+            {failed ? (
+              <span className="absolute -right-0.5 -top-0.5 flex size-2 rounded-full bg-status-failed" />
+            ) : runningCount > 0 ? (
+              <span className="absolute -right-0.5 -top-0.5 flex min-w-3.5 items-center justify-center rounded-full bg-brand-strong px-1 text-2xs font-semibold leading-tight text-brand-fg">
                 {runningCount}
               </span>
             ) : null}
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">Sessions</TooltipContent>
+        <TooltipContent side="right">{tooltip}</TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>
@@ -418,7 +427,7 @@ export function CollapsedSessionsButton() {
             size="icon-sm"
             aria-label="New session"
             onClick={rail.startNewSession}
-            className="text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]"
+            className="text-fg-muted hover:text-fg"
           >
             <PlusIcon className="size-4" />
           </Button>
@@ -434,8 +443,8 @@ function SessionListSkeleton() {
     <div className="grid gap-1 px-1 pt-2">
       {Array.from({ length: 5 }).map((_, index) => (
         <div key={index} className="flex h-8 items-center gap-2 px-1">
-          <span className="size-1.5 shrink-0 rounded-full bg-[color:var(--color-surface-3)]" />
-          <span className="h-3 flex-1 animate-pulse rounded bg-[color:var(--color-surface-2)]" />
+          <span className="size-1.5 shrink-0 rounded-full bg-surface-3" />
+          <span className="h-3 flex-1 animate-pulse rounded bg-surface-2" />
         </div>
       ))}
     </div>

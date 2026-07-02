@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { formatRelativeTime, truncate } from "../lib/format";
 import { Markdown } from "./markdown";
@@ -78,9 +78,37 @@ export function MessageTimeline({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pinned, setPinned] = useState(true);
+  // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
+  // always reads the live value without re-subscribing on every scroll.
+  const pinnedRef = useRef(true);
+  // The reader's visual anchor: the topmost still-visible timeline element and
+  // its offset from the viewport top. Recaptured on scroll and after every
+  // height change, it lets us hold the reader's position when content above the
+  // viewport expands or collapses (e.g. a turn folds when it settles).
+  const anchorRef = useRef<{ el: Element; top: number } | null>(null);
   const lastItem = resolvedItems[resolvedItems.length - 1];
   const streaming = lastItem !== undefined && (lastItem.kind === "agent-message" || lastItem.kind === "reasoning") && lastItem.streaming;
   const working = status === "running" && !streaming;
+
+  // Snapshot the topmost visible element and where it sits in the viewport, so a
+  // later reflow can restore it to the same spot.
+  const captureAnchor = useCallback(() => {
+    const node = scrollRef.current;
+    const inner = node?.firstElementChild;
+    if (!node || !inner) {
+      anchorRef.current = null;
+      return;
+    }
+    const containerTop = node.getBoundingClientRect().top;
+    for (const child of Array.from(inner.children)) {
+      const rect = child.getBoundingClientRect();
+      if (rect.bottom > containerTop + 1) {
+        anchorRef.current = { el: child, top: rect.top - containerTop };
+        return;
+      }
+    }
+    anchorRef.current = null;
+  }, []);
 
   // Follow the stream while pinned to the bottom; never fight the reader.
   useEffect(() => {
@@ -90,12 +118,51 @@ export function MessageTimeline({
     }
   }, [resolvedItems, working, autoFollow, pinned]);
 
+  // Scroll anchoring: when the content reflows (a fold expands/collapses, a
+  // stream appends), keep following the bottom if pinned; otherwise pin the
+  // reader's anchor in place. A change ABOVE the anchor shifts its viewport
+  // offset — we correct scrollTop by that shift so the reader never gets yanked.
+  // A change BELOW the anchor (a bottom append while scrolled up) leaves the
+  // anchor put, so `diff` is 0 and we leave scrollTop alone.
+  useEffect(() => {
+    const node = scrollRef.current;
+    const inner = node?.firstElementChild;
+    if (!node || !inner || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      const current = scrollRef.current;
+      if (!current) {
+        return;
+      }
+      if (autoFollow && pinnedRef.current) {
+        current.scrollTop = current.scrollHeight;
+      } else {
+        const anchor = anchorRef.current;
+        if (anchor && anchor.el.isConnected) {
+          const containerTop = current.getBoundingClientRect().top;
+          const now = anchor.el.getBoundingClientRect().top - containerTop;
+          const diff = now - anchor.top;
+          if (diff !== 0) {
+            current.scrollTop += diff;
+          }
+        }
+      }
+      captureAnchor();
+    });
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [autoFollow, captureAnchor]);
+
   const onScroll = () => {
     const node = scrollRef.current;
     if (!node) {
       return;
     }
-    setPinned(node.scrollHeight - node.scrollTop - node.clientHeight < 48);
+    const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+    pinnedRef.current = nextPinned;
+    setPinned(nextPinned);
+    captureAnchor();
   };
 
   return (
@@ -135,6 +202,7 @@ export function MessageTimeline({
               if (node) {
                 node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
               }
+              pinnedRef.current = true;
               setPinned(true);
             }}
             className={cn(

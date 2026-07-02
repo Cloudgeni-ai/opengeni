@@ -155,6 +155,9 @@ export function ActivityDisclosure({
   const rowClass = cn(
     "group/disclosure flex w-full min-w-0 items-center gap-2 rounded-og-sm px-1.5 py-1.5 text-left text-og-base",
     "text-og-fg-muted transition-colors duration-150",
+    // A tool row is a touch target on coarse pointers: grow its padding so the
+    // hit area clears the 40px minimum without loosening the dense desktop rail.
+    "pointer-coarse:py-2.5",
   );
   // The chevron rotates to point down when open; it tracks `data-state` on this
   // same row (the Trigger), so the affordance never freezes.
@@ -295,7 +298,7 @@ export function TermBlock({
   const showHeader = command != null || workdir != null;
 
   return (
-    <div className="overflow-hidden rounded-og-sm border border-og-border bg-og-bg/70">
+    <div className="min-w-0 overflow-hidden rounded-og-sm border border-og-border bg-og-bg/70">
       {showHeader ? (
         <div className="flex items-center gap-2 border-b border-og-border/70 px-2.5 py-1.5">
           <span className="select-none text-og-status-idle">$</span>

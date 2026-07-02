@@ -161,9 +161,9 @@ export function DeviceRoute({ userCode: userCodeFromUrl }: { userCode?: string |
   if (lookingUp && !lookup && phase !== "error") {
     return (
       <DeviceShell>
-        <div className="mx-auto flex w-full max-w-md items-center justify-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-6 text-sm text-[color:var(--color-fg-muted)]">
+        <div className="mx-auto flex w-full max-w-md items-center justify-center gap-2 rounded-lg border border-border bg-surface p-6 text-sm text-fg-muted">
           <LaptopIcon className="size-4 animate-pulse" />
-          Looking up <span className="font-mono text-[color:var(--color-fg)]">{userCode}</span>…
+          Looking up <span className="font-mono text-fg">{userCode}</span>…
         </div>
       </DeviceShell>
     );
@@ -197,7 +197,7 @@ const EMPTY_MACHINE: EnrollmentConsentMachine = {
 /** Centered page chrome shared by every device-page state. */
 function DeviceShell({ children }: { children: ReactNode }) {
   return (
-    <main className="flex min-h-dvh flex-1 items-center justify-center bg-[color:var(--color-bg)] px-4 py-10 text-[color:var(--color-fg)]">
+    <main className="flex min-h-dvh flex-1 items-center justify-center bg-bg px-4 py-10 text-fg">
       <div className="w-full max-w-md">{children}</div>
     </main>
   );
@@ -208,12 +208,12 @@ function DeviceShell({ children }: { children: ReactNode }) {
 function SignInPrompt({ userCode }: { userCode: string }) {
   return (
     <DeviceShell>
-      <div className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-6 text-center">
-        <span className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+      <div className="rounded-lg border border-border bg-surface p-6 text-center">
+        <span className="mx-auto mb-3 flex size-10 items-center justify-center rounded-full bg-brand-strong/20 text-brand">
           <LogInIcon className="size-5" />
         </span>
         <h1 className="text-base font-semibold">Sign in to approve this machine</h1>
-        <p className="mx-auto mt-2 max-w-sm text-sm leading-5 text-[color:var(--color-fg-muted)]">
+        <p className="mx-auto mt-2 max-w-sm text-sm leading-5 text-fg-muted">
           You need to be signed in to the workspace that owns this machine before you can grant it access. Sign in, then
           you'll return here to review the request.
         </p>
@@ -245,19 +245,19 @@ function CodeEntry({
   return (
     <DeviceShell>
       <form
-        className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-6"
+        className="rounded-lg border border-border bg-surface p-6"
         onSubmit={(event) => {
           event.preventDefault();
           onSubmit();
         }}
       >
         <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <LaptopIcon className="size-4" />
           </span>
           <div>
             <h1 className="text-base font-semibold">Approve a machine</h1>
-            <p className="text-sm text-[color:var(--color-fg-muted)]">
+            <p className="text-sm text-fg-muted">
               Enter the code shown on the machine you're enrolling.
             </p>
           </div>

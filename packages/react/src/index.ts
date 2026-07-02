@@ -13,7 +13,7 @@ export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type { SessionEventsConnectionState, UseSessionEventsOptions, UseSessionEventsResult } from "./hooks/use-session-events";
-export { useComposer, composeSendInput, shouldSubmitOnKey } from "./hooks/use-composer";
+export { useComposer, composeSendInput, shouldSubmitOnKey, FILE_ONLY_MESSAGE_TEXT } from "./hooks/use-composer";
 export type { ComposerMode, ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type { FileAttachment, UseFileAttachmentsOptions, UseFileAttachmentsResult } from "./hooks/use-file-attachments";

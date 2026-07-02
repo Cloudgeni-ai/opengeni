@@ -80,7 +80,7 @@ export function ConnectionStatusPill({ status, label, size = "md", className }: 
       data-connection-status={status}
       className={cn(
         "og-root inline-flex shrink-0 items-center rounded-full border font-medium",
-        size === "sm" ? "gap-1 px-1.5 py-px text-[10px]" : "gap-1.5 px-2 py-0.5 text-xs",
+        size === "sm" ? "gap-1 px-1.5 py-px text-og-xs" : "gap-1.5 px-2 py-0.5 text-og-sm",
         meta.badgeClassName,
         className,
       )}
@@ -132,7 +132,7 @@ export function MachineStatusPill({ state, sharedSessionCount, size = "md", clas
           data-state-badge={state}
           className={cn(
             "inline-flex shrink-0 items-center rounded-full border font-medium",
-            size === "sm" ? "px-1.5 py-px text-[10px]" : "px-2 py-0.5 text-xs",
+            size === "sm" ? "px-1.5 py-px text-og-xs" : "px-2 py-0.5 text-og-sm",
             stateBadge.badgeClassName,
           )}
         >
@@ -145,7 +145,7 @@ export function MachineStatusPill({ state, sharedSessionCount, size = "md", clas
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded-full border font-medium",
             "text-og-accent border-og-accent/30 bg-og-accent-soft",
-            size === "sm" ? "px-1.5 py-px text-[10px]" : "px-2 py-0.5 text-xs",
+            size === "sm" ? "px-1.5 py-px text-og-xs" : "px-2 py-0.5 text-og-sm",
           )}
           title={`${sharedSessionCount} sessions are on this machine`}
         >

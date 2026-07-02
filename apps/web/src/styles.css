@@ -11,42 +11,43 @@
 
 /* ---------------------------------------------------------------------------
    Design tokens
-   Dark-only palette. One calm accent. Status hues are muted and desaturated
-   so they inform without shouting. All colors use OKLCH for perceptual
-   consistency.
+   Tailwind bridge for the canonical @opengeni/react token palette.
    --------------------------------------------------------------------------- */
 @theme {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular,
     Menlo, monospace;
 
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;
   --radius-xl: 20px;
 
-  /* Core neutrals */
-  --color-bg: oklch(0.16 0.012 260);
-  --color-surface: oklch(0.19 0.014 260);
-  --color-surface-2: oklch(0.22 0.015 260);
-  --color-surface-3: oklch(0.26 0.016 260);
-  --color-border: oklch(0.30 0.015 260);
-  --color-border-strong: oklch(0.42 0.018 260);
-  --color-fg: oklch(0.96 0.005 260);
-  --color-fg-muted: oklch(0.74 0.012 260);
-  --color-fg-subtle: oklch(0.58 0.013 260);
+  --color-bg: var(--og-color-bg);
+  --color-surface: var(--og-color-surface-1);
+  --color-surface-2: var(--og-color-surface-2);
+  --color-surface-3: var(--og-color-surface-3);
+  --color-border: var(--og-color-border);
+  --color-border-strong: var(--og-color-border-strong);
+  --color-fg: var(--og-color-fg);
+  --color-fg-muted: var(--og-color-fg-muted);
+  --color-fg-subtle: var(--og-color-fg-subtle);
 
-  /* Brand accent */
-  --color-brand: oklch(0.72 0.15 255);
-  --color-brand-strong: oklch(0.62 0.18 255);
-  --color-brand-fg: oklch(0.98 0.005 260);
+  --color-brand: var(--og-color-accent);
+  --color-brand-strong: var(--og-color-accent-deep);
+  --color-brand-fg: var(--og-color-accent-fg);
 
-  /* Status — desaturated so badges stay calm */
-  --color-status-running: oklch(0.78 0.11 80);
-  --color-status-waiting: oklch(0.70 0.02 260);
-  --color-status-success: oklch(0.78 0.12 155);
-  --color-status-failed: oklch(0.72 0.14 20);
-  --color-status-cancelled: oklch(0.62 0.05 260);
+  --color-status-queued: var(--og-color-status-queued);
+  --color-status-running: var(--og-color-status-running);
+  --color-status-idle: var(--og-color-status-idle);
+  --color-status-waiting: var(--og-color-status-waiting);
+  --color-status-success: var(--og-color-status-idle);
+  --color-status-failed: var(--og-color-status-failed);
+  --color-status-cancelled: var(--og-color-status-cancelled);
+  --color-danger: var(--og-color-danger);
 
   /* shadcn compatibility — map canonical token names to ours */
   --color-background: var(--color-bg);
@@ -70,8 +71,8 @@
   --color-accent: var(--color-surface-2);
   --color-accent-foreground: var(--color-fg);
 
-  --color-destructive: oklch(0.65 0.18 22);
-  --color-destructive-foreground: oklch(0.98 0.005 260);
+  --color-destructive: var(--og-color-danger);
+  --color-destructive-foreground: var(--og-color-accent-fg);
 
   --color-input: var(--color-surface-2);
   --color-ring: var(--color-brand);

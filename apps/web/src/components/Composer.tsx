@@ -76,8 +76,8 @@ export function ConsoleComposer(props: {
         <p
           data-testid="delivery-mode-hint"
           className={cn(
-            "px-1.5 pt-1.5 text-[11px] leading-4",
-            composer.mode === "steer" ? "text-amber-300/90" : "text-[color:var(--color-fg-subtle)]",
+            "px-1.5 pt-1.5 text-2xs",
+            composer.mode === "steer" ? "text-status-running/90" : "text-fg-subtle",
           )}
         >
           {deliveryModeExplanation(composer.mode, props.status ?? null)}
@@ -88,15 +88,15 @@ export function ConsoleComposer(props: {
 }
 
 /**
- * The compose-time queue-vs-steer choice. Queue is the calm default; steer is
- * visually loud (amber) because it interrupts whatever the agent is doing.
+ * The compose-time queue-vs-steer choice. Queue is the calm default; steer
+ * uses the running status tone because it interrupts the current turn.
  */
 function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; disabled?: boolean }) {
   return (
     <div
       role="radiogroup"
       aria-label="Delivery mode"
-      className="flex h-8 shrink-0 items-center gap-0.5 rounded-full border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/60 p-0.5"
+      className="flex h-8 shrink-0 items-center gap-0.5 rounded-full border border-border bg-bg/60 p-0.5"
     >
       <button
         type="button"
@@ -108,8 +108,8 @@ function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; d
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
           composer.mode === "queue"
-            ? "bg-[color:var(--color-surface-2)] text-[color:var(--color-fg)]"
-            : "text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]",
+            ? "bg-surface-2 text-fg"
+            : "text-fg-muted hover:text-fg",
         )}
       >
         <ListPlusIcon className="size-3.5" />
@@ -125,8 +125,8 @@ function DeliveryModeToggle({ composer, disabled }: { composer: ComposerState; d
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors",
           composer.mode === "steer"
-            ? "bg-amber-500/20 text-amber-200"
-            : "text-[color:var(--color-fg-muted)] hover:text-amber-200",
+            ? "bg-status-running/20 text-status-running"
+            : "text-fg-muted hover:text-status-running",
         )}
       >
         <ZapIcon className="size-3.5" />

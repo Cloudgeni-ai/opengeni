@@ -199,7 +199,7 @@ function RootIndexRoute() {
   const context = useAppContext();
   const workspaceId = context.accessContext.defaultWorkspaceId ?? context.workspaces[0]?.id ?? context.accessContext.workspaceGrants[0]?.workspaceId;
   if (!workspaceId) {
-    return <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />;
+    return <ProblemPanel title="No workspace access" description="You don't have access to any workspace yet." />;
   }
   return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
 }
@@ -296,7 +296,7 @@ function BillingReturnRoute() {
   const { checkout } = billingReturnRoute.useSearch();
   const workspaceId = context.accessContext.defaultWorkspaceId ?? context.workspaces[0]?.id ?? context.accessContext.workspaceGrants[0]?.workspaceId;
   if (!workspaceId) {
-    return <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />;
+    return <ProblemPanel title="No workspace access" description="You don't have access to any workspace yet." />;
   }
   return (
     <Navigate
@@ -309,5 +309,5 @@ function BillingReturnRoute() {
 }
 
 function NotFoundRoute() {
-  return <ProblemPanel title="Page not found" description="This OpenGeni console route does not exist. Workspace-scoped URLs are required." />;
+  return <ProblemPanel title="Page not found" description="This page doesn't exist. Open a workspace to continue." />;
 }

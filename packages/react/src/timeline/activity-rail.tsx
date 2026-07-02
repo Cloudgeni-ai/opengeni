@@ -200,7 +200,7 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
           type="button"
           onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}
           className={cn(
-            "shrink-0 self-center rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted",
+            "shrink-0 self-center rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
             "outline-none transition-colors duration-150 hover:border-og-border-strong hover:text-og-fg",
             "focus-visible:ring-2 focus-visible:ring-og-accent",
           )}

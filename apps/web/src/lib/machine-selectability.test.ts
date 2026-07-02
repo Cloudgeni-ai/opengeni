@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { isMachineComputeSelectable } from "./machine-selectability";
 
-// The session "Run on" pickers (sessions-index machine <select> + the in-session
+// The session "Run on" pickers (sessions-index machine picker + the in-session
 // sandbox-switcher) gate selectability through this helper. The backend attach
 // gate is liveness-only, so any REACHABLE machine — online, headless
 // (display_unavailable), or one whose screen control isn't consented

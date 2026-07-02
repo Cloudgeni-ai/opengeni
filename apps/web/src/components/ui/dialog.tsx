@@ -61,7 +61,17 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
+          // Base + shared animation (fade). On phones the dialog is a
+          // near-full-width bottom sheet that scrolls internally; from `sm` up it
+          // is the centered modal (max-sm/sm scope the two presentations so they
+          // never fight — one change every Dialog consumer inherits, D9.5).
+          "fixed z-50 grid gap-4 border bg-background shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:animate-in data-[state=open]:fade-in-0",
+          // Phone: bottom sheet.
+          "inset-x-0 bottom-0 max-h-[90dvh] overflow-y-auto rounded-t-lg border-b-0 p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]",
+          "max-sm:data-[state=closed]:slide-out-to-bottom max-sm:data-[state=open]:slide-in-from-bottom",
+          // Tablet and up: centered modal.
+          "sm:inset-x-auto sm:bottom-auto sm:top-1/2 sm:left-1/2 sm:max-h-[85vh] sm:w-full sm:max-w-lg sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-lg sm:border-b sm:p-6 sm:pb-6",
+          "sm:data-[state=closed]:zoom-out-95 sm:data-[state=open]:zoom-in-95",
           className
         )}
         {...props}

@@ -12,15 +12,19 @@ import {
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
 import type { ScheduledTask, Session, WorkspaceEnvironment } from "@/types";
@@ -28,8 +32,16 @@ import type { ScheduledTask, Session, WorkspaceEnvironment } from "@/types";
 export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
   const environments = useEnvironments();
   // Attachment views: which sessions and scheduled tasks carry each environment.
-  const { sessions } = useWorkspaceSessions({ limit: 100 });
-  const { tasks } = useScheduledTasks();
+  const { sessions, loading: sessionsLoading, error: sessionsError } = useWorkspaceSessions({ limit: 100 });
+  const { tasks, loading: tasksLoading, error: tasksError } = useScheduledTasks();
+  // Fail closed: never delete an environment while its attachment set is
+  // unknown (initial load or a failed read) — a false-empty attachment view
+  // could otherwise let a still-referenced environment be removed.
+  const attachmentsUnknown =
+    sessionsError !== null ||
+    tasksError !== null ||
+    (sessionsLoading && sessions.length === 0) ||
+    (tasksLoading && tasks.length === 0);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createDescription, setCreateDescription] = useState("");
@@ -78,7 +90,7 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
       />
 
       {createOpen ? (
-        <div className="mt-4 grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
+        <div className="mt-4 grid gap-3 rounded-lg border border-border bg-surface p-3 sm:grid-cols-[14rem_minmax(0,1fr)_auto]">
           <div className="grid gap-1.5">
             <Label htmlFor="environment-name">Name</Label>
             <Input id="environment-name" value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="staging-aws" className="h-9" autoFocus />
@@ -98,16 +110,34 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
 
       <div className="mt-5 grid gap-3">
         {environmentsView === "loading" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
-            <Loader2Icon className="size-4 animate-spin" />
-            Loading environments
-          </div>
+          <>
+            {[0, 1].map((key) => (
+              <div key={key} className="rounded-lg border border-border bg-surface/45 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 space-y-2">
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="h-3 w-56" />
+                  </div>
+                  <Skeleton className="size-8 rounded-md" />
+                </div>
+                <Skeleton className="mt-3 h-8 w-full" />
+              </div>
+            ))}
+          </>
         ) : environmentsView === "error" ? (
           <LoadErrorState title="Couldn't load environments" error={environments.error} onRetry={() => void environments.refresh()} />
         ) : environmentsView === "empty" ? (
-          <EmptyState>
-            No environments yet. Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts.
-          </EmptyState>
+          <EmptyState
+            icon={<BoxIcon className="size-4" />}
+            title="No environments yet"
+            description="Create one to give sessions and scheduled tasks credentials without pasting secrets into prompts."
+            action={(
+              <Button type="button" size="sm" onClick={() => setCreateOpen(true)}>
+                <PlusIcon className="size-3.5" />
+                New environment
+              </Button>
+            )}
+          />
         ) : (
           environments.environments.map((environment) => (
             <EnvironmentCard
@@ -116,6 +146,7 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
               environment={environment}
               attachedSessions={sessions.filter((session) => session.environmentId === environment.id)}
               attachedTasks={tasks.filter((task) => task.environmentId === environment.id)}
+              attachmentsUnknown={attachmentsUnknown}
               mutating={environments.mutating}
               onUpdate={(patch) => environments.update(environment.id, patch)}
               onDelete={async () => {
@@ -131,12 +162,16 @@ export function EnvironmentsRoute({ workspaceId }: { workspaceId: string }) {
           ))
         )}
         {environments.mutationError ? (
-          <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200">
-            <span className="min-w-0 flex-1">{environments.mutationError.message}</span>
-            <button type="button" onClick={environments.clearMutationError} aria-label="Dismiss environment error" className="shrink-0 rounded p-0.5 hover:bg-red-500/20">
-              <XIcon className="size-3" />
-            </button>
-          </div>
+          <Notice
+            tone="failed"
+            action={(
+              <Button type="button" variant="ghost" size="xs" onClick={environments.clearMutationError}>
+                Dismiss
+              </Button>
+            )}
+          >
+            {environments.mutationError.message}
+          </Notice>
         ) : null}
       </div>
     </div>
@@ -148,6 +183,7 @@ function EnvironmentCard(props: {
   environment: WorkspaceEnvironment;
   attachedSessions: Session[];
   attachedTasks: ScheduledTask[];
+  attachmentsUnknown: boolean;
   mutating: boolean;
   onUpdate: (patch: { name?: string; description?: string | null }) => Promise<WorkspaceEnvironment | null>;
   onDelete: () => Promise<boolean>;
@@ -163,6 +199,16 @@ function EnvironmentCard(props: {
   // Per-variable rotate drafts (write-only value entry).
   const [rotatingName, setRotatingName] = useState<string | null>(null);
   const [rotateValue, setRotateValue] = useState("");
+  // Destructive confirms (D5): delete the environment, or one of its variables.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDeleteVariable, setConfirmDeleteVariable] = useState<string | null>(null);
+  const attachmentCount = props.attachedSessions.length + props.attachedTasks.length;
+  const deleteBlocked = attachmentCount > 0 || props.attachmentsUnknown;
+  const deleteBlockedReason = props.attachmentsUnknown
+    ? "Checking where this environment is used…"
+    : attachmentCount > 0
+      ? "Detach it from sessions and tasks first"
+      : undefined;
 
   async function saveDetails() {
     const result = await props.onUpdate({
@@ -203,7 +249,7 @@ function EnvironmentCard(props: {
   }
 
   return (
-    <article className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+    <article className="rounded-lg border border-border bg-surface/45 p-3">
       <div className="flex min-w-0 items-start justify-between gap-3">
         {editing ? (
           <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
@@ -213,10 +259,10 @@ function EnvironmentCard(props: {
         ) : (
           <div className="min-w-0">
             <div className="truncate text-sm font-medium">{environment.name}</div>
-            <div className="mt-0.5 text-xs text-[color:var(--color-fg-muted)]">
+            <div className="mt-0.5 text-xs text-fg-muted">
               {environment.description ?? "No description"}
             </div>
-            <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+            <div className="mt-1 text-2xs text-fg-subtle">
               {environment.variables.length} variable{environment.variables.length === 1 ? "" : "s"} · updated {formatTimestamp(environment.updatedAt)}
             </div>
           </div>
@@ -244,10 +290,10 @@ function EnvironmentCard(props: {
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Delete environment"
-                className="hover:text-red-300"
-                disabled={props.mutating || props.attachedSessions.length > 0 || props.attachedTasks.length > 0}
-                title={props.attachedSessions.length > 0 || props.attachedTasks.length > 0 ? "Detach it from sessions and tasks first" : "Delete environment"}
-                onClick={() => void props.onDelete()}
+                className="hover:text-status-failed"
+                disabled={props.mutating || deleteBlocked}
+                title={deleteBlockedReason ?? "Delete environment"}
+                onClick={() => setConfirmDelete(true)}
               >
                 <Trash2Icon className="size-3.5" />
               </Button>
@@ -258,24 +304,24 @@ function EnvironmentCard(props: {
 
       <div className="mt-3 space-y-1.5">
         {environment.variables.length === 0 ? (
-          <p className="text-xs text-[color:var(--color-fg-subtle)]">No variables yet.</p>
+          <p className="text-xs text-fg-subtle">No variables yet — add one below to inject it into the sandbox.</p>
         ) : (
           environment.variables.map((variable) => (
-            <div key={variable.name} className="rounded-md border border-[color:var(--color-border)]/70 bg-[color:var(--color-bg)]/25 px-2.5 py-1.5">
+            <div key={variable.name} className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5">
               <div className="flex min-w-0 items-center gap-2">
-                <KeyRoundIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+                <KeyRoundIcon className="size-3 shrink-0 text-fg-subtle" />
                 <span className="min-w-0 flex-1 truncate font-mono text-xs">{variable.name}</span>
-                <span className="shrink-0 text-[10px] text-[color:var(--color-fg-subtle)]">
+                <span className="shrink-0 text-2xs text-fg-subtle">
                   v{variable.version} · {formatTimestamp(variable.updatedAt)}
                 </span>
-                <span className="shrink-0 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]" title="Values are write-only and never returned by the API">
+                <span className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle" title="Values are write-only and never returned by the API">
                   ••••••
                 </span>
                 <Button
                   type="button"
                   variant="ghost"
                   size="xs"
-                  className="h-6 shrink-0 text-[11px]"
+                  className="h-6 shrink-0 text-2xs"
                   disabled={props.mutating}
                   onClick={() => {
                     setRotatingName((current) => current === variable.name ? null : variable.name);
@@ -289,13 +335,9 @@ function EnvironmentCard(props: {
                   variant="ghost"
                   size="icon-xs"
                   aria-label={`Delete variable ${variable.name}`}
-                  className="shrink-0 hover:text-red-300"
+                  className="shrink-0 hover:text-status-failed"
                   disabled={props.mutating}
-                  onClick={() => void props.onDeleteVariable(variable.name).then((removed) => {
-                    if (removed) {
-                      toast.success(`Variable ${variable.name} deleted`);
-                    }
-                  })}
+                  onClick={() => setConfirmDeleteVariable(variable.name)}
                 >
                   <Trash2Icon className="size-3" />
                 </Button>
@@ -344,25 +386,61 @@ function EnvironmentCard(props: {
         </Button>
       </div>
 
-      {(props.attachedSessions.length > 0 || props.attachedTasks.length > 0) ? (
-        <div className="mt-3 border-t border-[color:var(--color-border)]/70 pt-2 text-[11px] text-[color:var(--color-fg-subtle)]">
-          <span className="font-medium text-[color:var(--color-fg-muted)]">Attached to:</span>{" "}
-          {props.attachedSessions.slice(0, 4).map((session) => (
-            <Link
-              key={session.id}
-              to="/workspaces/$workspaceId/sessions/$sessionId"
-              params={{ workspaceId: props.workspaceId, sessionId: session.id }}
-              className="mr-2 underline decoration-[color:var(--color-border-strong)] underline-offset-2 hover:text-[color:var(--color-fg)]"
-            >
-              session “{session.initialMessage.slice(0, 32)}{session.initialMessage.length > 32 ? "…" : ""}”
-            </Link>
-          ))}
-          {props.attachedSessions.length > 4 ? <span className="mr-2">+{props.attachedSessions.length - 4} more sessions</span> : null}
-          {props.attachedTasks.map((task) => (
-            <span key={task.id} className="mr-2">task “{task.name}”</span>
-          ))}
+      {attachmentCount > 0 ? (
+        <div className="mt-3 border-t border-border/70 pt-2">
+          <span className="text-2xs font-medium text-fg-muted">Attached to</span>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {props.attachedSessions.slice(0, 4).map((session) => (
+              <Link
+                key={session.id}
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                params={{ workspaceId: props.workspaceId, sessionId: session.id }}
+                className="min-w-0 max-w-full rounded-md hover:text-fg"
+                title={session.initialMessage}
+              >
+                <MetaChip className="hover:border-border-strong">
+                  session · {session.initialMessage}
+                </MetaChip>
+              </Link>
+            ))}
+            {props.attachedSessions.length > 4 ? (
+              <MetaChip>+{props.attachedSessions.length - 4} more sessions</MetaChip>
+            ) : null}
+            {props.attachedTasks.map((task) => (
+              <MetaChip key={task.id} title={task.name}>
+                task · {task.name}
+              </MetaChip>
+            ))}
+          </div>
         </div>
       ) : null}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete environment “${environment.name}”?`}
+        description="Its variables are removed and sessions can no longer use them. This can't be undone."
+        confirmLabel="Delete environment"
+        onConfirm={() => props.onDelete()}
+      />
+      <ConfirmDialog
+        open={confirmDeleteVariable !== null}
+        onOpenChange={(next) => setConfirmDeleteVariable(next ? confirmDeleteVariable : null)}
+        title={`Delete variable “${confirmDeleteVariable ?? ""}”?`}
+        description="Sessions using this environment can no longer read it. This can't be undone."
+        confirmLabel="Delete variable"
+        onConfirm={async () => {
+          const name = confirmDeleteVariable;
+          if (!name) {
+            return;
+          }
+          const removed = await props.onDeleteVariable(name);
+          if (removed) {
+            toast.success(`Variable ${name} deleted`);
+          }
+          return removed;
+        }}
+      />
     </article>
   );
 }

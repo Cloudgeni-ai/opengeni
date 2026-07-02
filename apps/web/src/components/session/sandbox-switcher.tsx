@@ -45,9 +45,9 @@ export function SessionSandboxSwitcher({
   const hasChoices = machines.length > 1 && fleet.canAttach;
   if (!hasChoices) {
     return (
-      <span className="inline-flex min-w-0 items-center gap-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
+      <span className="inline-flex min-w-0 items-center gap-1 truncate text-2xs text-fg-subtle">
         <ServerIcon className="size-3 shrink-0" />
-        <span className="truncate">Run on: {activeName}</span>
+        <span className="truncate">{activeName}</span>
       </span>
     );
   }
@@ -59,12 +59,12 @@ export function SessionSandboxSwitcher({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-7 max-w-[12rem] gap-1 rounded-full border border-transparent px-2 text-xs text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]"
+          className="h-6 max-w-[12rem] gap-1 rounded-full border border-transparent px-1.5 text-2xs text-fg-subtle hover:border-border hover:bg-surface-2 hover:text-fg"
         >
           <ServerIcon className="size-3 shrink-0" />
-          {/* Label hides on narrow widths → an icon-only collapse. */}
-          <span className="hidden truncate text-[color:var(--color-fg-subtle)] sm:inline">Run on:</span>
-          <span className="truncate font-medium text-[color:var(--color-fg)]">{activeName}</span>
+          {/* Just the target's name — "Run on" is the dropdown's label, not
+              header-line grammar. */}
+          <span className="truncate">{activeName}</span>
           {fleet.attaching ? (
             <Loader2Icon className="size-3 shrink-0 animate-spin" />
           ) : (
@@ -76,9 +76,9 @@ export function SessionSandboxSwitcher({
         align="end"
         side="bottom"
         sideOffset={8}
-        className="w-60 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl"
+        className="w-60 rounded-xl border-border bg-surface p-2 shadow-xl"
       >
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
           Run on
         </DropdownMenuLabel>
         {machines.map((machine) => {
@@ -98,10 +98,10 @@ export function SessionSandboxSwitcher({
               }}
               className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
             >
-              <ServerIcon className="size-3.5 shrink-0 text-[color:var(--color-fg-subtle)]" />
+              <ServerIcon className="size-3.5 shrink-0 text-fg-subtle" />
               <span className="min-w-0 flex-1 truncate">{machine.name}</span>
               {machine.state !== "online" && !machine.active ? (
-                <span className="shrink-0 text-[10px] text-[color:var(--color-fg-subtle)]">{machine.state}</span>
+                <span className="shrink-0 text-2xs text-fg-subtle">{machine.state}</span>
               ) : null}
               {swapping ? (
                 <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
@@ -112,7 +112,7 @@ export function SessionSandboxSwitcher({
           );
         })}
         {fleet.mutationError ? (
-          <p className="px-2 pt-1 text-[11px] leading-4 text-[color:var(--color-danger)]">
+          <p className="px-2 pt-1 text-2xs text-danger">
             Swap failed: {fleet.mutationError.message}
           </p>
         ) : null}

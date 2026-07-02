@@ -43,8 +43,8 @@ function Capability({ icon, title, body }: { icon: ReactNode; title: string; bod
     <li className="flex items-start gap-2.5">
       <span className="mt-0.5 shrink-0 text-og-status-failed">{icon}</span>
       <span className="min-w-0">
-        <span className="block text-[13px] font-medium text-og-fg">{title}</span>
-        <span className="block text-[12px] text-og-fg-muted">{body}</span>
+        <span className="block text-og-base font-medium text-og-fg">{title}</span>
+        <span className="block text-og-sm text-og-fg-muted">{body}</span>
       </span>
     </li>
   );
@@ -113,15 +113,15 @@ export function EnrollmentConsent({
           <ShieldAlertIcon className="size-5" aria-hidden />
         </span>
         <div className="min-w-0">
-          <h1 className="text-base font-semibold text-og-fg">Give the agent your whole machine?</h1>
-          <p className="mt-1 text-[13px] text-og-fg-muted">
+          <h1 className="text-og-md font-semibold text-og-fg">Give the agent your whole machine?</h1>
+          <p className="mt-1 text-og-base text-og-fg-muted">
             Approving lets the OpenGeni agent run on <span className="font-medium text-og-fg">{machine.machineName}</span> with
             full access. This is your real computer — not a sandbox.
           </p>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2 text-[12px]">
+      <div className="flex flex-wrap items-center gap-2 rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2 text-og-sm">
         <LaptopIcon className="size-4 text-og-fg-subtle" aria-hidden />
         <span className="font-medium text-og-fg">{machine.machineName}</span>
         <span className="font-og-mono text-og-fg-subtle">
@@ -163,21 +163,21 @@ export function EnrollmentConsent({
             checked={allowScreenControl}
             disabled={busy}
             onChange={(e) => setAllowScreenControl(e.target.checked)}
-            className="mt-0.5 size-4 accent-[var(--og-color-accent)]"
+            className="mt-0.5 size-4 accent-og-accent"
           />
           <span className="min-w-0">
-            <span className="flex items-center gap-1.5 text-[13px] font-medium text-og-fg">
+            <span className="flex items-center gap-1.5 text-og-base font-medium text-og-fg">
               <ScreenShareIcon className="size-3.5 text-og-fg-muted" aria-hidden />
               Also let the agent control my mouse & keyboard
             </span>
-            <span className="mt-0.5 block text-[12px] text-og-fg-muted">
+            <span className="mt-0.5 block text-og-sm text-og-fg-muted">
               Optional. Enables computer-use — the agent can move the pointer, type, and click on this machine's desktop. Leave
               off to let it only watch.
             </span>
           </span>
         </label>
       ) : (
-        <p className="flex items-start gap-2 rounded-og-md border border-og-border bg-og-bg px-3 py-2 text-[12px] text-og-fg-muted">
+        <p className="flex items-start gap-2 rounded-og-md border border-og-border bg-og-bg px-3 py-2 text-og-sm text-og-fg-muted">
           <CircleAlertIcon className="mt-px size-3.5 shrink-0 text-og-fg-subtle" aria-hidden />
           This machine has no display, so screen control isn't available — files, terminal, and git only.
         </p>
@@ -189,7 +189,7 @@ export function EnrollmentConsent({
           data-deny
           disabled={busy}
           onClick={() => onDeny?.()}
-          className="flex-1 rounded-og-sm border border-og-border px-3 py-2 text-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:opacity-50"
+          className="flex-1 rounded-og-sm border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-10"
         >
           Cancel
         </button>
@@ -198,7 +198,7 @@ export function EnrollmentConsent({
           data-approve
           disabled={busy}
           onClick={() => onApprove?.(allowScreenControl)}
-          className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-sm font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-50"
+          className="flex-1 rounded-og-sm bg-og-status-failed px-3 py-2 text-og-sm font-semibold text-og-accent-fg transition-colors hover:opacity-90 disabled:opacity-50 pointer-coarse:min-h-10"
         >
           {busy ? "Connecting…" : "Grant full access"}
         </button>
@@ -238,8 +238,8 @@ function ConsentResult({
       <span className={cn("flex size-10 items-center justify-center rounded-full bg-og-surface-2", iconClass)}>
         <LaptopIcon className="size-5" aria-hidden />
       </span>
-      <h1 className="text-base font-semibold text-og-fg">{title}</h1>
-      <p className="max-w-sm text-[13px] text-og-fg-muted">{body}</p>
+      <h1 className="text-og-md font-semibold text-og-fg">{title}</h1>
+      <p className="max-w-sm text-og-base text-og-fg-muted">{body}</p>
     </div>
   );
 }

@@ -60,11 +60,11 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
         )}
       />
       <span className="flex w-full items-start justify-between gap-3">
-        <span className="line-clamp-2 min-w-0 text-sm font-medium leading-snug text-og-fg">{title ?? sessionDisplayTitle(session)}</span>
+        <span className="line-clamp-2 min-w-0 text-og-base font-medium leading-snug text-og-fg">{title ?? sessionDisplayTitle(session)}</span>
         <SessionStatus status={session.status} size="sm" className="mt-px" />
       </span>
-      {subtitle ? <span className="line-clamp-1 text-xs text-og-fg-muted">{subtitle}</span> : null}
-      <span className="mt-auto flex w-full items-center gap-2 text-[11px] text-og-fg-subtle">
+      {subtitle ? <span className="line-clamp-1 text-og-sm text-og-fg-muted">{subtitle}</span> : null}
+      <span className="mt-auto flex w-full items-center gap-2 text-og-xs text-og-fg-subtle">
         <span className="font-og-mono">{session.id.slice(0, 8)}</span>
         <span aria-hidden>·</span>
         <span className="truncate">{session.model}</span>
