@@ -8,11 +8,11 @@
 import {
   EnrollmentDeviceFlow,
   MachinesDashboard,
+  connectionStatusForState,
   useMachines,
   type DeviceFlowPhase,
 } from "@opengeni/react/machines";
 import {
-  AlertTriangleIcon,
   ArrowLeftIcon,
   CheckIcon,
   CopyIcon,
@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { apiBaseUrl } from "@/api";
 import { PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
 import { deviceVerificationUri, installOneLiner } from "@/lib/deployment";
 import {
   Dialog,
@@ -37,9 +38,47 @@ import {
 } from "@/components/ui/dialog";
 import { useAppContext } from "@/context";
 
+/** Copy to the clipboard and toast the outcome — clipboard access can be denied
+ *  (permissions, insecure context), so failures surface instead of vanishing. */
+async function copyToClipboard(text: string, successMessage: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast.success(successMessage);
+    return true;
+  } catch {
+    toast.error("Couldn't copy to the clipboard", { description: "Copy it manually instead." });
+    return false;
+  }
+}
+
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
   const [enrollOpen, setEnrollOpen] = useState(false);
+
+  // "Machine connected" moment: watch the polled fleet and, once a machine first
+  // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
+  // first poll seeds the baseline silently so existing machines don't announce.
+  const onlineSeenRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const online = new Set(
+      machines.machines
+        .filter((machine) => !machine.isSessionGroup && connectionStatusForState(machine.state) === "online")
+        .map((machine) => machine.sandboxId),
+    );
+    const previous = onlineSeenRef.current;
+    if (previous) {
+      for (const machine of machines.machines) {
+        if (
+          !machine.isSessionGroup &&
+          connectionStatusForState(machine.state) === "online" &&
+          !previous.has(machine.sandboxId)
+        ) {
+          toast.success(`${machine.name} connected`, { description: "It's ready to run sessions." });
+        }
+      }
+    }
+    onlineSeenRef.current = online;
+  }, [machines.machines]);
 
   // The install/approve URLs are deployment-relative: same origin as the API
   // (falling back to the page origin), never a hardcoded marketing domain.
@@ -50,7 +89,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<LaptopIcon className="size-4" />}
         title="Machines"
-        description="Your own computers, enrolled as agent sandboxes. Run the install one-liner on a machine and it appears here — driveable from any session alongside the Modal sandbox."
+        description="Your own computers, enrolled as agent sandboxes. Run the install one-liner on a machine and it appears here — usable from any session alongside the managed sandbox."
       />
 
       <div className="mt-5">
@@ -149,9 +188,11 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
     if (!command) {
       return;
     }
-    void navigator.clipboard.writeText(command);
-    setCopied(true);
-    toast.success("Install command copied");
+    void copyToClipboard(command, "Install command copied").then((ok) => {
+      if (ok) {
+        setCopied(true);
+      }
+    });
   }
 
   if (mode === "manual") {
@@ -177,7 +218,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           verificationUri={verificationUri}
           installCommand={installCommand}
           phase={"pending" satisfies DeviceFlowPhase}
-          onCopyInstall={() => void navigator.clipboard.writeText(installCommand)}
+          onCopyInstall={() => void copyToClipboard(installCommand, "Install command copied")}
           className="border-0 shadow-none"
         />
         <p className="text-center text-2xs text-fg-muted">
@@ -189,11 +230,11 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12px] leading-4 text-fg-muted">
+      <p className="text-xs leading-4 text-fg-muted">
         Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no approval step.
       </p>
 
-      <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-[12px] leading-4 text-fg">
+      <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-xs leading-4 text-fg">
         <input
           type="checkbox"
           className="mt-0.5"
@@ -212,33 +253,28 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         </span>
       </label>
 
-      <div className="flex items-start gap-2 rounded-md border border-status-waiting/40 bg-status-waiting/10 p-2.5 text-[12px] leading-4 text-status-waiting">
-        <AlertTriangleIcon className="mt-px size-3.5 shrink-0" />
-        <span>
-          <span className="font-semibold">Secret — copy it now.</span> This command embeds a one-time enroll token that
-          grants enrollment into this workspace until it expires. Anyone who has it can enroll a machine here.
-        </span>
-      </div>
+      <Notice tone="waiting" title="Secret — copy it now">
+        This command embeds a one-time enroll token that grants enrollment into this workspace until it expires. Anyone
+        who has it can enroll a machine here.
+      </Notice>
 
       {minting ? (
-        <div className="flex items-center gap-2 rounded-md border border-border bg-bg p-2.5 text-[12px] text-fg-muted">
-          <Loader2Icon className="size-4 animate-spin" />
+        <Notice tone="muted" icon={<Loader2Icon className="size-4 animate-spin" />}>
           Minting enroll token…
-        </div>
+        </Notice>
       ) : error ? (
-        <div className="flex flex-col gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2.5 text-[12px] leading-4 text-status-failed">
-          <span>Could not create an enroll token. {error}</span>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="w-full"
-            onClick={() => void mint(allowScreenControl)}
-          >
-            <TerminalIcon className="size-4" />
-            Try again
-          </Button>
-        </div>
+        <Notice
+          tone="failed"
+          title="Could not create an enroll token"
+          action={(
+            <Button type="button" variant="outline" size="sm" onClick={() => void mint(allowScreenControl)}>
+              <TerminalIcon className="size-4" />
+              Try again
+            </Button>
+          )}
+        >
+          {error}
+        </Notice>
       ) : token ? (
         <>
           <div className="flex items-center justify-between rounded-md border border-border bg-surface-2/60 px-2.5 py-1.5 text-2xs text-fg-muted">
