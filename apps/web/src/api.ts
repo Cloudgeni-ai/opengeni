@@ -148,6 +148,16 @@ export async function signOutManaged(): Promise<unknown> {
   return await authRequest<unknown>("/sign-out", { method: "POST" });
 }
 
+// Completes a password reset. `token` comes from the emailed link
+// (`<PUBLIC_BASE_URL>/reset-password?token=…`); Better Auth mounts this at
+// `/v1/auth/reset-password` and expects `{ newPassword, token }`.
+export async function resetPassword(input: { newPassword: string; token: string }): Promise<unknown> {
+  return await authRequest<unknown>("/reset-password", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function fetchClientConfig(): Promise<ClientConfig> {
   const config = await request<ClientConfig>("/v1/config/client");
   reloadIfStaleDeployment(config);

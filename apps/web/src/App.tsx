@@ -32,6 +32,7 @@ import { DocumentsRoute } from "@/routes/documents";
 import { EnvironmentsRoute } from "@/routes/environments";
 import { MachinesRoute } from "@/routes/machines";
 import { OrgSettingsRoute } from "@/routes/org-settings";
+import { ResetPasswordRoute } from "@/routes/reset-password";
 import { SchedulesRoute } from "@/routes/schedules";
 import { SessionRoute } from "@/routes/session";
 import { SessionsIndexRoute } from "@/routes/sessions-index";
@@ -72,6 +73,17 @@ const deviceRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { user_code?: string } =>
     typeof search.user_code === "string" && search.user_code ? { user_code: search.user_code } : {},
   component: Device,
+});
+// Password-reset completion page. Top-level and PUBLIC: the emailed link
+// (`<PUBLIC_BASE_URL>/reset-password?token=…`) is opened by a signed-out user,
+// so `RootRouteComponent` renders this route ahead of the auth gate (see the
+// `isPublicAuthRoute` branch there). Only `token` is read from the query.
+const resetPasswordRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "reset-password",
+  validateSearch: (search: Record<string, unknown>): { token?: string } =>
+    typeof search.token === "string" && search.token ? { token: search.token } : {},
+  component: ResetPassword,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -167,6 +179,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   billingReturnRoute,
   deviceRoute,
+  resetPasswordRoute,
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -289,6 +302,11 @@ function AccountRedirect() {
 function Device() {
   const { user_code } = deviceRoute.useSearch();
   return <DeviceRoute userCode={user_code} />;
+}
+
+function ResetPassword() {
+  const { token } = resetPasswordRoute.useSearch();
+  return <ResetPasswordRoute token={token} />;
 }
 
 function BillingReturnRoute() {

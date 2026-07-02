@@ -4,7 +4,7 @@
 // workspace shell consumes this through `useAppContext`.
 import type { OpenGeniClient } from "@opengeni/sdk";
 import type { SessionEventsConnectionState } from "@opengeni/react";
-import { Outlet, useNavigate } from "@tanstack/react-router";
+import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import {
@@ -214,6 +214,11 @@ export function RootRouteComponent() {
   const authReady = keyAuthReady && managedAuthReady;
   const defaultWorkspaceId = accessContext?.defaultWorkspaceId ?? workspaces[0]?.id ?? accessContext?.workspaceGrants[0]?.workspaceId ?? null;
   const navigate = useNavigate();
+  // Public routes render ahead of every auth/config gate: a user completing a
+  // password reset is signed out by definition, so `/reset-password` must never
+  // be intercepted by the sign-in panel or workspace-access loading.
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const isPublicAuthRoute = pathname === "/reset-password";
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
@@ -675,7 +680,12 @@ export function RootRouteComponent() {
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
-      {!clientConfig && !configError ? (
+      {isPublicAuthRoute ? (
+        // Self-contained public page (e.g. /reset-password): rendered before the
+        // config/auth gates and outside AppContext, so it works for a signed-out
+        // visitor even while client config is still loading.
+        <Outlet />
+      ) : !clientConfig && !configError ? (
         <LoadingPanel label="Loading OpenGeni" />
       ) : configError ? (
         <ProblemPanel title="Client configuration unavailable" description={configError} />
