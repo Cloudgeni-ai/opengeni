@@ -3294,14 +3294,61 @@ export async function requireSession(db: Database, workspaceId: string, sessionI
   return session;
 }
 
-export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, after = 0, limit = 500): Promise<SessionEvent[]> {
+export type ListSessionEventsOptions = {
+  after?: number;
+  before?: number;
+  limit?: number;
+};
+
+const POSTGRES_INT_MAX = 2_147_483_647;
+
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string): Promise<SessionEvent[]>;
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, after: number, limit?: number): Promise<SessionEvent[]>;
+export async function listSessionEvents(db: Database, workspaceId: string, sessionId: string, options: ListSessionEventsOptions): Promise<SessionEvent[]>;
+export async function listSessionEvents(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  afterOrOptions: number | ListSessionEventsOptions = 0,
+  legacyLimit = 500,
+): Promise<SessionEvent[]> {
+  const options = typeof afterOrOptions === "number"
+    ? { after: afterOrOptions, limit: legacyLimit }
+    : afterOrOptions;
+  const after = normalizeEventSequence(options.after, 0);
+  const limit = normalizeEventLimit(options.limit, 500);
+  const hasBefore = options.before !== undefined && Number.isFinite(options.before);
+  const before = hasBefore ? Math.floor(options.before as number) : undefined;
+
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const filters: SQL[] = [
+      eq(schema.sessionEvents.workspaceId, workspaceId),
+      eq(schema.sessionEvents.sessionId, sessionId),
+      gt(schema.sessionEvents.sequence, after),
+    ];
+    if (before !== undefined && before <= POSTGRES_INT_MAX) {
+      filters.push(lt(schema.sessionEvents.sequence, before));
+    }
     const rows = await scopedDb.select().from(schema.sessionEvents)
-      .where(and(eq(schema.sessionEvents.workspaceId, workspaceId), eq(schema.sessionEvents.sessionId, sessionId), gt(schema.sessionEvents.sequence, after)))
-      .orderBy(asc(schema.sessionEvents.sequence))
+      .where(and(...filters))
+      .orderBy(hasBefore ? desc(schema.sessionEvents.sequence) : asc(schema.sessionEvents.sequence))
       .limit(limit);
-    return rows.map(mapEvent);
+    return (hasBefore ? rows.reverse() : rows).map(mapEvent);
   });
+}
+
+function normalizeEventSequence(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.floor(value);
+}
+
+function normalizeEventLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.floor(value));
 }
 
 export async function getSessionEvent(db: Database, workspaceId: string, eventId: string): Promise<SessionEvent | null> {

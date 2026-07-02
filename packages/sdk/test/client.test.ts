@@ -53,10 +53,10 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("/events") ? jsonResponse([makeEvent(3)]) : jsonResponse({ id: SESSION_ID }));
     await client.getSession(WORKSPACE_ID, SESSION_ID);
-    const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, { after: 2, limit: 10 });
+    const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, { after: 2, before: 9, limit: 10 });
     expect(events.map((event) => event.sequence)).toEqual([3]);
     expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`);
-    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&limit=10`);
+    expect(requests[1]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10`);
   });
 
   test("sendMessage wraps text in a user.message control event", async () => {

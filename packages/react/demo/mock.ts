@@ -154,6 +154,22 @@ export class MockOpenGeniClient implements SessionClientLike {
     return FLEET.map((spec) => this.fabricateSession(spec.id, spec.status, spec.title, spec.agoMinutes));
   }
 
+  async listEvents(
+    _workspaceId: string,
+    sessionId: string,
+    options: { after?: number; before?: number; limit?: number } = {},
+  ): Promise<SessionEvent[]> {
+    const after = options.after ?? 0;
+    const limit = options.limit ?? 500;
+    let events = this.bus(sessionId).events.filter((event) => event.sequence > after);
+    if (options.before !== undefined) {
+      const before = options.before;
+      events = events.filter((event) => event.sequence < before);
+      return events.slice(-limit);
+    }
+    return events.slice(0, limit);
+  }
+
   async listScheduledTasks(): Promise<ScheduledTask[]> {
     return SCHEDULED_TASKS;
   }

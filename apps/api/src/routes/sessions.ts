@@ -284,9 +284,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const after = Number(c.req.query("after") ?? 0);
-    const limit = Number(c.req.query("limit") ?? 500);
-    return c.json(await listSessionEvents(db, workspaceId, sessionId, Number.isFinite(after) ? after : 0, Number.isFinite(limit) ? limit : 500));
+    const after = eventSequence(c.req.query("after"), 0);
+    const before = optionalEventSequence(c.req.query("before"));
+    const limit = eventListLimit(c.req.query("limit"));
+    return c.json(await listSessionEvents(db, workspaceId, sessionId, {
+      after,
+      ...(before !== undefined ? { before } : {}),
+      limit,
+    }));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
@@ -1068,6 +1073,33 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.body(null, 204);
   });
+}
+
+function eventListLimit(raw: string | undefined): number {
+  const limit = Number(raw ?? 500);
+  if (!Number.isFinite(limit)) {
+    return 500;
+  }
+  return Math.min(2000, Math.max(1, Math.floor(limit)));
+}
+
+function eventSequence(raw: string | undefined, fallback: number): number {
+  const sequence = Number(raw ?? fallback);
+  if (!Number.isFinite(sequence)) {
+    return fallback;
+  }
+  return Math.floor(sequence);
+}
+
+function optionalEventSequence(raw: string | undefined): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const sequence = Number(raw);
+  if (!Number.isFinite(sequence)) {
+    return undefined;
+  }
+  return Math.floor(sequence);
 }
 
 function hasOwnProperty(value: unknown, key: string): boolean {
