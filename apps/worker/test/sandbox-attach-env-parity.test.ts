@@ -18,7 +18,8 @@
 // keys go missing and the parity assertion fails (reproducing the delta throw).
 
 import { describe, expect, test } from "bun:test";
-import { stableSandboxEnvironmentForRun } from "@opengeni/config";
+import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "@opengeni/config";
+import { githubAppBotIdentity } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import type { ResourceRef } from "@opengeni/contracts";
 import { sandboxEnvironmentForRun } from "../src/activities/environment";
@@ -148,5 +149,73 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe(attachEnv.OPENGENI_GIT_TOKEN_FILE);
     expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
+  });
+});
+
+// REPO-ATTACHED parity (the case an open session page actually hits): since the
+// token broker, a cloud repo turn declares the STABLE git-auth POINTERS
+// (GIT_ASKPASS / GIT_TERMINAL_PROMPT / bot identity) on top of the stable base.
+// An attach-warmed box created WITHOUT them is missing keys the turn declares →
+// the SDK guard throws. Live regression: session 0566bad3 (2026-07-02) — the
+// viewer attach (open session page) won the cold-create race and the first repo
+// turn died. The attach paths now apply the SAME shared pointer helper.
+describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create race)", () => {
+  const repoSettings = () =>
+    testSettings({
+      sandboxBackend: "modal",
+      gitAuthorName: "OpenGeni Bot",
+      gitAuthorEmail: "bot@opengeni.dev",
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+
+  test("attach env built with the shared pointer helper has NO delta against the repo turn's declared env", async () => {
+    const settings = repoSettings();
+    // The turn's declared env for a cloud repo run = stable base + the SHARED
+    // pointer helper (sandboxEnvironmentForRun applies exactly this after the
+    // mint; the mint contributes only the OFF-manifest gitToken).
+    const turnEnv = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      githubAppBotIdentity(settings),
+    );
+    // What the attach paths (viewer.ts sessionAttachEnvironment / channel-a.ts)
+    // now cold-create a repo session's box with.
+    const attachEnv = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      githubAppBotIdentity(settings),
+    );
+    expect(attachEnv).toEqual(turnEnv);
+    expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
+    expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+    expect(attachEnv.GIT_TERMINAL_PROMPT).toBe("0");
+    // Deployment git identity wins over the bot fallback (parity on both sides).
+    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+  });
+
+  test("FAILURE-SENSITIVITY: the pointer-less attach env (the 0566bad3 bug) DOES delta against a repo turn", async () => {
+    const settings = repoSettings();
+    const turnEnv = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      githubAppBotIdentity(settings),
+    );
+    // The pre-fix attach env: stable base only, no pointers.
+    const oldAttachEnv = stableSandboxEnvironmentForRun(settings, {});
+    expect(hasNoEnvironmentDelta(oldAttachEnv, turnEnv)).toBe(false);
+  });
+
+  test("bot identity fallback applies when the deployment carries no git identity", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      gitAuthorName: undefined,
+      gitAuthorEmail: undefined,
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+    });
+    const env = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      githubAppBotIdentity(settings),
+    );
+    expect(env.GIT_AUTHOR_NAME).toBe("opengeni-test[bot]");
+    expect(env.GIT_AUTHOR_EMAIL).toBe("12345+opengeni-test[bot]@users.noreply.github.com");
   });
 });

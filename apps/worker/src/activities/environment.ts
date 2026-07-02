@@ -1,4 +1,5 @@
 import {
+  applyGitAuthPointerEnvironment,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
@@ -61,23 +62,17 @@ export async function sandboxEnvironmentForRun(
     installationId: selection.installationId,
     repositoryIds: selection.repositoryIds,
   });
-  const identity = githubAppBotIdentity(settings);
   // TOKEN-BROKER (B2): the askpass helper is PROVISIONED AT SETUP (runtime) into a
   // per-box, user-writable path in the SAME dir as the token file, instead of a
   // baked image script at /usr/local/bin/opengeni-git-askpass. The clone-hook seed
   // block writes both the token file AND this askpass script before the fetch, so
   // git auth becomes correct on ANY box image (including pre-existing warm boxes on
   // their next turn's clone hook) — no product image needs to carry the askpass.
-  // HOME is already resolved in the STABLE base above; keep the /workspace fallback
-  // in lockstep with stableSandboxEnvironmentForRun's OPENGENI_GIT_TOKEN_FILE.
-  environment.GIT_ASKPASS = `${environment.HOME ?? "/workspace"}/.opengeni/askpass`;
-  environment.GIT_TERMINAL_PROMPT = "0";
-  if (identity) {
-    environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
-    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
-    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
-    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
-  }
+  // The pointer layer is the SHARED config helper so every API-direct attach
+  // surface (viewer attach, channel-A) declares the IDENTICAL env when it
+  // cold-creates the box for a repo-attached session — an attach-warmed box
+  // missing these keys kills the next repo turn on the SDK's manifest-env guard.
+  applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
   return { environment, gitToken: token };
 }
 

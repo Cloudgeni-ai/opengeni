@@ -19,8 +19,9 @@
 // lease's recorded data_plane_url (null until P4 mints it).
 
 import { createHash } from "node:crypto";
-import { resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
+import { applyGitAuthPointerEnvironment, hasGitHubRepositorySelection, resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
+import { githubAppBotIdentity } from "@opengeni/github";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
 import {
   acquireLease,
@@ -103,14 +104,17 @@ export type ViewerAttachResult = {
  * `validateNoEnvironmentDelta` threw "Live sandbox sessions cannot change manifest
  * environment variables" — the BLOCKING error this fixes.
  *
- * Mirrors the worker turn's STABLE subset (config.stableSandboxEnvironmentForRun +
- * the session's attached, decrypted workspace environment). It deliberately omits
- * the per-run, rotating GitHub App installation token the turn layers on for a
- * repo-attached run (sandboxEnvironmentForRun): that secret is minted fresh per
- * call and is not attach-reproducible, and the attach surfaces have no repo
- * resources in scope anyway.
+ * Mirrors the worker turn's STABLE env (config.stableSandboxEnvironmentForRun +
+ * the session's attached, decrypted workspace environment + — for a repo-attached
+ * session — the stable git-auth POINTERS the turn declares since the token-broker:
+ * GIT_ASKPASS / GIT_TERMINAL_PROMPT / bot identity). The pointers carry NO rotating
+ * value (the token lives in the box FILE the clone hook seeds), so they are
+ * attach-reproducible; omitting them cold-created a box whose env lacked keys the
+ * next repo turn's manifest declares → the SDK guard threw "Live sandbox sessions
+ * cannot change manifest environment variables" whenever a viewer attach (an open
+ * session page) won the cold-create race against the first turn.
  */
-async function sessionAttachEnvironment(
+export async function sessionAttachEnvironment(
   services: ViewerServices,
   workspaceId: string,
   session: Session,
@@ -121,7 +125,11 @@ async function sessionAttachEnvironment(
     workspaceId,
     session.environmentId,
   );
-  return stableSandboxEnvironmentForRun(services.settings, workspaceEnvironment?.values ?? {});
+  const environment = stableSandboxEnvironmentForRun(services.settings, workspaceEnvironment?.values ?? {});
+  if (hasGitHubRepositorySelection(session.resources)) {
+    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(services.settings));
+  }
+  return environment;
 }
 
 /**

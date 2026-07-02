@@ -1414,6 +1414,52 @@ export function stableSandboxEnvironmentForRun(
   return environment;
 }
 
+/**
+ * Whether a resource set carries a GitHub-App-connected repository (installation
+ * + repository ids present) — the SAME predicate the worker turn uses to decide
+ * whether it declares the stable git-auth pointers. Attach surfaces call this so
+ * an attach-warmed cold box carries the IDENTICAL manifest env a later repo turn
+ * declares (env parity — see applyGitAuthPointerEnvironment).
+ */
+export function hasGitHubRepositorySelection(resources: ReadonlyArray<{ kind: string; githubInstallationId?: unknown; githubRepositoryId?: unknown }>): boolean {
+  const positive = (value: unknown): boolean =>
+    (typeof value === "number" && Number.isInteger(value) && value > 0)
+    || (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0);
+  return resources.some((resource) => resource.kind === "repository" && positive(resource.githubInstallationId) && positive(resource.githubRepositoryId));
+}
+
+/**
+ * TOKEN-BROKER (B1) parity: the STABLE git-auth POINTER environment a
+ * repo-attached run declares — GIT_ASKPASS (a fixed path under HOME; the script
+ * itself is provisioned at box setup), GIT_TERMINAL_PROMPT, and the GitHub-App
+ * bot identity fallbacks. NO rotating value rides here (the token lives in the
+ * file behind the askpass), so the layer is attach-reproducible and MUST be
+ * applied identically by the worker turn (sandboxEnvironmentForRun) AND every
+ * API-direct attach surface that can cold-create the box (viewer attach,
+ * channel-A ops). A box cold-created WITHOUT this layer kills the next repo
+ * turn: the turn's manifest declares these keys, the box's env lacks them, and
+ * the SDK's provided-session guard throws "Live sandbox sessions cannot change
+ * manifest environment variables" (observed live: an open session page's viewer
+ * attach won the cold-create race and the first turn died).
+ *
+ * Mutates and returns `environment`. Identity fallbacks preserve values already
+ * present (the deployment git-identity allowlist wins over the bot identity).
+ */
+export function applyGitAuthPointerEnvironment(
+  environment: Record<string, string>,
+  identity: { name: string; email: string } | null,
+): Record<string, string> {
+  environment.GIT_ASKPASS = `${environment.HOME ?? "/workspace"}/.opengeni/askpass`;
+  environment.GIT_TERMINAL_PROMPT = "0";
+  if (identity) {
+    environment.GIT_AUTHOR_NAME = environment.GIT_AUTHOR_NAME || identity.name;
+    environment.GIT_AUTHOR_EMAIL = environment.GIT_AUTHOR_EMAIL || identity.email;
+    environment.GIT_COMMITTER_NAME = environment.GIT_COMMITTER_NAME || identity.name;
+    environment.GIT_COMMITTER_EMAIL = environment.GIT_COMMITTER_EMAIL || identity.email;
+  }
+  return environment;
+}
+
 export type StartupRetryOptions = {
   attempts?: number;
   initialDelayMs?: number;
