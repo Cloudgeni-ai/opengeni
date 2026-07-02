@@ -319,7 +319,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "turn.failed": {
         const hadActivity = hasTurnActivity(items, turnId);
         const failureText = failureMessage(payload);
-        finalizeOpen(turnId, "failed");
+        // The TURN failed — the in-flight items did not. Chip doctrine: red is
+        // spent once, on the turn-level outcome. Items caught mid-flight read
+        // as calm "interrupted" (same as turn.cancelled); an item that itself
+        // failed keeps its own failed status from its output event.
+        finalizeOpen(turnId, "cancelled");
         items.push(turnEndItem(event, "failed", failureText));
         if (!hadActivity) {
           items.push({
