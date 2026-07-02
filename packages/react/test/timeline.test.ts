@@ -549,14 +549,16 @@ describe("buildTimeline", () => {
     expect(afterUserBoundary.map((item) => item.kind)).toEqual(["tool-call", "user-message", "turn-end", "notice"]);
   });
 
-  // Fix 3: in-flight tools when turn.failed must become "failed", not "complete"
-  test("turn.failed marks in-flight tool calls as failed (not complete)", () => {
+  // Chip doctrine: the TURN failed — items caught mid-flight did not. Red is
+  // spent once (the turn-level outcome); interrupted items read as calm
+  // "cancelled"/interrupted, never as their own failure.
+  test("turn.failed marks in-flight tool calls as interrupted (not failed, not complete)", () => {
     reset();
     const items = buildTimeline([
       event("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "make build" } }),
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
-    expect((items[0] as ToolCallItem).status).toBe("failed");
+    expect((items[0] as ToolCallItem).status).toBe("cancelled");
   });
 
   test("turn.cancelled marks in-flight tool calls as cancelled (not failed, not complete)", () => {
@@ -568,13 +570,13 @@ describe("buildTimeline", () => {
     expect((items[0] as ToolCallItem).status).toBe("cancelled");
   });
 
-  test("turn.failed marks in-flight sandbox operations as failed", () => {
+  test("turn.failed marks in-flight sandbox operations as interrupted", () => {
     reset();
     const items = buildTimeline([
       event("sandbox.operation.started", { name: "exec", command: "terraform apply" }),
       event("turn.failed", { error: "storage error" }),
     ]);
-    expect((items[0] as SandboxItem).status).toBe("failed");
+    expect((items[0] as SandboxItem).status).toBe("cancelled");
   });
 
   test("turn.cancelled marks in-flight sandbox operations as cancelled (not failed)", () => {
