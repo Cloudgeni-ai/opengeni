@@ -251,3 +251,98 @@ export function unwrapMcpOutput(output: unknown): { text: string; isError: boole
   }
   return { text: typeof output === "string" ? output : output == null ? "" : JSON.stringify(output), isError: false };
 }
+
+/* --- computer-use screenshot extraction ------------------------------------- */
+
+/**
+ * Extract a renderable `data:` URL from a computer-use screenshot output,
+ * whatever transport produced it. The hosted `computer_call` and the
+ * function-text mode persist a plain `data:image/...` string; the
+ * function-image mode (codex-backed sessions) persists the STRUCTURED image
+ * output — `{type:"image", image:{data, mediaType}}` with `data` arriving as a
+ * number array / index map / Buffer-JSON / base64 string after event
+ * serialization — or the agents-core normalized `input_image` content item.
+ * Returns null when the output carries no image (so callers fall back to their
+ * text/empty presentation).
+ */
+export function screenshotDataUrl(out: unknown): string | null {
+  if (typeof out === "string") {
+    if (out.startsWith("data:image")) {
+      return out;
+    }
+    // A JSON-encoded structured output (some transports stringify tool results).
+    if (out.startsWith("{") || out.startsWith("[")) {
+      const parsed = tryParseJson(out);
+      if (parsed !== undefined && parsed !== out) {
+        return screenshotDataUrl(parsed);
+      }
+    }
+    return null;
+  }
+  if (Array.isArray(out)) {
+    for (const entry of out) {
+      const url = screenshotDataUrl(entry);
+      if (url) {
+        return url;
+      }
+    }
+    return null;
+  }
+  if (out === null || typeof out !== "object") {
+    return null;
+  }
+  const record = out as Record<string, unknown>;
+  // agents-core normalized content item: {type:"input_image", image_url: "data:…" | {url}}
+  const imageUrl = record.image_url ?? record.imageUrl;
+  if (typeof imageUrl === "string" && imageUrl.startsWith("data:image")) {
+    return imageUrl;
+  }
+  if (imageUrl && typeof imageUrl === "object") {
+    const url = (imageUrl as Record<string, unknown>).url;
+    if (typeof url === "string" && url.startsWith("data:image")) {
+      return url;
+    }
+  }
+  // Structured tool output: {type:"image", image:{data, mediaType}}
+  const image = record.image as Record<string, unknown> | undefined;
+  if (image && typeof image === "object") {
+    const mediaType = typeof image.mediaType === "string" ? image.mediaType : "image/png";
+    const base64 = bytesToBase64(image.data);
+    if (base64) {
+      return `data:${mediaType};base64,${base64}`;
+    }
+    if (typeof image.data === "string" && image.data.length > 0) {
+      // Already base64 text.
+      return `data:${mediaType};base64,${image.data}`;
+    }
+  }
+  return null;
+}
+
+/** Serialize whatever a Uint8Array became in JSON (number[], {"0":n,…} index
+ *  map, or Buffer-JSON {type:"Buffer",data:[…]}) back into base64. */
+function bytesToBase64(data: unknown): string | null {
+  let bytes: number[] | null = null;
+  if (Array.isArray(data) && data.every((n) => typeof n === "number")) {
+    bytes = data as number[];
+  } else if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    if (record.type === "Buffer" && Array.isArray(record.data)) {
+      bytes = record.data as number[];
+    } else {
+      const keys = Object.keys(record);
+      if (keys.length > 0 && keys.every((key) => /^\d+$/.test(key))) {
+        bytes = keys.sort((a, b) => Number(a) - Number(b)).map((key) => Number(record[key]));
+      }
+    }
+  }
+  if (!bytes || bytes.length === 0) {
+    return null;
+  }
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.slice(i, i + CHUNK));
+  }
+  return typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
+}

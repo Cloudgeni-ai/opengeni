@@ -15,7 +15,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { stringifyPayload } from "../lib/format";
+import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
   applyPatchOps,
   controlCaret,
@@ -30,6 +30,7 @@ import {
   tailPeek,
   unwrapMcpOutput,
   v4aToGitFileDiff,
+  screenshotDataUrl,
   type ApplyPatchOperation,
 } from "./parsers";
 import { createToolRegistry, type ToolRegistry, type ToolRegistryEntry, type ToolRendererProps } from "./registry";
@@ -477,20 +478,49 @@ function computerVerb(action: ComputerAction | undefined): string {
   }
 }
 
+
+/** Coerce a function-tool arguments payload into the ComputerAction fields. */
+function asComputerArgs(args: unknown): Partial<ComputerAction> {
+  if (!args) {
+    return {};
+  }
+  const parsed = typeof args === "string" ? tryParseJson(args) : args;
+  if (!parsed || typeof parsed !== "object") {
+    return {};
+  }
+  const record = parsed as Record<string, unknown>;
+  return {
+    ...(typeof record.x === "number" ? { x: record.x } : {}),
+    ...(typeof record.y === "number" ? { y: record.y } : {}),
+    ...(typeof record.text === "string" ? { text: record.text } : {}),
+    ...(Array.isArray(record.keys) ? { keys: record.keys as string[] } : {}),
+    ...(typeof record.button === "string" ? { button: record.button } : {}),
+  };
+}
+
 function ComputerCallRenderer({ item }: ToolRendererProps) {
   const raw = (item.raw ?? {}) as {
     action?: ComputerAction;
     actions?: ComputerAction[];
     providerData?: { approvalStatus?: string };
   };
-  const action = raw.action;
+  // Function-mode computer tools (computer_screenshot / computer_click / …,
+  // used on codex + chat-wire providers since the explicit tool-transport
+  // change) carry the action in the tool NAME + arguments instead of raw.action.
+  // Normalize them into the same ComputerAction shape so one renderer serves
+  // every transport.
+  const functionAction: ComputerAction | undefined =
+    !raw.action && item.name.startsWith("computer_") && item.name !== "computer_call"
+      ? { type: item.name.slice("computer_".length), ...(asComputerArgs(item.arguments)) }
+      : undefined;
+  const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
   const verb = computerVerb(action);
   const out = item.output;
   const running = item.status === "running";
   const rejected = raw.providerData?.approvalStatus === "rejected";
   const readOnly = typeof out === "string" && out.includes("read-only");
-  const isImage = typeof out === "string" && out.startsWith("data:image");
+  const shotUrl = screenshotDataUrl(out);
   const empty = out === "" || out == null;
   const batched = actions.length > 1 ? actions.map((a) => computerVerb(a)).join(" · ") : null;
   // Fold the batched-action count into the title (one media affordance per row),
@@ -542,8 +572,8 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   const isFailed = item.status === "failed";
   const isCancelled = item.status === "cancelled";
 
-  if (isImage && typeof out === "string") {
-    const caption = `computer_call · ${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
+  if (shotUrl) {
+    const caption = `${verb}${actions.length > 1 ? ` (+${actions.length - 1} more)` : ""}`;
     return (
       <ActivityDisclosure
         icon={isShot ? <CameraIcon className={ICON_SIZE} /> : <MousePointer2Icon className={ICON_SIZE} />}
@@ -551,9 +581,9 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
         title={`${verb}${countSuffix}`}
         failed={isFailed}
         cancelled={isCancelled}
-        media={<Thumbnail src={out} caption={caption} />}
+        media={<Thumbnail src={shotUrl} caption={caption} />}
       >
-        <ScreenshotFigure src={out} caption={caption} />
+        <ScreenshotFigure src={shotUrl} caption={caption} />
         {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
       </ActivityDisclosure>
     );
@@ -866,6 +896,15 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "write_stdin", render: WriteStdinRenderer },
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "computer_call", render: ComputerCallRenderer },
+  // Function-mode computer tools (codex / chat-wire transports).
+  { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
+  { match: "name", name: "computer_click", render: ComputerCallRenderer },
+  { match: "name", name: "computer_double_click", render: ComputerCallRenderer },
+  { match: "name", name: "computer_move", render: ComputerCallRenderer },
+  { match: "name", name: "computer_scroll", render: ComputerCallRenderer },
+  { match: "name", name: "computer_type", render: ComputerCallRenderer },
+  { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
+  { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },

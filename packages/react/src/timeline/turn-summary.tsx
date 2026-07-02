@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
-import { applyPatchOps, isApplyPatch } from "./parsers";
+import { applyPatchOps, isApplyPatch, screenshotDataUrl } from "./parsers";
 import { rawTypeOf } from "./registry";
 import type { ActivityItem, TurnOutcome } from "./types";
 export type { TurnOutcome } from "./types";
@@ -124,8 +124,8 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
       files += applyPatchOps(item.raw).length;
     } else if (item.name === "exec_command") {
       commands += 1;
-    } else if (rawTypeOf(item) === "computer_call" || item.name === "computer_call") {
-      if (typeof item.output === "string" && item.output.startsWith("data:image")) {
+    } else if (rawTypeOf(item) === "computer_call" || item.name === "computer_call" || item.name === "computer_screenshot") {
+      if (screenshotDataUrl(item.output) !== null) {
         screenshots += 1;
       }
     }

@@ -125,7 +125,10 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
+    // The canvas parent is overflow-hidden, so this route owns its scrolling —
+    // without it the page clips (recent sessions were unreachable below the fold).
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
       <section className="flex flex-col items-center gap-2 text-center">
         <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
           What should the agent do?
@@ -184,6 +187,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
       </div>
 
       <RecentSessions workspaceId={workspaceId} />
+      </div>
     </div>
   );
 }
@@ -209,7 +213,9 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
       <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
         Recent sessions
       </h2>
-      <ul className="grid gap-1">
+      {/* flex-col, not grid: a grid auto track grows to a nowrap row's full
+          min-content width, defeating truncate and overflowing the page. */}
+      <ul className="flex min-w-0 flex-col gap-1">
         {recent.map((session) => (
           <RecentSessionRow key={session.id} workspaceId={workspaceId} session={session} />
         ))}
@@ -241,7 +247,7 @@ function RecentSessionRow({ workspaceId, session }: { workspaceId: string; sessi
   const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
   const meta = [session.model, sessionRepoLabel(session)].filter(Boolean).join(" · ");
   return (
-    <li>
+    <li className="min-w-0">
       <Link
         to="/workspaces/$workspaceId/sessions/$sessionId"
         params={{ workspaceId, sessionId: session.id }}
@@ -320,33 +326,6 @@ function WorkspaceRepositoryPicker({ workspaceId, disabled }: { workspaceId: str
   );
 }
 
-// Local opt-in flag for the Connected Machine path. The DEFAULT (no machines, no
-// opt-in) is the clean sandbox-only composer; this lets a user reveal the machine
-// option before/while enrolling their first machine. Mirrors the rail's
-// localStorage pattern (safe under SSR / private mode).
-// TODO(settings): promote this localStorage flag into a real persisted setting on
-// the Settings surface (workspace- or account-scoped) and surface the toggle there.
-const CONNECTED_MACHINES_OPTIN_KEY = "opengeni.composer.connectedMachines";
-
-function readConnectedMachinesOptIn(): boolean {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  try {
-    return window.localStorage.getItem(CONNECTED_MACHINES_OPTIN_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function persistConnectedMachinesOptIn(value: boolean): void {
-  try {
-    window.localStorage.setItem(CONNECTED_MACHINES_OPTIN_KEY, String(value));
-  } catch {
-    // localStorage may be unavailable (private mode); keep the in-memory value.
-  }
-}
-
 // ── The promoted top-level compute target (the parent that gates the band) ────
 
 function ComputeTargetControl(props: {
@@ -380,12 +359,9 @@ function ComputeTargetControl(props: {
   // shows the clean sandbox-only flow (byte-identical submission to before this
   // redesign). Once machines exist, the control is always shown. A lightweight
   // local opt-in lets a user reveal the option before/while enrolling.
-  const [optedIn, setOptedIn] = useState<boolean>(() => readConnectedMachinesOptIn());
-  const revealConnectedMachines = () => {
-    setOptedIn(true);
-    persistConnectedMachinesOptIn(true);
-  };
-  const showComputeTarget = !fleetEmpty || optedIn;
+  // No teaser for absent hardware: the segmented control exists only when the
+  // fleet has machines. Discovery lives on the Machines page, not the composer.
+  const showComputeTarget = !fleetEmpty;
 
   // Defensive: if the segmented control is hidden (clean flow) while a stale draft
   // still points at a machine (e.g. the last machine just left the fleet), fall
@@ -428,7 +404,6 @@ function ComputeTargetControl(props: {
           disabled={props.disabled}
         />
         {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
-        <RevealConnectedMachinesButton onClick={revealConnectedMachines} disabled={props.disabled} />
       </section>
     );
   }
@@ -563,6 +538,9 @@ function ManagedSandboxFields(props: {
         </p>
       </div>
 
+      {/* Offer environments only when some exist — configuration UI for
+          resources you don't have is clutter (same rule as machines). */}
+      {environments.environments.length > 0 ? (
       <div className="grid gap-2 border-t border-border pt-4">
         <Label className="flex items-center gap-1.5 text-xs">
           <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
@@ -584,6 +562,7 @@ function ManagedSandboxFields(props: {
           Variables are set in the sandbox at start. Their values stay write-only.
         </p>
       </div>
+      ) : null}
 
       {/* Low-level sandbox backend override — demoted into this kind's Advanced
           detail, descriptor-driven from CAPABILITY_DESCRIPTORS. */}
@@ -760,30 +739,6 @@ function CapabilityChip({ children }: { children: ReactNode }) {
     <span className="inline-flex items-center rounded-md border border-border bg-surface-2/60 px-1.5 py-0.5 text-2xs font-medium text-fg-muted">
       {children}
     </span>
-  );
-}
-
-// The opt-in affordance that reveals the Connected Machine path from the clean
-// sandbox-only flow. A quiet secondary action, tied to the compute area, with a
-// reveal-arrow on hover.
-function RevealConnectedMachinesButton(props: { onClick: () => void; disabled: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={props.onClick}
-      disabled={props.disabled}
-      className={cn(
-        "group inline-flex items-center gap-2 justify-self-start rounded-md px-1.5 py-1 text-2xs transition-colors",
-        "text-fg-subtle hover:text-fg-muted",
-        "disabled:cursor-not-allowed disabled:opacity-60",
-      )}
-    >
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2/50 text-fg-subtle transition-colors group-hover:border-border-strong group-hover:text-fg-muted">
-        <ServerIcon className="size-3" />
-      </span>
-      <span>Run on your own connected machine</span>
-      <ArrowRightIcon className="size-3 -translate-x-1 opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100" />
-    </button>
   );
 }
 
