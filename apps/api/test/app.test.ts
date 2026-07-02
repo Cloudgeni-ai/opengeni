@@ -74,19 +74,26 @@ describe("API helpers", () => {
     ]);
   });
 
-  test("validateToolRefs strips a client-supplied optional flag (explicit tools stay strict)", () => {
+  test("validateToolRefs applies MCP optional tri-state semantics", () => {
     const runtimeSettings = {
       mcpServers: [
         { id: "opengeni", url: "https://example.com/mcp", cacheToolsList: false },
         { id: "cap-notebook", url: "https://example.com/notebook", cacheToolsList: false },
       ],
     };
-    // A client cannot smuggle optional:true onto an explicitly-requested tool to
-    // make it non-fatal; the normalized ref is a bare strict ref.
-    expect(validateToolRefs(
-      [{ kind: "mcp", id: "cap-notebook", optional: true }] as never,
-      runtimeSettings as never,
-    )).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+
+    expect(validateToolRefs([{ kind: "mcp", id: "cap-notebook" }], runtimeSettings as never))
+      .toEqual([{ kind: "mcp", id: "cap-notebook" }]);
+    expect(validateToolRefs([{ kind: "mcp", id: "cap-notebook", optional: true }], runtimeSettings as never))
+      .toEqual([{ kind: "mcp", id: "cap-notebook", optional: true }]);
+    expect(() => validateToolRefs([{ kind: "mcp", id: "missing" }], runtimeSettings as never))
+      .toThrow("unknown MCP server id: missing");
+    expect(validateToolRefs([{ kind: "mcp", id: "missing", optional: true }], runtimeSettings as never))
+      .toEqual([]);
+    expect(validateToolRefs([
+      { kind: "mcp", id: "cap-notebook", optional: true },
+      { kind: "mcp", id: "cap-notebook" },
+    ], runtimeSettings as never)).toEqual([{ kind: "mcp", id: "cap-notebook" }]);
   });
 
   test("maps scheduled task schedules into Temporal specs", () => {

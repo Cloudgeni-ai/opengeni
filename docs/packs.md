@@ -15,7 +15,7 @@ The first pack is `marketing-social-daily-analysis`. It enables a workspace to c
 
 OpenGeni keeps pack execution on the normal session and scheduled-task path. A pack does not create a second runtime. Instead, enabling a pack stores a `pack_installations` row and pack-specific flows create ordinary scheduled tasks with:
 
-- `agentConfig.tools`: first-party MCP servers such as `opengeni` and `docs`
+- `agentConfig.tools`: first-party MCP servers such as `opengeni` and `docs`; portable packs may mark deployment-specific MCP refs with `optional: true` so unconfigured servers are skipped and configured-but-unavailable servers degrade best-effort at runtime
 - `agentConfig.resources`: files or repositories when needed
 - `agentConfig.metadata`: pack ID, template ID, connector IDs, and knowledge IDs
 - `agentConfig.prompt`: role-specific instructions compiled from the pack template

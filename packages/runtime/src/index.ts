@@ -1117,19 +1117,19 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
     //    device-code login may lack the connector scopes, and the backend can
     //    reject the bearer at the initialize/tools-list handshake, so a 401/403
     //    (or a missing/failed token) drops the server.
-    //  - an AUTO-ATTACHED workspace-default capability MCP (ToolRef.optional):
-    //    the caller never explicitly requested it, so a broken/expired
-    //    capability credential must SKIP the server with a warning, never kill
-    //    the turn before the model runs. An EXPLICITLY-requested tool omits
-    //    `optional` and stays strict (below), preserving the fail-loud contract.
+    //  - an optional ToolRef: either an auto-attached workspace-default
+    //    capability MCP or a client/pack-selected portable ref. A
+    //    broken/expired credential or unavailable endpoint skips the server
+    //    with a warning, never killing the turn before the model runs. Bare
+    //    refs stay strict (below), preserving the fail-loud default.
     const optional = tool.optional === true;
     return { server, bestEffort: isCodexAppsMcpServer(config) || optional, optional };
   }));
   const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
   const bestEffortServers = servers.filter((entry) => entry.bestEffort).map((entry) => entry.server);
-  // Names of the OPTIONAL capability servers (not codex_apps) so a drop is
-  // surfaced as a warning; codex_apps keeps its historically-quiet drop (a
-  // not-logged-in ChatGPT plan is a normal, non-noteworthy state).
+  // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
+  // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
+  // ChatGPT plan is a normal, non-noteworthy state).
   const optionalServerNames = new Set(
     servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
   );
@@ -1150,7 +1150,7 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       }
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
-        `[mcp] optional capability server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
+        `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
         error instanceof Error ? error.message : error,
       );
     }

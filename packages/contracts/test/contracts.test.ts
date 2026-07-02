@@ -35,9 +35,9 @@ describe("contracts", () => {
   test("accepts MCP tool refs on create session", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      tools: [{ kind: "mcp", id: "docs" }],
+      tools: [{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }],
     });
-    expect(payload.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    expect(payload.tools).toEqual([{ kind: "mcp", id: "docs" }, { kind: "mcp", id: "context7", optional: true }]);
   });
 
   test("accepts repository and file resources on create session", () => {
@@ -300,10 +300,10 @@ describe("contracts", () => {
     expect(() => DocumentSearchRequest.parse({ query: "" })).toThrow();
   });
 
-  test("mergeToolRefs: explicit (strict) beats auto-attached (optional) for the same server", () => {
-    // A capability that is both auto-attached (optional) at create AND later
-    // explicitly requested must end up STRICT — the explicit request wins so an
-    // unavailable server fails the turn, preserving the fail-loud contract.
+  test("mergeToolRefs: strict beats optional for the same server", () => {
+    // A server that is both optional and strict must end up STRICT. This keeps
+    // explicit strict selections fail-loud when they collide with optional pack
+    // refs or auto-attached capability MCP defaults.
     expect(mergeToolRefs(
       [{ kind: "mcp", id: "cap-notebook", optional: true }],
       [{ kind: "mcp", id: "cap-notebook" }],

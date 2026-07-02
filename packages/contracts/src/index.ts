@@ -1351,15 +1351,12 @@ export type DocumentSearchRequest = z.infer<typeof DocumentSearchRequest>;
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
   id: z.string().min(1),
-  // Non-fatal-on-connect marker for an AUTO-ATTACHED (workspace-default)
-  // capability MCP server: when true, a connect / tools-list failure (e.g. an
-  // expired capability credential returning 401) must SKIP that server with a
-  // logged warning and let the turn proceed, rather than failing the whole
-  // turn before the model runs. Absent/false ⇒ STRICT: an unavailable server
-  // fails the turn (the contract for EXPLICITLY-requested tools). This flag is
-  // set server-side only, at the default-capability auto-attach seam; it is
-  // stripped from client-supplied tool refs so an explicit request always
-  // stays strict.
+  // Non-fatal-on-connect marker for MCP server refs that can degrade
+  // gracefully. Absent/false is STRICT: the id must be configured and an
+  // unavailable server fails the turn. `optional:true` is preserved for known
+  // servers and makes runtime connect/list failures skip that server; if the
+  // deployment does not configure the id, validation drops the ref. The server
+  // also sets this for auto-attached workspace-default capability MCPs.
   optional: z.boolean().optional(),
 });
 export type ToolRef = z.infer<typeof ToolRef>;
@@ -1382,10 +1379,10 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
       order.push(key);
       continue;
     }
-    // Strict wins: if the same server appears both auto-attached (optional) and
-    // explicitly requested (non-optional), the explicit occurrence upgrades the
-    // merged ref to strict — a later explicit request of an already-defaulted
-    // capability MCP must still fail the turn when the server is unavailable.
+    // Strict wins: if the same server appears both optional and strict, the
+    // strict occurrence upgrades the merged ref so an unavailable server fails
+    // the turn. This preserves the fail-loud default when defaults, packs, and
+    // per-turn tool selections are combined.
     if (prior.optional === true && tool.optional !== true) {
       const { optional: _dropped, ...strict } = prior;
       byKey.set(key, strict);

@@ -1392,12 +1392,12 @@ describe("runtime event normalization", () => {
     }
   });
 
-  test("optional (auto-attached) capability MCP whose connect fails is skipped, not fatal", async () => {
-    // The geni-notebook class of bug: a workspace-default capability MCP whose
-    // credential expired returns 401 at connect. Because it was AUTO-ATTACHED
-    // (ToolRef.optional), the failure must drop the server with a warning and
-    // let the turn proceed — not fail the whole turn before the model runs. The
-    // config carries NO credential header, so the required-header server 401s.
+  test("optional ToolRef whose connect fails is skipped, not fatal", async () => {
+    // Optional MCP refs cover both auto-attached capability MCPs and
+    // client/pack-selected portable refs. If the server returns 401 at connect,
+    // the failure must drop the server with a warning and let the turn proceed
+    // instead of failing before the model runs. The config carries NO
+    // credential header, so the required-header server 401s.
     const broken = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;

@@ -17,26 +17,29 @@ import { HTTPException } from "hono/http-exception";
 
 export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
   const mcpServerIds = new Set(settings.mcpServers.map((server) => server.id));
-  const selected = new Set<string>();
   const out: ToolRef[] = [];
   for (const tool of tools) {
     if (tool.kind !== "mcp") {
       throw new HTTPException(422, { message: `unsupported tool kind: ${(tool as { kind?: string }).kind}` });
     }
+    const optional = tool.optional === true;
     if (!mcpServerIds.has(tool.id)) {
+      if (optional) {
+        continue;
+      }
       throw new HTTPException(422, { message: `unknown MCP server id: ${tool.id}` });
     }
-    if (selected.has(tool.id)) {
-      continue;
-    }
-    selected.add(tool.id);
-    // Normalize to a bare, STRICT ref: a client-supplied `optional` flag is
-    // dropped so an EXPLICITLY-requested tool always fails the turn when its
-    // server is unavailable. `optional: true` is set only server-side, at the
-    // default-capability auto-attach seam (enabledCapabilityMcpToolRefs).
-    out.push({ kind: "mcp", id: tool.id });
+    // Tool refs are tri-state for pack portability across deployments:
+    //  - bare / optional:false is STRICT: the id must be configured here and
+    //    runtime connection failure fails the turn.
+    //  - optional:true + known id is preserved: runtime treats it like an
+    //    auto-attached capability MCP and skips connect/list failures.
+    //  - optional:true + unknown id is skipped above: the client explicitly
+    //    opted into graceful degradation for MCPs (for example docs servers
+    //    like context7) that only some deployments configure.
+    out.push(optional ? { kind: "mcp", id: tool.id, optional: true } : { kind: "mcp", id: tool.id });
   }
-  return out;
+  return mergeToolRefs([], out);
 }
 
 type McpSettings = Pick<Settings, "mcpServers">;
