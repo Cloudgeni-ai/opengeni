@@ -8,6 +8,8 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { ChevronDownIcon, FlagIcon, Loader2Icon, PauseIcon, PlayIcon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { MetaChip } from "@/components/ui/meta-chip";
+import { Notice } from "@/components/ui/notice";
 import { eventLabel } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -60,17 +62,15 @@ export function GoalCard({ goal, events }: {
           ) : null}
 
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            <CounterChip
-              label="auto-continuations"
-              value={record.maxAutoContinuations !== null ? `${record.autoContinuations}/${record.maxAutoContinuations}` : String(record.autoContinuations)}
-              tone={record.maxAutoContinuations !== null && record.autoContinuations >= record.maxAutoContinuations ? "warn" : "default"}
-            />
-            <CounterChip
-              label="no-progress streak"
-              value={String(record.noProgressStreak)}
-              tone={record.noProgressStreak >= 2 ? "warn" : "default"}
-            />
-            <CounterChip label="v" value={String(record.version)} tone="default" />
+            <MetaChip dot={record.maxAutoContinuations !== null && record.autoContinuations >= record.maxAutoContinuations ? "waiting" : undefined}>
+              {record.maxAutoContinuations !== null
+                ? `${record.autoContinuations} of ${record.maxAutoContinuations} auto-continues`
+                : `${record.autoContinuations} auto-continue${record.autoContinuations === 1 ? "" : "s"}`}
+            </MetaChip>
+            <MetaChip dot={record.noProgressStreak >= 2 ? "waiting" : undefined}>
+              {record.noProgressStreak} stalled check{record.noProgressStreak === 1 ? "" : "s"}
+            </MetaChip>
+            <MetaChip>version {record.version}</MetaChip>
           </div>
 
           {record.status !== "completed" ? (
@@ -92,12 +92,16 @@ export function GoalCard({ goal, events }: {
       ) : null}
 
       {goal.mutationError ? (
-        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed">
-          <span className="min-w-0 flex-1">{goal.mutationError.message}</span>
-          <button type="button" onClick={goal.clearMutationError} aria-label="Dismiss goal error" className="shrink-0 rounded p-0.5 hover:bg-status-failed/20">
-            <XIcon className="size-3" />
-          </button>
-        </div>
+        <Notice
+          tone="failed"
+          action={(
+            <button type="button" onClick={goal.clearMutationError} aria-label="Dismiss goal error" className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg">
+              <XIcon className="size-3.5" />
+            </button>
+          )}
+        >
+          {goal.mutationError.message}
+        </Notice>
       ) : null}
 
       {goalEvents.length > 0 ? (
@@ -120,16 +124,26 @@ export function GoalCard({ goal, events }: {
   );
 }
 
-/** The compact goal chip for the session header: status + counters at a glance. */
+const GOAL_STATUS_LABEL: Record<"active" | "paused" | "completed", string> = {
+  active: "Active",
+  paused: "Paused",
+  completed: "Completed",
+};
+
+/** The compact goal chip for the session header: status at a glance, full
+ *  counters (auto-continues, stalled checks, version) in the tooltip so no
+ *  cryptic glyphs leak into the chip. */
 export function GoalChip({ goal }: { goal: UseGoalResult }) {
   const record = goal.goal;
   if (!record) {
     return null;
   }
+  const suffix = record.status === "paused" ? "Paused" : record.status === "completed" ? "Done" : null;
+  const tooltip = `${record.text} — ${record.autoContinuations} auto-continues, ${record.noProgressStreak} stalled checks, version ${record.version}`;
   return (
     <span
       data-testid="goal-chip"
-      title={record.text}
+      title={tooltip}
       className={cn(
         "inline-flex max-w-56 items-center gap-1.5 rounded-full border px-2 py-1 text-xs font-medium",
         record.status === "active" && "border-brand/40 bg-brand/10 text-fg",
@@ -139,9 +153,7 @@ export function GoalChip({ goal }: { goal: UseGoalResult }) {
     >
       <FlagIcon className="size-3 shrink-0" />
       <span className="min-w-0 truncate">{record.text}</span>
-      <span className="shrink-0 font-mono text-2xs opacity-75">
-        {record.status === "paused" ? "paused" : record.status === "completed" ? "done" : `${record.autoContinuations}↻ ${record.noProgressStreak}∅`}
-      </span>
+      {suffix ? <span className="shrink-0 text-2xs opacity-75">{suffix}</span> : null}
     </span>
   );
 }
@@ -156,23 +168,7 @@ function GoalStatusPill({ status }: { status: "active" | "paused" | "completed" 
         status === "completed" && "border-status-idle/40 bg-status-idle/10 text-status-idle",
       )}
     >
-      {status}
-    </span>
-  );
-}
-
-function CounterChip({ label, value, tone }: { label: string; value: string; tone: "default" | "warn" }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-2xs",
-        tone === "warn"
-          ? "border-status-waiting/40 bg-status-waiting/10 text-status-waiting"
-          : "border-border text-fg-subtle",
-      )}
-    >
-      <span className="font-mono font-medium text-fg-muted">{value}</span>
-      {label}
+      {GOAL_STATUS_LABEL[status]}
     </span>
   );
 }

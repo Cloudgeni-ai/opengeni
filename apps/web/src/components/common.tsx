@@ -29,19 +29,26 @@ export function ProblemPanel(props: { title: string; description: string; action
   );
 }
 
+/**
+ * Connection health, shown only when it needs a word (doctrine D2). Healthy
+ * states (live / idle / ended) render nothing — the session status badge is the
+ * single persistent pill, so there is no "live" + "Idle" double-green. The pill
+ * surfaces only while the stream is degraded, in sentence case.
+ */
 export function ConnectionPill({ state }: { state: SessionEventsConnectionState }) {
-  const tone = {
-    connecting: "bg-status-running",
-    reconnecting: "bg-status-running",
-    live: "bg-status-idle",
-    idle: "bg-status-cancelled",
-    ended: "bg-status-cancelled",
-    error: "bg-status-failed",
-  }[state];
+  const degraded: Partial<Record<SessionEventsConnectionState, { label: string; dot: string; text: string }>> = {
+    connecting: { label: "Connecting…", dot: "bg-status-running", text: "text-status-running" },
+    reconnecting: { label: "Reconnecting…", dot: "bg-status-running", text: "text-status-running" },
+    error: { label: "Stream error", dot: "bg-status-failed", text: "text-status-failed" },
+  };
+  const meta = degraded[state];
+  if (!meta) {
+    return null;
+  }
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium text-fg-muted">
-      <span className={cn("size-2 rounded-full", tone)} />
-      <span>{state}</span>
+    <span className={cn("inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-2 py-1 text-xs font-medium", meta.text)}>
+      <span className={cn("size-2 rounded-full motion-safe:animate-pulse", meta.dot)} />
+      <span>{meta.label}</span>
     </span>
   );
 }

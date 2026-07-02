@@ -31,6 +31,16 @@ export function SessionInspector(props: {
   // active (or selfhosted is disabled → the fleet 404s to empty).
   const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 10000 });
   const activeMachine = fleet.machines.find((machine) => machine.active && machine.kind === "selfhosted") ?? null;
+  // Compute context, honestly: don't fall back to the home backend while the
+  // fleet is still resolving — that reads "modal" even when a machine runs the
+  // turn. Show a loading/unavailable note until we actually know.
+  const computeUnknown = fleet.machines.length === 0 && (fleet.loading || Boolean(fleet.error));
+  const computeLabel = activeMachine ? "Machine" : "Sandbox";
+  const computeValue = activeMachine
+    ? activeMachine.name
+    : computeUnknown
+      ? (fleet.loading ? "Checking…" : "Unavailable")
+      : props.session.sandboxBackend;
   const displayEvents = props.events.map((event) => sanitizeEventForDisplay(event, props.session.status));
   const sortedEvents = [...displayEvents].sort((a, b) => b.sequence - a.sequence);
   const lifecycleEvents = [...displayEvents]
@@ -77,12 +87,9 @@ export function SessionInspector(props: {
               <InspectorSection title="Runtime">
                 <InfoRow label="Model" value={props.session.model} />
                 <InfoRow label="Effort" value={String(props.session.metadata.reasoningEffort ?? "low")} />
-                <InfoRow
-                  label={activeMachine ? "Machine" : "Sandbox"}
-                  value={activeMachine ? activeMachine.name : props.session.sandboxBackend}
-                />
+                <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Environment" value={props.session.environmentId ? <CopyableMono value={props.session.environmentId} /> : "none"} />
-                <InfoRow label="Stream" value={<ConnectionPill state={props.connectionState} />} />
+                <InfoRow label="Stream" value={props.connectionState} />
               </InspectorSection>
 
               <InspectorSection title="Repositories">

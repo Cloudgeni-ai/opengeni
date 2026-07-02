@@ -21,7 +21,7 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
             This session was cancelled and cannot be continued.
           </div>
           <div className="mt-1 text-xs text-fg-muted">
-            Historical session from {formatTimestamp(props.session.createdAt)}.
+            Started {formatTimestamp(props.session.createdAt)}.
           </div>
         </div>
       </div>
@@ -34,9 +34,9 @@ export function TerminalSessionBanner(props: { session: Session; onNewSession: (
 }
 
 /**
- * Failure honesty: the reason the session failed, how often the platform
- * re-dispatched turns after worker deaths, and the fact that the composer
- * stays usable — sending a message revives the session.
+ * Failure honesty: the reason the session failed, how many turns timed out and
+ * were retried automatically before it, and the fact that the composer stays
+ * usable — sending a message revives the session.
  */
 export function FailedSessionBanner({ failure }: { failure: SessionFailureSummary }) {
   return (
@@ -52,7 +52,7 @@ export function FailedSessionBanner({ failure }: { failure: SessionFailureSummar
           )}
           <div className="mt-1 text-xs text-fg-muted">
             {failure.redispatchCount > 0 ? (
-              <>The platform re-dispatched {failure.redispatchCount} timed-out turn{failure.redispatchCount === 1 ? "" : "s"} after worker restarts before this failure. </>
+              <>{failure.redispatchCount} turn{failure.redispatchCount === 1 ? "" : "s"} timed out and {failure.redispatchCount === 1 ? "was" : "were"} retried automatically before this failure. </>
             ) : null}
             {failure.failedTurnCount > 1 ? (
               <>{failure.failedTurnCount} turns have failed in this session. </>
@@ -73,7 +73,7 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
           <TerminalIcon className="size-4" />
         </div>
         <div className="text-sm font-medium">
-          Historical cancelled session
+          Cancelled session (read-only)
         </div>
         <p className="mt-1 text-xs leading-5 text-fg-muted">
           This is a saved event log from {formatTimestamp(props.session.createdAt)}, not a current run. Sanitized debug metadata is available in the inspector.

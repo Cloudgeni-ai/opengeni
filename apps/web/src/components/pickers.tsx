@@ -175,6 +175,7 @@ export function EnabledMcpToolPicker(props: {
         {props.servers.map((server) => (
           <DropdownMenuItem
             key={server.id}
+            title={server.id}
             onSelect={(event) => {
               event.preventDefault();
               toggle(server.id);
@@ -182,7 +183,6 @@ export function EnabledMcpToolPicker(props: {
             className="h-9 cursor-pointer rounded-md px-2 text-sm"
           >
             <span className="min-w-0 flex-1 truncate">{server.name}</span>
-            <span className="ml-2 max-w-24 truncate font-mono text-2xs text-fg-subtle">{server.id}</span>
             {props.selectedIds.has(server.id) ? <CheckIcon className="ml-2 size-4 shrink-0" /> : null}
           </DropdownMenuItem>
         ))}
