@@ -42,6 +42,14 @@ bun run test:e2e
 - Update README or docs when setup, public API, configuration, or user-facing behavior changes.
 - Do not commit secrets, local `.env` files, generated credentials, or private infrastructure details.
 
+## Keeping Docs True
+
+Use [`docs/README.md`](docs/README.md) as the docs map. If you move or rename files or packages, run `bun run check:docs-refs` and fix the current-tier references it reports. New packages need a package README plus an update to the [`docs/architecture.md`](docs/architecture.md) package table. New embed surfaces or ports belong in [`docs/embedding.md`](docs/embedding.md). New processes or commands belong in their canonical home from the docs map; link there instead of copying volatile details into multiple docs.
+
+## Release / Publishing
+
+Release and publishing guidance starts here; executable truth lives in [`package.json`](package.json) and the workflow files under `.github/workflows/`. When publishable packages change, keep changesets, package manifests, and the release workflow expectations aligned.
+
 ## Code Style
 
 - Prefer existing repository patterns over new abstractions.

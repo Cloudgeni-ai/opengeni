@@ -1,0 +1,32 @@
+# OpenGeni Docs Map
+
+This map defines who each doc tier serves and where volatile facts belong.
+
+## Audiences
+
+| Audience | Reads | Notes |
+| --- | --- | --- |
+| Integrator | `README.md`, `docs/embedding.md`, `packages/sdk/README.md` | OSS self-hosters and embedding hosts building against OpenGeni. |
+| Maintainer | `CONTRIBUTING.md`, `docs/architecture.md`, topic docs | Contributors changing code, packages, workflows, or release mechanics. |
+| Repo agent | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, this map | Coding agents working in this repository. |
+| Product agent | Bundled skills in `packages/runtime/src/bundled_hashicorp_terraform_skills` | Versioned product content; not covered by this freshness system. |
+| Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
+| Record | `docs/design/**`, historical results, design dossiers | Point-in-time records; banner-label, never "fix" them. |
+
+## Canonical Homes
+
+| Topic | Current canonical home | Known restatement locations |
+| --- | --- | --- |
+| Architecture & package layout | `docs/architecture.md` | `README.md`, `AGENTS.md`, package READMEs should link or summarize lightly. |
+| Embedding & ports | `docs/embedding.md` | `README.md`, `CONTRIBUTING.md`, SDK/client examples should link. |
+| Run lifecycle | `docs/run-lifecycle.md` | `AGENTS.md`, `.agents/skills/opengeni/SKILL.md`, architecture summaries should link. |
+| Connected machines | `docs/connected-machines.md` | `README.md`, `AGENTS.md`, client docs and skills should link. |
+| Deployment | `docs/deployment.md` | `README.md`, `AGENTS.md`, Helm/Terraform notes should link. |
+| Release/publishing | `CONTRIBUTING.md` § Release / Publishing, plus workflow files as executable truth | `README.md`, package READMEs, architecture release notes should link. |
+| Client/SDK integration | `packages/sdk/README.md` | `README.md`, `docs/embedding.md`, `@opengeni/react` docs should link. |
+
+## Rules
+
+1. Volatile facts such as paths, package names, commands, and env vars live in the canonical home; other docs link instead of restating.
+2. `docs/design/**` is record tier. Add the point-in-time banner and `<!-- docs-refs: record -->` marker; do not "freshen" those docs.
+3. Current-tier freshness is enforced in CI by `scripts/check-docs-refs.ts`.

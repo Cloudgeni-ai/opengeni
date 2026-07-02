@@ -50,6 +50,7 @@
     "release:publish": "bash scripts/release-publish.sh",
     "check": "bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build",
     "check:full": "bun run check && bun run test:integration && bun run test:e2e",
+    "check:docs-refs": "bun scripts/check-docs-refs.ts",
     "check:workspace-billing": "bun run typecheck && bun test && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
     "prep": "bun run check:full"
   },

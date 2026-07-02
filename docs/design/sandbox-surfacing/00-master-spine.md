@@ -1,3 +1,7 @@
+<!-- docs-refs: record -->
+
+> **Point-in-time design record.** Written against the tree at authoring time; paths and names may have moved. Code wins.
+
 # MASTER SPINE — OpenGeni Multi-Provider, Headless + Desktop, OS-Selectable Sandbox Surfacing
 
 **For:** Jørgen (lead engineer) · **Status:** top-level design of record · **Date:** 2026-06-19

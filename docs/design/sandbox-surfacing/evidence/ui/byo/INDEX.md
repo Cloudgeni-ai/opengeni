@@ -1,3 +1,5 @@
+<!-- docs-refs: record -->
+
 # M9 — Bring-your-own-compute UI screenshot evidence (V12)
 
 49 PNGs across **5 passes**, rendering every state-matrix cell of the Machines

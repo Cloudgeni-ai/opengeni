@@ -3,7 +3,7 @@
 The Rust agent that turns a user's own machine into a **Connected Machine** — a
 first-class, co-equal PRIMARY OpenGeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
-monorepo (the bun workspaces glob excludes it, and `agent/target/` is gitignored).
+monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
 
 **How the control plane treats a Connected Machine** (canonical:
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):

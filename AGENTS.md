@@ -97,6 +97,10 @@ The agent turn activity is `runAgentTurn`, also registered under the legacy alia
 
 If a change alters architecture, terminology, the run lifecycle, the memory model, or a "do not" guardrail above, update this file, [`docs/architecture.md`](docs/architecture.md), and the relevant `docs/*.md` in the same change. In particular, structural changes (an app/package/sandbox backend added, removed, or renamed; a moved responsibility; a changed invariant, data-flow, or canonical source) belong in `docs/architecture.md` — see its "Keeping this current" section. An out-of-date AGENTS.md or doc is a bug, not a nicety.
 
+## Keeping docs true
+
+Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename files or packages, run `bun run check:docs-refs` and fix every current-tier reference it reports. A new package needs a package README plus the [`docs/architecture.md`](docs/architecture.md) package table. A new embed surface or port belongs in [`docs/embedding.md`](docs/embedding.md). A new process or command belongs in its canonical home from the docs map; link to that home instead of restating volatile details.
+
 ## Sandbox Notes
 
 Sandbox execution is pluggable. `OPENGENI_SANDBOX_BACKEND` selects one of the backends defined by the `SandboxBackend` enum in `packages/contracts/src/index.ts` (the canonical list): `docker`, `modal`, `local`, `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`, and `selfhosted`. `docker` is the default and the usual local-dev choice; `modal` and the other cloud backends are provisioned, swappable boxes. When you change the set of backends, update the enum first and treat it as the source of truth — this file and the README follow it.

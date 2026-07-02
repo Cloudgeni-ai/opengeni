@@ -31,6 +31,9 @@ jobs:
       - name: Workspace auth/billing static guard
         run: bun scripts/check-workspace-billing-static.ts
 
+      - name: Docs reference freshness guard
+        run: bun scripts/check-docs-refs.ts
+
       - name: Build client packages (contracts + SDK + React)
         run: bun run build:packages
 

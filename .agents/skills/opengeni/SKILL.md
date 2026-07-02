@@ -1,10 +1,13 @@
 ---
 name: opengeni
+audience: repo-maintainer-agent
 description: >-
   Use when working in, operating, extending, integrating, documenting, or debugging OpenGeni: the session-based agent service with an API, durable event log, Temporal worker, sandboxed OpenAI Agents SDK runtime, file/object storage, MCP tools, scheduled tasks, and self-hosted local stack. Trigger this skill for questions about OpenGeni architecture, client-side API integration, sessions/events, worker orchestration, sandbox backends, file uploads, tools/MCP, scheduling, storage, GitHub integration, configuration, deployment, or how to keep agents using OpenGeni correctly as the repo evolves.
 ---
 
 # OpenGeni
+
+This skill is for repo-maintainer agents working in, operating, or changing the OpenGeni repository.
 
 ## Overview
 

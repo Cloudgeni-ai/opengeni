@@ -22,7 +22,7 @@ Code wins over this summary. Canonical sources:
   `claimNextQueuedTurn`, the reusable-session locked update.
 - `packages/db/drizzle/0014_repair_orphaned_function_call_results.sql` — the
   one-time orphan repair.
-- `apps/api/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
+- `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
   helpers and `assertReusableSessionRevivable`.
 
 ## The five fixes
@@ -213,8 +213,8 @@ otherwise terminal) reusable session was therefore **revived and billed** on the
 next scheduled fire — the opposite of what cancelling a session should mean.
 
 **The fix.** A shared
-`assertReusableSessionRevivable(status)` (mirrors the API's 409 in
-`apps/api/src/domain/sessions.ts`) refuses **only** `cancelled` (failed / idle
+`assertReusableSessionRevivable(status)` (mirrors the core session guard in
+`packages/core/src/domain/sessions.ts`) refuses **only** `cancelled` (failed / idle
 stay revivable, matching the revivable-failed-sessions contract). It is called
 **twice** in `apps/worker/src/activities/scheduled-tasks.ts`: once on the early
 read after `requireSession`, and again **inside the row lock** on the freshly
@@ -240,7 +240,7 @@ and the lock. Throwing aborts the dispatch rather than resurrecting the session.
 trigger (network blip, lambda re-invocation) never collided — it recorded usage
 **twice** and started **two** workflow runs (double-charge + double-spawn).
 
-**The fix** (`apps/api/src/domain/scheduled-tasks.ts`). Derive everything from a
+**The fix** (`packages/core/src/domain/scheduled-tasks.ts`). Derive everything from a
 **stable trigger token**:
 
 - `scheduledTaskTriggerToken(clientTriggerId)` — uses a client-supplied id when

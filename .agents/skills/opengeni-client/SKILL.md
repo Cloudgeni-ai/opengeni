@@ -1,9 +1,12 @@
 ---
 name: opengeni-client
+audience: integration-agent
 description: Use when integrating a customer product, coding agent, generic automation agent, CLI, SDK, or backend service with the OpenGeni API. Covers managed API-key auth, configured/self-host bearer auth, workspace discovery, workspace-scoped sessions, choosing a session's compute target (a managed sandbox or an enrolled Connected Machine), machine enrollment (device-flow consent + headless enroll tokens), SSE/event replay, files, documents/search, schedules, GitHub repository resources, billing/limits handling, safe retries, and keeping client guidance aligned with the live OpenGeni service rather than stale docs.
 ---
 
 # OpenGeni Client
+
+This skill is for integration agents building customer products, CLIs, SDK wrappers, or automations against an OpenGeni API service.
 
 Use this skill to help a customer-side agent or product consume OpenGeni as an API service. It is for client integration, not for editing OpenGeni internals.
 

@@ -451,7 +451,7 @@ The current map:
 - **Dev stack.** `bun run dev` (= `scripts/dev-stack.sh`): copy `.env`, pick free ports, `docker compose up` Postgres/NATS/Temporal/MinIO, migrate, build the sandbox image, launch api+worker+web. It auto-selects alternate ports if defaults are taken.
 - **Test tiers.** `test`/`test:unit` (bun test, **no infra**), `test:integration` (a fixed enumerated list of `*.integration.ts`), `test:e2e` (browser harness + Docker sandbox + Channel-A), `test:live` (opt-in via `OPENGENI_ENABLE_LIVE_TESTS`). **Unit tests and typecheck require no Temporal/NATS/Postgres/sandbox/model credentials** — keep new unit tests in that tier.
 - **Typecheck/check/prep.** `typecheck` is a hand-ordered `cd`-chain (add new packages to it). `check` = typecheck + unit + build sdk/react + web build; `check:full`/`prep` add integration + e2e; `check:workspace-billing` adds the static auth/billing guard.
-- **Static guards (build steps).** `publish-closure-guard.ts` (full npm closure has no ignored-package runtime dependencies; `sdk`/`react` remain client-clean), `check-workspace-billing-static.ts` (no unscoped `/v1` routes; Stripe only in `routes/billing.ts`, Better Auth only under `auth/`), `source-hygiene.test.ts` (no raw NUL bytes).
+- **Static guards (build steps).** `scripts/publish-closure-guard.ts` (full npm closure has no ignored-package runtime dependencies; `sdk`/`react` remain client-clean), `scripts/check-workspace-billing-static.ts` (no unscoped `/v1` routes; Stripe only in `routes/billing.ts`, Better Auth only under `auth/`), `scripts/check-docs-refs.ts` (current-tier docs reference existing repo paths and workspace packages), `source-hygiene.test.ts` (no raw NUL bytes).
 - **Changesets / publish.** Releases publish via **npm `changeset publish`** (bun can't emit provenance). Committed publishable `package.json` entry points point at `./src/...` (CI builds from source before `dist` exists); `build-publishable-packages.ts`, `rewrite-entry-points.ts`, and `rewrite-workspace-deps.ts` derive the publishable set from workspace manifests + `.changeset/config.json`, then build, swap to `dist`, and rewrite workspace ranges only in the ephemeral CI checkout. `sdk` + `react` are version-linked; package manifests and `.changeset/config.json` own which leaf packages stay ignored.
 - **CI.** `ci.yml` (typecheck + unit + guards + package/image builds + deployment-artifact validation; asserts no floating `latest` tags), `release.yml` (changesets Version-PR/publish + GHCR images, dormant until `RELEASE_ENABLED=true`), `agent-ci.yml`/`agent-release.yml` (Rust agent, path-filtered, independently versioned via `agent-v*` tags).
 
@@ -514,6 +514,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 
 | Doc | Covers |
 | --- | --- |
+| [`README.md`](README.md) | The audience-tiered docs map: canonical homes, current-vs-record rules, and freshness enforcement. |
 | [`architecture.md`](architecture.md) (this file) | The whole-system map, invariants, repo layout, and the change-decision table. |
 | [`run-lifecycle.md`](run-lifecycle.md) | Turns, the no-length-limit doctrine, the three memory stores, graceful-preempt vs ungraceful-death recovery, provider-item-id stripping. |
 | [`goals.md`](goals.md) | Goal-driven long runs: lifecycle, the replay-safe continuation loop, no-progress/budget guards, goal MCP tools, settings. |
@@ -527,6 +528,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`reliability-fixes.md`](reliability-fixes.md) | Reliability bugs/fixes (bounded Temporal history, orphan repair, scheduled-task/billing idempotency). |
 | [`deployment.md`](deployment.md) | Operator guide: profiles, preflight/stack plans, Helm/Terraform; the disposable-fixtures rule. |
 | [`embedding.md`](embedding.md) | Host-app embedding guide: router mounting, direct core calls, ports/bindings, schema/RLS, worker, and EventBus. |
+| [`connected-machines.md`](connected-machines.md) | Integrator guide for targeting, swapping, enrolling, and operating Connected Machines. |
 | [`design/sandbox-surfacing/`](design/sandbox-surfacing/) | Master design dossier for swappable sandboxes / BYO-compute (including the relay edge). |
 | [`design/desktop-hibernation.md`](design/desktop-hibernation.md) | Research/reference only (NOT shipped) — pause/resume/hibernation primitives across providers. |
 | [`../AGENTS.md`](../AGENTS.md) | How to run the stack + the load-bearing contributor guardrails. |
