@@ -49,6 +49,8 @@ import {
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
+  findCompactionNeededError,
+  SUMMARY_BUFFER_TOKENS,
   type SandboxFileDownload,
   type OpenGeniRuntime,
   type ComputerToolMode,
@@ -135,7 +137,7 @@ export function selectCodexCredentialForTurn(args: {
 // compaction: the turn's earlier work survives (albeit summarized), so the
 // agent continues instead of the session dying or stalling idle.
 export const CONTEXT_OVERFLOW_RESUME_TEXT = [
-  "[TURN RESUMED AFTER CONTEXT COMPACTION] The conversation grew past the model's context window mid-turn; older history above was compacted into a summary.",
+  "[TURN RESUMED AFTER CONTEXT COMPACTION] The conversation approached or exceeded the model's context window mid-turn; older history above was compacted into a summary.",
   "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
 ].join("\n");
 
@@ -167,7 +169,7 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
 }
 
 export const CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE =
-  "The conversation grew past the model's context window — it has been compacted; send a message to continue.";
+  "The conversation reached the model context compaction threshold; it has been compacted. Send a message to continue.";
 
 export function classifyContextWindowOverflowError(error: unknown): { message: string; code?: string; detail?: string } | null {
   const fields = collectErrorStrings(error);
@@ -1343,18 +1345,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {}),
       });
       const compactSummarizer = resolvedModel
-        ? (s: Settings, m: { system: string; user: string }) => withCodex(() => summarizeForCompaction(s, m, {
+        ? (s: Settings, m: Array<Record<string, unknown>>) => withCodex(() => summarizeForCompaction(s, m, {
             client: resolvedModel.client,
             api: resolvedModel.provider.api,
             model: resolvedModel.configured.id,
-            maxOutputTokens: s.contextSummaryMaxTokens,
+            maxOutputTokens: SUMMARY_BUFFER_TOKENS,
           }))
         : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
-      // resolved mode is "client" and the last turn's input tokens crossed the
-      // soft budget, this summarizes the orphan-safe old prefix into one user
-      // message and supersedes the summarized rows BEFORE the history is read
-      // for this turn, so the model sees [summary, ...recent tail] + new input.
+      // resolved mode is "client" and the single Codex-parity threshold is
+      // crossed, this summarizes the current active history and rebuilds active
+      // history as [user messages..., summary] BEFORE the model input is read.
       // Best-effort: a no-op or failure leaves the un-compacted history intact.
       // Skipped on approval/preempt resumes (no fresh user turn; the frozen
       // RunState or in-flight tail must replay verbatim).
@@ -1378,11 +1379,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             forced ? { force: true } : {},
           );
           if (outcome.compacted) {
-            // trigger precedence: an explicit operator /compact wins for the
-            // event label; otherwise a hard-forced (at/over hardFraction*B)
-            // compaction is surfaced as "hard" so the backstop firing is
-            // observable downstream, and the default soft trigger is implicit.
-            const trigger = forced ? "operator" : outcome.hardForced ? "hard" : undefined;
+            const trigger = forced ? "operator" : undefined;
             await publish([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, ...(trigger ? { trigger } : {}) } }]);
           }
         } catch (compactError) {
@@ -1447,7 +1444,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         nextHistoryPosition = await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId);
       };
 
-      const forceContextOverflowCompaction = async () => {
+      const forceContextCompaction = async (triggerLabel: "overflow" | "proactive") => {
         const clientCompactionSettings: Settings = { ...runSettings, contextCompactionMode: "client" };
         const outcome = await maybeCompactContext(
           db,
@@ -1458,7 +1455,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { force: true },
         );
         if (outcome.compacted) {
-          await publish!([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, trigger: "overflow" } }]);
+          await publish!([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, trigger: triggerLabel } }]);
         }
         return outcome;
       };
@@ -1494,6 +1491,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
             : {}),
+          contextCompactionSignalTokens: () => lastInputTokensObserved,
         });
         stream = await withCodex(runStreamOnce);
         batcher = createRuntimeBatcher(async (events) => {
@@ -1515,6 +1513,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const observed = responseUsage.usage?.inputTokens;
               if (typeof observed === "number" && observed > 0) {
                 lastInputTokensObserved = observed;
+                await setSessionLastInputTokens(db, input.workspaceId, input.sessionId, observed)
+                  .catch((error) => console.error("persist last_input_tokens failed (non-fatal)", error));
               }
               await recordModelUsageAndDebitCredits(settings, db, {
                 accountId: input.accountId,
@@ -1651,13 +1651,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
 
       await prepareRunAttemptInput();
-      let overflowRecoveryAttempted = false;
-      let retriedAfterOverflow = false;
+      let compactionRecoveryAttempted = false;
+      let retriedAfterCompaction = false;
       while (true) {
         try {
           const result = await runStreamAttempt();
-          if (retriedAfterOverflow) {
-            observability.info("context overflow recovery succeeded after in-activity retry", {
+          if (retriedAfterCompaction) {
+            observability.info("context compaction recovery succeeded after in-activity retry", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
             });
@@ -1665,26 +1665,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return result;
         } catch (attemptError) {
           const overflow = classifyContextWindowOverflowError(attemptError);
-          if (!overflow || !publish || !turnStartedPublished || overflowRecoveryAttempted) {
+          const compactionNeeded = findCompactionNeededError(attemptError);
+          const recoveryKind = compactionNeeded ? "proactive" : overflow ? "overflow" : null;
+          if (!recoveryKind || !publish || !turnStartedPublished || compactionRecoveryAttempted) {
             throw attemptError;
           }
-          overflowRecoveryAttempted = true;
+          compactionRecoveryAttempted = true;
           await flushRuntimeBatcher();
           await reconcileConversationTruth({ skipInputOnlyRows: true });
           const progressPersisted = modelOrToolProgressPersisted;
-          observability.warn("context overflow recovery attempted", {
+          observability.warn("context compaction recovery attempted", {
             sessionId: input.sessionId,
             turnId: activeTurnId,
+            reason: recoveryKind,
             progressPersisted,
-            code: overflow.code,
-            error: overflow.message,
+            code: overflow?.code,
+            error: overflow?.message ?? compactionNeeded?.message,
+            signalTokens: compactionNeeded?.signalTokens,
+            thresholdTokens: compactionNeeded?.thresholdTokens,
           });
           let compacted = false;
           try {
-            const outcome = await forceContextOverflowCompaction();
+            const outcome = await forceContextCompaction(recoveryKind);
             compacted = outcome.compacted;
           } catch (compactError) {
-            observability.warn("context overflow recovery compaction failed", {
+            observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
               error: compactError instanceof Error ? compactError.message : String(compactError),
@@ -1704,9 +1709,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               trigger.payload && typeof trigger.payload === "object" && !Array.isArray(trigger.payload)
                 ? trigger.payload as Record<string, unknown>
                 : {};
-            const overflowResumedTurn = triggerType === "turn.preempted" && triggerPayload.reason === "context_overflow_compacted";
+            const compactionResumedTurn = triggerType === "turn.preempted"
+              && (triggerPayload.reason === "context_compacted" || triggerPayload.reason === "context_overflow_compacted");
             const canAutoContinue =
-              compacted && !overflowResumedTurn && settings.sessionHistorySource === "items" && activeTurnId != null;
+              compacted && !compactionResumedTurn && settings.sessionHistorySource === "items" && activeTurnId != null;
             if (canAutoContinue) {
               const [preemptedEvent] = await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
                 {
@@ -1714,7 +1720,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   type: "turn.preempted",
                   payload: {
                     triggerEventId: input.triggerEventId,
-                    reason: "context_overflow_compacted",
+                    reason: "context_compacted",
                     resumeWithNotice: true,
                     text: CONTEXT_OVERFLOW_RESUME_TEXT,
                   },
@@ -1724,9 +1730,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await requeuePreemptedTurn(db, input.workspaceId, activeTurnId, preemptedEvent ? preemptedEvent.id : input.triggerEventId);
               await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
               activityStatus = "preempted";
-              observability.info("context overflow recovery succeeded by compacting and auto-continuing", {
+              observability.info("context compaction recovery succeeded by compacting and auto-continuing", {
                 sessionId: input.sessionId,
                 turnId: activeTurnId,
+                reason: recoveryKind,
                 compacted,
               });
               return { status: "preempted" };
@@ -1736,7 +1743,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 type: "turn.failed",
                 payload: {
                   error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
-                  code: "context_window_overflow_compacted",
+                  code: recoveryKind === "overflow" ? "context_window_overflow_compacted" : "context_compacted",
                   retryable: false,
                   recovery: "user_message",
                   compacted,
@@ -1748,17 +1755,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             activityError = attemptError;
-            observability.info("context overflow recovery succeeded by compacting and idling", {
+            observability.info("context compaction recovery succeeded by compacting and idling", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
+              reason: recoveryKind,
               compacted,
             });
             return { status: "idle" };
           }
-          retriedAfterOverflow = true;
-          observability.info("context overflow recovery retrying turn after compaction", {
+          retriedAfterCompaction = true;
+          observability.info("context compaction recovery retrying turn after compaction", {
             sessionId: input.sessionId,
             turnId: activeTurnId,
+            reason: recoveryKind,
             compacted,
           });
           await prepareRunAttemptInput();

@@ -234,8 +234,8 @@ async function messageInput(
   const inputBudgetTokens = readPathBudgetTokens(settings);
   if (settings?.sessionHistorySource === "items") {
     // Active rows only: after a client-side context compaction this is
-    // [active summary, ...active recent tail]; superseded (summarized-away)
-    // prefix rows stay in the table as an audit trail but never reach the model.
+    // [retained user messages..., active summary]; superseded rows stay in the
+    // table as an audit trail but never reach the model.
     const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
     if (stored.length > 0) {
       const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);

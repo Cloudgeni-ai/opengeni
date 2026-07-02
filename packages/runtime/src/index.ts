@@ -84,7 +84,15 @@ import { fileURLToPath } from "node:url";
 import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { elideStaleScreenshotImages } from "./image-history";
 import { installCodexToolSearch } from "./codex-tool-search";
-import { enforceInputBudget, estimateItemTokens } from "./context-compaction";
+import {
+  CompactionNeededError,
+  SUMMARY_BUFFER_TOKENS,
+  clientCompactionThresholdTokens,
+  enforceInputBudget,
+  estimateItemTokens,
+  estimateTokens,
+  renderCompactionPromptInputForChat,
+} from "./context-compaction";
 import {
   createSandboxClient,
   deserializeSandboxSessionStateEnvelope,
@@ -135,22 +143,29 @@ export type { HistoryItem } from "./history-sanitizer";
 export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
 
 export {
-  planCompaction,
+  CompactionNeededError,
+  buildCompactionPromptInput,
+  buildCompactionReplacementHistory,
+  clientCompactionThresholdTokens,
+  decideClientCompaction,
   enforceInputBudget,
   buildSummaryItem,
-  buildCompactionMessages,
+  findCompactionNeededError,
   isCompactionSummary,
   isUserMessage,
   findKeepBoundary,
   estimateTokens,
   estimateItemTokens,
-  compactionSummaryText,
-  renderPrefixTranscript,
+  renderCompactionPromptInputForChat,
   COMPACTION_SUMMARY_MARKER,
+  COMPACTION_PROMPT,
+  COMPACT_USER_MESSAGE_MAX_TOKENS,
+  CLIENT_COMPACTION_TRIGGER_FRACTION,
+  SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
-  SUMMARY_INSTRUCTIONS,
+  USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { CompactionItem, CompactionPlan, PlanCompactionInput } from "./context-compaction";
+export type { ClientCompactionDecision, CompactionItem } from "./context-compaction";
 export {
   elideStaleScreenshotImages,
   SCREENSHOT_OMITTED_PLACEHOLDER,
@@ -506,10 +521,10 @@ export function configureOpenAI(settings: Settings): void {
 
 /**
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
- * call against the resolved provider. `system`/`user` come from
- * buildCompactionMessages. Returns the trimmed summary text, or null on any
+ * call against the resolved provider. `input` is the active history plus
+ * Codex's checkpoint prompt. Returns the trimmed summary text, or null on any
  * failure (the caller treats a failed summarize as "skip compaction this turn"
- * — never fatal). The call deliberately does NOT request reasoning encryption,
+ * - never fatal). The call deliberately does NOT request reasoning encryption,
  * tools, or server-side compaction; it is a self-contained summarize.
  *
  * Provider-aware: the summary always runs on the SAME provider that serves the
@@ -523,22 +538,19 @@ export function configureOpenAI(settings: Settings): void {
  */
 export async function summarizeForCompaction(
   settings: Settings,
-  messages: { system: string; user: string },
+  input: Array<Record<string, unknown>>,
   options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
-  const maxTokens = options.maxOutputTokens ?? settings.contextSummaryMaxTokens;
+  const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
   try {
     if (api === "chat") {
       const completion = await client.chat.completions.create({
         model,
         max_tokens: maxTokens,
-        messages: [
-          { role: "system", content: messages.system },
-          { role: "user", content: messages.user },
-        ],
+        messages: [{ role: "user", content: renderCompactionPromptInputForChat(input) }],
       } as any);
       const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
       const trimmed = typeof text === "string" ? text.trim() : "";
@@ -551,10 +563,7 @@ export async function summarizeForCompaction(
       // built-in path (api "responses"), so gate it on the built-in provider.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
       max_output_tokens: maxTokens,
-      input: [
-        { role: "system", content: messages.system },
-        { role: "user", content: messages.user },
-      ],
+      input,
     } as any);
     const text = extractResponseOutputText(response);
     const trimmed = text.trim();
@@ -1579,6 +1588,7 @@ export type RunAgentStreamOptions = {
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
+  contextCompactionSignalTokens?: () => number | null | undefined;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -1607,6 +1617,11 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+};
+
+export type ContextRobustnessFilterOptions = {
+  contextCompactionSignalTokens?: () => number | null | undefined;
+  throwOnCompactionNeeded?: boolean;
 };
 
 // One-shot directive appended to the agent's system prompt on the genesis turn
@@ -1662,8 +1677,13 @@ export const normalizeComputerCallsFilter: CallModelInputFilter = ({ modelData }
   ) as unknown as AgentInputItem[],
 });
 
-export function contextRobustnessFilterForSettings(settings: Settings): CallModelInputFilter {
+export function contextRobustnessFilterForSettings(
+  settings: Settings,
+  options: ContextRobustnessFilterOptions = {},
+): CallModelInputFilter {
   const inputBudgetTokens = modelCallBudgetTokens(settings);
+  const clientCompactionMode = resolveContextCompactionMode(settings) === "client";
+  const compactionThresholdTokens = clientCompactionThresholdTokens(settings);
   return ({ modelData }) => {
     const images = elideStaleScreenshotImages(modelData.input);
     if (images.elidedCount > 0) {
@@ -1682,6 +1702,20 @@ export function contextRobustnessFilterForSettings(settings: Settings): CallMode
           `per-call budget guard trimmed ${guarded.droppedCount} oldest history item(s) to fit input budget (${inputBudgetTokens} tokens); the over-budget model call was NOT sent`,
         );
         input = guarded.items as unknown as AgentInputItem[];
+      }
+    }
+    if (clientCompactionMode && options.throwOnCompactionNeeded) {
+      const reported = options.contextCompactionSignalTokens?.();
+      const hasReported = typeof reported === "number" && reported > 0;
+      const signalTokens = hasReported
+        ? reported
+        : estimateTokens(input as unknown as Array<Record<string, unknown>>);
+      if (signalTokens > compactionThresholdTokens) {
+        throw new CompactionNeededError({
+          signalTokens,
+          thresholdTokens: compactionThresholdTokens,
+          signalSource: hasReported ? "provider" : "estimate",
+        });
       }
     }
     return { ...modelData, input };
@@ -1717,12 +1751,15 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
  * selects it; the context-robustness guard then elides stale screenshots on
  * every mode and applies hard budget trimming only on the client-compaction path.
  */
-export function callModelInputFilterForSettings(settings: Settings): CallModelInputFilter | undefined {
+export function callModelInputFilterForSettings(
+  settings: Settings,
+  options: ContextRobustnessFilterOptions = {},
+): CallModelInputFilter | undefined {
   const filters: CallModelInputFilter[] = [normalizeComputerCallsFilter];
   if (settings.openaiProviderItemIds === "strip") {
     filters.push(stripProviderItemIdsFilter);
   }
-  filters.push(contextRobustnessFilterForSettings(settings));
+  filters.push(contextRobustnessFilterForSettings(settings, options));
   return composeCallModelInputFilters(filters);
 }
 
@@ -1801,7 +1838,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // through the client during this run (it is inert for the provided session).
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
     const ownedFilter = composeCallModelInputFilters(
-      [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
+      [
+        callModelInputFilterForSettings(settings, {
+          throwOnCompactionNeeded: Boolean(overrides.contextCompactionSignalTokens),
+          ...(overrides.contextCompactionSignalTokens
+            ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+            : {}),
+        }),
+        overrides.callModelInputFilter,
+      ].filter(
         (f): f is CallModelInputFilter => Boolean(f),
       ),
     );
@@ -1854,7 +1899,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   // model input; the SDK persists filtered clones into its session view, while
   // OpenGeni's durable conversation truth is still reconciled explicitly below.
   const callModelInputFilter = composeCallModelInputFilters(
-    [callModelInputFilterForSettings(settings), overrides.callModelInputFilter].filter(
+    [
+      callModelInputFilterForSettings(settings, {
+        throwOnCompactionNeeded: Boolean(overrides.contextCompactionSignalTokens),
+        ...(overrides.contextCompactionSignalTokens
+          ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+          : {}),
+      }),
+      overrides.callModelInputFilter,
+    ].filter(
       (f): f is CallModelInputFilter => Boolean(f),
     ),
   );

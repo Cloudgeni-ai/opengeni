@@ -3431,8 +3431,8 @@ export async function getSessionHistoryItems(db: Database, workspaceId: string, 
 
 /**
  * The LIVE conversation-truth read path: only active rows, position-ordered.
- * After a client-side context compaction this returns [active summary,
- * ...active recent tail]; with no compaction yet it equals
+ * After a client-side context compaction this returns [retained user messages,
+ * active summary]; with no compaction yet it equals
  * getSessionHistoryItems. The model-facing read path uses this so superseded
  * (summarized-away) prefix rows are excluded while the full transcript stays in
  * the table as an audit trail.
@@ -3602,8 +3602,15 @@ export async function applyContextCompaction(db: Database, input: {
   turnId?: string | null;
   /** Active prefix rows with position < boundaryPosition get superseded. */
   boundaryPosition: number;
-  /** Fractional position for the new summary row (must be < boundaryPosition). */
+  /** Position for the new summary row. Old boundary mode uses a fractional half-step before the kept tail. */
   summaryPosition: number;
+  /**
+   * Optional replacement rows inserted after superseding the old active set.
+   * Used by Codex-parity client compaction to rebuild active history as retained
+   * user messages plus one summary. These rows are synthetic replay rows, so
+   * they intentionally do not inherit the current compaction turn id.
+   */
+  replacementItems?: Array<{ position: number; item: Record<string, unknown> }>;
   summaryItem: Record<string, unknown>;
 }): Promise<void> {
   await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
@@ -3616,6 +3623,20 @@ export async function applyContextCompaction(db: Database, input: {
           eq(schema.sessionHistoryItems.active, true),
           lt(schema.sessionHistoryItems.position, input.boundaryPosition),
         ));
+      if (input.replacementItems && input.replacementItems.length > 0) {
+        await tx.insert(schema.sessionHistoryItems).values(input.replacementItems.map((entry) => ({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: null,
+          position: entry.position,
+          item: sanitizeEventPayload(entry.item),
+          active: true,
+        }))).onConflictDoUpdate({
+          target: [schema.sessionHistoryItems.workspaceId, schema.sessionHistoryItems.sessionId, schema.sessionHistoryItems.position],
+          set: { active: true },
+        });
+      }
       // Insert the summary at its FRACTIONAL position. The supersede step above
       // also sets active=false for any rows with position < boundaryPosition —
       // which on a RETRY includes the summary itself (it sits below the

@@ -12,6 +12,7 @@ export type ScriptedModelStep = {
   chunks?: string[];
   outputText?: string;
   output?: AgentOutputItem[];
+  inputTokens?: number;
   delayMs?: number;
   error?: unknown;
 };
@@ -98,9 +99,9 @@ function responseForStep(step: ScriptedModelStep, callNumber: number): ModelResp
   return {
     usage: new Usage({
       requests: 1,
-      inputTokens: 1,
+      inputTokens: step.inputTokens ?? 1,
       outputTokens: Math.max(1, text.length),
-      totalTokens: Math.max(2, text.length + 1),
+      totalTokens: Math.max(2, text.length + (step.inputTokens ?? 1)),
     }),
     output: step.output ?? (text ? [assistantMessage(text)] : []),
     responseId: step.id ?? `scripted-response-${callNumber}`,

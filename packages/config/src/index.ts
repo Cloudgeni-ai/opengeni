@@ -193,14 +193,14 @@ const SettingsSchema = z.object({
   // StaticCompactionPolicy. Defaults to floor(B * contextCompactSoftFraction)
   // when unset.
   contextServerCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Client path: compact pre-turn when the last turn's actual input tokens
-  // reach softFraction*B; hard-force at hardFraction*B.
+  // Server path/back-compat knobs. The client compaction path ignores these:
+  // it uses Codex-parity 0.9 * (window - reserved output - 20k summary buffer).
   contextCompactSoftFraction: z.coerce.number().positive().max(1).default(0.70),
   contextCompactHardFraction: z.coerce.number().positive().max(1).default(0.85),
-  // Client path: tokens of the most recent FULL turns kept verbatim after a
-  // compaction (the live working set: recent tool results, not just messages).
+  // Deprecated for the client path; parsed for env/back-compat only.
   contextKeepRecentTokens: z.coerce.number().int().positive().default(32_000),
-  // Client path: token ceiling on the generated summary body.
+  // Parsed for back-compat. Client compaction uses the fixed 20k Codex summary
+  // buffer as its generated-summary output ceiling.
   contextSummaryMaxTokens: z.coerce.number().int().positive().default(20_000),
   authRequired: EnvBoolean.default(false),
   accessKey: z.string().optional(),

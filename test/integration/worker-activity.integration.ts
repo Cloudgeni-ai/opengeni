@@ -550,7 +550,63 @@ describe("worker activities integration", () => {
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
-  test("context overflow after persisted progress compacts and AUTO-CONTINUES via a resume-notice requeue", async () => {
+  test("mid-turn proactive compaction before model progress retries once in-activity", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "proactive retry",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "x".repeat(75_000 * 4) } },
+        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "old answer" }] } },
+      ],
+    });
+    await setSessionLastInputTokens(dbClient.db, grant.workspaceId, session.id, 1);
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "continue after proactive compaction" } },
+    ]);
+    const model = new ScriptedModel([
+      { outputText: "recovered", chunks: ["recovered"] },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 100_000,
+        contextReservedOutputTokens: 0,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: runtimeWithFakeCompactionSummarizer(model, "proactive retry summary"),
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-proactive-retry",
+    })).resolves.toEqual({ status: "idle" });
+
+    expect(model.calls).toBe(1);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
+  });
+
+  test("mid-turn proactive compaction after persisted progress AUTO-CONTINUES via a resume-notice requeue", async () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
@@ -575,10 +631,8 @@ describe("worker activities integration", () => {
         natsUrl: services.natsUrl,
         sessionHistorySource: "items",
         contextCompactionMode: "client",
-        contextWindowTokens: 1_000_000,
+        contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
-        contextCompactSoftFraction: 0.99,
-        contextKeepRecentTokens: 20,
         mcpServers: [{
           id: "opengeni",
           name: "OpenGeni",
@@ -611,8 +665,8 @@ describe("worker activities integration", () => {
         { type: "user.message", payload: { text: "overflow after progress" } },
       ]);
       const model = new ScriptedModel([
-        { id: "overflow-progress-1", output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")] },
-        { error: contextOverflowError("maximum context length exceeded") },
+        { id: "proactive-progress-1", inputTokens: 80_000, output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-progress")] },
+        { outputText: "should be requeued before this call" },
       ]);
       const activities = createActivities({
         settings,
@@ -629,14 +683,14 @@ describe("worker activities integration", () => {
         workflowId: "workflow-overflow-progress",
       })).resolves.toEqual({ status: "preempted" });
 
-      expect(model.calls).toBe(2);
+      expect(model.calls).toBe(1);
       const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 120);
       // The turn auto-continues: no turn.failed — a preempted-with-notice requeue,
       // exactly like the worker-shutdown checkpoint path.
       expect(events.some((event) => event.type === "turn.failed")).toBe(false);
       const preempted = events.find((event) => event.type === "turn.preempted");
       expect(preempted?.payload).toMatchObject({
-        reason: "context_overflow_compacted",
+        reason: "context_compacted",
         resumeWithNotice: true,
       });
       expect(typeof (preempted?.payload as Record<string, unknown>).text).toBe("string");
@@ -645,12 +699,16 @@ describe("worker activities integration", () => {
       expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
       const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
       expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toBe(true);
+      expect(active.every((row) => {
+        const item = row.item as Record<string, unknown>;
+        return item.type === "message" && item.role === "user";
+      })).toBe(true);
     } finally {
       server.stop(true);
     }
   });
 
-  test("an overflow on an overflow-resumed turn idles instead of requeueing again (loop guard)", async () => {
+  test("a compaction-needed error on a compaction-resumed turn idles instead of requeueing again (loop guard)", async () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
@@ -675,10 +733,8 @@ describe("worker activities integration", () => {
         natsUrl: services.natsUrl,
         sessionHistorySource: "items",
         contextCompactionMode: "client",
-        contextWindowTokens: 1_000_000,
+        contextWindowTokens: 100_000,
         contextReservedOutputTokens: 0,
-        contextCompactSoftFraction: 0.99,
-        contextKeepRecentTokens: 20,
         mcpServers: [{
           id: "opengeni",
           name: "OpenGeni",
@@ -707,14 +763,14 @@ describe("worker activities integration", () => {
           { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "recent answer" }] } },
         ],
       });
-      // The trigger IS an overflow resume: a second overflow in this lineage
+      // The trigger IS a compaction resume: a second compaction in this lineage
       // must idle, not requeue forever.
       const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
-        { type: "turn.preempted", payload: { reason: "context_overflow_compacted", resumeWithNotice: true, text: "[resumed after compaction]" } },
+        { type: "turn.preempted", payload: { reason: "context_compacted", resumeWithNotice: true, text: "[resumed after compaction]" } },
       ]);
       const model = new ScriptedModel([
-        { id: "overflow-loop-1", output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")] },
-        { error: contextOverflowError("maximum context length exceeded") },
+        { id: "compaction-loop-1", inputTokens: 80_000, output: [functionCall("opengeni__sessions_list", { limit: 1 }, "call-overflow-loop")] },
+        { outputText: "should not run" },
       ]);
       const activities = createActivities({
         settings,
@@ -735,7 +791,7 @@ describe("worker activities integration", () => {
       const failed = events.find((event) => event.type === "turn.failed");
       expect(failed?.payload).toMatchObject({
         error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
-        code: "context_window_overflow_compacted",
+        code: "context_compacted",
         recovery: "user_message",
       });
       // No SECOND requeue: the only turn.preempted event is the trigger itself.
@@ -3079,7 +3135,7 @@ describe("worker activities integration", () => {
     expect(workerEventsAfter).toBe(workerEventsBefore);
   });
 
-  test("maybeCompactContext compacts an over-budget Azure session into [summary, ...recent tail]", async () => {
+  test("maybeCompactContext compacts an over-budget Azure session into [user messages..., summary]", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "long session",
@@ -3131,10 +3187,11 @@ describe("worker activities integration", () => {
       900, // last-turn input tokens, well above soft = 500
       async (_s, messages) => {
         summarizerCalls += 1;
-        // The summarizer sees the OLD prefix, not the recent tail.
-        expect(messages.user).toContain("old turn 1");
-        expect(messages.user).toContain("old turn 2");
-        expect(messages.user).not.toContain("recent turn");
+        // The summarizer sees the current active history plus Codex's checkpoint prompt.
+        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("old turn 1"))).toBe(true);
+        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("old turn 2"))).toBe(true);
+        expect(messages.some((item) => String((item as Record<string, unknown>).content).includes("recent turn"))).toBe(true);
+        expect(String((messages.at(-1) as Record<string, unknown> | undefined)?.content)).toContain("CONTEXT CHECKPOINT COMPACTION");
         return "objective: ship; blocker: none; next: continue. Durable facts are in the notebook (pointers only).";
       },
     );
@@ -3142,21 +3199,21 @@ describe("worker activities integration", () => {
     expect(summarizerCalls).toBe(1);
     expect(result.compacted).toBe(true);
 
-    // Active read path now returns [summary, recent user, recent assistant], and
-    // it is orphan-clean (no stray tool result without its call).
+    // Active read path now returns retained user messages followed by one
+    // summary; assistant/tool rows remain only in the audit trail.
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
     const types = active.map((row) => (row.item as Record<string, unknown>).type);
-    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
+    expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
     expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c0")).toBe(false);
     expect(active.some((row) => (row.item as Record<string, unknown>).callId === "c1")).toBe(false);
-    expect(active.at(-1)!.item).toMatchObject({ role: "assistant" });
+    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(["old turn 1", "old turn 2", "recent turn"]);
     expect(types).not.toContain("function_call_result");
+    expect(active.every((row) => (row.item as Record<string, unknown>).role === "user")).toBe(true);
 
     // Audit trail intact: ALL ten seeded rows still present (none overwritten),
-    // plus the one summary row => eleven total. The earlier integer placement
-    // overwrote one real row, leaving ten.
+    // plus three retained user-message replacement rows and one summary row.
     const all = await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(all.length).toBe(11);
+    expect(all.length).toBe(14);
     expect(all.filter((row) => (row.item as Record<string, unknown>).opengeni_context_summary === true)).toHaveLength(1);
     // Every original seeded position (0..9) survives verbatim — in particular the
     // assistant 'a2' at position 7 that the half-step before the boundary used to
@@ -3343,8 +3400,8 @@ describe("worker activities integration", () => {
     const forced = await maybeCompactContext(dbClient.db, settings, scope, 10, summarize, { force: true });
     expect(forced.compacted).toBe(true);
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect((active[0]!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
-    expect(active.at(-1)!.item).toMatchObject({ role: "assistant" });
+    expect((active.at(-1)!.item as Record<string, unknown>).opengeni_context_summary).toBe(true);
+    expect(active.slice(0, -1).map((row) => (row.item as Record<string, unknown>).content)).toEqual(["old turn 1", "recent turn"]);
   });
 });
 

@@ -1,48 +1,50 @@
 import {
   applyContextCompaction,
   getActiveSessionHistoryItems,
+  nextSessionHistoryPosition,
   type Database,
 } from "@opengeni/db";
 import {
-  buildCompactionMessages,
-  buildSummaryItem,
-  planCompaction,
+  SUMMARY_BUFFER_TOKENS,
+  buildCompactionPromptInput,
+  buildCompactionReplacementHistory,
+  decideClientCompaction,
+  sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
 } from "@opengeni/runtime";
-import {
-  contextInputBudgetTokens,
-  resolveContextCompactionMode,
-  type Settings,
-} from "@opengeni/config";
+import { resolveContextCompactionMode, type Settings } from "@opengeni/config";
 
 export type MaybeCompactResult =
   | { compacted: false; reason: string }
-  | { compacted: true; supersededFrom: number; summaryPosition: number; hardForced: boolean };
+  | {
+      compacted: true;
+      supersededFrom: number;
+      summaryPosition: number;
+      signalTokens: number;
+      thresholdTokens: number;
+    };
 
 /**
  * Pre-turn client-side context compaction (the Azure path).
  *
  * Runs BEFORE the model call when the resolved compaction mode is "client".
- * Reads the active history rows + the last turn's actual input tokens, asks the
- * pure planner whether/where to compact, and — when it should — summarizes the
- * orphan-safe prefix into one plain user message via a model call and writes it
- * with applyContextCompaction (supersede prefix rows, insert the summary).
+ * Reads the active history rows + the most recent provider-reported input
+ * tokens, applies the single Codex-parity threshold, and - when it should -
+ * summarizes the active history with the Codex checkpoint prompt. The write
+ * supersedes the old active rows and inserts replacement active rows:
+ * all real user messages plus one summary.
  *
  * Best-effort by design: any failure (planner says no, summarize fails, DB
  * hiccup) returns without compacting and never throws — the turn proceeds with
  * the un-compacted history. The read path's existing sanitizer keeps that safe.
  *
- * The boundary the planner picks is the start of a kept user-message turn, so
- * no tool-call pair straddles the cut. The summary row is inserted at a
- * fractional position a half-step before the kept tail (boundaryPosition - 0.5),
- * which sorts ahead of the tail without overwriting any real prefix row, so the
- * active read path returns [summary, ...recent tail] in order and the full
- * superseded prefix survives untouched as an audit trail.
+ * There is no kept assistant/tool tail in client mode now. Assistant messages,
+ * tool calls/results, reasoning, and images stay only in inactive audit rows.
  */
 export type CompactionSummarizer = (
   settings: Settings,
-  messages: { system: string; user: string },
+  input: CompactionItem[],
 ) => Promise<string | null>;
 
 export async function maybeCompactContext(
@@ -51,7 +53,7 @@ export async function maybeCompactContext(
   scope: { accountId: string; workspaceId: string; sessionId: string; turnId?: string | null },
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
-  summarize: CompactionSummarizer = (s, m) => summarizeForCompaction(s, m, { maxOutputTokens: s.contextSummaryMaxTokens }),
+  summarize: CompactionSummarizer = (s, m) => summarizeForCompaction(s, m, { maxOutputTokens: SUMMARY_BUFFER_TOKENS }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
   options: { force?: boolean } = {},
@@ -65,61 +67,52 @@ export async function maybeCompactContext(
     return { compacted: false, reason: "no_history" };
   }
 
-  const items = active.map((row) => row.item) as CompactionItem[];
-  const plan = planCompaction({
+  const items = sanitizeHistoryItemsForModel(active.map((row) => row.item) as CompactionItem[]);
+  const decision = decideClientCompaction({
     items,
     lastInputTokens,
-    inputBudgetTokens: contextInputBudgetTokens(settings),
-    softFraction: settings.contextCompactSoftFraction,
-    hardFraction: settings.contextCompactHardFraction,
-    keepRecentTokens: settings.contextKeepRecentTokens,
+    contextWindowTokens: settings.contextWindowTokens,
+    contextReservedOutputTokens: settings.contextReservedOutputTokens,
     ...(options.force ? { force: true } : {}),
   });
-  if (!plan.shouldCompact) {
-    return { compacted: false, reason: plan.reason };
-  }
-  if (plan.hardForced) {
-    // At/over the hard ceiling (hardFraction*B): the session is past the soft
-    // trigger by a wide margin (often because last_input_tokens was stale-low
-    // and the actual history overflowed). Logged distinctly so the hard-force
-    // backstop firing is observable in production.
-    console.warn(
-      `context compaction HARD-FORCED for session ${scope.sessionId}: signal ${plan.signalTokens} tokens at/over hard ceiling`,
-    );
+  if (!decision.shouldCompact) {
+    return { compacted: false, reason: decision.reason };
   }
 
-  const messages = buildCompactionMessages(plan);
-  const summaryBody = await summarize(settings, messages);
+  const promptInput = buildCompactionPromptInput(items);
+  const summaryBody = await summarize(settings, promptInput);
   if (!summaryBody) {
     return { compacted: false, reason: "summarize_failed" };
   }
 
-  // Boundary is an index into the active rows; map to absolute positions. The
-  // kept tail starts at the boundary row's position; the summary takes a
-  // FRACTIONAL position a half-step before it. Positions are whole numbers, so
-  // boundaryPosition - 0.5 sorts immediately ahead of the kept tail and behind
-  // the last superseded prefix row while colliding with NO real row — the
-  // earlier `boundaryPosition - 1` always landed on (and overwrote) the real
-  // prefix row there.
-  const boundaryRow = active[plan.boundaryIndex];
-  if (!boundaryRow) {
-    return { compacted: false, reason: "boundary_out_of_range" };
+  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
+  const summaryItem = replacementHistory.at(-1);
+  if (!summaryItem) {
+    return { compacted: false, reason: "empty_replacement_history" };
   }
-  const boundaryPosition = boundaryRow.position;
-  if (boundaryPosition <= 0) {
-    return { compacted: false, reason: "boundary_at_origin" };
-  }
-  const summaryPosition = boundaryPosition - 0.5;
+  const nextPosition = await nextSessionHistoryPosition(db, scope.workspaceId, scope.sessionId);
+  const replacementItems = replacementHistory.slice(0, -1).map((item, index) => ({
+    position: nextPosition + index,
+    item,
+  }));
+  const summaryPosition = nextPosition + replacementItems.length;
 
   await applyContextCompaction(db, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
     sessionId: scope.sessionId,
     turnId: scope.turnId ?? null,
-    boundaryPosition,
+    boundaryPosition: nextPosition,
+    replacementItems,
     summaryPosition,
-    summaryItem: buildSummaryItem(summaryBody),
+    summaryItem: summaryItem as Record<string, unknown>,
   });
 
-  return { compacted: true, supersededFrom: boundaryPosition, summaryPosition, hardForced: plan.hardForced };
+  return {
+    compacted: true,
+    supersededFrom: nextPosition,
+    summaryPosition,
+    signalTokens: decision.signalTokens,
+    thresholdTokens: decision.thresholdTokens,
+  };
 }
