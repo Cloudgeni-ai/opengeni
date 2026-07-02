@@ -322,27 +322,36 @@ export function screenshotDataUrl(out: unknown): string | null {
 /** Serialize whatever a Uint8Array became in JSON (number[], {"0":n,…} index
  *  map, or Buffer-JSON {type:"Buffer",data:[…]}) back into base64. */
 function bytesToBase64(data: unknown): string | null {
+  const isByte = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255;
   let bytes: number[] | null = null;
-  if (Array.isArray(data) && data.every((n) => typeof n === "number")) {
-    bytes = data as number[];
+  if (Array.isArray(data) && data.every(isByte)) {
+    bytes = data;
   } else if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
-    if (record.type === "Buffer" && Array.isArray(record.data)) {
-      bytes = record.data as number[];
+    if (record.type === "Buffer" && Array.isArray(record.data) && record.data.every(isByte)) {
+      bytes = record.data;
     } else {
       const keys = Object.keys(record);
       if (keys.length > 0 && keys.every((key) => /^\d+$/.test(key))) {
-        bytes = keys.sort((a, b) => Number(a) - Number(b)).map((key) => Number(record[key]));
+        const values = keys.sort((a, b) => Number(a) - Number(b)).map((key) => record[key]);
+        if (values.every(isByte)) {
+          bytes = values;
+        }
       }
     }
   }
   if (!bytes || bytes.length === 0) {
     return null;
   }
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.slice(i, i + CHUNK));
+  try {
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode(...bytes.slice(i, i + CHUNK));
+    }
+    return typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
+  } catch {
+    // A hostile/absurd payload must degrade to "no image", never crash a render.
+    return null;
   }
-  return typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
 }

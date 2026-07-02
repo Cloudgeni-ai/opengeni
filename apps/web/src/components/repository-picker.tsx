@@ -116,6 +116,29 @@ export function RepositoryContextPicker(props: {
     </div>
   );
 
+  // The recovery path must stay reachable in EVERY configured state — including
+  // configured-but-zero-repos (the stale-app case), where installUrl may be
+  // absent and the settings form is the only way to reconnect or re-create.
+  const settingsDisclosure = (
+    <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
+      <div className="rounded-lg border border-border bg-bg/25">
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-fg transition-colors hover:bg-surface-2/60"
+          >
+            <ChevronDownIcon className={cn("size-3.5 shrink-0 text-fg-subtle transition-transform", props.githubAppOpen && "rotate-180")} />
+            <span className="truncate">GitHub app settings</span>
+          </button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="border-t border-border p-3">{setupForm}</div>
+        </CollapsibleContent>
+      </div>
+    </Collapsible>
+  );
+
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -207,6 +230,7 @@ export function RepositoryContextPicker(props: {
                   <Notice tone="waiting">
                     If repositories are missing, the app may have been removed on GitHub — reinstall it.
                   </Notice>
+                  {settingsDisclosure}
                 </div>
               ) : (
                 <>
@@ -301,22 +325,7 @@ export function RepositoryContextPicker(props: {
                     </div>
                   </section>
 
-                  <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
-                    <div className="rounded-lg border border-border bg-bg/25">
-                      <CollapsibleTrigger asChild>
-                        <button
-                          type="button"
-                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-medium text-fg transition-colors hover:bg-surface-2/60"
-                        >
-                          <ChevronDownIcon className={cn("size-3.5 shrink-0 text-fg-subtle transition-transform", props.githubAppOpen && "rotate-180")} />
-                          <span className="truncate">GitHub app settings</span>
-                        </button>
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="border-t border-border p-3">{setupForm}</div>
-                      </CollapsibleContent>
-                    </div>
-                  </Collapsible>
+                  {settingsDisclosure}
                 </>
               )}
 
