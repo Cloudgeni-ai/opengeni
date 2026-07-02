@@ -169,27 +169,70 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       githubAppSlug: "opengeni-test",
     });
 
-  test("attach env built with the shared pointer helper has NO delta against the repo turn's declared env", async () => {
-    const settings = repoSettings();
-    // The turn's declared env for a cloud repo run = stable base + the SHARED
-    // pointer helper (sandboxEnvironmentForRun applies exactly this after the
-    // mint; the mint contributes only the OFF-manifest gitToken).
-    const turnEnv = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings, {}),
-      githubAppBotIdentity(settings),
-    );
-    // What the attach paths (viewer.ts sessionAttachEnvironment / channel-a.ts)
-    // now cold-create a repo session's box with.
-    const attachEnv = applyGitAuthPointerEnvironment(
-      stableSandboxEnvironmentForRun(settings, {}),
-      githubAppBotIdentity(settings),
-    );
-    expect(attachEnv).toEqual(turnEnv);
-    expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
-    expect(attachEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
-    expect(attachEnv.GIT_TERMINAL_PROMPT).toBe("0");
-    // Deployment git identity wins over the bot fallback (parity on both sides).
-    expect(attachEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+  test("the REAL repo turn env (mint stubbed at fetch) has NO delta against the attach env", async () => {
+    // NON-TAUTOLOGICAL: the turn side is the ACTUAL worker function driven through
+    // its real mint path — a generated RSA app key signs the real JWT and a
+    // test-local fetch stub answers the installation-token POST — so a worker-side
+    // regression (e.g. dropping the pointer layer from sandboxEnvironmentForRun)
+    // fails THIS assertion. The attach side is the exact construction viewer.ts /
+    // channel-a.ts perform. (An earlier version built both sides from the same
+    // helpers, which could never fail.)
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+      publicKeyEncoding: { type: "spki", format: "pem" },
+    });
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      gitAuthorName: "OpenGeni Bot",
+      gitAuthorEmail: "bot@opengeni.dev",
+      githubAppId: "12345",
+      githubAppSlug: "opengeni-test",
+      githubAppPrivateKey: privateKey,
+      githubClientId: "client-id",
+      githubClientSecret: "client-secret",
+    });
+    const repoResource: ResourceRef = {
+      kind: "repository",
+      uri: "https://github.com/acme/private.git",
+      ref: "main",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const target = String(url);
+      if (target.endsWith("/app/installations/123/access_tokens") && init?.method === "POST") {
+        return new Response(JSON.stringify({ token: "ghs_stub_mint" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch in parity test: ${target}`);
+    }) as typeof fetch;
+    try {
+      const { environment: turnEnv, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource], {});
+      // The mint really ran (through the JWT + stubbed GitHub API)…
+      expect(gitToken).toBe("ghs_stub_mint");
+      // …and its value stayed OFF the manifest.
+      expect(Object.values(turnEnv)).not.toContain("ghs_stub_mint");
+
+      // What the attach paths (viewer.ts sessionAttachEnvironment / channel-a.ts)
+      // cold-create a repo session's box with.
+      const attachEnv = applyGitAuthPointerEnvironment(
+        stableSandboxEnvironmentForRun(settings, {}),
+        githubAppBotIdentity(settings),
+      );
+      expect(attachEnv).toEqual(turnEnv);
+      expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
+      expect(turnEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+      expect(turnEnv.GIT_TERMINAL_PROMPT).toBe("0");
+      // Deployment git identity wins over the bot fallback (parity on both sides).
+      expect(turnEnv.GIT_AUTHOR_NAME).toBe("OpenGeni Bot");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("FAILURE-SENSITIVITY: the pointer-less attach env (the 0566bad3 bug) DOES delta against a repo turn", async () => {

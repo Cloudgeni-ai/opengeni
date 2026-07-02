@@ -125,7 +125,18 @@ export async function sessionAttachEnvironment(
     workspaceId,
     session.environmentId,
   );
-  const environment = stableSandboxEnvironmentForRun(services.settings, workspaceEnvironment?.values ?? {});
+  // Build the env with the SESSION's backend, not the deployment default: the
+  // stable base is backend-aware (HOME = the descriptor workspaceRoot, and the
+  // git token-file/askpass pointers derive from HOME), the box is established
+  // with `backendOverride: session.sandboxBackend`, and the worker turn builds
+  // the same env from runSettings.sandboxBackend = the session's backend. An
+  // attach env keyed off the deployment default would cold-create e.g. an e2b
+  // session's box with /workspace-rooted values while its turn declares
+  // /home/user-rooted ones — the same guard-killed first turn all over again.
+  const settingsForSession = session.sandboxBackend !== services.settings.sandboxBackend
+    ? { ...services.settings, sandboxBackend: session.sandboxBackend }
+    : services.settings;
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {});
   if (hasGitHubRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(services.settings));
   }

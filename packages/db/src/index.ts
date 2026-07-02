@@ -3083,6 +3083,21 @@ export async function getAnySessionInGroup(db: Database, workspaceId: string, sa
   });
 }
 
+/**
+ * The DISTINCT environmentIds across a group's member sessions (workspace-
+ * scoped; null = no environment attached). The env-aware create check compares
+ * a joiner against EVERY member — an arbitrary single member (getAnySessionInGroup)
+ * makes the compatibility verdict nondeterministic for legacy env-blind groups
+ * whose members carry mixed environmentIds.
+ */
+export async function listDistinctEnvironmentIdsInGroup(db: Database, workspaceId: string, sandboxGroupId: string): Promise<Array<string | null>> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.selectDistinct({ environmentId: schema.sessions.environmentId }).from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.sandboxGroupId, sandboxGroupId)));
+    return rows.map((r) => r.environmentId ?? null);
+  });
+}
+
 export async function listSessions(db: Database, workspaceId: string, limit = 50): Promise<Session[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.sessions)

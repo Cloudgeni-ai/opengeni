@@ -132,9 +132,15 @@ export async function withChannelA<T>(
     // turn's agent-manifest apply finds an EMPTY env delta (config base + git
     // identity + decrypted workspace env + HOME + — for a repo-attached session —
     // the stable git-auth pointers the turn declares). Only the rotating token
-    // VALUE stays off (it lives in the box file the clone hook seeds).
+    // VALUE stays off (it lives in the box file the clone hook seeds). Keyed off
+    // the SESSION's backend (the establish below passes backendOverride:
+    // session.sandboxBackend, and HOME/token-file/askpass are backend-derived),
+    // NOT the deployment default — mirrors sessionAttachEnvironment.
     const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, settings, workspaceId, session.environmentId);
-    const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment?.values ?? {});
+    const settingsForSession = session.sandboxBackend !== settings.sandboxBackend
+      ? { ...settings, sandboxBackend: session.sandboxBackend }
+      : settings;
+    const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {});
     if (hasGitHubRepositorySelection(session.resources)) {
       applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
     }
