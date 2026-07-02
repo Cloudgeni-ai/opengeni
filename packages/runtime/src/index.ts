@@ -426,7 +426,7 @@ export class MultiProviderModelProvider implements ModelProvider {
 
   async getModel(modelName?: string): Promise<Model> {
     if (modelName) {
-      const resolved = resolveTurnModel(this.settings, modelName);
+      const resolved = resolveTurnModel(settingsForRunScopedModelResolution(this.settings, modelName), modelName);
       if (resolved) {
         // Fail-loud floor (defense in depth): a `codex/<slug>` id must only ever
         // resolve through the synthetic codex-subscription provider (which installs
@@ -462,6 +462,27 @@ export class MultiProviderModelProvider implements ModelProvider {
     this.fallback ??= new OpenAIProvider();
     return this.fallback.getModel(modelName);
   }
+}
+
+function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
+  if (modelName !== settings.openaiModel) {
+    return settings;
+  }
+  const builtinAllowed = splitOpenaiAllowedModels(settings.openaiAllowedModels);
+  const fallbackBuiltin = builtinAllowed.find((id) => id !== modelName);
+  if (!fallbackBuiltin) {
+    return settings;
+  }
+  // The worker sets runSettings.openaiModel to the turn's model. For namespaced
+  // registry ids configuredModels filters the built-in entry out, but a unique
+  // bare registry id would otherwise be claimed by the built-in only because of
+  // that per-turn override. Resolve the run-scoped router against the deployment
+  // allow-list head instead; real built-in models stay in the allow-list.
+  return builtinAllowed.includes(modelName) ? settings : { ...settings, openaiModel: fallbackBuiltin };
+}
+
+function splitOpenaiAllowedModels(value: string): string[] {
+  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 /**

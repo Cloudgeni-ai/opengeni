@@ -415,6 +415,26 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     expect(resolved.model).toBeInstanceOf(OpenAIChatCompletionsModel);
   });
 
+  test("the run-scoped provider routes a unique bare registry turn model to its registry provider", async () => {
+    const settings = multiProviderSettings({
+      openaiProvider: "azure",
+      azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: "az-test-key",
+      openaiModel: "scripted-1",
+      openaiAllowedModels: "gpt-5.5,gpt-5.4",
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "scripted",
+          baseUrl: "http://127.0.0.1:8399/v1",
+          apiKey: "dummy",
+          models: [{ id: "scripted-1", label: "Scripted" }],
+        },
+      ]),
+    });
+    const model = await new MultiProviderModelProvider(settings).getModel("scripted-1");
+    expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
+  });
+
   test("a BARE id a registry merely redeclares (e.g. the built-in default) still resolves to the built-in — precedence preserved", () => {
     // The registry below redeclares "gpt-5.5"; the built-in must still win it
     // (only namespaced `<provider>/<model>` ids are ceded to the registry).
