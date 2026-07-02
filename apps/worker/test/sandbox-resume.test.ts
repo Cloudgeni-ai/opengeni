@@ -33,7 +33,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
-import { resumeBoxForTurn } from "../src/sandbox-resume";
+import { resumeBoxForTurn, SandboxWarmingTimeoutError } from "../src/sandbox-resume";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -72,6 +72,16 @@ async function readRow(workspaceId: string, groupId: string) {
     liveness: string; refcount: number; turn_holders: number; viewer_holders: number;
     lease_epoch: number; instance_id: string | null; resume_backend_id: string | null; image: string | null;
   } | undefined;
+}
+
+async function holderCount(workspaceId: string, groupId: string, holderId: string): Promise<number> {
+  const [r] = await admin<{ n: number }[]>`
+    select count(*)::int as n from sandbox_lease_holders h
+    join sandbox_leases l on l.id = h.lease_id
+    where l.workspace_id = ${workspaceId}
+      and l.sandbox_group_id = ${groupId}
+      and h.holder_id = ${holderId}`;
+  return r!.n;
 }
 
 async function dropSession(established: { session: unknown }): Promise<void> {
@@ -249,6 +259,48 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     expect(okCurrent).toBe(true);
 
     await dropSession(resumed.established);
+  }, 60_000);
+
+  test("(3b) attached turn waiting on warming is bounded and releases its holder on timeout", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      ...settingsFor(true),
+      sandboxWarmingTimeoutMs: 25,
+      sandboxLeaseWarmingTtlMs: 60_000,
+    });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warming', 0, 0, 0,
+        'local', 3, now() + interval '60 seconds'
+      )`;
+
+    await expect(
+      resumeBoxForTurn(
+        { db, settings },
+        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        "turn",
+        "activity-timeout",
+      ),
+    ).rejects.toThrow(SandboxWarmingTimeoutError);
+
+    await expect(
+      resumeBoxForTurn(
+        { db, settings },
+        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local", os: "linux" },
+        "turn",
+        "activity-timeout-message",
+      ),
+    ).rejects.toThrow(/Sandbox backend "local" capacity or creation timed out/);
+
+    expect(await holderCount(workspaceId, groupId, "activity-timeout")).toBe(0);
+    expect(await holderCount(workspaceId, groupId, "activity-timeout-message")).toBe(0);
+    const row = await readRow(workspaceId, groupId);
+    expect(row?.liveness).toBe("warming");
   }, 60_000);
 
   // FINDING 3: turn spawner must prefer the lease's resume_state archive.

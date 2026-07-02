@@ -54,6 +54,16 @@ export {
   type ProviderConstructionContext,
 } from "./providers";
 export {
+  modalSandboxAttributionEnvironment,
+  modalSandboxAttributionTags,
+  sweepModalOrphanSandboxes,
+  tagModalSandbox,
+  terminateModalSandboxById,
+  type LiveModalSandboxLeaseAttribution,
+  type ModalOrphanSweepResult,
+  type ModalSandboxAttribution,
+} from "./providers/modal";
+export {
   selectBackend,
   backendSupportsOs,
   desktopCapableBackend,
@@ -540,6 +550,8 @@ export type EstablishedSandboxSession = {
   backendId: string;
 };
 
+export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
+
 // The structural slice we need from a provider SandboxClient to resume by id and
 // cold-restore. Narrowed (not the full agent-loop SandboxClient) so the leaf
 // stays agent-loop-free.
@@ -616,6 +628,16 @@ function readInstanceId(session: unknown): string {
   return typeof candidate === "string" && candidate.length > 0 ? candidate : "";
 }
 
+async function terminateCreatedSandbox(client: ResumeCapableClient, session: unknown, sessionState: unknown): Promise<void> {
+  const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
+  if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
+    try { await clientWithDelete.delete(sessionState); } catch { /* best-effort */ }
+    return;
+  }
+  const sess = session as { close?: () => Promise<unknown>; terminate?: () => Promise<unknown>; kill?: () => Promise<unknown> };
+  try { await (sess.terminate ?? sess.kill ?? sess.close)?.(); } catch { /* best-effort */ }
+}
+
 /**
  * Resume the one box by id from its recovery envelope, or cold-restore from the
  * snapshot when the provider reports it gone. The envelope is the lease's
@@ -633,7 +655,12 @@ function readInstanceId(session: unknown): string {
 export async function establishSandboxSessionFromEnvelope(
   settings: Settings,
   envelope: Record<string, unknown> | null,
-  opts: { sessionId: string; backendOverride?: SandboxBackend; environment?: Record<string, string> },
+  opts: {
+    sessionId: string;
+    backendOverride?: SandboxBackend;
+    environment?: Record<string, string>;
+    onSandboxCreated?: SandboxCreatedCallback;
+  },
 ): Promise<EstablishedSandboxSession> {
   const envelopeBackend = typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
   const backend = (opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend));
@@ -680,6 +707,22 @@ export async function establishSandboxSessionFromEnvelope(
   // cold-restore branch (b) below.
   const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
     const restored = await client.create!({ manifest: createManifest });
+    let restoredState = (restored as { state?: unknown }).state;
+    let established: EstablishedSandboxSession = {
+      client,
+      session: restored,
+      sessionState: restoredState ?? resumeFallbackState,
+      instanceId: readInstanceId(restored),
+      backendId: client.backendId,
+    };
+    if (opts.onSandboxCreated) {
+      try {
+        await opts.onSandboxCreated(established);
+      } catch (createCallbackError) {
+        await terminateCreatedSandbox(client, restored, restoredState);
+        throw createCallbackError;
+      }
+    }
     if (workspaceArchive) {
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
       if (typeof hydrate === "function") {
@@ -696,21 +739,38 @@ export async function establishSandboxSessionFromEnvelope(
           // re-throwing so no box leaks. The original error semantics are preserved
           // (the re-throw propagates to the caller). This mirrors the reaper's
           // discipline: NEVER leave an orphaned box running.
-          const restoredState = (restored as { state?: unknown }).state;
-          const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
-          if (typeof clientWithDelete.delete === "function" && restoredState !== undefined) {
-            try { await clientWithDelete.delete(restoredState); } catch { /* best-effort; re-throw the hydrate error below */ }
-          } else {
-            // No delete() — try a session-level close/terminate as a fallback.
-            const sess = restored as { close?: () => Promise<unknown>; terminate?: () => Promise<unknown> };
-            try { await (sess.terminate ?? sess.close)?.(); } catch { /* best-effort */ }
-          }
+          await terminateCreatedSandbox(client, restored, restoredState);
           throw hydrateError;
+        }
+        const hydratedState = (restored as { state?: unknown }).state;
+        const hydratedInstanceId = readInstanceId(restored);
+        if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
+          established = {
+            client,
+            session: restored,
+            sessionState: hydratedState ?? resumeFallbackState,
+            instanceId: hydratedInstanceId,
+            backendId: client.backendId,
+          };
+          if (opts.onSandboxCreated) {
+            try {
+              await opts.onSandboxCreated(established);
+            } catch (createCallbackError) {
+              await terminateCreatedSandbox(client, restored, hydratedState);
+              throw createCallbackError;
+            }
+          }
         }
       }
     }
-    const restoredState = (restored as { state?: unknown }).state;
-    return { client, session: restored, sessionState: restoredState ?? resumeFallbackState, instanceId: readInstanceId(restored), backendId: client.backendId };
+    restoredState = (restored as { state?: unknown }).state;
+    return {
+      client,
+      session: restored,
+      sessionState: restoredState ?? resumeFallbackState,
+      instanceId: readInstanceId(restored),
+      backendId: client.backendId,
+    };
   };
 
   // Does the envelope carry a RESUMABLE box id (warm reattach), or only a

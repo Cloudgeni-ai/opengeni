@@ -35,6 +35,7 @@ import {
   confirmDrainCold,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
+  listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
   readLease,
@@ -55,6 +56,8 @@ import {
   deletePriorPersistedSnapshot,
   deserializeSandboxSessionStateEnvelope,
   isProviderSandboxNotFoundError,
+  sweepModalOrphanSandboxes,
+  terminateModalSandboxById,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 
@@ -73,6 +76,8 @@ export type ReapSandboxLeasesResult = {
   /** Viewer-only boxes force-drained because their workspace is over a limit
    *  (0 balance / over the warm cap) — turn-held boxes are never drained (P2.1). */
   forceDrained: number;
+  /** Provider-side Modal orphan sandboxes terminated by the defensive sweep. */
+  modalOrphansTerminated: number;
 };
 
 // The structural slice of a provider SandboxClient we need to resume-by-id and
@@ -129,10 +134,19 @@ export type TerminateBoxFn = (
   persistArchive: PersistArchiveFn,
 ) => Promise<boolean>;
 
+export type SweepModalOrphansFn = (
+  settings: ActivityServices["settings"],
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+) => Promise<number>;
+
 export type SandboxLeaseActivityOptions = {
   /** Override the provider terminate (tests spy this; defaults to the real
    *  resume-by-id + provider stop()). */
   terminateBox?: TerminateBoxFn;
+  /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
+   *  Modal list+tag comparison when Modal is configured). */
+  sweepModalOrphans?: SweepModalOrphansFn;
 };
 
 export function createSandboxLeaseActivities(
@@ -140,6 +154,7 @@ export function createSandboxLeaseActivities(
   options: SandboxLeaseActivityOptions = {},
 ) {
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
+  const sweepModalOrphans: SweepModalOrphansFn = options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
    * Gated by the caller (the Schedule is only registered when
@@ -149,7 +164,7 @@ export function createSandboxLeaseActivities(
   async function reapSandboxLeases(): Promise<ReapSandboxLeasesResult> {
     const { db, settings, observability } = await services();
     if (!settings.sandboxOwnershipEnabled) {
-      return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0 };
+      return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0, modalOrphansTerminated: 0 };
     }
 
     // (0) Warm-meter tick (P2.1) — accrue warm-seconds for every WARM viewer-only
@@ -172,6 +187,7 @@ export function createSandboxLeaseActivities(
 
     let terminated = 0;
     let skipped = 0;
+    let modalOrphansTerminated = 0;
 
     // (2) Terminate each drainable box, then CAS draining->cold. Per-row failures
     // are isolated: one box's provider error must not abort the whole sweep (the
@@ -195,17 +211,26 @@ export function createSandboxLeaseActivities(
       }
     }
 
-    if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0) {
+    try {
+      modalOrphansTerminated = await sweepModalOrphans(settings, db, observability);
+    } catch (error) {
+      observability.warn("sandbox reaper: Modal orphan sweep failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0 || modalOrphansTerminated > 0) {
       observability.info("sandbox reaper swept", {
         drainable: drainable.length,
         terminated,
         skipped,
         metered: metered.accrued,
         forceDrained,
+        modalOrphansTerminated,
       });
     }
 
-    return { examined: drainable.length, terminated, skipped, metered: metered.accrued, forceDrained };
+    return { examined: drainable.length, terminated, skipped, metered: metered.accrued, forceDrained, modalOrphansTerminated };
   }
 
   return { reapSandboxLeases };
@@ -308,6 +333,46 @@ async function forceDrainOverLimitWorkspaces(
     }
   }
   return forceDrained;
+}
+
+async function sweepModalOrphansForConfiguredBackend(
+  settings: ActivityServices["settings"],
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+): Promise<number> {
+  // Keep the provider-side sweep tightly scoped to deployments that have a Modal
+  // app path configured. Local/docker-only workers should not attempt Modal API
+  // calls just because modalAppName has a default.
+  if (settings.sandboxBackend !== "modal" && !settings.modalTokenId && !settings.modalTokenSecret) {
+    return 0;
+  }
+  let liveLeases: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>;
+  try {
+    liveLeases = await listLiveModalSandboxLeaseAttributions(db);
+  } catch (error) {
+    observability.warn("sandbox reaper: live Modal lease attribution read failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 0;
+  }
+
+  const result = await sweepModalOrphanSandboxes(settings, liveLeases);
+  for (const terminated of result.terminated) {
+    observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
+      sandboxId: terminated.sandboxId,
+      reason: terminated.reason,
+      tags: JSON.stringify(terminated.tags),
+    });
+  }
+  if (result.examined > 0) {
+    observability.info("sandbox reaper: Modal orphan sweep completed", {
+      examined: result.examined,
+      terminated: result.terminated.length,
+      skipped: result.skipped,
+      appName: settings.modalAppName,
+    });
+  }
+  return result.terminated.length;
 }
 
 /**
@@ -455,6 +520,35 @@ export async function terminateProviderBox(
       sandboxGroupId: lease.sandboxGroupId,
       backend,
     });
+    return true;
+  }
+
+  // A warming-death row can have a provider instance id recorded immediately
+  // after create() but no resumable envelope yet. For Modal, instance_id is
+  // enough to terminate directly; CAS-check first so a re-arm during the sweep
+  // leaves the box running.
+  if (backend === "modal" && !lease.resumeState && lease.instanceId) {
+    const { wrote } = await persistArchive(null);
+    if (!wrote) {
+      observability.info("sandbox reaper: Modal lease re-armed before direct terminate — leaving sandbox RUNNING", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+        instanceId: lease.instanceId,
+      });
+      return false;
+    }
+    try {
+      await terminateModalSandboxById(settings, lease.instanceId);
+    } catch (error) {
+      if (!isProviderSandboxNotFoundError("modal", error)) {
+        throw error;
+      }
+      observability.info("sandbox reaper: Modal sandbox already gone during direct terminate", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+        instanceId: lease.instanceId,
+      });
+    }
     return true;
   }
 

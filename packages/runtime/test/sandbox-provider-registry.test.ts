@@ -86,11 +86,32 @@ describe("createSandboxClient — per-backend matrix construction", () => {
     expect(client.options?.tokenSecret).toBe("tok-secret");
     // modalTimeoutSeconds default (3600s) → ms.
     expect(client.options?.timeoutMs).toBe(3_600_000);
+    // Bounded create waits come from OPENGENI_SANDBOX_WARMING_TIMEOUT_MS.
+    expect(client.options?.sandboxCreateTimeoutS).toBe(600);
+    // The Agents extension otherwise stamps a hardcoded sleep command; let
+    // Modal's own timeout own lifetime instead.
+    expect(client.options?.useSleepCmd).toBe(false);
     // sandbox-file-persistence: idleTimeoutMs is ALWAYS pinned; with no explicit
     // OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS it DEFAULTS to the hard lifetime so
     // Modal's short server-default idle-reap can never kill an idle box before the
     // OpenGeni reaper snapshots /workspace.
     expect(client.options?.idleTimeoutMs).toBe(3_600_000);
+  });
+
+  test("modal hard lifetime and create timeout derive from configured settings", () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      modalTokenId: "tok-id",
+      modalTokenSecret: "tok-secret",
+      modalAppName: "my-app",
+      modalTimeoutSeconds: 7200,
+      sandboxWarmingTimeoutMs: 123_000,
+    });
+    const client = createSandboxClient(settings) as { options?: Record<string, unknown> };
+    expect(client.options?.timeoutMs).toBe(7_200_000);
+    expect(client.options?.idleTimeoutMs).toBe(7_200_000);
+    expect(client.options?.sandboxCreateTimeoutS).toBe(123);
+    expect(client.options?.useSleepCmd).toBe(false);
   });
 
   test("modal idleTimeoutMs honours an explicit override (still pinned, not the SDK default)", () => {

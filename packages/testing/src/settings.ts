@@ -172,6 +172,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxIdleGraceMs: 900_000,
     sandboxLeaseTtlMs: 90_000,
     sandboxLeaseWarmingTtlMs: 120_000,
+    sandboxWarmingTimeoutMs: 600_000,
     sandboxWarmRateMicrosPerSecondJson: "{}",
     sandboxMaxWarmSecondsPerWorkspace: 0,
     sandboxPreparationProfiles: "none",

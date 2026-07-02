@@ -4481,6 +4481,14 @@ export interface LeaseSnapshot {
   expiresAt: Date;
 }
 
+export interface LiveModalSandboxLeaseAttribution {
+  leaseId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  instanceId: string | null;
+  liveness: SandboxLeaseLiveness;
+}
+
 export interface AcquireLeaseInput {
   accountId: string;
   workspaceId: string;
@@ -4780,6 +4788,40 @@ export async function commitWarmingToWarm(db: Database, input: {
     });
 }
 
+// §4.2a — leak-proof create attribution. The spawner calls this immediately
+// after the provider create returns, before display/readiness/setup work. It
+// intentionally does NOT bump lease_epoch or mark the lease warm; it only makes
+// the just-created provider id durable while the row is still warming so a
+// failure/reaper/provider-side sweep can identify and stop it.
+export async function recordWarmingSandboxCreated(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  instanceId: string;
+  resumeBackendId?: string | null;
+  resumeState?: Record<string, unknown> | null;
+  leaseTtlMs: number;
+}): Promise<{ recorded: boolean; lease: LeaseSnapshot | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const resumeStateJson = input.resumeState == null ? null : JSON.stringify(input.resumeState);
+      const rows = await scopedDb.execute<LeaseRow>(sql`
+        update sandbox_leases set
+          instance_id       = ${input.instanceId},
+          resume_backend_id = ${input.resumeBackendId ?? null},
+          resume_state      = ${resumeStateJson}::jsonb,
+          expires_at        = now() + (${String(input.leaseTtlMs)} || ' milliseconds')::interval,
+          updated_at        = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warming' and lease_epoch = ${input.expectedEpoch}
+        returning *
+      `);
+      if (rows.length === 0) return { recorded: false, lease: null };
+      return { recorded: true, lease: mapLeaseRow(rows[0]!) };
+    });
+}
+
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
 // left intact — the arrival that triggered the spawn still wants a box, so the
 // next acquireLease re-CAS cold->warming.
@@ -4962,15 +5004,34 @@ export async function reapStaleLeaseHolders(db: Database, input: {
         where L.id = c.id and L.workspace_id = ${input.workspaceId}
       `);
 
-      // (c) WARMING-death: a 'warming' row whose LEASE TTL lapsed = an uncaught
-      // spawner death. Reset to cold so a queued turn can re-acquire and re-spawn.
+      // (c1) WARMING-death before provider create returned: no instance_id was
+      // ever persisted, so there is no provider box to stop. Reset to cold so a
+      // queued turn can re-acquire and re-spawn.
       const warmingReset = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
           data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
         where workspace_id = ${input.workspaceId}
-          and liveness = 'warming' and expires_at < now()
+          and liveness = 'warming' and expires_at < now() and instance_id is null
+        returning id
+      `);
+
+      // (c2) WARMING-death after provider create returned: instance_id is known,
+      // so do NOT drop it. Convert to immediately-drainable so the caller's
+      // provider terminate path stops the box before the lease goes cold.
+      const warmingDrain = await tx.execute<{ id: string }>(sql`
+        update sandbox_leases set
+          liveness = 'draining',
+          refcount = 0,
+          turn_holders = 0,
+          viewer_holders = 0,
+          data_plane_url = null,
+          terminal_data_plane_url = null,
+          expires_at = now() - interval '1 millisecond',
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and liveness = 'warming' and expires_at < now() and instance_id is not null
         returning id
       `);
 
@@ -4985,7 +5046,7 @@ export async function reapStaleLeaseHolders(db: Database, input: {
 
       return {
         reapedViewers: reaped.length,
-        warmingReset: warmingReset.length,
+        warmingReset: warmingReset.length + warmingDrain.length,
         drained: drainable.map((r) => ({
           workspaceId: input.workspaceId,
           sandboxGroupId: r.sandbox_group_id,
@@ -5042,6 +5103,28 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
     sandboxGroupId: r.sandbox_group_id,
     leaseEpoch: Number(r.lease_epoch),
     backend: r.backend,
+  }));
+}
+
+// Cross-workspace live Modal lease read for the provider-side orphan sweep. The
+// SECURITY DEFINER function is the sanctioned RLS bypass; see migration 0036.
+export async function listLiveModalSandboxLeaseAttributions(db: Database): Promise<LiveModalSandboxLeaseAttribution[]> {
+  const rows = await rawRows<{
+    lease_id: string;
+    workspace_id: string;
+    sandbox_group_id: string;
+    instance_id: string | null;
+    liveness: SandboxLeaseLiveness;
+  }>(db, sql`
+    select lease_id, workspace_id, sandbox_group_id, instance_id, liveness
+    from opengeni_private.list_live_modal_sandbox_leases()
+  `);
+  return rows.map((r) => ({
+    leaseId: r.lease_id,
+    workspaceId: r.workspace_id,
+    sandboxGroupId: r.sandbox_group_id,
+    instanceId: r.instance_id,
+    liveness: r.liveness,
   }));
 }
 

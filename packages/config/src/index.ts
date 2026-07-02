@@ -509,6 +509,10 @@ const SettingsSchema = z.object({
   // window a cold->warming spawner has to commit warm before a reaper resets it.
   sandboxLeaseTtlMs: z.coerce.number().int().positive().default(90_000),
   sandboxLeaseWarmingTtlMs: z.coerce.number().int().positive().default(120_000),
+  // Overall user-facing budget for warming a sandbox lease. Unlike the lease TTL
+  // (a liveness/reaper cadence), this bounds how long one turn waits for capacity
+  // or provider creation before surfacing a clear turn.failed error.
+  sandboxWarmingTimeoutMs: z.coerce.number().int().positive().default(600_000),
   // --- sandbox warm-time billing (P2.1) ---
   // Per-backend warm rate (usd_micros/sec), like modelPricingJson: an empty {}
   // means warm-cost is not debited (warm-seconds are still metered for audit).
@@ -979,6 +983,7 @@ export function getSettings(): Settings {
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
+    sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional("OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON"),
     sandboxMaxWarmSecondsPerWorkspace: optional("OPENGENI_SANDBOX_MAX_WARM_SECONDS_PER_WORKSPACE"),
     sandboxPreparationProfiles: optional("OPENGENI_SANDBOX_PREPARATION_PROFILES"),

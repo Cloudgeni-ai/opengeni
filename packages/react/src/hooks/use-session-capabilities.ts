@@ -52,8 +52,9 @@ export type UseSessionCapabilitiesOptions = ClientOverride & {
   warmingPollMs?: number | undefined;
   /**
    * Give up waiting for `warm` after this long while polling (ms) and surface a
-   * stalled error with a manual `renegotiate`. Default 30000 (must agree with
-   * the lease warming TTL — I15). 0 disables the deadline.
+   * stalled error with a manual `renegotiate`. Default 30000. This is a UI
+   * patience deadline, independent from the worker's sandbox warming timeout.
+   * 0 disables the deadline.
    */
   warmingDeadlineMs?: number | undefined;
 };

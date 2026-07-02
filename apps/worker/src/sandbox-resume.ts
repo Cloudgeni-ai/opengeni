@@ -28,6 +28,7 @@ import {
   failWarmingToCold,
   getSandboxSessionEnvelope,
   readLease,
+  recordWarmingSandboxCreated,
   releaseLeaseHolder,
   SandboxLeaseSupersededError,
   type Database,
@@ -42,6 +43,8 @@ import {
   DisplayStackUnsupportedError,
   buildStreamUrl,
   StreamPortUnavailableError,
+  modalSandboxAttributionEnvironment,
+  tagModalSandbox,
   type EstablishedSandboxSession,
   type ExposedPortEndpoint,
 } from "@opengeni/runtime";
@@ -105,12 +108,100 @@ export type ResumedTurnSandbox = {
   release: () => Promise<void>;
 };
 
-// Bounded poll while a sibling spawner is mid cold-restore. The reaper resets a
-// dead warming row after sandboxLeaseWarmingTtlMs; we poll up to that horizon.
+export class SandboxWarmingTimeoutError extends Error {
+  readonly code = "sandbox_warming_timeout";
+
+  constructor(public readonly backend: string, public readonly timeoutMs: number) {
+    super(
+      `Sandbox backend "${backend}" capacity or creation timed out after ${Math.ceil(timeoutMs / 1000)}s while warming the sandbox lease. Please try again; if this persists, sandbox capacity may be exhausted.`,
+    );
+    this.name = "SandboxWarmingTimeoutError";
+  }
+}
+
+// Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
+// user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function terminateEstablishedSandbox(established: EstablishedSandboxSession | null): Promise<boolean> {
+  if (!established) {
+    return true;
+  }
+  const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
+  if (typeof client.delete === "function" && established.sessionState !== undefined) {
+    try {
+      await client.delete(established.sessionState);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  const session = established.session as {
+    close?: () => Promise<unknown>;
+    terminate?: () => Promise<unknown>;
+    kill?: () => Promise<unknown>;
+    closed?: boolean;
+  };
+  try {
+    if (session.terminate) {
+      await session.terminate();
+      return true;
+    } else if (session.kill) {
+      await session.kill();
+      return true;
+    } else if (session.close) {
+      if (!session.closed) {
+        await session.close();
+      }
+      return true;
+    }
+    return false;
+  } catch {
+    // Best-effort cleanup. A provider-side orphan sweep is the backstop.
+    return false;
+  }
+}
+
+function asSandboxWarmingError(error: unknown, backend: string, timeoutMs: number): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  return /sandbox creation timed out|warming timed out|capacity.*timed out/i.test(message)
+    ? new SandboxWarmingTimeoutError(backend, timeoutMs)
+    : error;
+}
+
+function workspaceArchiveFromEnvelope(envelope: Record<string, unknown> | null | undefined): string | null {
+  const sessionState = envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
+    ? envelope.sessionState as Record<string, unknown>
+    : null;
+  const archive = sessionState?.workspaceArchive;
+  return typeof archive === "string" && archive.length > 0 ? archive : null;
+}
+
+function preserveWorkspaceArchiveOnInterimResumeState(
+  resumeState: Record<string, unknown> | null,
+  archiveSource: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  const archive = workspaceArchiveFromEnvelope(archiveSource);
+  if (!archive) {
+    return resumeState;
+  }
+  const existingSessionState = resumeState && typeof resumeState.sessionState === "object" && resumeState.sessionState !== null
+    ? resumeState.sessionState as Record<string, unknown>
+    : {};
+  return {
+    ...(resumeState ?? {}),
+    ...(resumeState?.backendId === undefined && archiveSource?.backendId !== undefined
+      ? { backendId: archiveSource.backendId }
+      : {}),
+    sessionState: {
+      ...existingSessionState,
+      workspaceArchive: archive,
+    },
+  };
 }
 
 /**
@@ -178,6 +269,14 @@ export async function resumeBoxForTurn(
   // expose the stream port, then commit warm (lease_epoch++).
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
+    let createdEstablished: EstablishedSandboxSession | null = null;
+    if (ids.environment && ids.backend === "modal") {
+      Object.assign(ids.environment, modalSandboxAttributionEnvironment({
+        leaseId: acquired.lease.id,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+      }));
+    }
     try {
       const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
       // Prefer the COLD lease's preserved resume_state when it carries a persisted
@@ -194,7 +293,35 @@ export async function resumeBoxForTurn(
         sessionId: ids.sessionId,
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
+        onSandboxCreated: async (created) => {
+          createdEstablished = created;
+          const resumeEnvelope = preserveWorkspaceArchiveOnInterimResumeState(
+            (await serializeEstablishedSandboxEnvelope(created)) ?? null,
+            spawnEnvelope,
+          );
+          const recorded = await recordWarmingSandboxCreated(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sandboxGroupId: ids.sandboxGroupId,
+            expectedEpoch,
+            instanceId: created.instanceId,
+            resumeBackendId: created.backendId,
+            resumeState: resumeEnvelope,
+            leaseTtlMs,
+          });
+          if (!recorded.recorded) {
+            throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+          }
+          if (created.backendId === "modal") {
+            await tagModalSandbox(settings, created.instanceId, {
+              leaseId: acquired.lease.id,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: ids.sandboxGroupId,
+            }).catch(() => undefined);
+          }
+        },
       });
+      createdEstablished = established;
       await ensureDisplayStack(settings, established);
       const endpoint = await exposeStreamPort(settings, established);
       // Fold the LIVE box into a re-resumable envelope and persist it as the
@@ -219,39 +346,49 @@ export async function resumeBoxForTurn(
       if (!committed.committed || !committed.lease) {
         // A reaper reset our warming row (we were too slow) or a sibling
         // re-established and bumped the epoch. Drop the handle; release our
-        // holder; surface supersession. NEVER provider-delete the box.
+        // holder; surface supersession. This spawner created the box, so stop it
+        // before retrying to avoid an untracked running sandbox.
+        await terminateEstablishedSandbox(established);
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
       if (error instanceof SandboxLeaseSupersededError) {
+        await terminateEstablishedSandbox(createdEstablished);
+        await release();
         throw error;
       }
-      // Caught spawn failure: roll the warming row back to cold so a queued turn
-      // re-acquires and re-spawns. Holders are intentionally left for the
-      // re-acquire (failWarmingToCold keeps them); then release our own holder.
-      await failWarmingToCold(db, {
-        accountId: ids.accountId,
-        workspaceId: ids.workspaceId,
-        sandboxGroupId: ids.sandboxGroupId,
-        expectedEpoch,
-      });
+      const terminated = await terminateEstablishedSandbox(createdEstablished);
+      // Caught spawn failure: if the just-created sandbox was actually stopped,
+      // roll the warming row back to cold so a queued turn can re-acquire and
+      // re-spawn. If termination itself failed, keep the recorded instance_id on
+      // the warming row; the lease TTL/reaper and Modal orphan sweep are the
+      // tracked backstops, and we must not erase the only provider pointer.
+      if (terminated) {
+        await failWarmingToCold(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          expectedEpoch,
+        });
+      }
       await release();
-      throw error;
+      throw asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
     }
   }
 
   // ATTACHED / REARMED: the box is live (or a sibling is warming it). Resume it
   // BY ID off the committed lease envelope. For an 'attached'-to-warming lease we
-  // first wait for the spawner to commit warm (or for the row to flip cold so we
-  // can re-acquire as spawner).
-  let leaseEpoch = acquired.lease.leaseEpoch;
-  if (acquired.lease.liveness === "warming") {
-    leaseEpoch = (await waitForWarmOrReacquire(services, ids, kind, holderId)).leaseEpoch;
-  }
-
+  // first wait for the spawner to commit warm, bounded by the explicit warming
+  // budget. A cold reset means the spawner died; requeue the turn instead of
+  // trying to enter the spawner create path from the attached branch.
   try {
+    let leaseEpoch = acquired.lease.leaseEpoch;
+    if (acquired.lease.liveness === "warming") {
+      leaseEpoch = (await waitForWarm(services, ids)).leaseEpoch;
+    }
+
     // Prefer the lease's resume_state (the LIVE box the spawner committed) so we
     // re-attach to the SAME box by id, not cold-restore the original session
     // manifest into a rival. Fall back to the session envelope only when the
@@ -277,7 +414,7 @@ export async function resumeBoxForTurn(
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
-    throw error;
+    throw asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
   }
 }
 
@@ -378,58 +515,40 @@ export async function acquireSelfhostedLeaseForTurn(
 
 /**
  * Poll a warming lease until the spawner commits warm. If the warming row is
- * reset to cold (the spawner died and the reaper reset it), re-acquire — we may
- * now win the cold->warming CAS ourselves. Bounded by the warming TTL.
+ * reset to cold (the spawner died and the reaper reset it), surface supersession
+ * so the turn is re-dispatched and can enter the normal spawner branch from
+ * acquireLease. Bounded by OPENGENI_SANDBOX_WARMING_TIMEOUT_MS, not the lease TTL.
  */
-async function waitForWarmOrReacquire(
+async function waitForWarm(
   services: SandboxResumeServices,
   ids: ResumeBoxIds,
-  kind: LeaseHolderKind,
-  holderId: string,
-): Promise<{ liveness: string; leaseEpoch: number }> {
+): Promise<{ leaseEpoch: number }> {
   const { db, settings } = services;
-  const deadline = Date.now() + settings.sandboxLeaseWarmingTtlMs;
+  const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
   while (Date.now() < deadline) {
     await sleep(WARMING_POLL_INTERVAL_MS);
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (!lease) {
-      // Lease vanished (cold-reaped). Re-acquire from scratch.
-      break;
+      // Lease vanished (cold-reaped). Re-dispatch from scratch.
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
     }
-    if (lease.liveness === "warm" || lease.liveness === "draining") {
-      return { liveness: lease.liveness, leaseEpoch: lease.leaseEpoch };
+    if (lease.liveness === "warm") {
+      return { leaseEpoch: lease.leaseEpoch };
+    }
+    if (lease.liveness === "draining") {
+      // The warming attempt either failed into drain or committed+released before
+      // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
+      // through the normal path.
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
     }
     if (lease.liveness === "cold") {
-      // The spawner died; the reaper reset to cold. Re-acquire — we might win.
-      break;
+      // The spawner died; re-dispatch so the normal acquireLease path can win
+      // cold->warming and run the full spawner branch.
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
     }
     // still warming — keep polling.
   }
-  // Re-acquire: if we now win cold->warming we become the spawner; if the box is
-  // warm we attach. Either way resumeBoxForTurn's caller already holds a holder
-  // row (idempotent), so this re-acquire just re-reads/re-CASes.
-  const reacquired = await acquireLease(db, {
-    accountId: ids.accountId,
-    workspaceId: ids.workspaceId,
-    sandboxGroupId: ids.sandboxGroupId,
-    kind,
-    holderId,
-    subjectId: ids.sessionId,
-    backend: ids.backend,
-    os: ids.os ?? "linux",
-    leaseTtlMs: settings.sandboxLeaseTtlMs,
-  });
-  if (reacquired.role === "fenced") {
-    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, reacquired.lease.leaseEpoch);
-  }
-  // For 'spawner' we'd need to run the cold-restore path; to keep resumeBoxForTurn
-  // a single critical section we recurse the spawner handling by surfacing it as a
-  // re-establish from the (now-cold) envelope. The simplest correct behavior: if
-  // we re-won the CAS, establish + commit happens on the NEXT resumeBoxForTurn
-  // call (the queued turn re-dispatch); here we just return the lease snapshot so
-  // the attached path resumes by id. A cold lease has no box yet, so treat it as
-  // warming-resolved only when warm/draining.
-  return { liveness: reacquired.lease.liveness, leaseEpoch: reacquired.lease.leaseEpoch };
+  throw new SandboxWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs);
 }
 
 // ============================================================================

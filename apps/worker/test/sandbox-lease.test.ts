@@ -31,11 +31,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
-import { createDb, persistDrainSnapshot, type Database, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  listLiveModalSandboxLeaseAttributions,
+  persistDrainSnapshot,
+  recordWarmingSandboxCreated,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase, testSettings } from "@opengeni/testing";
 import {
   createSandboxLeaseActivities,
+  type SweepModalOrphansFn,
   type TerminateBoxFn,
 } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
@@ -219,14 +227,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     await insertHolder(staleViewer, wLease, "viewer", "viewer-stale", 120_000); // > 90s TTL
 
-    // (b) a WARMING lease whose lease TTL has LAPSED (spawner died mid-resume) →
-    //     reset to cold.
+    // (b) a WARMING lease whose lease TTL has LAPSED before provider create
+    //     returned (no instance_id) → reset to cold.
     const warmingDeath = await freshWorkspace();
     await insertLease(warmingDeath, {
-      liveness: "warming", leaseEpoch: 1, expiresInMs: -1_000, instanceId: "box-zombie",
+      liveness: "warming", leaseEpoch: 1, expiresInMs: -1_000,
     });
 
-    // (c) a DRAINING lease, refcount 0, grace ELAPSED → terminate + confirm cold.
+    // (c) a WARMING lease whose lease TTL has LAPSED after provider create
+    //     returned (instance_id recorded) → convert to drainable and terminate.
+    const warmingCreated = await freshWorkspace();
+    await insertLease(warmingCreated, {
+      liveness: "warming", leaseEpoch: 4, expiresInMs: -1_000,
+      instanceId: "box-warming-created", backend: "local", resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+
+    // (d) a DRAINING lease, refcount 0, grace ELAPSED → terminate + confirm cold.
     const drainable = await freshWorkspace();
     await insertLease(drainable, {
       liveness: "draining", refcount: 0, leaseEpoch: 5, expiresInMs: -1_000,
@@ -246,6 +263,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const warmingRow = await readRow(warmingDeath.workspaceId, warmingDeath.groupId);
     expect(warmingRow?.liveness).toBe("cold");
     expect(warmingRow?.instance_id).toBeNull();
+
+    // The post-create warming-death row kept its instance_id long enough for the
+    // provider terminate seam, then went cold.
+    expect(spy.calls.some((c) => c.group === warmingCreated.groupId && c.epoch === 4)).toBe(true);
+    const warmingCreatedRow = await readRow(warmingCreated.workspaceId, warmingCreated.groupId);
+    expect(warmingCreatedRow?.liveness).toBe("cold");
+    expect(warmingCreatedRow?.instance_id).toBeNull();
 
     // The draining-past-grace box was terminated (spy called for its group/epoch)
     // and the lease went cold via confirmDrainCold.
@@ -303,6 +327,96 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 999, workspaceArchive: archive2,
     });
     expect(r3.wrote).toBe(false);
+  }, 60_000);
+
+  test("(1c) recordWarmingSandboxCreated persists provider id on a warming lease before warm commit", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "warming",
+      leaseEpoch: 9,
+      expiresInMs: 60_000,
+      backend: "modal",
+    });
+
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: "sb-created" }, workspaceReady: true },
+    };
+    const recorded = await recordWarmingSandboxCreated(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 9,
+      instanceId: "sb-created",
+      resumeBackendId: "modal",
+      resumeState,
+      leaseTtlMs: REAPER_SETTINGS.sandboxLeaseTtlMs,
+    });
+    expect(recorded.recorded).toBe(true);
+    expect(recorded.lease?.liveness).toBe("warming");
+    expect(recorded.lease?.instanceId).toBe("sb-created");
+    expect(recorded.lease?.resumeBackendId).toBe("modal");
+
+    const [row] = await admin<{ liveness: string; instance_id: string | null; resume_state: any; lease_epoch: number }[]>`
+      select liveness, instance_id, resume_state, lease_epoch
+      from sandbox_leases
+      where workspace_id = ${ids.workspaceId} and sandbox_group_id = ${ids.groupId}`;
+    expect(row?.liveness).toBe("warming");
+    expect(row?.instance_id).toBe("sb-created");
+    expect(row?.resume_state?.sessionState?.providerState?.sandboxId).toBe("sb-created");
+    expect(row?.lease_epoch).toBe(9);
+
+    const stale = await recordWarmingSandboxCreated(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 8,
+      instanceId: "sb-stale",
+      resumeBackendId: "modal",
+      resumeState,
+      leaseTtlMs: REAPER_SETTINGS.sandboxLeaseTtlMs,
+    });
+    expect(stale.recorded).toBe(false);
+  }, 60_000);
+
+  test("(1d) Modal orphan sweep hook sees live Modal lease attribution and reports terminations", async () => {
+    if (!available) return;
+    const modalSettings = testSettings({
+      ...REAPER_SETTINGS,
+      sandboxBackend: "modal",
+      modalTokenId: "tok-id",
+      modalTokenSecret: "tok-secret",
+      modalAppName: "opengeni-test-app",
+    });
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      viewerHolders: 1,
+      leaseEpoch: 2,
+      instanceId: "sb-live",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-live" } } },
+    });
+
+    let capturedGroups: string[] = [];
+    const sweep: SweepModalOrphansFn = async (settings, sweepDb) => {
+      expect(settings.modalAppName).toBe("opengeni-test-app");
+      const live = await listLiveModalSandboxLeaseAttributions(sweepDb);
+      capturedGroups = live.map((lease) => lease.sandboxGroupId);
+      return 2;
+    };
+
+    const { reapSandboxLeases } = createSandboxLeaseActivities(
+      reaperServices(modalSettings),
+      { sweepModalOrphans: sweep },
+    );
+    const result = await reapSandboxLeases();
+
+    expect(result.modalOrphansTerminated).toBe(2);
+    expect(capturedGroups).toContain(ids.groupId);
   }, 60_000);
 
   test("(2) provider stop() fires ONLY at refcount=0 past grace — never under a held turn/viewer or during the grace", async () => {

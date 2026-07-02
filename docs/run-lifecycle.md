@@ -44,6 +44,16 @@ already persisted, it does not replay the trigger; it publishes a clear
 message continues on compacted history. A second overflow in the same turn falls
 through to the normal failure path so recovery cannot loop.
 
+Sandbox lease warming is bounded for the same reason: it is a capacity/setup
+symptom, not legitimate agent work. A turn that attaches while another worker is
+creating the group sandbox waits at most
+`OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default 600000). If the lease does not
+reach `warm` in that budget, the activity fails the turn with a clear
+backend/capacity timeout instead of heartbeating forever. When a provider create
+does return, the worker immediately records the provider instance id on the
+warming lease before readiness/display/setup work; any later setup failure
+terminates that just-created sandbox before the lease can be retried.
+
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
 reason `WORKER_SHUTDOWN`) preempts the in-flight turn instead of failing the
