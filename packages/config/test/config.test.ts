@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
 import {
   collectGitIdentityEnvironment,
@@ -21,6 +23,37 @@ import {
   startupRetryOptions,
   streamTokenDegraded,
 } from "../src";
+
+describe(".env.example", () => {
+  test("shell-sources and validates with the stock example values", () => {
+    const envPath = fileURLToPath(new URL("../../../.env.example", import.meta.url));
+    const source = spawnSync(
+      "bash",
+      ["-c", "set -a; . \"$1\"; env -0", "bash", envPath],
+      {
+        encoding: "utf8",
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      },
+    );
+    if (source.status !== 0) {
+      throw new Error(`.env.example failed to source:\n${source.stderr}`);
+    }
+
+    const sourcedEnv: NodeJS.ProcessEnv = {};
+    for (const entry of source.stdout.split("\0")) {
+      if (!entry) {
+        continue;
+      }
+      const equals = entry.indexOf("=");
+      if (equals <= 0) {
+        continue;
+      }
+      sourcedEnv[entry.slice(0, equals)] = entry.slice(equals + 1);
+    }
+
+    expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
+  });
+});
 
 describe("sandbox preparation profiles", () => {
   test("defaults to no sandbox environment exposure or lifecycle hooks", () => {
