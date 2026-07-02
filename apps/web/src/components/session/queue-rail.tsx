@@ -106,30 +106,30 @@ export function QueueRail({ queue, sessionStatus }: {
   return (
     <div data-testid="queue-rail" className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+        <h3 className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-fg-subtle">
           <ListPlusIcon className="size-3.5" />
           Turn queue
         </h3>
-        <span className="text-[11px] text-[color:var(--color-fg-subtle)]">
+        <span className="text-2xs text-fg-subtle">
           {queue.queue.length > 0 ? `${queue.queue.length} queued` : activeTurnView === "error" ? "unavailable" : "empty"}
         </span>
       </div>
 
       {claimedNotice ? (
-        <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs leading-4 text-amber-200">
+        <div className="flex items-start gap-2 rounded-md border border-status-waiting/40 bg-status-waiting/10 p-2 text-xs leading-4 text-status-waiting">
           <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
           <span className="min-w-0 flex-1">{claimedNotice}</span>
-          <button type="button" onClick={() => setClaimedNotice(null)} aria-label="Dismiss" className="shrink-0 rounded p-0.5 hover:bg-amber-500/20">
+          <button type="button" onClick={() => setClaimedNotice(null)} aria-label="Dismiss" className="shrink-0 rounded p-0.5 hover:bg-status-waiting/20">
             <XIcon className="size-3" />
           </button>
         </div>
       ) : null}
 
       {queue.mutationError ? (
-        <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200">
+        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed">
           <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
           <span className="min-w-0 flex-1">{queue.mutationError.message}</span>
-          <button type="button" onClick={queue.clearMutationError} aria-label="Dismiss queue error" className="shrink-0 rounded p-0.5 hover:bg-red-500/20">
+          <button type="button" onClick={queue.clearMutationError} aria-label="Dismiss queue error" className="shrink-0 rounded p-0.5 hover:bg-status-failed/20">
             <XIcon className="size-3" />
           </button>
         </div>
@@ -138,20 +138,20 @@ export function QueueRail({ queue, sessionStatus }: {
       {queue.activeTurn ? (
         <ActiveTurnCard turn={queue.activeTurn} />
       ) : activeTurnView === "loading" ? (
-        <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 text-xs text-[color:var(--color-fg-muted)]">
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-3 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
           Loading turns
         </div>
       ) : activeTurnView === "error" ? (
-        <div className="flex items-start gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2 text-xs leading-4 text-red-200" role="alert">
+        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed" role="alert">
           <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
           <span className="min-w-0 flex-1">Couldn't load the turn queue{queue.error?.message ? ` — ${queue.error.message}` : ""}</span>
-          <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="shrink-0 text-red-200 hover:bg-red-500/20 hover:text-red-100">
+          <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="shrink-0 text-status-failed hover:bg-status-failed/20 hover:text-status-failed">
             Retry
           </Button>
         </div>
       ) : (
-        <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs leading-5 text-[color:var(--color-fg-subtle)]">
+        <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-subtle">
           {sessionStatus === "failed"
             ? "No turn is running — the session failed. Send a message to revive it."
             : "No turn is running. New messages start immediately."}
@@ -179,8 +179,8 @@ export function QueueRail({ queue, sessionStatus }: {
                 void dropOn(turn.id);
               }}
               className={cn(
-                "group rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-2 transition-colors",
-                dropTargetId === turn.id && draggedTurnId !== turn.id && "border-[color:var(--color-brand)]/60 bg-[color:var(--color-brand)]/10",
+                "group rounded-lg border border-border bg-surface/45 p-2 transition-colors",
+                dropTargetId === turn.id && draggedTurnId !== turn.id && "border-brand/60 bg-brand/10",
                 draggedTurnId === turn.id && "opacity-50",
               )}
             >
@@ -191,7 +191,7 @@ export function QueueRail({ queue, sessionStatus }: {
                     onChange={(event) => setEditDraft(event.target.value)}
                     autoFocus
                     aria-label={`Edit queued turn ${index + 1}`}
-                    className="min-h-16 w-full rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5"
+                    className="min-h-16 w-full rounded-md border border-border bg-bg px-2.5 py-2 text-xs leading-5"
                   />
                   <div className="flex items-center justify-end gap-1.5">
                     <Button type="button" variant="ghost" size="xs" onClick={() => setEditingTurnId(null)}>
@@ -205,13 +205,13 @@ export function QueueRail({ queue, sessionStatus }: {
                 </div>
               ) : (
                 <div className="flex min-w-0 items-start gap-2">
-                  <span className="mt-0.5 flex shrink-0 cursor-grab items-center gap-1 text-[color:var(--color-fg-subtle)]" title="Drag to reorder">
+                  <span className="mt-0.5 flex shrink-0 cursor-grab items-center gap-1 text-fg-subtle" title="Drag to reorder">
                     <GripVerticalIcon className="size-3.5" />
-                    <span className="font-mono text-[10px]">#{index + 1}</span>
+                    <span className="font-mono text-2xs">#{index + 1}</span>
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="line-clamp-2 text-xs leading-5 text-[color:var(--color-fg)]">{turn.prompt}</div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">
+                    <div className="line-clamp-2 text-xs leading-5 text-fg">{turn.prompt}</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-fg-subtle">
                       <span>{turnSourceLabel(turn.source)}</span>
                       <span>{formatTimestamp(turn.createdAt)}</span>
                     </div>
@@ -254,7 +254,7 @@ export function QueueRail({ queue, sessionStatus }: {
                       disabled={queue.mutating}
                       onClick={() => void queue.removeTurn(turn.id)}
                       aria-label="Delete queued turn"
-                      className="hover:text-red-300"
+                      className="hover:text-status-failed"
                     >
                       <Trash2Icon className="size-3.5" />
                     </Button>
@@ -268,16 +268,16 @@ export function QueueRail({ queue, sessionStatus }: {
 
       {history.length > 0 ? (
         <details className="group">
-          <summary className="cursor-pointer list-none text-[11px] font-medium text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg-muted)]">
+          <summary className="cursor-pointer list-none text-2xs font-medium text-fg-subtle hover:text-fg-muted">
             <ChevronDownIcon className="mr-1 inline size-3 transition-transform group-open:rotate-180" />
             {history.length} finished turn{history.length === 1 ? "" : "s"}
           </summary>
           <ol className="mt-2 space-y-1">
             {history.slice(0, 12).map((turn) => (
-              <li key={turn.id} className="flex min-w-0 items-center gap-2 rounded-md border border-[color:var(--color-border)]/70 bg-[color:var(--color-bg)]/25 px-2 py-1.5">
+              <li key={turn.id} className="flex min-w-0 items-center gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5">
                 <TurnStatusDot status={turn.status} />
-                <span className="min-w-0 flex-1 truncate text-[11px] text-[color:var(--color-fg-muted)]">{turn.prompt}</span>
-                <span className="shrink-0 text-[10px] text-[color:var(--color-fg-subtle)]">{turn.status}</span>
+                <span className="min-w-0 flex-1 truncate text-2xs text-fg-muted">{turn.prompt}</span>
+                <span className="shrink-0 text-2xs text-fg-subtle">{turn.status}</span>
               </li>
             ))}
           </ol>
@@ -300,8 +300,8 @@ function ActiveTurnCard({ turn }: { turn: SessionTurn }) {
       className={cn(
         "rounded-lg border p-2.5",
         awaitingApproval
-          ? "border-amber-500/40 bg-amber-500/10"
-          : "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10",
+          ? "border-status-waiting/40 bg-status-waiting/10"
+          : "border-brand/40 bg-brand/10",
       )}
     >
       <div className="flex items-center justify-between gap-2">
@@ -309,12 +309,12 @@ function ActiveTurnCard({ turn }: { turn: SessionTurn }) {
           <TurnStatusDot status={turn.status} />
           {awaitingApproval ? "Awaiting approval" : "Running"}
         </span>
-        <span className="shrink-0 font-mono text-[11px] text-[color:var(--color-fg-muted)]" aria-label="Elapsed time">
+        <span className="shrink-0 font-mono text-2xs text-fg-muted" aria-label="Elapsed time">
           {turn.startedAt ? formatElapsedSeconds(turnElapsedSeconds(turn, now)) : "starting"}
         </span>
       </div>
-      <div className="mt-1.5 line-clamp-3 text-xs leading-5 text-[color:var(--color-fg)]">{turn.prompt}</div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">
+      <div className="mt-1.5 line-clamp-3 text-xs leading-5 text-fg">{turn.prompt}</div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-2xs text-fg-subtle">
         <span>{turnSourceLabel(turn.source)}</span>
         <span>{turn.model}</span>
         <span>{turn.reasoningEffort}</span>
@@ -328,12 +328,12 @@ function TurnStatusDot({ status }: { status: SessionTurn["status"] }) {
     <span
       className={cn(
         "size-2 shrink-0 rounded-full",
-        status === "running" && "animate-pulse bg-emerald-400",
-        status === "requires_action" && "animate-pulse bg-amber-400",
-        status === "queued" && "bg-sky-400",
-        status === "completed" && "bg-emerald-600",
-        status === "failed" && "bg-red-400",
-        status === "cancelled" && "bg-zinc-500",
+        status === "running" && "animate-pulse bg-status-running",
+        status === "requires_action" && "animate-pulse bg-status-waiting",
+        status === "queued" && "bg-status-queued",
+        status === "completed" && "bg-status-idle",
+        status === "failed" && "bg-status-failed",
+        status === "cancelled" && "bg-status-cancelled",
       )}
       aria-hidden="true"
     />

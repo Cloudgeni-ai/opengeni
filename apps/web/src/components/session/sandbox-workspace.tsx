@@ -178,7 +178,7 @@ export function useSandboxWorkspaceTabs({
         label: "Files",
         badge:
           dirtyCount > 0 ? (
-            <span className="rounded-[var(--og-radius-xs,3px)] bg-[color:var(--og-color-accent-soft,#2a2a2a)] px-1 text-[9px] text-[color:var(--og-color-fg-muted,#aaa)]">
+            <span className="rounded-[var(--og-radius-xs,3px)] bg-og-accent-soft px-1 text-2xs text-og-fg-muted">
               {dirtyCount}
             </span>
           ) : undefined,
@@ -199,7 +199,7 @@ export function useSandboxWorkspaceTabs({
         id: "terminal",
         label: "Terminal",
         content: withMachineBar(
-          <div className="h-full bg-[color:var(--og-color-bg,var(--color-bg))] p-1">
+          <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
@@ -218,7 +218,7 @@ export function useSandboxWorkspaceTabs({
         id: "desktop",
         label: "Desktop",
         badge: watchDesktop ? (
-          <span className="rounded-[var(--og-radius-xs,3px)] bg-[color:var(--og-color-status-running,#d29922)]/20 px-1 text-[9px] text-[color:var(--og-color-status-running,#d29922)]">
+          <span className="rounded-[var(--og-radius-xs,3px)] bg-og-status-running/20 px-1 text-2xs text-og-status-running">
             live
           </span>
         ) : undefined,

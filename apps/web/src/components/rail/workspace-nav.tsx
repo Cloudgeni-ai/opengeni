@@ -39,7 +39,7 @@ export function WorkspaceNav() {
   return (
     <nav aria-label="Workspace" className={cn("grid gap-0.5", rail.collapsed ? "px-2" : "px-2")}>
       {!rail.collapsed ? (
-        <p className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+        <p className="px-2 pb-1 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
           Workspace
         </p>
       ) : null}
@@ -53,7 +53,7 @@ export function WorkspaceNav() {
           collapsed={rail.collapsed}
         />
       ))}
-      <div className={cn("mt-1 border-t border-[color:var(--color-border)]/60 pt-1", rail.collapsed ? "mx-1" : "")}>
+      <div className={cn("mt-1 border-t border-border/60 pt-1", rail.collapsed ? "mx-1" : "")}>
         <RailNavItem
           to="/workspaces/$workspaceId/settings"
           workspaceId={rail.workspaceId}
@@ -83,14 +83,14 @@ export function RailNavItem(props: {
       activeProps={{ "data-active": "true" }}
       aria-label={props.collapsed ? props.label : undefined}
       className={cn(
-        "group relative flex h-8 items-center rounded-md text-sm font-medium text-[color:var(--color-fg-muted)] transition-colors",
-        "hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
-        "data-[active=true]:bg-[color:var(--color-surface-2)] data-[active=true]:text-[color:var(--color-fg)]",
+        "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors",
+        "hover:bg-surface-2 hover:text-fg",
+        "data-[active=true]:bg-surface-2 data-[active=true]:text-fg",
         props.collapsed ? "w-8 justify-center" : "gap-2.5 px-2.5",
       )}
     >
       {/* Left accent bar on the active route. */}
-      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
+      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
       <span className="shrink-0">{props.icon}</span>
       {!props.collapsed ? <span className="min-w-0 truncate">{props.label}</span> : null}
     </Link>

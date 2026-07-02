@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
 // Cache TTL: a row whose cached snapshot is older than this (or never fetched)
@@ -45,15 +46,15 @@ export function UsageBar({ label, window, now }: { label: string; window: CodexU
   const secs = secondsUntilReset(window, now);
   return (
     <div className="grid gap-1">
-      <div className="flex items-center justify-between text-xs text-[color:var(--color-fg-muted)]">
+      <div className="flex items-center justify-between text-xs text-fg-muted">
         <span>{label}</span>
         <span>
           {limitReached ? "limit reached" : `${pct}% used`}
           {secs ? ` · ${resetLabel(secs)}` : ""}
         </span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-[color:var(--color-surface-2)]">
-        <div className={`h-full rounded-full ${danger ? "bg-amber-500" : "bg-[color:var(--color-brand)]"}`} style={{ width: `${pct}%` }} />
+      <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
+        <div className={`h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -82,14 +83,14 @@ function AccountUsage({
 
   // loading — a live refresh is in flight and we have nothing cached yet.
   if (refreshing && !fiveHour && !weekly) {
-    return <div className="h-3 w-2/3 animate-pulse rounded bg-[color:var(--color-surface-2)]" />;
+    return <div className="h-3 w-2/3 animate-pulse rounded bg-surface-2" />;
   }
   // error — a refresh/needs_relogin or transient 401. Subtle inline, not a hard block.
   if (status === "error" && !fiveHour && !weekly) {
     return (
-      <div className="text-xs text-[color:var(--color-fg-subtle)]">
+      <div className="text-xs text-fg-subtle">
         usage unavailable ·{" "}
-        <button type="button" className="underline hover:text-[color:var(--color-fg)]" onClick={onRetry}>
+        <button type="button" className="underline hover:text-fg" onClick={onRetry}>
           retry
         </button>
       </div>
@@ -105,7 +106,7 @@ function AccountUsage({
       <UsageBar label="5-hour" window={fiveHour} now={now} />
       <UsageBar label="Weekly" window={weekly} now={now} />
       {limitReached ? (
-        <div className="flex items-center gap-1.5 text-xs text-amber-500">
+        <div className="flex items-center gap-1.5 text-xs text-status-waiting">
           <TriangleAlertIcon className="size-3.5" /> Usage limit reached
         </div>
       ) : null}
@@ -312,14 +313,14 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
   };
 
   return (
-    <section className="grid gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-4">
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="flex items-center gap-1.5 text-sm font-medium">
-            <SparklesIcon className="size-3.5 text-[color:var(--color-brand)]" />
+            <SparklesIcon className="size-3.5 text-brand" />
             Codex subscriptions
           </h2>
-          <p className="mt-1 text-xs text-[color:var(--color-fg-muted)]">
+          <p className="mt-1 text-xs text-fg-muted">
             Connect one or more ChatGPT plans to run agents on your subscription. Turns using a <span className="font-medium">Codex</span> model spend
             your ChatGPT usage — <span className="font-medium">no API credits</span>.
           </p>
@@ -332,15 +333,15 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
       </div>
 
       {accounts.length > 1 && canManage ? (
-        <div className="grid gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-3">
+        <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
           <label className="flex cursor-pointer items-center justify-between gap-3">
             <span className="text-xs">
               <span className="font-medium">Auto-rotate subscriptions</span>
-              <span className="ml-1 text-[color:var(--color-fg-subtle)]">— fail over to another plan when one hits its cap, never mid-turn.</span>
+              <span className="ml-1 text-fg-subtle">— fail over to another plan when one hits its cap, never mid-turn.</span>
             </span>
             <input
               type="checkbox"
-              className="size-4 accent-[color:var(--color-brand)]"
+              className="size-4 accent-brand"
               checked={rotationEnabled}
               disabled={busy}
               onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
@@ -348,9 +349,9 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
           </label>
           {rotationEnabled ? (
             <label className="flex items-center justify-between gap-3 text-xs">
-              <span className="text-[color:var(--color-fg-muted)]">Strategy</span>
-              <select
-                className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)] px-2 py-1 text-xs"
+              <span className="text-fg-muted">Strategy</span>
+              <Select
+                className="h-7 bg-surface text-xs"
                 value={rotationStrategy}
                 disabled={busy}
                 onChange={(e) => void setRotation({ rotationStrategy: e.target.value as CodexRotationSettings["rotationStrategy"] })}
@@ -358,28 +359,28 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                 <option value="most_remaining">Most remaining quota</option>
                 <option value="round_robin">Round-robin</option>
                 <option value="drain_then_next">Drain then next</option>
-              </select>
+              </Select>
             </label>
           ) : null}
         </div>
       ) : null}
 
       {loading ? (
-        <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-subtle)]"><Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…</div>
+        <div className="flex items-center gap-2 text-xs text-fg-subtle"><Loader2Icon className="size-3.5 animate-spin" /> Loading subscriptions…</div>
       ) : pending ? (
-        <div className="grid gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-3">
-          <div className="text-xs text-[color:var(--color-fg-muted)]">Enter this code at the OpenAI page (opened in a new tab), then leave this open:</div>
+        <div className="grid gap-2 rounded-md border border-border bg-bg p-3">
+          <div className="text-xs text-fg-muted">Enter this code at the OpenAI page (opened in a new tab), then leave this open:</div>
           <div className="flex items-center gap-2">
-            <code className="rounded bg-[color:var(--color-surface-2)] px-3 py-1.5 text-lg font-semibold tracking-widest">{pending.userCode}</code>
+            <code className="rounded bg-surface-2 px-3 py-1.5 text-lg font-semibold tracking-widest">{pending.userCode}</code>
             <Button asChild type="button" variant="secondary" size="sm">
               <a href={pending.verificationUri} target="_blank" rel="noopener noreferrer">Open auth page <ExternalLinkIcon className="size-3.5" /></a>
             </Button>
           </div>
-          <div className="flex items-center gap-2 text-xs text-[color:var(--color-fg-subtle)]"><Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…</div>
+          <div className="flex items-center gap-2 text-xs text-fg-subtle"><Loader2Icon className="size-3.5 animate-spin" /> Waiting for authorization…</div>
         </div>
       ) : accounts.length === 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-[color:var(--color-fg-subtle)]">Not connected. Connecting needs admin access and a ChatGPT Plus/Pro/Team plan.</p>
+          <p className="text-xs text-fg-subtle">Not connected. Connecting needs admin access and a ChatGPT Plus/Pro/Team plan.</p>
           {canManage ? (
             <Button type="button" size="sm" disabled={busy} onClick={() => void connect()}>
               {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <SparklesIcon className="size-3.5" />} Connect Codex
@@ -392,13 +393,13 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
             const isActive = account.id === activeAccountId;
             const needsRelogin = account.status !== "active" && account.lastError != null;
             return (
-              <div key={account.id} className="grid gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-3">
+              <div key={account.id} className="grid gap-2 rounded-md border border-border bg-bg p-3">
                 <div className="flex items-center gap-3">
                   <label className="flex cursor-pointer items-center" title="Used when a session isn't pinned to a specific subscription">
                     <input
                       type="radio"
                       name="codex-active"
-                      className="size-3.5 accent-[color:var(--color-brand)]"
+                      className="size-3.5 accent-brand"
                       checked={isActive}
                       disabled={!canManage || busy}
                       onChange={() => { if (!isActive) void activate(account.id); }}
@@ -428,14 +429,14 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                         {accountDisplay(account)}
                       </button>
                     )}
-                    <div className="mt-0.5 truncate text-xs text-[color:var(--color-fg-subtle)]">
+                    <div className="mt-0.5 truncate text-xs text-fg-subtle">
                       {account.email ? `${account.email} · ` : ""}
                       {account.status === "active" ? "Token valid" : account.status}
                       {account.expiresAt ? ` · expires ${new Date(account.expiresAt).toLocaleString()}` : ""}
                     </div>
                   </div>
                   {account.plan ? (
-                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300">
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-idle/30 bg-status-idle/10 px-2 py-0.5 text-xs text-status-idle">
                       {account.plan} plan
                     </span>
                   ) : null}
@@ -445,14 +446,14 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                       : 0;
                     if (coolingSecs > 0) {
                       return (
-                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300" title="Rotated off after hitting its cap; skipped until reset">
+                        <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-waiting/30 bg-status-waiting/10 px-2 py-0.5 text-2xs text-status-waiting" title="Rotated off after hitting its cap; skipped until reset">
                           cooling down · {resetLabel(coolingSecs)}
                         </span>
                       );
                     }
                     if (isActive) {
                       return (
-                        <span className="shrink-0 text-[10px] uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+                        <span className="shrink-0 text-2xs uppercase tracking-wide text-fg-subtle">
                           {rotationEnabled ? "Active · default when idle" : "Active"}
                         </span>
                       );
@@ -461,7 +462,7 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
                   })()}
                 </div>
                 {needsRelogin ? (
-                  <div className="flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+                  <div className="flex items-center gap-1.5 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-2 text-xs text-status-waiting">
                     <TriangleAlertIcon className="size-3.5" /> {account.lastError ?? "Reconnect needed."}
                   </div>
                 ) : (
@@ -492,7 +493,7 @@ export function CodexSubscriptionsCard({ workspaceId, canManage }: { workspaceId
               </div>
             );
           })}
-          <p className="text-[11px] text-[color:var(--color-fg-subtle)]">
+          <p className="text-2xs text-fg-subtle">
             {rotationEnabled ? (
               <>Auto-rotating across {accounts.length} subscriptions by <span className="font-medium">{ROTATION_STRATEGY_LABELS[rotationStrategy]}</span>. Pinned sessions stay on their pin.</>
             ) : (

@@ -163,7 +163,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           type="button"
           variant="ghost"
           size="sm"
-          className="-ml-1 w-fit text-[color:var(--color-fg-muted)]"
+          className="-ml-1 w-fit text-fg-muted"
           onClick={() => setMode("token")}
         >
           <ArrowLeftIcon className="size-4" />
@@ -180,7 +180,7 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
           onCopyInstall={() => void navigator.clipboard.writeText(installCommand)}
           className="border-0 shadow-none"
         />
-        <p className="text-center text-[11px] leading-4 text-[color:var(--color-fg-muted)]">
+        <p className="text-center text-2xs text-fg-muted">
           Screen control is granted on the approval page when you confirm the code.
         </p>
       </div>
@@ -189,11 +189,11 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[12px] leading-4 text-[color:var(--color-fg-muted)]">
+      <p className="text-[12px] leading-4 text-fg-muted">
         Run this on the machine you want to share. It enrolls instantly as an agent sandbox — no approval step.
       </p>
 
-      <label className="flex items-start gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/40 px-2.5 py-2 text-[12px] leading-4 text-[color:var(--color-fg)]">
+      <label className="flex items-start gap-2 rounded-md border border-border bg-bg/40 px-2.5 py-2 text-[12px] leading-4 text-fg">
         <input
           type="checkbox"
           className="mt-0.5"
@@ -203,16 +203,16 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         />
         <span className="flex flex-col gap-0.5">
           <span className="flex items-center gap-1.5 font-medium">
-            <MonitorIcon className="size-3.5 text-[color:var(--color-fg-muted)]" />
+            <MonitorIcon className="size-3.5 text-fg-muted" />
             Allow screen control
           </span>
-          <span className="text-[11px] text-[color:var(--color-fg-muted)]">
+          <span className="text-2xs text-fg-muted">
             Let agents view and control this machine&apos;s screen (mouse + keyboard). Leave off for a headless sandbox.
           </span>
         </span>
       </label>
 
-      <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[12px] leading-4 text-amber-200">
+      <div className="flex items-start gap-2 rounded-md border border-status-waiting/40 bg-status-waiting/10 p-2.5 text-[12px] leading-4 text-status-waiting">
         <AlertTriangleIcon className="mt-px size-3.5 shrink-0" />
         <span>
           <span className="font-semibold">Secret — copy it now.</span> This command embeds a one-time enroll token that
@@ -221,12 +221,12 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
       </div>
 
       {minting ? (
-        <div className="flex items-center gap-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-2.5 text-[12px] text-[color:var(--color-fg-muted)]">
+        <div className="flex items-center gap-2 rounded-md border border-border bg-bg p-2.5 text-[12px] text-fg-muted">
           <Loader2Icon className="size-4 animate-spin" />
           Minting enroll token…
         </div>
       ) : error ? (
-        <div className="flex flex-col gap-2 rounded-md border border-red-500/40 bg-red-500/10 p-2.5 text-[12px] leading-4 text-red-200">
+        <div className="flex flex-col gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2.5 text-[12px] leading-4 text-status-failed">
           <span>Could not create an enroll token. {error}</span>
           <Button
             type="button"
@@ -241,14 +241,14 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         </div>
       ) : token ? (
         <>
-          <div className="flex items-center justify-between rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/60 px-2.5 py-1.5 text-[11px] text-[color:var(--color-fg-muted)]">
+          <div className="flex items-center justify-between rounded-md border border-border bg-surface-2/60 px-2.5 py-1.5 text-2xs text-fg-muted">
             <span>Expires {formatExpiry(token.expiresAt, token.expiresInSeconds)}</span>
             <Button type="button" variant="ghost" size="xs" onClick={() => void mint(allowScreenControl)} disabled={minting}>
               Regenerate
             </Button>
           </div>
-          <div className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-2.5">
-            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-4 text-[color:var(--color-fg)]">
+          <div className="rounded-md border border-border bg-bg p-2.5">
+            <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-2xs text-fg">
               {command}
             </pre>
           </div>
@@ -259,19 +259,19 @@ function EnrollDialogBody({ workspaceId, origin }: { workspaceId: string; origin
         </>
       ) : null}
 
-      <div className="mt-1 border-t border-[color:var(--color-border)] pt-3">
+      <div className="mt-1 border-t border-border pt-3">
         <Button
           type="button"
           variant="ghost"
           size="sm"
-          className="w-full justify-between text-[color:var(--color-fg-muted)]"
+          className="w-full justify-between text-fg-muted"
           onClick={() => setMode("manual")}
         >
           <span className="flex items-center gap-2">
             <TerminalIcon className="size-4" />
             Approve manually instead
           </span>
-          <span className="text-[11px]">device flow</span>
+          <span className="text-2xs">device flow</span>
         </Button>
       </div>
     </div>

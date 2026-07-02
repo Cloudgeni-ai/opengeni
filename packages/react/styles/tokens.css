@@ -48,6 +48,7 @@
   /* Accent — one brand hue, used sparingly ----------------------------------- */
   --og-color-accent: oklch(0.72 0.15 255);
   --og-color-accent-strong: oklch(0.78 0.14 255);
+  --og-color-accent-deep: oklch(0.62 0.18 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
   --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
 
@@ -91,6 +92,7 @@
 
   --og-color-accent: oklch(0.55 0.18 255);
   --og-color-accent-strong: oklch(0.48 0.19 255);
+  --og-color-accent-deep: oklch(0.44 0.19 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
   --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
 

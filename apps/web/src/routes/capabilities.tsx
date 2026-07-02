@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 import {
   capabilityCounts,
@@ -269,7 +270,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           actions={(
             <>
               <div className="relative min-w-56 flex-1 sm:flex-none">
-                <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-[color:var(--color-fg-subtle)]" />
+                <SearchIcon className="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-fg-subtle" />
                 <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search catalog" className="h-9 pl-8 text-sm" />
               </div>
               <Button type="button" variant="ghost" size="sm" onClick={() => void refresh()} disabled={loading} className="h-9">
@@ -292,7 +293,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
             >
               {capabilityKindIcon(kind)}
               {capabilityFilterLabel(kind)}
-              <span className="ml-1 rounded-full border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{counts[kind]}</span>
+              <span className="ml-1 rounded-full border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">{counts[kind]}</span>
             </Button>
           ))}
         </div>
@@ -312,14 +313,14 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
             ) : null}
 
             {filter === "pack" ? null : catalogView === "loading" ? (
-              <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-4 text-sm text-[color:var(--color-fg-muted)]">
+              <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-4 text-sm text-fg-muted">
                 <Loader2Icon className="size-4 animate-spin" />
                 Loading capabilities
               </div>
             ) : catalogView === "error" ? (
               <LoadErrorState title="Couldn't load capabilities" error={loadError} onRetry={() => void refresh()} />
             ) : visibleItems.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-sm text-[color:var(--color-fg-muted)]">
+              <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-fg-muted">
                 {catalogView === "empty" ? "No capabilities in this workspace yet." : "No capabilities match this filter."}
               </div>
             ) : (
@@ -336,10 +337,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
             )}
           </div>
 
-          <aside className="min-w-0 space-y-4 border-t border-[color:var(--color-border)] pt-4 xl:border-t-0 xl:border-l xl:pl-4 xl:pt-0">
-            <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+          <aside className="min-w-0 space-y-4 border-t border-border pt-4 xl:border-t-0 xl:border-l xl:pl-4 xl:pt-0">
+            <section className="rounded-lg border border-border bg-surface/45 p-3">
               <div className="flex items-center gap-2 text-sm font-medium">
-                <GlobeIcon className="size-4 text-[color:var(--color-brand)]" />
+                <GlobeIcon className="size-4 text-brand" />
                 Public MCP Registry
               </div>
               <div className="mt-3 flex gap-2">
@@ -359,14 +360,14 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
               </div>
               <div className="mt-3 max-h-[28rem] space-y-2 overflow-auto pr-1">
                 {registryResults.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-[color:var(--color-border)] p-3 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                  <div className="rounded-md border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
                     Search returns public remote MCP servers that expose streamable HTTP endpoints.
                   </div>
                 ) : registryResults.map((item) => (
-                  <div key={item.id} className="rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-2">
+                  <div key={item.id} className="rounded-md border border-border bg-bg/35 p-2">
                     <div className="min-w-0 truncate text-xs font-medium">{item.name}</div>
-                    {item.description ? <p className="mt-1 line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-muted)]">{item.description}</p> : null}
-                    <div className="mt-2 truncate font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{item.endpointUrl}</div>
+                    {item.description ? <p className="mt-1 line-clamp-2 text-2xs text-fg-muted">{item.description}</p> : null}
+                    <div className="mt-2 truncate font-mono text-2xs text-fg-subtle">{item.endpointUrl}</div>
                     <div className="mt-2 flex justify-end gap-1.5">
                       <Button type="button" variant="ghost" size="xs" disabled={busyId === item.id} onClick={() => void addRegistryItem(item, false)}>
                         <PlusIcon className="size-3" />
@@ -388,15 +389,15 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
               </div>
             </section>
 
-            <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+            <section className="rounded-lg border border-border bg-surface/45 p-3">
               <div className="flex items-center gap-2 text-sm font-medium">
-                <PlusIcon className="size-4 text-[color:var(--color-brand)]" />
+                <PlusIcon className="size-4 text-brand" />
                 Add Capability
               </div>
               <div className="mt-3 grid gap-2">
                 <div className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2">
-                  <select
-                    className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                  <Select
+                    className="h-8 text-xs"
                     value={addForm.kind}
                     onChange={(event) => setAddForm((current) => ({ ...current, kind: event.target.value as CapabilityFormState["kind"] }))}
                   >
@@ -404,7 +405,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                     <option value="api">API</option>
                     <option value="skill">Skill</option>
                     <option value="plugin">Plugin</option>
-                  </select>
+                  </Select>
                   <Input value={addForm.name} onChange={(event) => setAddForm((current) => ({ ...current, name: event.target.value }))} placeholder="Name" className="h-8 text-xs" />
                 </div>
                 <Input value={addForm.endpointUrl} onChange={(event) => setAddForm((current) => ({ ...current, endpointUrl: event.target.value }))} placeholder="Endpoint URL" className="h-8 text-xs" />
@@ -416,9 +417,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                   value={addForm.description}
                   onChange={(event) => setAddForm((current) => ({ ...current, description: event.target.value }))}
                   placeholder="Description"
-                  className="min-h-16 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-xs"
+                  className="min-h-16 rounded-md border border-border bg-bg px-3 py-2 text-xs"
                 />
-                <label className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+                <label className="flex items-center gap-2 text-xs text-fg-muted">
                   <input
                     type="checkbox"
                     checked={addForm.enableAfterAdd}
@@ -453,10 +454,10 @@ function CapabilityRow({ item, busy, onToggle }: {
     : undefined;
   const packContents = summarizePackContents(item);
   return (
-    <article className="grid min-w-0 gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+    <article className="grid min-w-0 gap-3 rounded-lg border border-border bg-surface/45 p-3 lg:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-brand)]">
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-md border border-border bg-bg text-brand">
             {capabilityKindIcon(item.kind)}
           </span>
           <div className="min-w-0">
@@ -464,7 +465,7 @@ function CapabilityRow({ item, busy, onToggle }: {
               <h3 className="truncate text-sm font-medium">{item.name}</h3>
               <CapabilityStatusPill enabled={item.enabled} source={item.source} reason={item.enabledReason} />
             </div>
-            <div className="mt-0.5 flex min-w-0 flex-wrap gap-1.5 text-[11px] text-[color:var(--color-fg-subtle)]">
+            <div className="mt-0.5 flex min-w-0 flex-wrap gap-1.5 text-2xs text-fg-subtle">
               <span>{item.kind}</span>
               <span>{item.source.replaceAll("_", " ")}</span>
               <span>{item.category}</span>
@@ -472,10 +473,10 @@ function CapabilityRow({ item, busy, onToggle }: {
             </div>
           </div>
         </div>
-        {item.description ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-[color:var(--color-fg-muted)]">{item.description}</p> : null}
+        {item.description ? <p className="mt-2 line-clamp-2 text-xs leading-5 text-fg-muted">{item.description}</p> : null}
         <div className="mt-2 flex min-w-0 flex-wrap gap-1.5">
           {item.tags.slice(0, 5).map((tag) => (
-            <span key={tag} className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{tag}</span>
+            <span key={tag} className="max-w-full truncate rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">{tag}</span>
           ))}
           {item.endpointUrl ? <CapabilityLink href={item.endpointUrl} label="endpoint" /> : null}
           {item.homepageUrl ? <CapabilityLink href={item.homepageUrl} label="home" /> : null}
@@ -516,17 +517,17 @@ function CapabilityRow({ item, busy, onToggle }: {
 
 function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
   return (
-    <div className="grid gap-3 border-t border-[color:var(--color-border)] pt-3 lg:col-span-2 md:grid-cols-2">
+    <div className="grid gap-3 border-t border-border pt-3 lg:col-span-2 md:grid-cols-2">
       <PackContentsSection title="MCPs">
         {contents.mcpServerIds.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {contents.mcpServerIds.map((id) => (
-              <span key={id} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{id}</span>
+              <span key={id} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{id}</span>
             ))}
           </div>
         ) : <PackEmptyText />}
         {contents.firstPartyMcpTools.length > 0 ? (
-          <div className="mt-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+          <div className="mt-2 text-2xs text-fg-subtle">
             Tools: {contents.firstPartyMcpTools.join(", ")}
           </div>
         ) : null}
@@ -536,7 +537,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
         {contents.skills.length > 0 ? (
           <div className="flex flex-wrap gap-1.5">
             {contents.skills.map((skill) => (
-              <span key={skill} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">{skill}</span>
+              <span key={skill} className="rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">{skill}</span>
             ))}
           </div>
         ) : <PackEmptyText />}
@@ -549,9 +550,9 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
               <div key={connector.id} className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                   <span className="truncate text-xs font-medium">{connector.name}</span>
-                  {connector.required ? <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[10px] text-amber-300">required</span> : null}
+                  {connector.required ? <span className="rounded border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">required</span> : null}
                 </div>
-                <div className="mt-0.5 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                <div className="mt-0.5 text-2xs text-fg-subtle">
                   {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
                 </div>
               </div>
@@ -566,7 +567,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
             {contents.knowledge.map((knowledge) => (
               <div key={knowledge.id} className="min-w-0">
                 <div className="truncate text-xs font-medium">{knowledge.name}</div>
-                {knowledge.description ? <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{knowledge.description}</div> : null}
+                {knowledge.description ? <div className="mt-0.5 line-clamp-2 text-2xs text-fg-subtle">{knowledge.description}</div> : null}
               </div>
             ))}
           </div>
@@ -579,7 +580,7 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
             {contents.scheduledTaskTemplates.map((template) => (
               <div key={template.id} className="min-w-0">
                 <div className="truncate text-xs font-medium">{template.name}</div>
-                <div className="mt-0.5 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{template.scheduleSummary}</div>
+                <div className="mt-0.5 text-2xs text-fg-subtle">{template.scheduleSummary}</div>
               </div>
             ))}
           </div>
@@ -592,24 +593,24 @@ function PackContentsPanel({ contents }: { contents: PackContentsSummary }) {
 function PackContentsSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="min-w-0">
-      <div className="mb-1.5 text-[11px] font-semibold text-[color:var(--color-fg-subtle)]">{title}</div>
+      <div className="mb-1.5 text-2xs font-semibold text-fg-subtle">{title}</div>
       {children}
     </section>
   );
 }
 
 function PackEmptyText() {
-  return <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">None declared.</div>;
+  return <div className="text-2xs text-fg-subtle">None declared.</div>;
 }
 
 function CapabilityStatusPill(props: { enabled: boolean; source: string; reason: string | null }) {
   return (
     <span
       className={cn(
-        "shrink-0 rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+        "shrink-0 rounded-full border px-1.5 py-0.5 text-2xs font-medium",
         props.enabled
-          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-          : "border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-fg-subtle)]",
+          ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
+          : "border-border bg-bg text-fg-subtle",
       )}
     >
       {props.enabled ? props.reason ?? "enabled" : props.source === "manual" ? "added" : "available"}
@@ -629,7 +630,7 @@ function capabilityToggleLabel(item: CapabilityCatalogItem, canToggle: boolean):
 
 function CapabilityLink({ href, label }: { href: string; label: string }) {
   return (
-    <a href={href} target="_blank" rel="noreferrer noopener" className="max-w-full truncate rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-brand)] hover:bg-[color:var(--color-surface-2)]">
+    <a href={href} target="_blank" rel="noreferrer noopener" className="max-w-full truncate rounded border border-border px-1.5 py-0.5 text-2xs text-brand hover:bg-surface-2">
       {label}
     </a>
   );
@@ -676,14 +677,14 @@ function PacksSection(props: {
   }
 
   return (
-    <section className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/45 p-3">
+    <section className="rounded-lg border border-border bg-surface/45 p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-medium">
-            <PackageIcon className="size-4 text-[color:var(--color-brand)]" />
+            <PackageIcon className="size-4 text-brand" />
             Packs
           </div>
-          <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+          <p className="mt-1 text-xs leading-5 text-fg-muted">
             Complete agent capabilities: a sandbox image, skills, tools, connectors, knowledge, and schedule templates that enable as one unit.
           </p>
         </div>
@@ -700,12 +701,12 @@ function PacksSection(props: {
       </div>
 
       {registerOpen ? (
-        <div className="mt-3 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3">
+        <div className="mt-3 grid gap-2 rounded-lg border border-border bg-bg/35 p-3">
           <textarea
             value={manifestDraft}
             onChange={(event) => setManifestDraft(event.target.value)}
             placeholder='{"id": "my-pack", "name": "My pack", "description": "...", "role": "...", "category": "...", "version": "1.0.0", ...}'
-            className="min-h-40 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 font-mono text-xs leading-5"
+            className="min-h-40 rounded-md border border-border bg-bg px-3 py-2 font-mono text-xs leading-5"
             aria-label="Pack manifest JSON"
           />
           <div className="flex justify-end gap-2">
@@ -720,7 +721,7 @@ function PacksSection(props: {
 
       <div className="mt-3 grid gap-3">
         {packsView === "loading" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-4 text-sm text-[color:var(--color-fg-muted)]">
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-bg/35 p-4 text-sm text-fg-muted">
             <Loader2Icon className="size-4 animate-spin" />
             Loading packs
           </div>
@@ -763,38 +764,38 @@ function PackCard(props: {
   const needsEnvironment = pack.environment?.required === true;
 
   return (
-    <article className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-bg)]/35 p-3">
+    <article className="rounded-lg border border-border bg-bg/35 p-3">
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             <h3 className="truncate text-sm font-medium">{pack.name}</h3>
-            <span className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">v{pack.version}</span>
+            <span className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">v{pack.version}</span>
             <span
               className={cn(
-                "rounded-full border px-1.5 py-0.5 text-[10px] font-medium",
+                "rounded-full border px-1.5 py-0.5 text-2xs font-medium",
                 enabled
-                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-                  : "border-[color:var(--color-border)] bg-[color:var(--color-bg)] text-[color:var(--color-fg-subtle)]",
+                  ? "border-status-idle/30 bg-status-idle/10 text-status-idle"
+                  : "border-border bg-bg text-fg-subtle",
               )}
             >
               {enabled ? "enabled" : installation ? "disabled" : "available"}
             </span>
           </div>
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[color:var(--color-fg-muted)]">{pack.description}</p>
-          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+          <p className="mt-1 line-clamp-2 text-xs leading-5 text-fg-muted">{pack.description}</p>
+          <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-fg-subtle">
             <span>{pack.role}</span>
             <span>{pack.category}</span>
             {pack.sandboxImage ? (
               <span className="flex min-w-0 items-center gap-1" title={pack.sandboxImage}>
                 <ContainerIcon className="size-3 shrink-0" />
-                <span className="max-w-72 truncate font-mono text-[10px]">{pack.sandboxImage}</span>
+                <span className="max-w-72 truncate font-mono text-2xs">{pack.sandboxImage}</span>
               </span>
             ) : null}
           </div>
           {pack.skills.length > 0 ? (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {pack.skills.map((skill) => (
-                <span key={skill.name} title={skill.description} className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1.5 py-0.5 text-[10px] text-[color:var(--color-fg-subtle)]">
+                <span key={skill.name} title={skill.description} className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-subtle">
                   <SparkleIcon className="size-3" />
                   {skill.name}
                 </span>
@@ -832,7 +833,7 @@ function PackCard(props: {
               variant="ghost"
               size="icon-sm"
               aria-label={`Unregister pack ${pack.id}`}
-              className="hover:text-red-300"
+              className="hover:text-status-failed"
               disabled={props.busy}
               title="Unregister this workspace pack (built-ins cannot be removed)"
               onClick={props.onUnregister}
@@ -842,29 +843,29 @@ function PackCard(props: {
           </div>
           {pack.environment ? (
             <div className="flex items-center gap-1.5">
-              <select
+              <Select
                 value={environmentId}
                 onChange={(event) => setEnvironmentId(event.target.value)}
                 aria-label={`Environment for ${pack.name}`}
-                className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs"
+                className="h-8 text-xs"
               >
                 <option value="">{needsEnvironment ? "Choose environment (required)" : "No environment"}</option>
                 {props.environments.map((environment) => (
                   <option key={environment.id} value={environment.id}>{environment.name}</option>
                 ))}
-              </select>
+              </Select>
             </div>
           ) : null}
         </div>
       </div>
 
       {expanded ? (
-        <div className="mt-3 grid gap-3 border-t border-[color:var(--color-border)] pt-3 md:grid-cols-2">
+        <div className="mt-3 grid gap-3 border-t border-border pt-3 md:grid-cols-2">
           <PackSection title="Tools" icon={<PlugIcon className="size-3" />}>
             {pack.tools.length > 0 ? (
               <div className="flex flex-wrap gap-1.5">
                 {pack.tools.map((tool) => (
-                  <span key={`${tool.kind}:${tool.id}`} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{tool.id}</span>
+                  <span key={`${tool.kind}:${tool.id}`} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{tool.id}</span>
                 ))}
               </div>
             ) : <PackNone />}
@@ -876,7 +877,7 @@ function PackCard(props: {
                 {pack.skills.map((skill) => (
                   <div key={skill.name} className="min-w-0">
                     <div className="truncate text-xs font-medium">{skill.name}</div>
-                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                    <div className="text-2xs text-fg-subtle">
                       {skill.description ?? "No description"} · {skill.files.length} file{skill.files.length === 1 ? "" : "s"}
                     </div>
                   </div>
@@ -892,9 +893,9 @@ function PackCard(props: {
                   <div key={connector.id} className="min-w-0">
                     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <span className="truncate text-xs font-medium">{connector.name}</span>
-                      {connector.required ? <span className="rounded border border-amber-500/30 px-1.5 py-0.5 text-[10px] text-amber-300">required</span> : null}
+                      {connector.required ? <span className="rounded border border-status-waiting/30 px-1.5 py-0.5 text-2xs text-status-waiting">required</span> : null}
                     </div>
-                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+                    <div className="text-2xs text-fg-subtle">
                       {[connector.authModel, connector.providers.join(", "), connector.scopes.length ? `${connector.scopes.length} scopes` : null].filter(Boolean).join(" / ")}
                     </div>
                   </div>
@@ -909,7 +910,7 @@ function PackCard(props: {
                 {pack.knowledge.map((knowledge) => (
                   <div key={knowledge.id} className="min-w-0">
                     <div className="truncate text-xs font-medium">{knowledge.name}</div>
-                    {knowledge.description ? <div className="line-clamp-2 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{knowledge.description}</div> : null}
+                    {knowledge.description ? <div className="line-clamp-2 text-2xs text-fg-subtle">{knowledge.description}</div> : null}
                   </div>
                 ))}
               </div>
@@ -922,7 +923,7 @@ function PackCard(props: {
                 {pack.scheduledTaskTemplates.map((template) => (
                   <div key={template.id} className="min-w-0">
                     <div className="truncate text-xs font-medium">{template.name}</div>
-                    <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{scheduleLabel(template.defaultSchedule)}</div>
+                    <div className="text-2xs text-fg-subtle">{scheduleLabel(template.defaultSchedule)}</div>
                   </div>
                 ))}
               </div>
@@ -931,11 +932,11 @@ function PackCard(props: {
 
           {pack.environment ? (
             <PackSection title="Environment" icon={<ContainerIcon className="size-3" />}>
-              <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">{pack.environment.description}</div>
+              <div className="text-2xs text-fg-subtle">{pack.environment.description}</div>
               {pack.environment.requiredVariables.length > 0 ? (
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
                   {pack.environment.requiredVariables.map((name) => (
-                    <span key={name} className="rounded border border-[color:var(--color-border)] px-1.5 py-0.5 font-mono text-[10px] text-[color:var(--color-fg-subtle)]">{name}</span>
+                    <span key={name} className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle">{name}</span>
                   ))}
                 </div>
               ) : null}
@@ -950,7 +951,7 @@ function PackCard(props: {
 function PackSection({ title, icon, children }: { title: string; icon: ReactNode; children: ReactNode }) {
   return (
     <section className="min-w-0">
-      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[color:var(--color-fg-subtle)]">
+      <div className="mb-1.5 flex items-center gap-1.5 text-2xs font-semibold text-fg-subtle">
         {icon}
         {title}
       </div>
@@ -960,5 +961,5 @@ function PackSection({ title, icon, children }: { title: string; icon: ReactNode
 }
 
 function PackNone() {
-  return <div className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">None declared.</div>;
+  return <div className="text-2xs text-fg-subtle">None declared.</div>;
 }

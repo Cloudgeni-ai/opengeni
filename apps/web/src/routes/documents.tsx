@@ -209,21 +209,21 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         />
 
         <div className="mt-5 grid min-h-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
-          <aside className="min-w-0 border-b border-[color:var(--color-border)] pb-4 lg:border-b-0 lg:border-r lg:pr-4">
+          <aside className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase text-[color:var(--color-fg-subtle)]">Bases</div>
-              <div className="text-[11px] text-[color:var(--color-fg-subtle)]">{bases.length}</div>
+              <div className="text-xs font-medium uppercase text-fg-subtle">Bases</div>
+              <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
             <div className="space-y-1">
               {basesView === "loading" ? (
-                <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
                   <Loader2Icon className="size-3.5 animate-spin" />
                   Loading bases
                 </div>
               ) : basesView === "error" ? (
                 <LoadErrorState title="Couldn't load document bases" error={basesError} onRetry={() => void refreshBases()} />
               ) : basesView === "empty" ? (
-                <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                <div className="rounded-lg border border-dashed border-border p-3 text-xs text-fg-muted">
                   Create a document base to start.
                 </div>
               ) : bases.map((base) => (
@@ -234,8 +234,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   className={cn(
                     "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
                     selectedBaseId === base.id
-                      ? "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
-                      : "border-[color:var(--color-border)] bg-[color:var(--color-bg)]/25 text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)]",
+                      ? "border-brand/40 bg-brand/10 text-fg"
+                      : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
                   )}
                 >
                   <span className="truncate">{base.name}</span>
@@ -251,7 +251,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="truncate text-base font-medium">{selectedBase.name}</div>
-                    <div className="text-xs text-[color:var(--color-fg-subtle)]">
+                    <div className="text-xs text-fg-subtle">
                       {documents.length} files · {failedDocuments.length} failed
                     </div>
                   </div>
@@ -289,26 +289,26 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
 
                 <div className="mt-4 space-y-2">
                   {documentsView === "loading" ? (
-                    <div className="flex items-center justify-center gap-2 rounded-lg border border-[color:var(--color-border)] p-6 text-xs text-[color:var(--color-fg-muted)]">
+                    <div className="flex items-center justify-center gap-2 rounded-lg border border-border p-6 text-xs text-fg-muted">
                       <Loader2Icon className="size-3.5 animate-spin" />
                       Loading documents
                     </div>
                   ) : documentsView === "error" ? (
                     <LoadErrorState title="Couldn't load documents" error={documentsError} onRetry={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined} />
                   ) : documentsView === "empty" ? (
-                    <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-xs text-[color:var(--color-fg-muted)]">
+                    <div className="rounded-lg border border-dashed border-border p-6 text-center text-xs text-fg-muted">
                       Upload files to index this base.
                     </div>
                   ) : (
                     documents.map((document) => (
-                      <div key={document.id} className="flex items-start justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 px-3 py-2.5">
+                      <div key={document.id} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium">{document.title}</div>
-                          <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+                          <div className="mt-1 text-2xs text-fg-subtle">
                             {document.status} · {document.chunkCount} chunks · {document.parser}
                           </div>
                           {document.status === "failed" && document.error ? (
-                            <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-[color:var(--color-danger)]">
+                            <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
                               {document.error}
                             </div>
                           ) : null}
@@ -335,15 +335,15 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 </div>
               </>
             ) : (
-              <div className="grid min-h-48 place-items-center text-center text-xs text-[color:var(--color-fg-muted)]">
+              <div className="grid min-h-48 place-items-center text-center text-xs text-fg-muted">
                 Select or create a base.
               </div>
             )}
           </div>
 
-          <aside className="min-w-0 border-t border-[color:var(--color-border)] pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
+          <aside className="min-w-0 border-t border-border pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
             <div className="flex items-center gap-2 text-sm font-medium">
-              <FileSearchIcon className="size-4 text-[color:var(--color-brand)]" />
+              <FileSearchIcon className="size-4 text-brand" />
               Search
             </div>
             <div className="mt-3 grid gap-2">
@@ -366,16 +366,16 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             <div className="mt-4 space-y-2">
               {results.length > 0 ? (
                 results.map((result) => (
-                  <div key={result.chunkId} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3">
+                  <div key={result.chunkId} className="rounded-lg border border-border bg-surface/35 p-3">
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate font-medium text-[color:var(--color-fg)]">{result.title}</span>
-                      <span className="shrink-0 text-[color:var(--color-fg-subtle)]">{Math.round(result.score * 100)}%</span>
+                      <span className="truncate font-medium text-fg">{result.title}</span>
+                      <span className="shrink-0 text-fg-subtle">{Math.round(result.score * 100)}%</span>
                     </div>
-                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">{result.text}</p>
+                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-fg-muted">{result.text}</p>
                   </div>
                 ))
               ) : (
-                <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
+                <div className="rounded-lg border border-dashed border-border p-4 text-xs leading-5 text-fg-muted">
                   Search results appear here for the selected base.
                 </div>
               )}
@@ -392,9 +392,9 @@ function DocumentStatusDot({ status }: { status: IndexedDocument["status"] }) {
     <span
       className={cn(
         "size-2.5 shrink-0 rounded-full",
-        status === "ready" && "bg-emerald-400",
-        status === "failed" && "bg-red-400",
-        (status === "queued" || status === "indexing") && "bg-amber-300",
+        status === "ready" && "bg-status-idle",
+        status === "failed" && "bg-status-failed",
+        (status === "queued" || status === "indexing") && "bg-status-waiting",
       )}
       aria-label={status}
       title={status}
