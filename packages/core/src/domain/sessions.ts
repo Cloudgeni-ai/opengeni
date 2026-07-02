@@ -10,6 +10,9 @@ import {
   type ResourceRef,
   type Session,
   type SessionEvent,
+  type SessionMcpCredentialUpdateInput,
+  type SessionMcpServerInput,
+  type SessionMcpServerMetadata,
   type SessionTurn,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -19,6 +22,7 @@ import {
   createSessionGoal,
   createSessionWithIdempotencyKey,
   enqueueSessionTurn,
+  encryptEnvironmentValue,
   getAnySessionInGroup,
   getEnrollment,
   listDistinctEnvironmentIdsInGroup,
@@ -29,16 +33,18 @@ import {
   requireSession,
   setTemporalWorkflowId,
   updateSessionTitle as updateSessionTitleRow,
+  updateSessionMcpServerCredentials,
+  type CreateSessionMcpServerInput,
   type Database,
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../dependencies";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { validateEnvironmentAttachment } from "./environments";
+import { requireEnvironmentEncryption, validateEnvironmentAttachment } from "./environments";
 import {
   mergeResourceRefs,
   mergeToolRefs,
@@ -48,6 +54,176 @@ import {
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
 } from "./resources";
+
+const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
+const maxSessionMcpCredentialHeaders = 16;
+const maxSessionMcpCredentialHeaderValueLength = 4096;
+// RFC 9110 field-name token characters.
+const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+type ValidatedSessionMcpServers = {
+  runtimeServers: Settings["mcpServers"];
+  dbServers: CreateSessionMcpServerInput[];
+  metadata: SessionMcpServerMetadata[];
+};
+
+function normalizedSessionMcpCredentialHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+  const entries = Object.entries(headers).map(([name, value]) => [name.trim(), value] as const).filter(([name]) => name.length > 0);
+  if (entries.length > maxSessionMcpCredentialHeaders) {
+    throw new HTTPException(422, { message: `a session MCP server supports at most ${maxSessionMcpCredentialHeaders} credential headers` });
+  }
+  const seen = new Set<string>();
+  for (const [name, value] of entries) {
+    if (!sessionMcpCredentialHeaderName.test(name)) {
+      throw new HTTPException(422, { message: `invalid credential header name: ${name}` });
+    }
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) {
+      throw new HTTPException(422, { message: `duplicate credential header name: ${name}` });
+    }
+    seen.add(lower);
+    if (value.length === 0 || value.length > maxSessionMcpCredentialHeaderValueLength) {
+      throw new HTTPException(422, { message: `credential header ${name} must be 1-${maxSessionMcpCredentialHeaderValueLength} characters` });
+    }
+    // RFC 9110 §5.5: field values are HTAB / printable characters.
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u0008\u000A-\u001F\u007F]/.test(value)) {
+      throw new HTTPException(422, { message: `credential header ${name} contains forbidden control characters` });
+    }
+  }
+  return Object.fromEntries(entries);
+}
+
+function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpServers"][number] {
+  return {
+    id: server.id,
+    ...(server.name ? { name: server.name } : {}),
+    url: server.url,
+    ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+    ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+    cacheToolsList: server.cacheToolsList ?? false,
+  };
+}
+
+function mcpServerConfigFromMetadata(server: SessionMcpServerMetadata): Settings["mcpServers"][number] {
+  return {
+    id: server.id,
+    ...(server.name ? { name: server.name } : {}),
+    url: server.url,
+    cacheToolsList: false,
+  };
+}
+
+function settingsWithSessionMcpServerConfigs(settings: Settings, servers: Settings["mcpServers"]): Settings {
+  if (servers.length === 0) {
+    return settings;
+  }
+  const sessionIds = new Set(servers.map((server) => server.id));
+  return {
+    ...settings,
+    mcpServers: [
+      ...settings.mcpServers.filter((server) => !sessionIds.has(server.id)),
+      ...servers,
+    ],
+  };
+}
+
+export function settingsWithSessionMcpServerMetadata(settings: Settings, servers: SessionMcpServerMetadata[]): Settings {
+  return settingsWithSessionMcpServerConfigs(settings, servers.map(mcpServerConfigFromMetadata));
+}
+
+function validateSessionMcpServersForCreate(
+  settings: Settings,
+  grant: AccessGrant,
+  servers: SessionMcpServerInput[],
+): ValidatedSessionMcpServers {
+  if (servers.length === 0) {
+    return { runtimeServers: [], dbServers: [], metadata: [] };
+  }
+  requirePermission(grant, "mcp_servers:attach");
+  const encryptionKey = requireEnvironmentEncryption(settings);
+  const existingIds = new Set(settings.mcpServers.map((server) => server.id));
+  const seenIds = new Set<string>();
+  const runtimeServers: Settings["mcpServers"] = [];
+  const dbServers: CreateSessionMcpServerInput[] = [];
+  const metadata: SessionMcpServerMetadata[] = [];
+  for (const server of servers) {
+    if (seenIds.has(server.id)) {
+      throw new HTTPException(422, { message: `duplicate session MCP server id: ${server.id}` });
+    }
+    seenIds.add(server.id);
+    if (reservedSessionMcpServerIds.has(server.id) || existingIds.has(server.id)) {
+      throw new HTTPException(422, { message: `MCP server id already exists: ${server.id}` });
+    }
+    const headers = normalizedSessionMcpCredentialHeaders(server.headers);
+    const headersEncrypted = Object.fromEntries(
+      Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+    );
+    runtimeServers.push(mcpServerConfigFromInput(server));
+    dbServers.push({
+      id: server.id,
+      name: server.name ?? null,
+      url: server.url,
+      allowedTools: server.allowedTools ?? null,
+      timeoutMs: server.timeoutMs ?? null,
+      cacheToolsList: server.cacheToolsList ?? false,
+      headersEncrypted,
+    });
+    metadata.push({
+      id: server.id,
+      name: server.name ?? null,
+      url: server.url,
+      headerNames: Object.keys(headersEncrypted).sort(),
+      credentialVersion: 1,
+    });
+  }
+  return { runtimeServers, dbServers, metadata };
+}
+
+async function applySessionMcpCredentialUpdates(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  workspaceId: string;
+  session: Session;
+  updates: SessionMcpCredentialUpdateInput[];
+}): Promise<SessionMcpServerMetadata[]> {
+  if (input.updates.length === 0) {
+    return [];
+  }
+  requirePermission(input.grant, "mcp_servers:attach");
+  const encryptionKey = requireEnvironmentEncryption(input.settings);
+  const knownIds = new Set(input.session.mcpServers.map((server) => server.id));
+  const seenIds = new Set<string>();
+  const encryptedUpdates = input.updates.map((update) => {
+    if (seenIds.has(update.id)) {
+      throw new HTTPException(422, { message: `duplicate session MCP credential update id: ${update.id}` });
+    }
+    seenIds.add(update.id);
+    if (!knownIds.has(update.id)) {
+      throw new HTTPException(422, { message: `unknown session MCP server id: ${update.id}` });
+    }
+    const headers = normalizedSessionMcpCredentialHeaders(update.headers);
+    return {
+      id: update.id,
+      headersEncrypted: Object.fromEntries(
+        Object.entries(headers).map(([name, value]) => [name, encryptEnvironmentValue(encryptionKey, value)]),
+      ),
+    };
+  });
+  const result = await updateSessionMcpServerCredentials(input.db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.session.id,
+    updates: encryptedUpdates,
+  });
+  if (result.missingIds.length > 0) {
+    throw new HTTPException(422, { message: `unknown session MCP server id: ${result.missingIds[0]}` });
+  }
+  return result.servers;
+}
 
 export async function createAndStartSession(input: {
   db: Database;
@@ -68,6 +244,10 @@ export async function createAndStartSession(input: {
   goal?: GoalSpec | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
+  // Encrypted DB rows plus matching safe metadata for create-time per-session
+  // MCP servers. Metadata is the only shape emitted in events/responses.
+  mcpServers?: CreateSessionMcpServerInput[];
+  sessionMcpServers?: SessionMcpServerMetadata[];
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -127,6 +307,7 @@ export async function createAndStartSession(input: {
       createIdempotencyKey: input.createIdempotencyKey,
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+      mcpServers: input.mcpServers ?? [],
     });
     if (!created) {
       return keyed;
@@ -147,6 +328,7 @@ export async function createAndStartSession(input: {
     parentSessionId: input.parentSessionId ?? null,
     sandboxGroupId: input.sandboxGroupId ?? null,
     ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+    mcpServers: input.mcpServers ?? [],
   });
   return await finishStartSession(input, session);
 }
@@ -171,6 +353,7 @@ async function finishStartSession(input: {
   sandboxBackend: Settings["sandboxBackend"];
   environment?: { id: string; name: string } | null;
   goal?: GoalSpec | null;
+  sessionMcpServers?: SessionMcpServerMetadata[];
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
 }, session: Session): Promise<Session> {
   // The goal row is durable session state; the workflow picks it up from the
@@ -197,6 +380,7 @@ async function finishStartSession(input: {
       payload: {
         status: "queued",
         ...(input.environment ? { environmentId: input.environment.id, environmentName: input.environment.name } : {}),
+        ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
       },
     },
     ...(goal ? [{
@@ -355,6 +539,7 @@ export async function postUserMessageTurn(input: {
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
+  mcpCredentialUpdates?: SessionMcpServerMetadata[];
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -386,6 +571,7 @@ export async function postUserMessageTurn(input: {
             ...(input.tools.length ? { tools: input.tools } : {}),
             ...(requestedModel ? { model: requestedModel } : {}),
             ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
+            ...(input.mcpCredentialUpdates?.length ? { mcpCredentialUpdates: input.mcpCredentialUpdates } : {}),
           },
           ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
         },
@@ -446,12 +632,14 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
+  const sessionMcpServers = validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
+  const runtimeSettings = settingsWithSessionMcpServerConfigs(capabilityRuntimeSettings, sessionMcpServers.runtimeServers);
   const resources = normalizeResources(payload.resources);
   const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
   const defaultedTools = hasOwnProperty(rawPayload, "tools")
     ? requestedTools
-    : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, runtimeSettings);
+    : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
   // The first-party MCP server is attached to EVERY session. It hosts the
   // session's own metadata tool (set_session_title) + goal tools, and — only
   // when the grant carries the permission — the orchestration/environment/
@@ -672,6 +860,8 @@ export async function createSessionForRequest(
     environment: environment ? { id: environment.id, name: environment.name } : null,
     goal: payload.goal ?? null,
     firstPartyMcpPermissions,
+    mcpServers: sessionMcpServers.dbServers,
+    sessionMcpServers: sessionMcpServers.metadata,
     parentSessionId,
     createIdempotencyKey: payload.idempotencyKey ?? null,
     // Create-time machine targeting (A-2a): when a target sandbox is named, the
@@ -716,19 +906,21 @@ export async function acceptSessionUserMessage(
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
-  const requestedResources = normalizeResources(input.resources ?? []);
-  const validatedTools = validateToolRefs(input.tools ?? [], runtimeSettings);
-  const requestedTools = input.toolsProvided
-    ? validatedTools
-    : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, runtimeSettings);
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings);
   // Hoisted above requireLimit so the codex-billed predicate can resolve the
   // turn's effective model (a follow-up turn inherits the session's model). A
   // pure read with no side effects.
   const existingSession = await requireSession(db, workspaceId, sessionId);
+  const runtimeSettings = settingsWithSessionMcpServerMetadata(capabilityRuntimeSettings, existingSession.mcpServers);
+  const requestedResources = normalizeResources(input.resources ?? []);
+  const validatedTools = validateToolRefs(input.tools ?? [], runtimeSettings);
+  const requestedTools = input.toolsProvided
+    ? validatedTools
+    : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, capabilityRuntimeSettings);
   await requireLimit(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -741,6 +933,14 @@ export async function acceptSessionUserMessage(
   }
   await validateFileResources(db, workspaceId, requestedResources);
   await validateGitHubRepositorySelection(db, workspaceId, [...existingSession.resources, ...requestedResources]);
+  const rotatedMcpServers = await applySessionMcpCredentialUpdates({
+    db,
+    settings,
+    grant,
+    workspaceId,
+    session: existingSession,
+    updates: input.mcpCredentialUpdates ?? [],
+  });
   const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
@@ -754,6 +954,7 @@ export async function acceptSessionUserMessage(
     tools: requestedTools,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
+    mcpCredentialUpdates: rotatedMcpServers,
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });
   await recordWorkspaceUsage(deps, {

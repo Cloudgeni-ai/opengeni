@@ -160,6 +160,9 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionCapabilities,
+  SessionMcpCredentialUpdateInput,
+  SessionMcpServerInput,
+  SessionMcpServerMetadata,
   // Per-surface capability cell aliases (views of SessionCapabilities).
   FileSystemCapability,
   TerminalCapability,

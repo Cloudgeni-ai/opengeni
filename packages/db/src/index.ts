@@ -34,6 +34,7 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
@@ -348,6 +349,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "environments:manage",
   "environments:use",
+  "mcp_servers:attach",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
@@ -1198,6 +1200,33 @@ export type EnabledMcpCapabilityServer = {
    * capability API surface.
    */
   headersEncrypted?: Record<string, string>;
+};
+
+export type CreateSessionMcpServerInput = {
+  id: string;
+  name?: string | null;
+  url: string;
+  allowedTools?: string[] | null;
+  timeoutMs?: number | null;
+  cacheToolsList?: boolean | null;
+  headersEncrypted?: Record<string, string>;
+};
+
+export type UpdateSessionMcpServerCredentialsInput = {
+  id: string;
+  headersEncrypted: Record<string, string>;
+};
+
+export type UpdateSessionMcpServerCredentialsResult = {
+  servers: SessionMcpServerMetadata[];
+  missingIds: string[];
+};
+
+export type SessionMcpServerForRun = SessionMcpServerMetadata & {
+  allowedTools?: string[];
+  timeoutMs?: number;
+  cacheToolsList?: boolean;
+  headers: Record<string, string>;
 };
 
 export type EnqueueSessionTurnInput = {
@@ -3085,6 +3114,144 @@ function mapWorkspaceEnvironmentVariableMetadata(row: {
   };
 }
 
+function mapSessionMcpServerMetadata(row: typeof schema.sessionMcpServers.$inferSelect): SessionMcpServerMetadata {
+  return {
+    id: row.serverId,
+    name: row.name ?? null,
+    url: row.url,
+    headerNames: Object.keys(row.headersEncrypted ?? {}).sort(),
+    credentialVersion: Number(row.credentialVersion),
+  };
+}
+
+async function sessionMcpServerMetadataForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, SessionMcpServerMetadata[]>> {
+  const grouped = new Map<string, SessionMcpServerMetadata[]>();
+  if (sessionIds.length === 0) {
+    return grouped;
+  }
+  const rows = await db.select().from(schema.sessionMcpServers)
+    .where(and(
+      eq(schema.sessionMcpServers.workspaceId, workspaceId),
+      inArray(schema.sessionMcpServers.sessionId, sessionIds),
+    ))
+    .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
+  for (const row of rows) {
+    const list = grouped.get(row.sessionId) ?? [];
+    list.push(mapSessionMcpServerMetadata(row));
+    grouped.set(row.sessionId, list);
+  }
+  return grouped;
+}
+
+async function insertSessionMcpServers(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  servers: CreateSessionMcpServerInput[];
+}): Promise<SessionMcpServerMetadata[]> {
+  if (input.servers.length === 0) {
+    return [];
+  }
+  const rows = await db.insert(schema.sessionMcpServers).values(input.servers.map((server) => ({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    serverId: server.id,
+    name: server.name ?? null,
+    url: server.url,
+    allowedTools: server.allowedTools ?? null,
+    timeoutMs: server.timeoutMs ?? null,
+    cacheToolsList: server.cacheToolsList ?? false,
+    headersEncrypted: server.headersEncrypted ?? {},
+  }))).returning();
+  return rows.map(mapSessionMcpServerMetadata);
+}
+
+export async function createSessionMcpServers(db: Database, input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  servers: CreateSessionMcpServerInput[];
+}): Promise<SessionMcpServerMetadata[]> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) =>
+    await insertSessionMcpServers(scopedDb, input)
+  );
+}
+
+export async function listSessionMcpServerMetadata(db: Database, workspaceId: string, sessionId: string): Promise<SessionMcpServerMetadata[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [sessionId]);
+    return grouped.get(sessionId) ?? [];
+  });
+}
+
+export async function updateSessionMcpServerCredentials(db: Database, input: {
+  workspaceId: string;
+  sessionId: string;
+  updates: UpdateSessionMcpServerCredentialsInput[];
+}): Promise<UpdateSessionMcpServerCredentialsResult> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => await scopedDb.transaction(async (tx) => {
+    const servers: SessionMcpServerMetadata[] = [];
+    const missingIds: string[] = [];
+    for (const update of input.updates) {
+      const [row] = await tx.update(schema.sessionMcpServers)
+        .set({
+          headersEncrypted: update.headersEncrypted,
+          credentialVersion: sql`${schema.sessionMcpServers.credentialVersion} + 1`,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+          eq(schema.sessionMcpServers.sessionId, input.sessionId),
+          eq(schema.sessionMcpServers.serverId, update.id),
+        ))
+        .returning();
+      if (!row) {
+        missingIds.push(update.id);
+      } else {
+        servers.push(mapSessionMcpServerMetadata(row));
+      }
+    }
+    return { servers, missingIds };
+  }));
+}
+
+export async function listSessionMcpServersForRun(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  encryptionKey: Uint8Array,
+): Promise<SessionMcpServerForRun[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.select().from(schema.sessionMcpServers)
+      .where(and(
+        eq(schema.sessionMcpServers.workspaceId, workspaceId),
+        eq(schema.sessionMcpServers.sessionId, sessionId),
+      ))
+      .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
+    return rows.map((row) => {
+      let headers: Record<string, string>;
+      try {
+        headers = Object.fromEntries(Object.entries(row.headersEncrypted ?? {})
+          .map(([name, stored]) => [name, decryptEnvironmentValue(encryptionKey, stored)]));
+      } catch {
+        throw new Error("session MCP server credential decryption failed");
+      }
+      return {
+        ...mapSessionMcpServerMetadata(row),
+        ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
+        ...(row.timeoutMs ? { timeoutMs: row.timeoutMs } : {}),
+        ...(row.cacheToolsList ? { cacheToolsList: row.cacheToolsList } : {}),
+        headers,
+      };
+    });
+  });
+}
+
 export async function createSession(db: Database, input: {
   accountId: string;
   workspaceId: string;
@@ -3103,6 +3270,7 @@ export async function createSession(db: Database, input: {
   // shared spawn passes the parent's sandboxGroupId so both run in ONE box.
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
+  mcpServers?: CreateSessionMcpServerInput[];
 }): Promise<Session> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
@@ -3129,7 +3297,13 @@ export async function createSession(db: Database, input: {
     if (!row) {
       throw new Error("Failed to create session");
     }
-    return mapSession(row);
+    const mcpServers = await insertSessionMcpServers(scopedDb, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: row.id,
+      servers: input.mcpServers ?? [],
+    });
+    return mapSession(row, mcpServers);
   });
 }
 
@@ -3160,6 +3334,7 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
   // (group === the new row's own id); a shared spawn passes the parent's group.
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
+  mcpServers?: CreateSessionMcpServerInput[];
 }): Promise<{ session: Session; created: boolean }> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
@@ -3187,7 +3362,13 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       where: sql`${schema.sessions.createIdempotencyKey} is not null`,
     }).returning();
     if (inserted) {
-      return { session: mapSession(inserted), created: true };
+      const mcpServers = await insertSessionMcpServers(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: inserted.id,
+        servers: input.mcpServers ?? [],
+      });
+      return { session: mapSession(inserted, mcpServers), created: true };
     }
     const [existing] = await scopedDb.select().from(schema.sessions).where(and(
       eq(schema.sessions.workspaceId, input.workspaceId),
@@ -3199,7 +3380,8 @@ export async function createSessionWithIdempotencyKey(db: Database, input: {
       // than silently returning a phantom.
       throw new Error("Failed to create session under idempotency key");
     }
-    return { session: mapSession(existing), created: false };
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, input.workspaceId, [existing.id]);
+    return { session: mapSession(existing, grouped.get(existing.id) ?? []), created: false };
   });
 }
 
@@ -3209,14 +3391,18 @@ export async function getSessionByCreateIdempotencyKey(db: Database, workspaceId
       eq(schema.sessions.workspaceId, workspaceId),
       eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
     )).limit(1);
-    return row ? mapSession(row) : null;
+    if (!row) return null;
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
+    return mapSession(row, grouped.get(row.id) ?? []);
   });
 }
 
 export async function getSession(db: Database, workspaceId: string, sessionId: string): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.sessions).where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId))).limit(1);
-    return row ? mapSession(row) : null;
+    if (!row) return null;
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
+    return mapSession(row, grouped.get(row.id) ?? []);
   });
 }
 
@@ -3262,7 +3448,8 @@ export async function listSessions(db: Database, workspaceId: string, limit = 50
       .where(eq(schema.sessions.workspaceId, workspaceId))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
-    return rows.map(mapSession);
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
+    return rows.map((row) => mapSession(row, grouped.get(row.id) ?? []));
   });
 }
 
@@ -7377,7 +7564,7 @@ export function sessionSubject(workspaceId: string, sessionId: string): string {
   return `workspaces.${workspaceId}.sessions.${sessionId}.events`;
 }
 
-function mapSession(row: typeof schema.sessions.$inferSelect): Session {
+function mapSession(row: typeof schema.sessions.$inferSelect, mcpServers: SessionMcpServerMetadata[] = []): Session {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -7400,6 +7587,7 @@ function mapSession(row: typeof schema.sessions.$inferSelect): Session {
     activeEpoch: Number(row.activeEpoch),
     environmentId: row.environmentId,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
+    mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     createIdempotencyKey: row.createIdempotencyKey ?? null,
     temporalWorkflowId: row.temporalWorkflowId,

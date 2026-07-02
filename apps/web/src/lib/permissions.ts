@@ -21,6 +21,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "scheduled_tasks:run": "Scheduled tasks",
   "environments:manage": "Environments",
   "environments:use": "Environments",
+  "mcp_servers:attach": "Sessions",
   "github:manage": "GitHub",
   "github:use": "GitHub",
   "goals:manage": "Goals",

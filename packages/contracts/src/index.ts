@@ -486,6 +486,10 @@ export const Permission = z.enum([
   "api_keys:manage",
   "environments:manage",
   "environments:use",
+  // Attach or rotate per-session third-party MCP server credentials. Deliberately
+  // not part of the worker's default first-party MCP permission set: a sandboxed
+  // agent must not be able to hand itself new bearer credentials.
+  "mcp_servers:attach",
   "goals:manage",
   // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
   // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
@@ -1361,6 +1365,43 @@ export const ToolRef = z.object({
 });
 export type ToolRef = z.infer<typeof ToolRef>;
 
+const registryId = /^[A-Za-z0-9_-]+$/;
+const httpsUrl = z.string().url().refine((value) => {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}, { message: "URL must use https" });
+
+export const SessionMcpServerInput = z.object({
+  id: z.string().min(1).regex(registryId),
+  name: z.string().min(1).optional(),
+  url: httpsUrl,
+  allowedTools: z.array(z.string().min(1)).optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  cacheToolsList: z.boolean().optional(),
+  // Write-only credential headers. Values are encrypted at rest and never
+  // returned in session responses or events; response metadata exposes names.
+  headers: z.record(z.string(), z.string()).optional(),
+});
+export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
+
+export const SessionMcpCredentialUpdateInput = z.object({
+  id: z.string().min(1).regex(registryId),
+  headers: z.record(z.string(), z.string()),
+});
+export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
+
+export const SessionMcpServerMetadata = z.object({
+  id: z.string().min(1).regex(registryId),
+  name: z.string().min(1).nullable(),
+  url: httpsUrl,
+  headerNames: z.array(z.string()).default([]),
+  credentialVersion: z.number().int().positive(),
+}).strict();
+export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
+
 export class ResourceRefConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -2164,6 +2205,9 @@ export const Session = z.object({
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),
+  // Per-session third-party MCP servers, metadata only. Credential values are
+  // write-only and never appear here.
+  mcpServers: z.array(SessionMcpServerMetadata).default([]),
   // The manager session that spawned this one via session_create (set only
   // when the creating grant carried a worker-signed sessionId claim); null for
   // direct API creates and scheduled-task runs. When set, this session's
@@ -2769,6 +2813,9 @@ export const CreateSessionRequest = z.object({
   // the orchestration/environment/github tools. Capped at creation: every
   // requested permission must be held by the creating grant (no escalation).
   firstPartyMcpPermissions: z.array(Permission).optional(),
+  // Third-party MCP servers attached only to this session. Credential headers are
+  // write-only: create responses and events expose only SessionMcpServerMetadata.
+  mcpServers: z.array(SessionMcpServerInput).default([]),
   // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
   // today's behavior (a context-dependent default resolved server-side: from
   // inside a session → "shared" with the creator's box, top-level → "new").
@@ -2804,6 +2851,9 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       tools: z.array(ToolRef).default([]),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
+      // Header-value rotation only. URL/name/tool settings are immutable after
+      // session create; persisted events expose metadata, never header values.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
   z.object({

@@ -1,5 +1,6 @@
 import {
   CreateScheduledTaskRequest,
+  SessionMcpCredentialUpdateInput,
   WorkspaceEnvironmentVariableName,
   type AccessGrant,
   type GitHubRepository,
@@ -631,6 +632,9 @@ function registerWorkspaceOrchestrationTools(
         goal: z4.unknown().optional(),
         resources: z4.array(z4.unknown()).optional(),
         tools: z4.array(z4.unknown()).optional(),
+        // Per-session third-party MCP servers. Credential header values are
+        // accepted only at create and never appear in responses/events.
+        mcpServers: z4.array(z4.unknown()).optional(),
         environmentId: z4.string().uuid().optional(),
         model: z4.string().min(1).optional(),
         reasoningEffort: z4.string().optional(),
@@ -691,11 +695,15 @@ function registerWorkspaceOrchestrationTools(
       inputSchema: {
         sessionId: z4.string().uuid(),
         text: z4.string().min(1),
+        // Header-value rotation only. URL/name/tool settings are immutable
+        // after create; core enforces mcp_servers:attach on this field.
+        mcpCredentialUpdates: z4.array(z4.unknown()).optional(),
       },
-    }, async ({ sessionId, text }) => {
+    }, async ({ sessionId, text, mcpCredentialUpdates }) => {
       const { accepted, turn } = await acceptSessionUserMessage(deps, grant, grant.workspaceId, sessionId, {
         text,
         toolsProvided: false,
+        mcpCredentialUpdates: (mcpCredentialUpdates ?? []).map((update) => SessionMcpCredentialUpdateInput.parse(update)),
       });
       return json({ event: accepted, turnId: turn.id });
     });
