@@ -1,7 +1,7 @@
 import type { ClientModel, SessionStatus } from "@opengeni/sdk";
-import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, SquareIcon, XIcon } from "lucide-react";
+import { ArrowUpIcon, FileIcon, ImageIcon, LoaderCircleIcon, PaperclipIcon, RotateCwIcon, SquareIcon, XIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { argHint } from "../commands/registry";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
@@ -303,7 +303,9 @@ export function ChatComposer({
   const activeNotice = notice ?? (composer.error ? { tone: "error" as const, message: composer.error.message || "Sending failed — your draft is still here. Try again." } : null);
 
   return (
-    <div className={cn("og-root", className)}>
+    // Respect the iOS home-indicator inset so the sticky composer never sits
+    // under it (0 on non-notch devices and desktop, so it's inert there).
+    <div className={cn("og-root", className)} style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
       <div className="relative">
         {paletteEnabled ? (
           <CommandPalette
@@ -354,7 +356,11 @@ export function ChatComposer({
             </div>
           ) : null}
           {attachments && attachments.attachments.length > 0 ? (
-            <AttachmentChips attachments={attachments.attachments} onRemove={attachments.remove} />
+            <AttachmentChips
+              attachments={attachments.attachments}
+              onRemove={attachments.remove}
+              onRetry={attachments.retry}
+            />
           ) : null}
           {header}
           <textarea
@@ -373,7 +379,9 @@ export function ChatComposer({
             aria-controls={paletteEnabled && palette.open ? listboxId : undefined}
             aria-activedescendant={paletteEnabled && palette.open ? `${listboxId}-option-${palette.highlight}` : undefined}
             className={cn(
-              "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-[15px] leading-6",
+              // Font size steps up to 16px below `md` so iOS never zooms the
+              // viewport on focus; desktop keeps the 15px og-md rhythm.
+              "block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-base leading-6 md:text-og-md",
               // The wrapper owns the whole-composer focus affordance (focus-within
               // border + soft glow). Suppress any self-scoped focus outline on the
               // textarea itself: `focus:outline-none` alone only sets outline-style
@@ -391,11 +399,15 @@ export function ChatComposer({
               command={pendingDangerCommand}
               onCancel={() => confirmState.resolve(false)}
               onConfirm={() => confirmState.resolve(true)}
+              returnFocusRef={textareaRef}
             />
           ) : (
-            <div className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1">
+            <div className="flex items-end gap-2 px-2.5 pb-2.5 pt-1">
               {attachments || models || controlsStart ? (
-                <span className="flex min-w-0 items-center gap-1.5">
+                // The control group wraps onto extra rows when it can't fit
+                // (narrow viewports) instead of clipping under the rounded
+                // corner; send/stop stays anchored bottom-right (shrink-0).
+                <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                   {attachments ? (
                     <>
                       <input
@@ -432,11 +444,11 @@ export function ChatComposer({
                   {controlsStart}
                 </span>
               ) : (
-                <span className="px-1.5 text-[11px] text-og-fg-subtle max-sm:hidden">
+                <span className="min-w-0 flex-1 px-1.5 text-og-xs text-og-fg-subtle max-sm:hidden">
                   {hint ?? "Enter to send · Shift+Enter for a new line · / for commands"}
                 </span>
               )}
-              <span className="flex items-center gap-1.5">
+              <span className="ml-auto flex shrink-0 items-center gap-1.5">
                 <AnimatePresence initial={false}>
                   {active ? (
                     <motion.button
@@ -451,7 +463,7 @@ export function ChatComposer({
                       aria-label="Stop the current turn"
                       title="Stop the current turn"
                       className={cn(
-                        "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border",
+                        "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
                         "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
                         "hover:border-og-status-failed/50 hover:text-og-status-failed",
                         "disabled:opacity-50",
@@ -476,7 +488,7 @@ export function ChatComposer({
                   disabled={!canSend || disabled === true || commandDraftBlocked}
                   aria-label="Send message"
                   className={cn(
-                    "inline-flex size-8 items-center justify-center rounded-og-md",
+                    "inline-flex size-8 items-center justify-center rounded-og-md pointer-coarse:size-11",
                     "bg-og-accent text-og-accent-fg shadow-og-sm",
                     "transition-[background-color,transform,opacity] duration-150 ease-og-spring",
                     "hover:bg-og-accent-strong active:scale-95",
@@ -521,33 +533,66 @@ export function ChatComposer({
   );
 }
 
-/** The danger confirm bar — reuses og-status-failed tokens (like the stop control). */
-function ConfirmBar({ command, onCancel, onConfirm }: { command: SlashCommand; onCancel: () => void; onConfirm: () => void }) {
+/**
+ * The danger confirm bar — reuses og-status-failed tokens (like the stop
+ * control). Inline (not a modal) but keyboard-complete: Escape cancels, focus
+ * moves to the primary action when it appears and returns to the composer on
+ * dismiss, and the primary button names the action rather than a bare "Confirm".
+ */
+function ConfirmBar({
+  command,
+  onCancel,
+  onConfirm,
+  returnFocusRef,
+}: {
+  command: SlashCommand;
+  onCancel: () => void;
+  onConfirm: () => void;
+  /** Focus returns here when the bar dismisses (the composer textarea). */
+  returnFocusRef?: RefObject<HTMLTextAreaElement | null> | undefined;
+}) {
+  const confirmRef = useRef<HTMLButtonElement | null>(null);
+  const descriptionId = useId();
+  useEffect(() => {
+    const returnTo = returnFocusRef?.current ?? null;
+    confirmRef.current?.focus();
+    return () => {
+      returnTo?.focus();
+    };
+  }, [returnFocusRef]);
   return (
     <div
       role="alertdialog"
       aria-label={`Confirm /${command.name}`}
+      aria-describedby={descriptionId}
       data-testid="danger-confirm"
-      className="flex items-center justify-between gap-2 px-2.5 pb-2.5 pt-1"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          onCancel();
+        }
+      }}
+      className="flex items-end justify-between gap-2 px-2.5 pb-2.5 pt-1"
     >
-      <span className="px-1.5 text-[12px] text-og-status-failed">
+      <span id={descriptionId} className="min-w-0 flex-1 px-1.5 text-og-sm text-og-status-failed">
         Run <span className="font-mono">/{command.name}</span>? {command.description}
       </span>
-      <span className="flex items-center gap-1.5">
+      <span className="flex shrink-0 items-center gap-1.5">
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-og-md border border-og-border bg-og-surface-2 px-2.5 py-1 text-[12px] text-og-fg-muted hover:bg-og-surface-3"
+          className="rounded-og-md border border-og-border bg-og-surface-2 px-2.5 py-1 text-og-sm text-og-fg-muted hover:bg-og-surface-3 pointer-coarse:min-h-10"
         >
           Cancel
         </button>
         <button
+          ref={confirmRef}
           type="button"
-          autoFocus
           onClick={onConfirm}
-          className="rounded-og-md border border-og-status-failed/50 bg-og-status-failed/15 px-2.5 py-1 text-[12px] text-og-status-failed hover:bg-og-status-failed/25"
+          className="rounded-og-md border border-og-status-failed/50 bg-og-status-failed/15 px-2.5 py-1 text-og-sm text-og-status-failed hover:bg-og-status-failed/25 pointer-coarse:min-h-10"
         >
-          Confirm
+          Run /{command.name}
         </button>
       </span>
     </div>
@@ -557,51 +602,73 @@ function ConfirmBar({ command, onCancel, onConfirm }: { command: SlashCommand; o
 /**
  * The attachment-chips strip rendered above the textarea while files are
  * attached. Each chip shows an image preview (or a type icon), the filename,
- * an upload/size/failed status line, and a remove control. Styled with the
+ * an upload/size/failed status line, and a remove control. A failed upload
+ * surfaces its actual error (inline, full text on hover via `title`) and offers
+ * a retry alongside remove — a failed attachment never blocks send (only an
+ * in-progress upload does), and removing it clears the way. Styled with the
  * package's og-* tokens so it themes in any consumer.
  */
-function AttachmentChips({ attachments, onRemove }: {
+function AttachmentChips({ attachments, onRemove, onRetry }: {
   attachments: UseFileAttachmentsResult["attachments"];
   onRemove: (id: string) => void;
+  onRetry?: ((id: string) => void) | undefined;
 }) {
   return (
     <div className="flex flex-wrap gap-2 border-b border-og-border px-3 py-2">
-      {attachments.map((attachment) => (
-        <div
-          key={attachment.id}
-          className={cn(
-            "flex min-w-0 max-w-[240px] items-center gap-2 rounded-og-md border px-2 py-1.5",
-            "border-og-border bg-og-surface-2 text-xs",
-          )}
-        >
-          {attachment.previewUrl ? (
-            <img src={attachment.previewUrl} alt="" className="size-8 shrink-0 rounded object-cover" />
-          ) : attachment.contentType.startsWith("image/") ? (
-            <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
-          ) : (
-            <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
-          )}
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-medium text-og-fg">{attachment.name}</div>
-            <div className={cn(
-              "truncate text-[11px]",
-              attachment.status === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+      {attachments.map((attachment) => {
+        const failed = attachment.status === "failed";
+        const statusText = attachment.status === "uploading"
+          ? "Uploading"
+          : failed
+            ? attachment.error || "Upload failed"
+            : formatBytes(attachment.sizeBytes);
+        return (
+          <div
+            key={attachment.id}
+            className={cn(
+              "flex min-w-0 max-w-[240px] items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              failed ? "border-og-status-failed/40 bg-og-status-failed/10" : "border-og-border bg-og-surface-2",
             )}
-            >
-              {attachment.status === "uploading" ? "Uploading" : attachment.status === "failed" ? "Upload failed" : formatBytes(attachment.sizeBytes)}
-            </div>
-          </div>
-          {attachment.status === "uploading" ? <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" /> : null}
-          <button
-            type="button"
-            onClick={() => onRemove(attachment.id)}
-            className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg"
-            aria-label={`Remove ${attachment.name}`}
           >
-            <XIcon className="size-3.5" />
-          </button>
-        </div>
-      ))}
+            {attachment.previewUrl ? (
+              <img src={attachment.previewUrl} alt="" className="size-8 shrink-0 rounded object-cover" />
+            ) : attachment.contentType.startsWith("image/") ? (
+              <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
+            ) : (
+              <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium text-og-fg">{attachment.name}</div>
+              <div
+                className={cn("truncate text-og-xs", failed ? "text-og-status-failed" : "text-og-fg-subtle")}
+                title={failed ? statusText : undefined}
+              >
+                {statusText}
+              </div>
+            </div>
+            {attachment.status === "uploading" ? <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" /> : null}
+            {failed && onRetry ? (
+              <button
+                type="button"
+                onClick={() => onRetry(attachment.id)}
+                className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-8"
+                aria-label={`Retry ${attachment.name}`}
+                title="Retry upload"
+              >
+                <RotateCwIcon className="size-3.5" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => onRemove(attachment.id)}
+              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg pointer-coarse:size-8"
+              aria-label={`Remove ${attachment.name}`}
+            >
+              <XIcon className="size-3.5" />
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -616,8 +683,8 @@ function HelpPanel({ commands, onClose }: { commands: readonly SlashCommand[]; o
       className="mt-2 overflow-hidden rounded-og-lg border border-og-border bg-og-surface-2"
     >
       <div className="flex items-center justify-between border-b border-og-border px-3 py-1.5">
-        <span className="text-[12px] font-medium text-og-fg">Commands</span>
-        <button type="button" onClick={onClose} className="text-[11px] text-og-fg-subtle hover:text-og-fg">
+        <span className="text-og-sm font-medium text-og-fg">Commands</span>
+        <button type="button" onClick={onClose} className="text-og-xs text-og-fg-subtle hover:text-og-fg">
           Close
         </button>
       </div>
@@ -626,13 +693,13 @@ function HelpPanel({ commands, onClose }: { commands: readonly SlashCommand[]; o
           const hint = argHint(command.args);
           return (
             <li key={command.name} className="flex items-baseline gap-2 px-3 py-1">
-              <span className="font-mono text-[12px] text-og-accent">
+              <span className="font-mono text-og-sm text-og-accent">
                 /{command.name}
                 {hint ? <span className="ml-1 text-og-fg-subtle">{hint}</span> : null}
               </span>
-              <span className="text-[12px] text-og-fg-muted">{command.description}</span>
+              <span className="text-og-sm text-og-fg-muted">{command.description}</span>
               {command.danger ? (
-                <span className="ml-auto rounded-og-xs bg-og-status-failed/15 px-1 text-[10px] uppercase tracking-wide text-og-status-failed">
+                <span className="ml-auto rounded-og-xs bg-og-status-failed/15 px-1 text-og-xs uppercase tracking-wide text-og-status-failed">
                   danger
                 </span>
               ) : null}

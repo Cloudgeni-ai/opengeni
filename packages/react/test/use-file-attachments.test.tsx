@@ -184,6 +184,46 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("retry(id) re-uploads a failed attachment in place -> ready, clearing its error", async () => {
+    let calls = 0;
+    const asset = fakeAsset({ id: "recovered", filename: "recovered.png" });
+    const client = fakeClient({
+      uploadFile: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error("transient network error");
+        }
+        return asset;
+      },
+    });
+    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+
+    await flushing(() => hook.result.current.addFiles([imageFile()]));
+    await flush();
+    const id = hook.result.current.attachments[0]!.id;
+    expect(hook.result.current.attachments[0]!.status).toBe("failed");
+    expect(hook.result.current.attachments[0]!.error).toBe("transient network error");
+
+    await flushing(() => hook.result.current.retry(id));
+    await flush();
+    const attachment = hook.result.current.attachments[0]!;
+    expect(attachment.status).toBe("ready");
+    expect(attachment.error).toBeUndefined();
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: asset.id }]);
+    expect(calls).toBe(2);
+    await hook.unmount();
+  });
+
+  test("retry(id) is a no-op for an unknown / already-removed id", async () => {
+    const client = fakeClient({ uploadFile: async () => fakeAsset() });
+    const hook = await renderHook(() => useFileAttachments({ client, workspaceId: WORKSPACE_ID }), undefined);
+
+    await flushing(() => hook.result.current.retry("nope"));
+    await flush();
+    expect(hook.result.current.attachments).toHaveLength(0);
+    await hook.unmount();
+  });
+
   test("uploading is true while an upload is pending and flips false once it resolves", async () => {
     let resolveUpload!: (asset: FileAsset) => void;
     const pending = new Promise<FileAsset>((resolve) => { resolveUpload = resolve; });
