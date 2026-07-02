@@ -1,7 +1,7 @@
 // The session view — the console's centerpiece. Live timeline on the left;
 // the session rail (turn queue + goal, or debug inspector) on the right.
 // The composer is queue-by-default with explicit steer; failed sessions stay
-// honest (reason + re-dispatch history) and revivable from the same composer.
+// honest (reason + retry history) and revivable from the same composer.
 import {
   MessageTimeline,
   projectPendingApprovals,
@@ -17,7 +17,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, XIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MessagesSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -40,6 +40,8 @@ import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
 import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Notice } from "@/components/ui/notice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
@@ -153,8 +155,8 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       onClearView={clearView}
       onOpenSession={(nextSessionId) => void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: { workspaceId, sessionId: nextSessionId } })}
       onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
-      onApprove={(approvalId) => void approve(approvalId, "approve")}
-      onReject={(approvalId) => void approve(approvalId, "reject")}
+      onApprove={(approvalId) => approve(approvalId, "approve")}
+      onReject={(approvalId) => approve(approvalId, "reject")}
     />
   );
 
@@ -179,7 +181,8 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     try {
       await context.client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision });
     } catch (error) {
-      toast.error("Failed to submit the approval decision", { description: error instanceof Error ? error.message : String(error) });
+      toast.error("Couldn't submit the decision", { description: error instanceof Error ? error.message : String(error) });
+      throw error instanceof Error ? error : new Error(String(error));
     }
   }
 }
@@ -256,12 +259,38 @@ function SessionChatPane(props: {
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
   onNewSession: () => void;
-  onApprove: (approvalId: string) => void;
-  onReject: (approvalId: string) => void;
+  onApprove: (approvalId: string) => Promise<void>;
+  onReject: (approvalId: string) => Promise<void>;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(props.session.workspaceId);
   const terminal = isTerminalSessionStatus(props.session.status);
+  // Per-approval decision state: an in-flight decision disables both buttons for
+  // that approval and shows progress; a settled one can never double-submit even
+  // if the strip lingers for a beat before the status flips.
+  const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
+  const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
+  const decideApproval = useCallback(
+    async (approvalId: string, decision: "approve" | "reject") => {
+      if (approvalPending[approvalId] || approvalSettled[approvalId]) {
+        return;
+      }
+      setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      try {
+        await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
+        setApprovalSettled((current) => ({ ...current, [approvalId]: decision }));
+      } catch {
+        // The route already surfaced a toast; leave the buttons live to retry.
+      } finally {
+        setApprovalPending((current) => {
+          const next = { ...current };
+          delete next[approvalId];
+          return next;
+        });
+      }
+    },
+    [approvalPending, approvalSettled, props],
+  );
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
@@ -334,9 +363,12 @@ function SessionChatPane(props: {
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               emptyState={(
-                <div className="grid min-h-[24rem] place-items-center rounded-lg border border-dashed border-border text-sm text-fg-subtle">
-                  Waiting for session activity
-                </div>
+                <EmptyState
+                  className="min-h-[24rem]"
+                  icon={<MessagesSquareIcon className="size-4" />}
+                  title="Waiting for the first step"
+                  description="The agent's steps will appear here as it works."
+                />
               )}
             />
           </div>
@@ -349,24 +381,29 @@ function SessionChatPane(props: {
       {props.approvals.length > 0 && props.session.status === "requires_action" ? (
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
           <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
-            {props.approvals.map((approval) => (
-              <div key={approval.id} className="rounded-lg border border-status-waiting/40 bg-status-waiting/10 p-3">
-                <div className="text-sm font-medium">{approval.name}</div>
-                <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-md bg-bg p-3 text-xs text-fg-muted">
-                  {JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)}
-                </pre>
-                <div className="mt-3 flex justify-end gap-2">
-                  <Button size="sm" onClick={() => props.onApprove(approval.id)}>
-                    <CheckIcon className="size-3.5" />
-                    Approve
-                  </Button>
-                  <Button size="sm" variant="destructive" onClick={() => props.onReject(approval.id)}>
-                    <XIcon className="size-3.5" />
-                    Reject
-                  </Button>
-                </div>
-              </div>
-            ))}
+            {props.approvals.map((approval) => {
+              const pending = approvalPending[approval.id];
+              const settled = approvalSettled[approval.id];
+              const busy = Boolean(pending) || Boolean(settled);
+              const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
+              return (
+                <Notice key={approval.id} tone="waiting" title={approval.name}>
+                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-2/60 p-2.5 font-mono text-xs leading-5 text-fg-muted">
+                    {payload}
+                  </pre>
+                  <div className="mt-3 flex justify-end gap-2">
+                    <Button size="sm" disabled={busy} onClick={() => void decideApproval(approval.id, "approve")}>
+                      {pending === "approve" ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+                      {settled === "approve" ? "Approved" : "Approve"}
+                    </Button>
+                    <Button size="sm" variant="destructive" disabled={busy} onClick={() => void decideApproval(approval.id, "reject")}>
+                      {pending === "reject" ? <Loader2Icon className="size-3.5 animate-spin" /> : <XIcon className="size-3.5" />}
+                      {settled === "reject" ? "Rejected" : "Reject"}
+                    </Button>
+                  </div>
+                </Notice>
+              );
+            })}
           </div>
         </div>
       ) : null}
@@ -382,11 +419,11 @@ function SessionChatPane(props: {
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder={terminal
-              ? `Session is ${props.session.status}.`
+            placeholder={props.session.status === "cancelled"
+              ? "This session was cancelled."
               : props.session.status === "failed"
-                ? "Send a message to revive this session..."
-                : "Send a follow-up..."}
+                ? "This session failed — send a message to revive it."
+                : "Send a follow-up…"}
             controls={(
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker

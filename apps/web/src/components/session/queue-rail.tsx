@@ -7,7 +7,6 @@
 import type { UseTurnQueueResult } from "@opengeni/react";
 import type { SessionStatus, SessionTurn } from "@opengeni/sdk";
 import {
-  AlertTriangleIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronUpIcon,
@@ -21,6 +20,8 @@ import {
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
+import { StatusDot, STATUS_META, type StatusTone } from "@/components/ui/status-dot";
 import { formatElapsedSeconds, formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
 import {
@@ -110,29 +111,35 @@ export function QueueRail({ queue, sessionStatus }: {
           <ListPlusIcon className="size-3.5" />
           Turn queue
         </h3>
-        <span className="text-2xs text-fg-subtle">
-          {queue.queue.length > 0 ? `${queue.queue.length} queued` : activeTurnView === "error" ? "unavailable" : "empty"}
-        </span>
+        {queue.queue.length > 0 ? (
+          <span className="text-2xs text-fg-subtle">{queue.queue.length} queued</span>
+        ) : null}
       </div>
 
       {claimedNotice ? (
-        <div className="flex items-start gap-2 rounded-md border border-status-waiting/40 bg-status-waiting/10 p-2 text-xs leading-4 text-status-waiting">
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1">{claimedNotice}</span>
-          <button type="button" onClick={() => setClaimedNotice(null)} aria-label="Dismiss" className="shrink-0 rounded p-0.5 hover:bg-status-waiting/20">
-            <XIcon className="size-3" />
-          </button>
-        </div>
+        <Notice
+          tone="waiting"
+          action={(
+            <button type="button" onClick={() => setClaimedNotice(null)} aria-label="Dismiss" className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg">
+              <XIcon className="size-3.5" />
+            </button>
+          )}
+        >
+          {claimedNotice}
+        </Notice>
       ) : null}
 
       {queue.mutationError ? (
-        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed">
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1">{queue.mutationError.message}</span>
-          <button type="button" onClick={queue.clearMutationError} aria-label="Dismiss queue error" className="shrink-0 rounded p-0.5 hover:bg-status-failed/20">
-            <XIcon className="size-3" />
-          </button>
-        </div>
+        <Notice
+          tone="failed"
+          action={(
+            <button type="button" onClick={queue.clearMutationError} aria-label="Dismiss queue error" className="rounded p-0.5 text-fg-subtle hover:bg-surface-2 hover:text-fg">
+              <XIcon className="size-3.5" />
+            </button>
+          )}
+        >
+          {queue.mutationError.message}
+        </Notice>
       ) : null}
 
       {queue.activeTurn ? (
@@ -140,16 +147,19 @@ export function QueueRail({ queue, sessionStatus }: {
       ) : activeTurnView === "loading" ? (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface/45 p-3 text-xs text-fg-muted">
           <Loader2Icon className="size-3.5 animate-spin" />
-          Loading turns
+          Loading turns…
         </div>
       ) : activeTurnView === "error" ? (
-        <div className="flex items-start gap-2 rounded-md border border-status-failed/40 bg-status-failed/10 p-2 text-xs leading-4 text-status-failed" role="alert">
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span className="min-w-0 flex-1">Couldn't load the turn queue{queue.error?.message ? ` — ${queue.error.message}` : ""}</span>
-          <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="shrink-0 text-status-failed hover:bg-status-failed/20 hover:text-status-failed">
-            Retry
-          </Button>
-        </div>
+        <Notice
+          tone="failed"
+          action={(
+            <Button type="button" variant="ghost" size="xs" onClick={() => void queue.refresh()} className="text-status-failed hover:bg-status-failed/20 hover:text-status-failed">
+              Retry
+            </Button>
+          )}
+        >
+          Couldn't load the turn queue{queue.error?.message ? ` — ${queue.error.message}` : ""}
+        </Notice>
       ) : (
         <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-subtle">
           {sessionStatus === "failed"
@@ -274,10 +284,10 @@ export function QueueRail({ queue, sessionStatus }: {
           </summary>
           <ol className="mt-2 space-y-1">
             {history.slice(0, 12).map((turn) => (
-              <li key={turn.id} className="flex min-w-0 items-center gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5">
-                <TurnStatusDot status={turn.status} />
-                <span className="min-w-0 flex-1 truncate text-2xs text-fg-muted">{turn.prompt}</span>
-                <span className="shrink-0 text-2xs text-fg-subtle">{turn.status}</span>
+              <li key={turn.id} className="flex min-w-0 items-start gap-2 rounded-md border border-border/70 bg-bg/25 px-2 py-1.5">
+                <TurnStatusDot status={turn.status} className="mt-1" />
+                <span className="line-clamp-2 min-w-0 flex-1 text-2xs leading-4 text-fg-muted" title={turn.prompt}>{turn.prompt}</span>
+                <span className="shrink-0 text-2xs text-fg-subtle">{turnStatusLabel(turn.status)}</span>
               </li>
             ))}
           </ol>
@@ -307,10 +317,10 @@ function ActiveTurnCard({ turn }: { turn: SessionTurn }) {
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
           <TurnStatusDot status={turn.status} />
-          {awaitingApproval ? "Awaiting approval" : "Running"}
+          {awaitingApproval ? "Waiting on you" : "Running"}
         </span>
         <span className="shrink-0 font-mono text-2xs text-fg-muted" aria-label="Elapsed time">
-          {turn.startedAt ? formatElapsedSeconds(turnElapsedSeconds(turn, now)) : "starting"}
+          {turn.startedAt ? formatElapsedSeconds(turnElapsedSeconds(turn, now)) : "Starting…"}
         </span>
       </div>
       <div className="mt-1.5 line-clamp-3 text-xs leading-5 text-fg">{turn.prompt}</div>
@@ -323,19 +333,37 @@ function ActiveTurnCard({ turn }: { turn: SessionTurn }) {
   );
 }
 
-function TurnStatusDot({ status }: { status: SessionTurn["status"] }) {
-  return (
-    <span
-      className={cn(
-        "size-2 shrink-0 rounded-full",
-        status === "running" && "animate-pulse bg-status-running",
-        status === "requires_action" && "animate-pulse bg-status-waiting",
-        status === "queued" && "bg-status-queued",
-        status === "completed" && "bg-status-idle",
-        status === "failed" && "bg-status-failed",
-        status === "cancelled" && "bg-status-cancelled",
-      )}
-      aria-hidden="true"
-    />
-  );
+// Turn lifecycle → the one status language (doctrine D2). Note "completed" reads
+// as the idle hue but keeps its own "Completed" word in history: a finished turn
+// isn't "Idle".
+function turnStatusTone(status: SessionTurn["status"]): StatusTone {
+  switch (status) {
+    case "running":
+      return "running";
+    case "requires_action":
+      return "waiting";
+    case "completed":
+      return "idle";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "queued";
+  }
+}
+
+function turnStatusLabel(status: SessionTurn["status"]): string {
+  if (status === "completed") {
+    return "Completed";
+  }
+  if (status === "requires_action") {
+    return STATUS_META.waiting.label;
+  }
+  return STATUS_META[turnStatusTone(status)].label;
+}
+
+function TurnStatusDot({ status, className }: { status: SessionTurn["status"]; className?: string }) {
+  const tone = turnStatusTone(status);
+  return <StatusDot tone={tone} pulse={tone === "running" || tone === "waiting"} className={className} />;
 }
