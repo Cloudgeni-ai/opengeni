@@ -46,7 +46,10 @@ contiguous `sequence` number:
 
 Use `client.listEvents(workspaceId, sessionId, { before, after, limit })` for
 durable replay pages. `before` is an exclusive sequence cursor that returns the
-newest matching page, still ordered ascending in the response.
+newest matching page, still ordered ascending in the response. Pass
+`compact: true` for history windows that do not need individual delta fragments;
+delta runs may be coalesced and expose `payload.coalescedUntil` as the true last
+sequence for stream resume cursors.
 
 ```ts
 const controller = new AbortController();

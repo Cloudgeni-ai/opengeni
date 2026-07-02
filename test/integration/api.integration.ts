@@ -2778,6 +2778,37 @@ describe("API component integration", () => {
     expect(clampedMin.status).toBe(200);
     expect((await clampedMin.json() as SessionEvent[])).toHaveLength(1);
 
+    const compact = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000&compact=1`));
+    expect(compact.status).toBe(200);
+    const compactEvents = await compact.json() as SessionEvent[];
+    expect(compactEvents.slice(0, 4)).toEqual(initialEvents);
+    expect(compactEvents).toHaveLength(5);
+    expect(compactEvents[4]).toMatchObject({
+      sequence: 5,
+      type: "agent.message.delta",
+      payload: { coalescedUntil: latestSequence },
+    });
+    expect((compactEvents[4]?.payload as { text?: string }).text?.startsWith("bulk-0")).toBe(true);
+    expect((compactEvents[4]?.payload as { text?: string }).text?.endsWith(`bulk-${bulkEventCount - 1}`)).toBe(true);
+
+    const compactNewest = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?before=${Number.MAX_SAFE_INTEGER}&limit=3&compact=true`));
+    expect(compactNewest.status).toBe(200);
+    const compactNewestEvents = await compactNewest.json() as SessionEvent[];
+    expect(compactNewestEvents).toHaveLength(1);
+    expect(compactNewestEvents[0]?.sequence).toBe(latestSequence - 2);
+    expect((compactNewestEvents[0]?.payload as { coalescedUntil?: number }).coalescedUntil).toBe(latestSequence);
+
+    const compactOlder = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/events?before=${compactNewestEvents[0]!.sequence}&limit=3&compact=1`));
+    expect(compactOlder.status).toBe(200);
+    const compactOlderEvents = await compactOlder.json() as SessionEvent[];
+    expect(compactOlderEvents).toHaveLength(1);
+    const compactPageChunks = [
+      ...(((compactOlderEvents[0]?.payload as { text?: string }).text ?? "").match(/bulk-\d+/g) ?? []),
+      ...(((compactNewestEvents[0]?.payload as { text?: string }).text ?? "").match(/bulk-\d+/g) ?? []),
+    ];
+    expect(compactPageChunks).toEqual(Array.from({ length: 6 }, (_, offset) => `bulk-${bulkEventCount - 6 + offset}`));
+    expect(new Set(compactPageChunks).size).toBe(compactPageChunks.length);
+
     const replayAbort = new AbortController();
     const replay = await app.request(new Request(`http://test${workspacePath(workspaceId, `/sessions/${session.id}/events/stream?after=0`)}`, {
       signal: replayAbort.signal,

@@ -330,16 +330,22 @@ export class OpenGeniClient {
 
   // --- Events: replay, send, stream ----------------------------------------
 
-  /** Replay durable events by sequence, ascending. `before` is exclusive and returns the newest matching window. */
+  /**
+   * Replay durable events by sequence, ascending. `before` is exclusive and
+   * returns the newest matching window. With `compact`, consecutive delta runs
+   * may be coalesced; `payload.coalescedUntil` carries the run's last sequence
+   * for resume cursors.
+   */
   async listEvents(
     workspaceId: string,
     sessionId: string,
-    options: { after?: number; before?: number; limit?: number } = {},
+    options: { after?: number; before?: number; limit?: number; compact?: boolean } = {},
   ): Promise<SessionEvent[]> {
     return await this.requestJson<SessionEvent[]>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, undefined, {
       ...(options.after !== undefined ? { after: String(options.after) } : {}),
       ...(options.before !== undefined ? { before: String(options.before) } : {}),
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      ...(options.compact ? { compact: "1" } : {}),
     });
   }
 

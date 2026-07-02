@@ -3,6 +3,7 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { useSessionEvents } from "../src/hooks/use-session-events";
+import { buildTimeline, type TimelineItem } from "../src/timeline";
 
 registerDom();
 
@@ -20,7 +21,9 @@ function event(sequence: number, type: SessionEvent["type"] = "user.message", pa
   };
 }
 
-function listPage(store: SessionEvent[], options: { after?: number; before?: number; limit?: number } = {}): SessionEvent[] {
+type ListOptions = { after?: number; before?: number; limit?: number; compact?: boolean };
+
+function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
   const after = options.after ?? 0;
   const limit = options.limit ?? 500;
   let candidates = store.filter((item) => item.sequence > after);
@@ -35,9 +38,9 @@ function listPage(store: SessionEvent[], options: { after?: number; before?: num
 function scriptedClient(input: {
   store: SessionEvent[];
   streamEvents?: SessionEvent[];
-  listEvents?: (options: { after?: number; before?: number; limit?: number }) => Promise<SessionEvent[]>;
+  listEvents?: (options: ListOptions) => Promise<SessionEvent[]>;
 }) {
-  const listCalls: Array<{ after?: number; before?: number; limit?: number }> = [];
+  const listCalls: ListOptions[] = [];
   const streamCalls: number[] = [];
   const client = fakeClient({
     listEvents: async (_workspaceId, _sessionId, options = {}) => {
@@ -61,7 +64,7 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
-  test("initial windowed load stops at density target and opens the stream after the newest event", async () => {
+  test("initial windowed load uses compact tail pages and opens the stream after the newest event", async () => {
     const store = Array.from({ length: 1200 }, (_, index) => event(index + 1));
     const { client, listCalls, streamCalls } = scriptedClient({ store });
     const lengths: number[] = [];
@@ -72,12 +75,12 @@ describe("useSessionEvents", () => {
     }, undefined);
     await flush(20);
 
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000 }]);
-    expect(hook.result.current.events).toHaveLength(1000);
-    expect(hook.result.current.events[0]?.sequence).toBe(201);
-    expect(hook.result.current.hasOlder).toBe(true);
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(hook.result.current.events).toHaveLength(1200);
+    expect(hook.result.current.events[0]?.sequence).toBe(1);
+    expect(hook.result.current.hasOlder).toBe(false);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
+    expect(lengths.filter((length) => length === 1200)).toHaveLength(1);
 
     await hook.unmount();
   });
@@ -86,31 +89,32 @@ describe("useSessionEvents", () => {
     const store = [
       event(1, "session.created", {}),
       event(2),
-      ...Array.from({ length: 498 }, (_, index) => event(index + 3, "agent.message.delta", { text: "older" })),
-      event(501),
-      ...Array.from({ length: 1000 }, (_, index) => event(index + 502, "agent.message.delta", { text: "middle" })),
-      ...Array.from({ length: 999 }, (_, index) => event(index + 1502)),
+      ...Array.from({ length: 5099 }, (_, index) => event(index + 3, "agent.message.delta", { text: "older" })),
+      event(5102),
+      ...Array.from({ length: 1000 }, (_, index) => event(index + 5103, "agent.message.delta", { text: "middle" })),
+      ...Array.from({ length: 1000 }, (_, index) => event(index + 6103)),
     ];
     const { client, listCalls } = scriptedClient({ store });
     const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
     await flush(20);
 
-    // One fetch: the tail page already contains boundaries, so the head is
-    // TRIMMED to the oldest user message (the mid-turn fragment at seq 1501 is
-    // dropped) rather than fetching further down. loadOlder's `before` cursor
-    // is the trimmed top, so the fragment is refetched with its own turn.
-    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 1000 }]);
+    // One fetch: the tail page already contains a boundary, so the head is
+    // TRIMMED to the oldest user message rather than fetching further down.
+    // loadOlder's `before` cursor is the trimmed top, so the fragment is
+    // refetched with its own turn.
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
     expect(hook.result.current.events[0]?.type).toBe("user.message");
-    expect(hook.result.current.events[0]?.sequence).toBe(1502);
+    expect(hook.result.current.events[0]?.sequence).toBe(5102);
     expect(hook.result.current.hasOlder).toBe(true);
 
     const more = await hook.result.current.loadOlder();
     await flush(20);
-    // The older window starts exactly below the kept window (before: 1502 —
-    // no overlap, no gap), recovers the trimmed fragment, and runs all the way
-    // to the log start, so nothing older remains.
+    // The older window starts exactly below the kept window (before: 5102 —
+    // no overlap, no gap), recovers the trimmed fragment, and runs to the log
+    // start within the older fetch cap, so nothing older remains.
     expect(more).toBe(false);
-    expect(listCalls[1]).toEqual({ before: 1502, limit: 1000 });
+    expect(listCalls[1]).toEqual({ before: 5102, limit: 5000, compact: true });
+    expect(listCalls[2]).toEqual({ before: 102, limit: 5000, compact: true });
     expect(hook.result.current.events[0]?.type).toBe("session.created");
     expect(hook.result.current.events[0]?.sequence).toBe(1);
     expect(hook.result.current.hasOlder).toBe(false);
@@ -124,7 +128,7 @@ describe("useSessionEvents", () => {
   test("loadOlder prepends one older window, preserves order, and guards concurrent calls", async () => {
     const store = [
       event(1, "session.created", {}),
-      ...Array.from({ length: 1199 }, (_, index) => event(index + 2)),
+      ...Array.from({ length: 5999 }, (_, index) => event(index + 2)),
     ];
     let releaseOlder: () => void = () => {
       throw new Error("older page was not requested");
@@ -132,7 +136,7 @@ describe("useSessionEvents", () => {
     const { client, listCalls } = scriptedClient({
       store,
       listEvents: async (options) => {
-        if (options.before === 201) {
+        if (options.before === 1001) {
           await new Promise<void>((resolve) => {
             releaseOlder = resolve;
           });
@@ -146,7 +150,7 @@ describe("useSessionEvents", () => {
     const first = hook.result.current.loadOlder();
     const second = hook.result.current.loadOlder();
     await flush();
-    expect(listCalls.filter((call) => call.before === 201)).toHaveLength(1);
+    expect(listCalls.filter((call) => call.before === 1001)).toHaveLength(1);
     releaseOlder();
     const [firstResult, secondResult] = await Promise.all([first, second]);
     await flush(20);
@@ -188,16 +192,110 @@ describe("useSessionEvents", () => {
     await resumedHook.unmount();
   });
 
-  test("event budget cap stops a boundary-less monster turn at the cap", async () => {
-    const store = Array.from({ length: 12_000 }, (_, index) => event(index + 1, "agent.message.delta", { text: "x" }));
+  test("few-turn many-event logs stop at the initial round-trip cap", async () => {
+    const store = Array.from({ length: 40_000 }, (_, index) => event(index + 1, "agent.message.delta", { text: "x" }));
     const { client, listCalls } = scriptedClient({ store });
     const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
     await flush(20);
 
-    expect(hook.result.current.events).toHaveLength(10_000);
-    expect(hook.result.current.events[0]?.sequence).toBe(2001);
+    expect(hook.result.current.events).toHaveLength(15_000);
+    expect(hook.result.current.events[0]?.sequence).toBe(25_001);
     expect(hook.result.current.hasOlder).toBe(true);
-    expect(listCalls).toHaveLength(10);
+    expect(listCalls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true },
+      { before: 35_001, limit: 5000, compact: true },
+      { before: 30_001, limit: 5000, compact: true },
+    ]);
+
+    await hook.unmount();
+  });
+
+  test("coalesced tail opens the stream after coalescedUntil", async () => {
+    const coalescedTail = [
+      event(1, "session.created", {}),
+      event(10, "agent.message.delta", { text: "streamed", coalescedUntil: 99 }),
+    ];
+    const { client, listCalls, streamCalls } = scriptedClient({
+      store: [],
+      listEvents: async () => coalescedTail,
+    });
+    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    await flush(20);
+
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 10]);
+    expect(streamCalls).toEqual([99]);
+
+    await hook.unmount();
+  });
+
+  test("loadOlder before an oldest synthetic sequence does not duplicate projected text", async () => {
+    const calls: ListOptions[] = [];
+    const { client } = scriptedClient({
+      store: [],
+      listEvents: async (options) => {
+        calls.push(options);
+        if (options.before === Number.MAX_SAFE_INTEGER) {
+          return [event(8, "agent.message.delta", { text: "ghi", coalescedUntil: 9 })];
+        }
+        if (options.before === 8) {
+          return [event(6, "agent.message.delta", { text: "ef", coalescedUntil: 7 })];
+        }
+        if (options.before === 6) {
+          return [event(4, "agent.message.delta", { text: "cd", coalescedUntil: 5 })];
+        }
+        if (options.before === 4) {
+          return [
+            event(1, "session.created", {}),
+            event(2, "agent.message.delta", { text: "ab", coalescedUntil: 3 }),
+          ];
+        }
+        return [];
+      },
+    });
+    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    await flush(20);
+
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([4, 6, 8]);
+    expect(hook.result.current.hasOlder).toBe(true);
+    expect(hook.result.current.lastSequence).toBe(9);
+
+    const more = await hook.result.current.loadOlder();
+    await flush(20);
+
+    expect(more).toBe(false);
+    expect(calls).toEqual([
+      { before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true },
+      { before: 8, limit: 5000, compact: true },
+      { before: 6, limit: 5000, compact: true },
+      { before: 4, limit: 5000, compact: true },
+    ]);
+    const agentText = hook.result.current.timeline
+      .filter((item): item is Extract<TimelineItem, { kind: "agent-message" }> => item.kind === "agent-message")
+      .map((item) => item.text);
+    expect(agentText).toEqual(["abcdefghi"]);
+    const rawEquivalent = [
+      event(1, "session.created", {}),
+      ...Array.from("abcdefghi", (text, index) => event(index + 2, "agent.message.delta", { text })),
+    ];
+    const rawText = buildTimeline(rawEquivalent)
+      .filter((item): item is Extract<TimelineItem, { kind: "agent-message" }> => item.kind === "agent-message")
+      .map((item) => item.text);
+    expect(agentText).toEqual(rawText);
+
+    await hook.unmount();
+  });
+
+  test("group early-stop still works on many-turn logs", async () => {
+    const store = Array.from({ length: 20_000 }, (_, index) => event(index + 1, "user.message", { text: `m-${index + 1}` }));
+    const { client, listCalls } = scriptedClient({ store });
+    const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
+    await flush(20);
+
+    expect(listCalls).toEqual([{ before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true }]);
+    expect(hook.result.current.events).toHaveLength(5000);
+    expect(hook.result.current.events[0]?.sequence).toBe(15_001);
+    expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
   });

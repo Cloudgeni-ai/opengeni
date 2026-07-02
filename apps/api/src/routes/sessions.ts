@@ -56,7 +56,7 @@ import {
   updateQueuedSessionTurn,
   type AppendEventInput,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -286,12 +286,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const after = eventSequence(c.req.query("after"), 0);
     const before = optionalEventSequence(c.req.query("before"));
-    const limit = eventListLimit(c.req.query("limit"));
-    return c.json(await listSessionEvents(db, workspaceId, sessionId, {
+    const compact = compactEvents(c.req.query("compact"));
+    const limit = eventListLimit(c.req.query("limit"), compact ? 5000 : 2000);
+    const events = await listSessionEvents(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
-    }));
+    });
+    return c.json(compact ? coalesceSessionEventDeltas(events) : events);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
@@ -1085,12 +1087,16 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function eventListLimit(raw: string | undefined): number {
+function eventListLimit(raw: string | undefined, max = 2000): number {
   const limit = Number(raw ?? 500);
   if (!Number.isFinite(limit)) {
     return 500;
   }
-  return Math.min(2000, Math.max(1, Math.floor(limit)));
+  return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+function compactEvents(raw: string | undefined): boolean {
+  return raw === "1" || raw === "true";
 }
 
 function eventSequence(raw: string | undefined, fallback: number): number {

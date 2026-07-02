@@ -4,6 +4,8 @@ import { connect, JSONCodec, type ConnectionOptions, type Msg, type NatsConnecti
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
 
+export { coalesceSessionEventDeltas } from "./coalesce";
+
 /**
  * Reconnect + keepalive defaults applied to EVERY long-lived NATS connection
  * this package opens (the event bus AND the standalone auth-callout responder).

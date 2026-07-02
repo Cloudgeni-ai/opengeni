@@ -34,11 +34,11 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-const TAIL_PAGE_SIZE = 1000;
+const TAIL_PAGE_SIZE = 5000;
 const INITIAL_GROUP_TARGET = 48;
-const INITIAL_EVENT_BUDGET = 10_000;
+const INITIAL_FETCH_CAP = 3;
 const OLDER_GROUP_TARGET = 32;
-const OLDER_EVENT_BUDGET = 6_000;
+const OLDER_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
 
 /**
@@ -102,7 +102,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
       // the next connect instead of being skipped.
       const lastInBatch = batch[batch.length - 1];
       if (lastInBatch) {
-        lastSequenceRef.current = lastInBatch.sequence;
+        lastSequenceRef.current = Math.max(lastSequenceRef.current, ...batch.map(eventResumeSequence));
       }
       setEvents((existing) => [...existing, ...batch]);
     };
@@ -118,7 +118,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
             before: Number.MAX_SAFE_INTEGER,
             pageSize: TAIL_PAGE_SIZE,
             targetGroups: INITIAL_GROUP_TARGET,
-            maxEvents: INITIAL_EVENT_BUDGET,
+            maxFetches: INITIAL_FETCH_CAP,
             signal: controller.signal,
           });
           if (controller.signal.aborted) {
@@ -182,7 +182,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
         before,
         pageSize: TAIL_PAGE_SIZE,
         targetGroups: OLDER_GROUP_TARGET,
-        maxEvents: OLDER_EVENT_BUDGET,
+        maxFetches: OLDER_FETCH_CAP,
       });
       if (generationRef.current !== generation) {
         return false;
@@ -240,20 +240,24 @@ async function loadEventWindow(
     before: number;
     pageSize: number;
     targetGroups: number;
-    maxEvents: number;
+    maxFetches: number;
     signal?: AbortSignal;
   },
 ): Promise<LoadedEventWindow> {
   let cursor = options.before;
   let buffer: SessionEvent[] = [];
   let reachedStart = false;
+  let fetches = 0;
 
-  while (buffer.length < options.maxEvents && groupCount(buffer) < options.targetGroups) {
+  while (fetches < options.maxFetches) {
+    if (buffer.length > 0 && groupCount(buffer) >= options.targetGroups) {
+      break;
+    }
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
-      remainingEvents: options.maxEvents - buffer.length,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    fetches += 1;
     if (page.length === 0) {
       reachedStart = true;
       break;
@@ -261,7 +265,7 @@ async function loadEventWindow(
     assertAscending(page);
     buffer = [...page, ...buffer];
     cursor = page[0]!.sequence;
-    if (page.length < page.requested) {
+    if (isLogStart(page[0]!)) {
       reachedStart = true;
       break;
     }
@@ -274,12 +278,12 @@ async function loadEventWindow(
   // pages are fetched only when the buffer holds no boundary at all (one
   // monster turn); past the cap a mid-turn top is accepted.
   let snapPages = 0;
-  while (buffer.length < options.maxEvents && !reachedStart && findBoundaryIndex(buffer) === -1 && snapPages < BOUNDARY_PAGE_CAP) {
+  while (!reachedStart && findBoundaryIndex(buffer) === -1 && snapPages < BOUNDARY_PAGE_CAP && fetches < options.maxFetches) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,
-      remainingEvents: options.maxEvents - buffer.length,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    fetches += 1;
     snapPages += 1;
     if (page.length === 0) {
       reachedStart = true;
@@ -288,7 +292,7 @@ async function loadEventWindow(
     assertAscending(page);
     buffer = [...page, ...buffer];
     cursor = page[0]!.sequence;
-    if (page.length < page.requested) {
+    if (isLogStart(page[0]!)) {
       reachedStart = true;
       break;
     }
@@ -305,7 +309,7 @@ async function loadEventWindow(
   return {
     events: buffer,
     oldestSequence: oldest?.sequence ?? null,
-    newestSequence: newest?.sequence ?? 0,
+    newestSequence: newest ? maxResumeSequence(buffer) : 0,
     hasOlder: buffer.length > 0 && !reachedStart && oldest?.type !== "session.created",
   };
 }
@@ -330,18 +334,17 @@ async function loadPreviousPage(
   before: number,
   options: {
     pageSize: number;
-    remainingEvents: number;
     signal?: AbortSignal;
   },
 ): Promise<PreviousPage> {
   if (options.signal?.aborted) {
     throw abortError();
   }
-  const requested = Math.min(options.pageSize, Math.max(0, options.remainingEvents));
+  const requested = options.pageSize;
   if (requested === 0) {
     return Object.assign([], { requested });
   }
-  const page = await client.listEvents(workspaceId, sessionId, { before, limit: requested });
+  const page = await client.listEvents(workspaceId, sessionId, { before, limit: requested, compact: true });
   if (options.signal?.aborted) {
     throw abortError();
   }
@@ -355,6 +358,23 @@ function groupCount(events: SessionEvent[]): number {
   return groupTimeline(buildTimeline(events)).length;
 }
 
+function isLogStart(event: SessionEvent): boolean {
+  return event.type === "session.created" || event.sequence <= 1;
+}
+
+function maxResumeSequence(events: SessionEvent[]): number {
+  return events.reduce((max, event) => Math.max(max, eventResumeSequence(event)), 0);
+}
+
+function eventResumeSequence(event: SessionEvent): number {
+  const payload = asRecord(event.payload);
+  const coalescedUntil = Number(payload.coalescedUntil);
+  return Math.max(event.sequence, Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? value as Record<string, unknown> : {};
+}
 
 function assertAscending(events: SessionEvent[]): void {
   for (let index = 1; index < events.length; index += 1) {

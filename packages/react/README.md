@@ -82,12 +82,14 @@ export function App() {
 
 ## Hooks
 
-- `useSessionEvents(sessionId)` — loads a bounded tail window by default, then
-  live-streams on the SDK's exactly-once/ordered event delivery. It returns the
-  raw windowed `events`, projected `timeline`, latest `sessionStatus`,
-  connection state, and older-history controls (`hasOlder`, `loadingOlder`,
-  `loadOlder`). Pass `replay: "full"` to opt back into full replay; a nonzero
-  `after` keeps the previous resume semantics.
+- `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
+  default, then live-streams on the SDK's exactly-once/ordered event delivery.
+  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  timeline group density is only an early stop. It returns the raw windowed
+  `events`, projected `timeline`, latest `sessionStatus`, connection state, and
+  older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
+  `replay: "full"` to opt back into full replay; a nonzero `after` keeps the
+  previous resume semantics.
 - `useComposer(sessionId, { sendExtras, defaultMode })` — draft/send/interrupt
   state plus the compose-time **queue-vs-steer** choice (`mode`/`setMode`,
   default `"queue"`): queue stacks the message behind the running turn, steer
