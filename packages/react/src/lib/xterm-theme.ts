@@ -1,8 +1,8 @@
 import type { XtermTheme } from "../components/sandbox-terminal";
 
 /**
- * Derive an xterm `ITheme` subset from the live OKLCH `--og-*` token system (or
- * the app's `--color-*` aliases). Reads the COMPUTED values so xterm — which
+ * Derive an xterm `ITheme` subset from the live OKLCH `--og-*` token system.
+ * Reads the COMPUTED values so xterm — which
  * paints into a canvas and can't consume CSS vars — gets concrete colors. Call
  * on mount and re-derive on a `data-og-theme` flip.
  *
@@ -12,16 +12,13 @@ export function xtermThemeFromTokens(root?: HTMLElement | null): XtermTheme | un
   if (typeof window === "undefined" || typeof getComputedStyle === "undefined") return undefined;
   const el = root ?? document.documentElement;
   const style = getComputedStyle(el);
-  const read = (names: string[]): string | undefined => {
-    for (const name of names) {
-      const value = style.getPropertyValue(name).trim();
-      if (value) return value;
-    }
-    return undefined;
+  const read = (name: string): string | undefined => {
+    const value = style.getPropertyValue(name).trim();
+    return value || undefined;
   };
-  const bg = read(["--og-color-bg", "--color-bg"]);
-  const fg = read(["--og-color-fg", "--color-fg"]);
-  const accent = read(["--og-color-accent", "--color-brand", "--color-accent"]);
+  const bg = read("--og-color-bg");
+  const fg = read("--og-color-fg");
+  const accent = read("--og-color-accent");
   const theme: XtermTheme = {};
   if (bg) theme.background = bg;
   if (fg) theme.foreground = fg;

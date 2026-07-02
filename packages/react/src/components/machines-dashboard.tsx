@@ -30,8 +30,8 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
         <LaptopIcon className="size-5" aria-hidden />
       </span>
       <div className="space-y-1">
-        <p className="text-sm font-medium text-og-fg">No machines yet</p>
-        <p className="max-w-xs text-[12px] text-og-fg-muted">
+        <p className="text-og-base font-medium text-og-fg">No machines yet</p>
+        <p className="max-w-xs text-og-sm text-og-fg-muted">
           Enroll your own computer to run the agent on it — your files, your terminal, your desktop.
         </p>
       </div>
@@ -40,7 +40,7 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
           type="button"
           data-enroll-cta
           onClick={onEnroll}
-          className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-xs font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong"
+          className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-10"
         >
           <PlusIcon className="size-3.5" aria-hidden />
           Enroll a machine
@@ -54,16 +54,18 @@ function Header({
   count,
   onEnroll,
   onRefresh,
+  loading,
 }: {
   count: number;
   onEnroll?: (() => void) | undefined;
   onRefresh?: (() => void) | undefined;
+  loading?: boolean | undefined;
 }): ReactNode {
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex items-baseline gap-2">
-        <h2 className="text-sm font-semibold text-og-fg">Machines</h2>
-        <span className="font-og-mono text-[11px] text-og-fg-subtle">{count}</span>
+        <h2 className="text-og-base font-semibold text-og-fg">Machines</h2>
+        <span className="font-og-mono text-og-xs text-og-fg-subtle">{count}</span>
       </div>
       <div className="flex items-center gap-1.5">
         {onRefresh ? (
@@ -74,7 +76,7 @@ function Header({
             title="Refresh"
             className="rounded-og-sm p-1.5 text-og-fg-subtle transition-colors hover:bg-og-surface-2 hover:text-og-fg"
           >
-            <RefreshCwIcon className="size-3.5" aria-hidden />
+            <RefreshCwIcon className={cn("size-3.5", loading && "animate-og-spin")} aria-hidden />
           </button>
         ) : null}
         {onEnroll ? (
@@ -82,10 +84,10 @@ function Header({
             type="button"
             data-enroll-cta
             onClick={onEnroll}
-            className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg"
+            className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-10"
           >
             <PlusIcon className="size-3.5" aria-hidden />
-            Enroll
+            Enroll machine
           </button>
         ) : null}
       </div>
@@ -95,7 +97,7 @@ function Header({
 
 /**
  * The workspace Machines dashboard: the fleet of selfhosted enrollments + the
- * session's Modal sandbox, each with its connection-status pill, state badges,
+ * session's managed sandbox, each with its connection-status pill, state badges,
  * latest metrics, and an attach/swap affordance. Renders the empty state (no
  * machines → enroll CTA), a load error, and the populated grid. The component
  * is purely presentational — feed it `MachinesResponse` data via `useMachines`.
@@ -115,15 +117,27 @@ export function MachinesDashboard({
 
   return (
     <section data-machines-dashboard className={cn("og-root flex flex-col gap-3", className)}>
-      <Header count={machines.length} onEnroll={onEnroll} onRefresh={onRefresh} />
+      <Header count={machines.length} onEnroll={onEnroll} onRefresh={onRefresh} loading={loading} />
 
       {error ? (
-        <p
+        <div
           data-machines-error
-          className="rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-[12px] text-og-status-failed"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-status-failed"
         >
-          Could not load machines: {error.message}
-        </p>
+          <span>Could not load machines: {error.message}</span>
+          {onRefresh ? (
+            <button
+              type="button"
+              data-machines-retry
+              onClick={onRefresh}
+              disabled={loading}
+              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-status-failed/30 px-2 py-1 text-og-xs font-medium transition-colors hover:border-og-status-failed/50 disabled:cursor-not-allowed disabled:opacity-60 pointer-coarse:min-h-10"
+            >
+              <RefreshCwIcon className={cn("size-3.5", loading && "animate-og-spin")} aria-hidden />
+              {loading ? "Retrying…" : "Retry"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {loading && machines.length === 0 ? (
