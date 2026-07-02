@@ -1,5 +1,11 @@
 # @opengeni/observability
 
+## 0.2.1
+
+### Patch Changes
+
+- 5962dd0: Republish the closure so published manifests reference `@opengeni/contracts@^0.4.0`. The previous `^0.3.0` ranges exclude 0.4.0 under 0.x caret semantics, causing consumers to nest a stale contracts copy that lacks the current export surface.
+
 ## 0.2.0
 
 ### Minor Changes
