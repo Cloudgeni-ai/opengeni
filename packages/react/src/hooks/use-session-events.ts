@@ -25,6 +25,8 @@ export type UseSessionEventsResult = {
   connectionState: SessionEventsConnectionState;
   /** Highest sequence seen so far (0 before the first event). */
   lastSequence: number;
+  /** True until the initial tail window has been applied (windowed mode). */
+  initialLoading: boolean;
   /** Whether older durable events are available before the current window. */
   hasOlder: boolean;
   /** True while an older window is being fetched. */
@@ -35,8 +37,7 @@ export type UseSessionEventsResult = {
 };
 
 const TAIL_PAGE_SIZE = 5000;
-const INITIAL_GROUP_TARGET = 48;
-const INITIAL_FETCH_CAP = 3;
+const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
 const BOUNDARY_PAGE_CAP = 4;
@@ -57,6 +58,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [error, setError] = useState<Error | null>(null);
   const [hasOlder, setHasOlder] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lastSequenceRef = useRef(after);
   const oldestSequenceRef = useRef<number | null>(null);
@@ -76,6 +78,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
       setError(null);
       setHasOlder(false);
       setLoadingOlder(false);
+      setInitialLoading(true);
       lastSequenceRef.current = after;
       oldestSequenceRef.current = null;
       hasOlderRef.current = false;
@@ -114,10 +117,13 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
       try {
         if (!fullReplay) {
           setConnectionState("connecting");
+          // First paint is ONE compact fetch — the newest window, revealed at
+          // the bottom in a few hundred ms. Deeper history loads only when the
+          // reader actually scrolls up (the sentinel drives loadOlder).
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
             pageSize: TAIL_PAGE_SIZE,
-            targetGroups: INITIAL_GROUP_TARGET,
+            targetGroups: Number.POSITIVE_INFINITY,
             maxFetches: INITIAL_FETCH_CAP,
             signal: controller.signal,
           });
@@ -129,6 +135,10 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
           lastSequenceRef.current = window.newestSequence;
           setHasOlder(window.hasOlder);
           setEvents(window.events);
+          setInitialLoading(false);
+        }
+        if (fullReplay) {
+          setInitialLoading(false);
         }
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: lastSequenceRef.current,
@@ -218,6 +228,7 @@ export function useSessionEvents(sessionId: string | null | undefined, options: 
     sessionStatus,
     connectionState,
     lastSequence: lastSequenceRef.current,
+    initialLoading: fullReplay ? false : initialLoading,
     hasOlder: fullReplay ? false : hasOlder,
     loadingOlder: fullReplay ? false : loadingOlder,
     loadOlder,

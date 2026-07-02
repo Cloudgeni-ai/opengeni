@@ -192,19 +192,18 @@ describe("useSessionEvents", () => {
     await resumedHook.unmount();
   });
 
-  test("few-turn many-event logs stop at the initial round-trip cap", async () => {
+  test("the initial window is a single fetch regardless of log size", async () => {
     const store = Array.from({ length: 40_000 }, (_, index) => event(index + 1, "agent.message.delta", { text: "x" }));
     const { client, listCalls } = scriptedClient({ store });
     const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
     await flush(20);
 
-    expect(hook.result.current.events).toHaveLength(15_000);
-    expect(hook.result.current.events[0]?.sequence).toBe(25_001);
+    // First paint is exactly ONE fetch — deeper history is the sentinel's job.
+    expect(hook.result.current.events).toHaveLength(5000);
+    expect(hook.result.current.events[0]?.sequence).toBe(35_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       { before: Number.MAX_SAFE_INTEGER, limit: 5000, compact: true },
-      { before: 35_001, limit: 5000, compact: true },
-      { before: 30_001, limit: 5000, compact: true },
     ]);
 
     await hook.unmount();
@@ -256,9 +255,14 @@ describe("useSessionEvents", () => {
     const hook = await renderHook(() => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }), undefined);
     await flush(20);
 
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([4, 6, 8]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([8]);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.lastSequence).toBe(9);
+
+    const first = await hook.result.current.loadOlder();
+    await flush(20);
+    expect(first).toBe(true);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([4, 6, 8]);
 
     const more = await hook.result.current.loadOlder();
     await flush(20);

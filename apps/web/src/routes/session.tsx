@@ -57,7 +57,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // Session record + live event log via @opengeni/react. Fresh opens load a
   // bounded tail, then stream live events with resume-by-sequence.
   const { session: fetchedSession, loading, error: loadError } = useSession(sessionId);
-  const { events, sessionStatus, connectionState, hasOlder, loadingOlder, loadOlder, error: streamError } = useSessionEvents(sessionId);
+  const { events, sessionStatus, connectionState, initialLoading, hasOlder, loadingOlder, loadOlder, error: streamError } = useSessionEvents(sessionId);
   const session = useMemo(
     () => fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
     [fetchedSession, sessionStatus],
@@ -88,12 +88,20 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     if (!session) {
       return [];
     }
+    // While the tail window is still being fetched, render nothing rather than
+    // projectSessionTimeline's initial-message fallback — on a large session
+    // that fallback painted the GENESIS message at the top for the whole fetch
+    // (user-reported). The fallback is only for genuinely-empty NEW sessions,
+    // i.e. after the load settles with no events.
+    if (initialLoading && visibleEvents.length === 0) {
+      return [];
+    }
     const projected = projectSessionTimeline(session, visibleEvents);
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [session, visibleEvents, viewClearedAfter]);
+  }, [session, visibleEvents, viewClearedAfter, initialLoading]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -148,6 +156,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     <SessionChatPane
       session={session}
       timeline={timeline}
+      initialLoading={initialLoading}
       approvals={approvals}
       failure={failure}
       goal={goal}
@@ -254,6 +263,7 @@ function SessionDock(props: {
 function SessionChatPane(props: {
   session: Session;
   timeline: TimelineItem[];
+  initialLoading: boolean;
   approvals: PendingApproval[];
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   goal: ReturnType<typeof useGoal>;
@@ -380,7 +390,13 @@ function SessionChatPane(props: {
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
-              emptyState={(
+              emptyState={props.initialLoading ? (
+                // History is still fetching — a quiet shimmer, not the
+                // "waiting for the first step" copy (that's for NEW sessions).
+                <div className="grid min-h-[24rem] place-items-center text-sm">
+                  <span className="og-shimmer-text font-medium">Loading conversation…</span>
+                </div>
+              ) : (
                 <EmptyState
                   className="min-h-[24rem]"
                   icon={<MessagesSquareIcon className="size-4" />}
