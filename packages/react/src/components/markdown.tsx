@@ -36,12 +36,12 @@ const components: Components = {
     </h2>
   ),
   h3: ({ children, ...props }) => (
-    <h3 className="mt-4 mb-1.5 text-[15px] font-semibold tracking-tight text-og-fg first:mt-0" {...props}>
+    <h3 className="mt-4 mb-1.5 text-og-md font-semibold tracking-tight text-og-fg first:mt-0" {...props}>
       {children}
     </h3>
   ),
   h4: ({ children, ...props }) => (
-    <h4 className="mt-4 mb-1.5 text-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0" {...props}>
+    <h4 className="mt-4 mb-1.5 text-og-sm font-semibold uppercase tracking-[0.04em] text-og-fg-muted first:mt-0" {...props}>
       {children}
     </h4>
   ),
@@ -94,7 +94,7 @@ const components: Components = {
         {...props}
         type="checkbox"
         disabled
-        className="mr-2 size-3.5 translate-y-[2px] cursor-default appearance-none rounded-[3px] border border-og-border bg-og-surface-1 align-baseline checked:border-og-accent checked:bg-og-accent checked:[background-image:url('data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2012%2012%22%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22white%22%20stroke-width%3D%221.6%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M2.5%206.2l2.2%202.2%204.6-4.8%22%2F%3E%3C%2Fsvg%3E')] checked:bg-[length:11px_11px] checked:bg-center checked:bg-no-repeat"
+        className="mr-2 size-3.5 translate-y-[2px] cursor-default accent-og-accent align-baseline"
       />
     ) : (
       <input type={type} {...props} />
@@ -113,7 +113,7 @@ const components: Components = {
   // the `pre` renderer), so a `code` reaching here is treated as inline.
   code: ({ children, className: _className, ...props }) => (
     <code
-      className="rounded-og-xs border border-og-border bg-og-surface-1 px-1 py-0.5 font-og-mono text-[0.85em] text-og-fg"
+      className="rounded-og-xs border border-og-border bg-og-surface-1 px-1 py-0.5 font-og-mono text-og-sm text-og-fg"
       {...props}
     >
       {children}
@@ -123,7 +123,7 @@ const components: Components = {
   // visual consistency (bordered, scrollable, mono, surface background).
   pre: ({ children, ...props }) => (
     <pre
-      className="my-3 max-h-96 overflow-auto rounded-og-md border border-og-border bg-og-bg/60 p-3 font-og-mono text-[12.5px] leading-5 text-og-fg-muted [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit first:mt-0 last:mb-0"
+      className="my-3 max-h-96 overflow-auto rounded-og-md border border-og-border bg-og-bg/60 p-3 font-og-mono text-og-sm text-og-fg-muted [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit first:mt-0 last:mb-0"
       {...props}
     >
       {children}
@@ -131,7 +131,7 @@ const components: Components = {
   ),
   table: ({ children, ...props }) => (
     <div className="my-3 max-w-full overflow-x-auto rounded-og-md border border-og-border first:mt-0 last:mb-0">
-      <table className="w-full border-collapse text-[13px]" {...props}>
+      <table className="w-full border-collapse text-og-base" {...props}>
         {children}
       </table>
     </div>

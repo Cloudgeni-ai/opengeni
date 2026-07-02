@@ -20,9 +20,11 @@ import {
   type XtermTheme,
 } from "@opengeni/react";
 import { MachineDockBar, SharedMachineDisclosure, useMachines, type MachineView } from "@opengeni/react/machines";
+import { Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import type { SessionEvent } from "@/types";
 
@@ -155,7 +157,34 @@ export function useSandboxWorkspaceTabs({
     // selfhosted machine (the dock-parity contract). Omitted only when the fleet
     // hasn't resolved an active machine yet (graceful, never a crash).
     const withMachineBar = (surface: ReactNode): ReactNode => {
-      if (!activeMachine) return surface;
+      if (!activeMachine) {
+        // Don't let the dock bar vanish while the fleet is still resolving or
+        // failed — keep a stable placeholder/error chip above the surface.
+        if (machines.loading || machines.error) {
+          return (
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-fg-muted">
+                {machines.error ? (
+                  <>
+                    <span className="min-w-0 flex-1 truncate text-fg-muted">Sandbox connection unavailable</span>
+                    <Button type="button" variant="ghost" size="xs" onClick={() => void machines.refresh()}>
+                      <RefreshCwIcon className="size-3" />
+                      Retry
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+                    <span className="min-w-0 flex-1 truncate">Connecting sandbox…</span>
+                  </>
+                )}
+              </div>
+              <div className="min-h-0 flex-1">{surface}</div>
+            </div>
+          );
+        }
+        return surface;
+      }
       return (
         <div className="flex h-full min-h-0 flex-col">
           <MachineDockBar
@@ -178,7 +207,7 @@ export function useSandboxWorkspaceTabs({
         label: "Files",
         badge:
           dirtyCount > 0 ? (
-            <span className="rounded-[var(--og-radius-xs,3px)] bg-[color:var(--og-color-accent-soft,#2a2a2a)] px-1 text-[9px] text-[color:var(--og-color-fg-muted,#aaa)]">
+            <span className="rounded-sm bg-og-accent-soft px-1 text-2xs text-og-fg-muted">
               {dirtyCount}
             </span>
           ) : undefined,
@@ -199,7 +228,7 @@ export function useSandboxWorkspaceTabs({
         id: "terminal",
         label: "Terminal",
         content: withMachineBar(
-          <div className="h-full bg-[color:var(--og-color-bg,var(--color-bg))] p-1">
+          <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
               result={terminal}
               terminalCapability={capabilities?.Terminal ?? null}
@@ -218,8 +247,8 @@ export function useSandboxWorkspaceTabs({
         id: "desktop",
         label: "Desktop",
         badge: watchDesktop ? (
-          <span className="rounded-[var(--og-radius-xs,3px)] bg-[color:var(--og-color-status-running,#d29922)]/20 px-1 text-[9px] text-[color:var(--og-color-status-running,#d29922)]">
-            live
+          <span className="rounded-sm bg-og-status-running/20 px-1 text-2xs text-og-status-running">
+            Live
           </span>
         ) : undefined,
         content: withMachineBar(
@@ -233,6 +262,26 @@ export function useSandboxWorkspaceTabs({
           />,
         ),
       });
+    }
+
+    // No surface is advertised yet: instead of silently hiding Files/Terminal/
+    // Desktop, show why — a quiet "Connecting sandbox…" tab while capabilities
+    // negotiate, or an unavailable state with retry when negotiation failed. So
+    // the "watch and steer" promise is visibly in flight, never just absent.
+    if (tabs.length === 0) {
+      const pending = caps.state === "negotiating" || caps.state === "cold";
+      if (pending || caps.state === "error") {
+        tabs.push({
+          id: "sandbox",
+          // Named for its state, not a noun: a cold user reading "Sandbox"
+          // learns nothing; "Connecting…" / "Sandbox offline" say exactly why
+          // Files/Terminal/Desktop aren't here yet.
+          label: caps.state === "error" ? "Sandbox offline" : "Connecting…",
+          content: withMachineBar(
+            <SandboxStatusPanel isError={caps.state === "error"} error={caps.error} onRetry={caps.renegotiate} />,
+          ),
+        });
+      }
     }
 
     const defaultTab = tabs[0]?.id ?? "files";
@@ -251,7 +300,48 @@ export function useSandboxWorkspaceTabs({
     terminal,
     xtermTheme,
     capabilities,
+    caps.state,
+    caps.error,
     caps.viewerCapReached,
+    machines.loading,
+    machines.error,
     activeMachine,
   ]);
+}
+
+/** The Sandbox tab's stand-in while capabilities are negotiating or after a
+ *  negotiation failure — a quiet placeholder, never a silently missing surface. */
+function SandboxStatusPanel({
+  isError,
+  error,
+  onRetry,
+}: {
+  isError: boolean;
+  error: Error | null;
+  onRetry: () => void;
+}) {
+  if (isError) {
+    return (
+      <div className="grid h-full place-items-center p-6 text-center">
+        <div className="max-w-sm space-y-3">
+          <p className="text-sm font-medium text-fg">Sandbox unavailable</p>
+          <p className="text-sm leading-5 text-fg-muted">
+            {error?.message ?? "Couldn't reach the sandbox for this session."}
+          </p>
+          <Button type="button" variant="secondary" size="sm" onClick={onRetry}>
+            <RefreshCwIcon className="size-3.5" />
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="grid h-full place-items-center p-6 text-center">
+      <div className="flex items-center gap-2 text-sm text-fg-muted">
+        <Loader2Icon className="size-4 animate-spin" />
+        Connecting sandbox…
+      </div>
+    </div>
+  );
 }

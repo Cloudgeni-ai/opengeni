@@ -26,12 +26,12 @@ type NavTarget =
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/settings";
 
-const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string }> = [
-  { to: "/workspaces/$workspaceId/environments", icon: BoxIcon, label: "Environments" },
-  { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines" },
-  { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities" },
-  { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules" },
-  { to: "/workspaces/$workspaceId/documents", icon: FileSearchIcon, label: "Documents" },
+const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> = [
+  { to: "/workspaces/$workspaceId/environments", icon: BoxIcon, label: "Environments", description: "Secret variable sets for sandboxes" },
+  { to: "/workspaces/$workspaceId/machines", icon: LaptopIcon, label: "Machines", description: "Your own connected computers" },
+  { to: "/workspaces/$workspaceId/capabilities", icon: PlugIcon, label: "Capabilities", description: "Packs, MCP servers, and tools" },
+  { to: "/workspaces/$workspaceId/schedules", icon: CalendarClockIcon, label: "Schedules", description: "Run agents on a schedule" },
+  { to: "/workspaces/$workspaceId/documents", icon: FileSearchIcon, label: "Documents", description: "Indexed knowledge for agents" },
 ];
 
 export function WorkspaceNav() {
@@ -39,7 +39,7 @@ export function WorkspaceNav() {
   return (
     <nav aria-label="Workspace" className={cn("grid gap-0.5", rail.collapsed ? "px-2" : "px-2")}>
       {!rail.collapsed ? (
-        <p className="px-2 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[color:var(--color-fg-subtle)]">
+        <p className="px-2 pb-1 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
           Workspace
         </p>
       ) : null}
@@ -50,15 +50,17 @@ export function WorkspaceNav() {
           workspaceId={rail.workspaceId}
           icon={<item.icon className="size-4" />}
           label={item.label}
+          description={item.description}
           collapsed={rail.collapsed}
         />
       ))}
-      <div className={cn("mt-1 border-t border-[color:var(--color-border)]/60 pt-1", rail.collapsed ? "mx-1" : "")}>
+      <div className={cn("mt-1 border-t border-border/60 pt-1", rail.collapsed ? "mx-1" : "")}>
         <RailNavItem
           to="/workspaces/$workspaceId/settings"
           workspaceId={rail.workspaceId}
           icon={<SettingsIcon className="size-4" />}
-          label="Settings"
+          label="Workspace settings"
+          description="Name, API keys, and members"
           collapsed={rail.collapsed}
         />
       </div>
@@ -71,6 +73,8 @@ export function RailNavItem(props: {
   workspaceId: string;
   icon: ReactNode;
   label: string;
+  /** One-line orientation for an opaque label — surfaced in the tooltip. */
+  description?: string;
   collapsed: boolean;
   /** Optional search params (Capabilities Packs subsection, etc.). */
   search?: Record<string, string>;
@@ -82,15 +86,18 @@ export function RailNavItem(props: {
       {...(props.search ? { search: props.search } : {})}
       activeProps={{ "data-active": "true" }}
       aria-label={props.collapsed ? props.label : undefined}
+      // The description labels an otherwise opaque nav item; a title keeps it
+      // reachable on the expanded rail without a hover-only requirement.
+      title={props.description && !props.collapsed ? props.description : undefined}
       className={cn(
-        "group relative flex h-8 items-center rounded-md text-sm font-medium text-[color:var(--color-fg-muted)] transition-colors",
-        "hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]",
-        "data-[active=true]:bg-[color:var(--color-surface-2)] data-[active=true]:text-[color:var(--color-fg)]",
-        props.collapsed ? "w-8 justify-center" : "gap-2.5 px-2.5",
+        "group relative flex h-8 items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10",
+        "hover:bg-surface-2 hover:text-fg",
+        "data-[active=true]:bg-surface-2 data-[active=true]:text-fg",
+        props.collapsed ? "w-8 justify-center pointer-coarse:w-10" : "gap-2.5 px-2.5",
       )}
     >
       {/* Left accent bar on the active route. */}
-      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-[color:var(--color-brand)] opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
+      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
       <span className="shrink-0">{props.icon}</span>
       {!props.collapsed ? <span className="min-w-0 truncate">{props.label}</span> : null}
     </Link>
@@ -102,7 +109,10 @@ export function RailNavItem(props: {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{link}</TooltipTrigger>
-      <TooltipContent side="right">{props.label}</TooltipContent>
+      <TooltipContent side="right" className="max-w-52">
+        <p className="font-medium">{props.label}</p>
+        {props.description ? <p className="text-fg-subtle">{props.description}</p> : null}
+      </TooltipContent>
     </Tooltip>
   );
 }

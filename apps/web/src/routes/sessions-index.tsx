@@ -15,11 +15,12 @@
 // collapses to the clean sandbox-only flow (just the managed sandbox fields). The
 // control appears once machines exist, or once the user reveals it via a
 // lightweight local opt-in.
-import { useEnvironments, type ComposerState } from "@opengeni/react";
+import { FILE_ONLY_MESSAGE_TEXT, useEnvironments, useWorkspaceSessions, type ComposerState } from "@opengeni/react";
 import { useMachines, type MachineView } from "@opengeni/react/machines";
-import { useNavigate } from "@tanstack/react-router";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRightIcon, BoxIcon, CheckIcon, ChevronDownIcon, FlagIcon, FolderIcon, GitBranchIcon, MonitorOffIcon, ServerIcon, ShieldIcon, SlidersHorizontalIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { PermissionGroupPicker } from "@/components/permission-picker";
@@ -31,7 +32,11 @@ import { RepositoryContextPicker } from "@/components/repository-picker";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
+import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
@@ -46,7 +51,7 @@ import {
   type SessionDraft,
 } from "@/lib/session-create";
 import { cn } from "@/lib/utils";
-import type { SandboxBackend } from "@/types";
+import type { SandboxBackend, Session } from "@/types";
 
 const examples = [
   "Inspect the repository and summarize the infrastructure layout.",
@@ -77,7 +82,12 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     value: message,
     setValue: setMessage,
     sending: context.busy,
-    canSend: message.trim().length > 0 && !context.busy && !attachments.uploading && computeReady,
+    // Mirrors useComposer's gate: a ready attachment with no typed draft is a
+    // sendable file-only message (the API requires non-empty text, so send()
+    // substitutes FILE_ONLY_MESSAGE_TEXT).
+    canSend:
+      (message.trim().length > 0 || attachments.readyResources.length > 0) &&
+      !context.busy && !attachments.uploading && computeReady,
     // Queue-vs-steer is meaningless before the session exists.
     mode: "queue",
     setMode: () => {},
@@ -86,7 +96,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     error: null,
     clearError: () => {},
     send: async () => {
-      const text = message.trim();
+      const text = message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
       if (!text || context.busy || attachments.uploading || !computeReady) {
         return false;
       }
@@ -120,7 +130,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
         <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
           What should the agent do?
         </h1>
-        <p className="max-w-md text-sm text-[color:var(--color-fg-muted)]">
+        <p className="max-w-md text-sm text-fg-muted">
           It runs in a live sandbox you can watch and steer.
         </p>
       </section>
@@ -131,7 +141,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           attachments={attachments}
           autoFocus
           fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-          placeholder="Describe a task for the agent..."
+          placeholder="Describe a task for the agent…"
           controls={<SessionControlStrip workspaceId={workspaceId} />}
         />
 
@@ -145,9 +155,9 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
                 disabled={context.busy}
                 className={cn(
                   "max-w-full truncate rounded-full border px-3 py-1 text-left text-xs",
-                  "border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/50",
-                  "text-[color:var(--color-fg-muted)] hover:text-[color:var(--color-fg)]",
-                  "hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)]",
+                  "border-border bg-surface-2/50",
+                  "text-fg-muted hover:text-fg",
+                  "hover:border-border-strong hover:bg-surface-2",
                   "transition-colors active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60",
                 )}
               >
@@ -172,7 +182,79 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
           disabled={context.busy}
         />
       </div>
+
+      <RecentSessions workspaceId={workspaceId} />
     </div>
+  );
+}
+
+// ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
+// A calm section below the composer: the most recent sessions as compact rows
+// (status dot, title, repo/model meta, relative time), linking straight in. It
+// reuses the same useWorkspaceSessions hook the rail runs on and renders only
+// when sessions exist, so the hero stays the composer.
+function RecentSessions({ workspaceId }: { workspaceId: string }) {
+  const { sessions } = useWorkspaceSessions({ limit: 12, pollIntervalMs: 30_000 });
+  const recent = useMemo(() => {
+    const { running, grouped } = groupSessionsForRail(sessions);
+    return [...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
+  }, [sessions]);
+
+  if (recent.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="mt-12">
+      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+        Recent sessions
+      </h2>
+      <ul className="grid gap-1">
+        {recent.map((session) => (
+          <RecentSessionRow key={session.id} workspaceId={workspaceId} session={session} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
+  queued: "queued",
+  running: "running",
+  requires_action: "waiting",
+  idle: "idle",
+  failed: "failed",
+  cancelled: "cancelled",
+};
+
+/** A short `owner/repo` label from the session's first repository resource. */
+function sessionRepoLabel(session: Session): string | null {
+  const repo = session.resources.find((resource) => resource.kind === "repository");
+  if (!repo || repo.kind !== "repository") {
+    return null;
+  }
+  const parts = repo.uri.replace(/\.git$/, "").split("/").filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join("/") : parts.at(-1) ?? null;
+}
+
+function RecentSessionRow({ workspaceId, session }: { workspaceId: string; session: Session }) {
+  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  const meta = [session.model, sessionRepoLabel(session)].filter(Boolean).join(" · ");
+  return (
+    <li>
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: session.id }}
+        className="group flex items-center gap-3 rounded-lg border border-border bg-surface/40 px-3 py-2.5 transition-colors hover:border-border-strong hover:bg-surface-2/60"
+      >
+        <StatusDot tone={SESSION_STATUS_TONE[session.status]} pulse={session.status === "running"} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-fg">{title}</span>
+          {meta ? <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{meta}</span> : null}
+        </span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-subtle">{relativeTimeLabel(session.updatedAt)}</span>
+      </Link>
+    </li>
   );
 }
 
@@ -281,6 +363,11 @@ function ComputeTargetControl(props: {
   const fleet = useMachines({ pollIntervalMs: 10000 });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
+  // A 404 is the expected "self-hosted machines are disabled here" signal, not a
+  // failure — only a genuine load error (network/5xx) is surfaced, so the machine
+  // option isn't silently swallowed by a transient outage (states #4).
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   // Preserve the last managed backend override across kind toggles (lossless) so
   // toggling machine→sandbox returns to the prior choice, not a forced reset.
   const lastBackend = useRef<SandboxBackend | "">(draft.compute.kind === "sandbox" ? draft.compute.backend : "");
@@ -340,6 +427,7 @@ function ComputeTargetControl(props: {
           onChange={onChange}
           disabled={props.disabled}
         />
+        {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
         <RevealConnectedMachinesButton onClick={revealConnectedMachines} disabled={props.disabled} />
       </section>
     );
@@ -347,7 +435,7 @@ function ComputeTargetControl(props: {
 
   return (
     <section className="mt-5 grid gap-3">
-      <p className="px-0.5 text-[11px] font-medium uppercase tracking-[0.08em] text-[color:var(--color-fg-subtle)]">
+      <p className="px-0.5 text-2xs font-medium uppercase tracking-[0.08em] text-fg-subtle">
         Where should this run?
       </p>
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
@@ -355,19 +443,21 @@ function ComputeTargetControl(props: {
           selected={draft.compute.kind === "sandbox"}
           disabled={props.disabled}
           icon={<BoxIcon className="size-4 shrink-0" />}
-          title="Managed Sandbox"
-          subtitle="A fresh box, set up for you"
+          title="Managed sandbox"
+          subtitle="A fresh sandbox, set up for you"
           onClick={() => selectKind("sandbox")}
         />
         <ComputeKindButton
           selected={draft.compute.kind === "machine"}
           disabled={props.disabled || fleetEmpty}
           icon={<ServerIcon className="size-4 shrink-0" />}
-          title="Connected Machine"
-          subtitle={fleetEmpty ? "Connect one to use it" : "Run on your own machine"}
+          title="Connected machine"
+          subtitle={fleetLoadFailed ? "Couldn't load machines" : fleetEmpty ? "Connect one to use it" : "Run on your own machine"}
           onClick={() => selectKind("machine")}
         />
       </div>
+
+      {fleetLoadFailed ? <FleetErrorNotice onRetry={() => void fleet.refresh()} /> : null}
 
       {draft.compute.kind === "sandbox" ? (
         <ManagedSandboxFields
@@ -412,29 +502,29 @@ function ComputeKindButton(props: {
         "group flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-[color,background-color,border-color,box-shadow]",
         "disabled:cursor-not-allowed disabled:opacity-50",
         props.selected
-          ? "border-[color:var(--color-brand)]/60 bg-[color:var(--color-brand)]/[0.08] ring-1 ring-inset ring-[color:var(--color-brand)]/20"
-          : "border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)]/60",
+          ? "border-brand/60 bg-brand/[0.08] ring-1 ring-inset ring-brand/20"
+          : "border-border bg-surface/40 hover:border-border-strong hover:bg-surface-2/60",
       )}
     >
       <span
         className={cn(
           "mt-0.5 transition-colors",
-          props.selected ? "text-[color:var(--color-brand)]" : "text-[color:var(--color-fg-subtle)] group-hover:text-[color:var(--color-fg-muted)]",
+          props.selected ? "text-brand" : "text-fg-subtle group-hover:text-fg-muted",
         )}
       >
         {props.icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-medium text-[color:var(--color-fg)]">{props.title}</span>
-        <span className="mt-0.5 block truncate text-[11px] text-[color:var(--color-fg-subtle)]">{props.subtitle}</span>
+        <span className="block truncate text-sm font-medium text-fg">{props.title}</span>
+        <span className="mt-0.5 block truncate text-2xs text-fg-subtle">{props.subtitle}</span>
       </span>
       <span
         aria-hidden
         className={cn(
           "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full transition-all",
           props.selected
-            ? "scale-100 bg-[color:var(--color-brand)] text-[color:var(--color-brand-fg)]"
-            : "scale-90 border border-[color:var(--color-border-strong)] opacity-0 group-hover:opacity-60",
+            ? "scale-100 bg-brand text-brand-fg"
+            : "scale-90 border border-border-strong opacity-0 group-hover:opacity-60",
         )}
       >
         <CheckIcon className="size-2.5" strokeWidth={3} />
@@ -458,28 +548,27 @@ function ManagedSandboxFields(props: {
   const backendSummary = [selectedBackend?.label, ...(selectedBackend?.chips ?? [])].filter(Boolean).join(" · ");
 
   return (
-    <div className="grid gap-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 p-3.5">
+    <div className="grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
       <div className="grid gap-2">
         <Label className="flex items-center gap-1.5 text-xs">
-          <GitBranchIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <GitBranchIcon className="size-3 shrink-0 text-fg-subtle" />
           Repository + branch
         </Label>
         <div>
           <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled={props.disabled} />
         </div>
-        <p className="flex items-center gap-1.5 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+        <p className="flex items-center gap-1.5 text-2xs text-fg-subtle">
           <FolderIcon className="size-3 shrink-0" />
-          Cloned into <span className="font-mono text-[color:var(--color-fg-muted)]">/workspace</span>, the fixed sandbox root.
+          Repositories are cloned into <span className="font-mono text-fg-muted">/workspace</span>.
         </p>
       </div>
 
-      <div className="grid gap-2 border-t border-[color:var(--color-border)] pt-4">
+      <div className="grid gap-2 border-t border-border pt-4">
         <Label className="flex items-center gap-1.5 text-xs">
-          <BoxIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
           Environment
         </Label>
-        <select
-          className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 text-sm transition-colors hover:border-[color:var(--color-border-strong)] focus-visible:border-[color:var(--color-ring)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        <Select
           value={draft.environmentId}
           disabled={props.disabled}
           onChange={(event) => onChange({ ...draft, environmentId: event.target.value })}
@@ -490,24 +579,23 @@ function ManagedSandboxFields(props: {
               {environment.name} ({environment.variables.length} vars)
             </option>
           ))}
-        </select>
-        <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+        </Select>
+        <p className="text-2xs text-fg-subtle">
           Variables are set in the sandbox at start. Their values stay write-only.
         </p>
       </div>
 
       {/* Low-level sandbox backend override — demoted into this kind's Advanced
           detail, descriptor-driven from CAPABILITY_DESCRIPTORS. */}
-      <details className="group rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/30 transition-colors open:bg-[color:var(--color-surface)]/50">
-        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-[11px] text-[color:var(--color-fg-subtle)] transition-colors hover:text-[color:var(--color-fg-muted)]">
+      <details className="group rounded-md border border-border bg-surface/30 transition-colors open:bg-surface/50">
+        <summary className="flex cursor-pointer list-none items-center gap-1.5 px-3 py-2 text-2xs text-fg-subtle transition-colors hover:text-fg-muted">
           <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
           <span>Advanced</span>
-          <span className="text-[color:var(--color-fg-subtle)]/70">·</span>
-          <span className="truncate">backend {backendSummary}</span>
+          <span className="text-fg-subtle/70">·</span>
+          <span className="truncate">backend: {backendSummary}</span>
         </summary>
         <div className="grid gap-2 px-3 pb-3">
-          <select
-            className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 text-sm transition-colors hover:border-[color:var(--color-border-strong)] focus-visible:border-[color:var(--color-ring)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          <Select
             value={compute.backend}
             disabled={props.disabled}
             onChange={(event) => onChange({ ...draft, compute: { kind: "sandbox", backend: event.target.value as SandboxBackend | "" } })}
@@ -518,8 +606,8 @@ function ManagedSandboxFields(props: {
                 {option.chips.length > 0 ? ` · ${option.chips.join(" · ")}` : ""}
               </option>
             ))}
-          </select>
-          <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+          </Select>
+          <p className="text-2xs text-fg-subtle">
             Forces the underlying sandbox type. Leave on the deployment default unless you need a specific backend.
           </p>
         </div>
@@ -547,14 +635,13 @@ function ConnectedMachineFields(props: {
   const capabilityChips = selfhostedCapabilityChips(pickedMachine);
 
   return (
-    <div className="grid gap-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 p-3.5">
+    <div className="grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
       <div className="grid gap-2">
         <Label className="flex items-center gap-1.5 text-xs">
-          <ServerIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <ServerIcon className="size-3 shrink-0 text-fg-subtle" />
           Machine
         </Label>
-        <select
-          className="h-9 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 text-sm transition-colors hover:border-[color:var(--color-border-strong)] focus-visible:border-[color:var(--color-ring)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        <Select
           value={compute.sandboxId ?? ""}
           disabled={props.disabled}
           onChange={(event) => setCompute({ ...compute, sandboxId: event.target.value || null })}
@@ -569,20 +656,20 @@ function ConnectedMachineFields(props: {
               {machine.state !== "online" ? ` (${machine.state})` : ""}
             </option>
           ))}
-        </select>
+        </Select>
         <div className="flex flex-wrap items-center gap-1.5">
           {capabilityChips.map((chip) => (
             <CapabilityChip key={chip}>{chip}</CapabilityChip>
           ))}
           {pickedMachine && !pickedMachine.hasDisplay ? (
-            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-[color:var(--color-border-strong)] px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--color-fg-subtle)]">
+            <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border-strong px-1.5 py-0.5 text-2xs font-medium text-fg-subtle">
               <MonitorOffIcon className="size-3 shrink-0" />
               No display
             </span>
           ) : null}
         </div>
         {compute.sandboxId === null ? (
-          <p className="text-[11px] leading-4 text-[color:var(--color-fg-muted)]">
+          <p className="text-2xs text-fg-muted">
             Pick a machine to run on.
           </p>
         ) : null}
@@ -590,9 +677,9 @@ function ConnectedMachineFields(props: {
 
       {/* Project / folder — the agent's working directory on the machine (D4/D5,
           functional via Stage A's workingDir for root + custom path). */}
-      <div className="grid gap-2.5 border-t border-[color:var(--color-border)] pt-4">
+      <div className="grid gap-2.5 border-t border-border pt-4">
         <Label className="flex items-center gap-1.5 text-xs">
-          <FolderIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <FolderIcon className="size-3 shrink-0 text-fg-subtle" />
           Project / folder
         </Label>
         <div className="grid gap-2">
@@ -629,38 +716,38 @@ function ConnectedMachineFields(props: {
             />
           ) : null}
         </div>
-        <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+        <p className="text-2xs text-fg-subtle">
           Where the agent, terminal, and file dock open. Defaults to the machine&apos;s workspace root.
         </p>
       </div>
 
       {/* Repositories — grayed: a connected machine uses its own checkout & git
           auth (D3), so the workspace repo selection is never cloned onto it. */}
-      <div className="grid gap-2 border-t border-[color:var(--color-border)] pt-4">
-        <Label className="flex items-center justify-between gap-1.5 text-xs text-[color:var(--color-fg-subtle)]">
+      <div className="grid gap-2 border-t border-border pt-4">
+        <Label className="flex items-center justify-between gap-1.5 text-xs text-fg-subtle">
           <span className="flex items-center gap-1.5">
             <GitBranchIcon className="size-3 shrink-0" />
             Repositories
           </span>
-          <span className="rounded border border-[color:var(--color-border)] px-1.5 py-px text-[10px] font-normal text-[color:var(--color-fg-subtle)]">
+          <span className="rounded border border-border px-1.5 py-px text-2xs font-normal text-fg-subtle">
             Not cloned here
           </span>
         </Label>
         <div className="pointer-events-none select-none opacity-45">
           <WorkspaceRepositoryPicker workspaceId={props.workspaceId} disabled />
         </div>
-        <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+        <p className="text-2xs text-fg-subtle">
           This machine uses its own checkout &amp; git auth, so your selected repositories aren&apos;t cloned onto it.
         </p>
       </div>
 
       {/* Environment injection — hidden on a connected machine (D2). */}
-      <div className="grid gap-1 border-t border-[color:var(--color-border)] pt-4">
-        <p className="flex items-center gap-1.5 text-xs text-[color:var(--color-fg-subtle)]">
+      <div className="grid gap-1 border-t border-border pt-4">
+        <p className="flex items-center gap-1.5 text-xs text-fg-subtle">
           <BoxIcon className="size-3 shrink-0" />
           No environment is injected here.
         </p>
-        <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
+        <p className="text-2xs text-fg-subtle">
           The machine&apos;s own environment &amp; git credentials apply.
         </p>
       </div>
@@ -670,7 +757,7 @@ function ConnectedMachineFields(props: {
 
 function CapabilityChip({ children }: { children: ReactNode }) {
   return (
-    <span className="inline-flex items-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/60 px-1.5 py-0.5 text-[10px] font-medium text-[color:var(--color-fg-muted)]">
+    <span className="inline-flex items-center rounded-md border border-border bg-surface-2/60 px-1.5 py-0.5 text-2xs font-medium text-fg-muted">
       {children}
     </span>
   );
@@ -686,17 +773,35 @@ function RevealConnectedMachinesButton(props: { onClick: () => void; disabled: b
       onClick={props.onClick}
       disabled={props.disabled}
       className={cn(
-        "group inline-flex items-center gap-2 justify-self-start rounded-md px-1.5 py-1 text-[11px] transition-colors",
-        "text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg-muted)]",
+        "group inline-flex items-center gap-2 justify-self-start rounded-md px-1.5 py-1 text-2xs transition-colors",
+        "text-fg-subtle hover:text-fg-muted",
         "disabled:cursor-not-allowed disabled:opacity-60",
       )}
     >
-      <span className="flex size-5 shrink-0 items-center justify-center rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-surface-2)]/50 text-[color:var(--color-fg-subtle)] transition-colors group-hover:border-[color:var(--color-border-strong)] group-hover:text-[color:var(--color-fg-muted)]">
+      <span className="flex size-5 shrink-0 items-center justify-center rounded-md border border-border bg-surface-2/50 text-fg-subtle transition-colors group-hover:border-border-strong group-hover:text-fg-muted">
         <ServerIcon className="size-3" />
       </span>
       <span>Run on your own connected machine</span>
       <ArrowRightIcon className="size-3 -translate-x-1 opacity-0 transition-all group-hover:translate-x-0 group-hover:opacity-100" />
     </button>
+  );
+}
+
+// A genuine fleet-load failure (not the expected selfhosted-disabled 404): a
+// calm, retryable note so the machine option is never silently swallowed.
+function FleetErrorNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <Notice
+      tone="muted"
+      className="p-2.5 text-xs"
+      action={
+        <button type="button" onClick={onRetry} className="text-xs font-medium text-fg-muted underline underline-offset-2 hover:text-fg">
+          Retry
+        </button>
+      }
+    >
+      Couldn&apos;t load your connected machines.
+    </Notice>
   );
 }
 
@@ -721,19 +826,19 @@ function FolderRadio(props: {
         className={cn(
           "flex size-3.5 shrink-0 items-center justify-center rounded-full border transition-colors",
           props.checked
-            ? "border-[color:var(--color-brand)]"
-            : "border-[color:var(--color-border-strong)] group-hover:border-[color:var(--color-fg-subtle)]",
+            ? "border-brand"
+            : "border-border-strong group-hover:border-fg-subtle",
         )}
       >
-        {props.checked ? <span className="size-1.5 rounded-full bg-[color:var(--color-brand-strong)]" /> : null}
+        {props.checked ? <span className="size-1.5 rounded-full bg-brand-strong" /> : null}
       </span>
-      <span className="font-medium text-[color:var(--color-fg)]">{props.label}</span>
+      <span className="font-medium text-fg">{props.label}</span>
       {props.badge ? (
-        <span className="rounded border border-[color:var(--color-border)] px-1 py-px text-[9px] font-medium uppercase tracking-wide text-[color:var(--color-fg-subtle)]">
+        <span className="rounded border border-border px-1 py-px text-2xs font-medium uppercase tracking-wide text-fg-subtle">
           {props.badge}
         </span>
       ) : null}
-      <span className="text-[11px] text-[color:var(--color-fg-subtle)]">— {props.hint}</span>
+      <span className="text-2xs text-fg-subtle">— {props.hint}</span>
     </button>
   );
 }
@@ -759,21 +864,21 @@ function OptionalSessionOptions(props: {
       <CollapsibleTrigger asChild>
         <button
           type="button"
-          className="flex w-full items-center gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 px-3 py-2.5 text-left text-xs text-[color:var(--color-fg-muted)] transition-colors hover:border-[color:var(--color-border-strong)] hover:bg-[color:var(--color-surface-2)]/60 hover:text-[color:var(--color-fg)]"
+          className="flex w-full items-center gap-2 rounded-lg border border-border bg-surface/40 px-3 py-2.5 text-left text-xs text-fg-muted transition-colors hover:border-border-strong hover:bg-surface-2/60 hover:text-fg"
         >
-          <SlidersHorizontalIcon className="size-3.5 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <SlidersHorizontalIcon className="size-3.5 shrink-0 text-fg-subtle" />
           <span className="font-medium">Goal &amp; tool permissions</span>
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[color:var(--color-fg-subtle)]">
+          <span className="min-w-0 flex-1 truncate text-2xs text-fg-subtle">
             {summary.length > 0 ? summary.join(" · ") : "Optional — run toward a goal, limit tool access"}
           </span>
           <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", props.open && "rotate-180")} />
         </button>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="mt-2 grid gap-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/40 p-3.5">
+        <div className="mt-2 grid gap-4 rounded-lg border border-border bg-surface/40 p-3.5">
           <div className="grid gap-2">
             <Label className="flex items-center gap-1.5 text-xs">
-              <FlagIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+              <FlagIcon className="size-3 shrink-0 text-fg-subtle" />
               Goal (optional)
             </Label>
             <textarea
@@ -781,7 +886,7 @@ function OptionalSessionOptions(props: {
               disabled={props.disabled}
               onChange={(event) => update({ goalText: event.target.value })}
               placeholder="Keep the session working on its own between your messages…"
-              className="min-h-14 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-3 py-2 text-sm transition-colors placeholder:text-[color:var(--color-fg-subtle)] hover:border-[color:var(--color-border-strong)] focus-visible:border-[color:var(--color-ring)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-14 rounded-md border border-border bg-bg px-3 py-2 text-sm transition-colors placeholder:text-fg-subtle hover:border-border-strong focus-visible:border-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
             />
             <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_10rem]">
               <Input
@@ -803,15 +908,15 @@ function OptionalSessionOptions(props: {
           </div>
 
           <div className="grid gap-2">
-            <label className="flex items-center gap-2 text-xs text-[color:var(--color-fg-muted)]">
+            <label className="flex items-center gap-2 text-xs text-fg-muted">
               <input
                 type="checkbox"
                 checked={draft.customMcpPermissions}
                 disabled={props.disabled}
                 onChange={(event) => update({ customMcpPermissions: event.target.checked })}
-                className="size-3.5 accent-[color:var(--color-brand-strong)]"
+                className="size-3.5 accent-brand-strong"
               />
-              <ShieldIcon className="size-3 shrink-0 text-[color:var(--color-fg-subtle)]" />
+              <ShieldIcon className="size-3 shrink-0 text-fg-subtle" />
               Restrict this session&apos;s OpenGeni tool permissions
             </label>
             {draft.customMcpPermissions ? (
@@ -830,8 +935,8 @@ function OptionalSessionOptions(props: {
                 }}
               />
             ) : (
-              <p className="text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">
-                By default the session&apos;s OpenGeni MCP tool can use the platform on your behalf inside this workspace.
+              <p className="text-2xs text-fg-subtle">
+                By default this session can use OpenGeni tools on your behalf in this workspace.
               </p>
             )}
           </div>

@@ -168,7 +168,14 @@ export function RootRouteComponent() {
   // so each open session keeps its own choice independently.
   const [modelBySession, setModelBySession] = useState<Record<string, string>>({});
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  // The dock is open by default on desktop, but on narrow viewports (<1024px)
+  // the dock renders as a full-screen overlay — so it must start CLOSED there or
+  // a phone opening a session would land with the overlay covering the
+  // transcript. Only the initial default is viewport-aware; the user's later
+  // toggles are never overridden.
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() =>
+    typeof window === "undefined" ? true : !window.matchMedia("(max-width: 1023px)").matches,
+  );
   const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
@@ -346,8 +353,11 @@ export function RootRouteComponent() {
     }
     setWorkspaces((current) => upsertWorkspace(current, created));
     // Refresh grants so the new workspace's owner permissions apply at once;
-    // the workspace itself is already usable if this refresh fails.
-    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    // the workspace itself is already usable if this refresh fails — surface a
+    // soft warning so a stale permission set doesn't fail silently.
+    await client.getAccessContext().then(setAccessContext).catch(() => {
+      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
+    });
     return created;
   }
 
@@ -387,7 +397,9 @@ export function RootRouteComponent() {
       return false;
     }
     setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
-    await client.getAccessContext().then(setAccessContext).catch(() => undefined);
+    await client.getAccessContext().then(setAccessContext).catch(() => {
+      toast.warning("Permissions may be out of date", { description: "Reload if something looks off." });
+    });
     return true;
   }
 
@@ -661,7 +673,7 @@ export function RootRouteComponent() {
   } satisfies AppContextValue : null;
 
   return (
-    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-[color:var(--color-bg)] text-[color:var(--color-fg)]">
+    <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">
       <Toaster richColors theme="dark" />
       {!clientConfig && !configError ? (
         <LoadingPanel label="Loading OpenGeni" />
@@ -691,7 +703,7 @@ export function RootRouteComponent() {
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
       ) : !defaultWorkspaceId ? (
-        <ProblemPanel title="No workspace access" description="This subject does not have access to any OpenGeni workspace." />
+        <ProblemPanel title="No workspace access" description="You don't have access to any workspace yet." />
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
@@ -728,19 +740,19 @@ function AccessKeyPanel(props: {
   return (
     <section className="flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-5 shadow-sm"
+        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
         onSubmit={(event) => {
           event.preventDefault();
           props.onSubmit();
         }}
       >
         <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <LockIcon className="size-4" />
           </span>
           <div>
             <h1 className="text-base font-semibold">Access key required</h1>
-            <p className="text-sm text-[color:var(--color-fg-subtle)]">
+            <p className="text-sm text-fg-subtle">
               Enter the {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"} for this OpenGeni instance.
             </p>
           </div>
@@ -755,7 +767,7 @@ function AccessKeyPanel(props: {
           className="mt-2"
           autoFocus
         />
-        <Button type="submit" className="mt-4 w-full">
+        <Button type="submit" className="mt-4 w-full" disabled={props.accessKeyDraft.trim().length === 0}>
           <CheckIcon className="size-4" />
           Continue
         </Button>
@@ -809,22 +821,22 @@ function ManagedAuthPanel(props: {
   return (
     <section className="flex flex-1 items-center justify-center px-4">
       <form
-        className="w-full max-w-sm rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-5 shadow-sm"
+        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
         }}
       >
         <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <UserIcon className="size-4" />
           </span>
           <div>
             <h1 className="text-base font-semibold">{mode === "signup" ? "Create account" : "Sign in"}</h1>
-            <p className="text-sm text-[color:var(--color-fg-subtle)]">Email and password access for the managed console.</p>
+            <p className="text-sm text-fg-subtle">Email and password access for the managed console.</p>
           </div>
         </div>
-        <div className="mb-4 grid grid-cols-2 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] p-1">
+        <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
           <Button type="button" size="sm" variant={mode === "signin" ? "secondary" : "ghost"} onClick={() => setMode("signin")}>Sign in</Button>
           <Button type="button" size="sm" variant={mode === "signup" ? "secondary" : "ghost"} onClick={() => setMode("signup")}>Sign up</Button>
         </div>

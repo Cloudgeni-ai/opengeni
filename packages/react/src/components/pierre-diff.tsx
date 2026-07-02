@@ -98,16 +98,15 @@ export function PierreDiff({
 
   // Pierre renders inside a shadow DOM, so host CSS can't reach it — but it reads
   // a set of `--diffs-*-override` custom properties through the shadow boundary.
-  // Pin the diff's own base background to the dock surface (Pierre's dark default
-  // is pure #000, which reads as a seam against our #0d0d0d panel) and quiet the
-  // hunk-separator slab so the collapsed-context row isn't a heavy gray bar.
+  // Pin the diff's own base background to the dock surface and quiet the hunk
+  // separator slab so collapsed context rows do not become heavy bars.
   const pierreVars = {
-    "--diffs-dark-bg": "var(--og-color-bg, #0d0d0d)",
-    "--diffs-light-bg": "var(--og-color-bg, #ffffff)",
-    "--diffs-bg-buffer-override": "var(--og-color-surface-1, #161616)",
-    "--diffs-bg-separator-override": "var(--og-color-surface-1, #161616)",
-    "--diffs-font-size": "12.5px",
-    "--diffs-line-height": "20px",
+    "--diffs-dark-bg": "var(--og-color-bg)",
+    "--diffs-light-bg": "var(--og-color-bg)",
+    "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
+    "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    "--diffs-font-size": "var(--og-code-font-size)",
+    "--diffs-line-height": "var(--og-code-line-height)",
   } as CSSProperties;
 
   return (
@@ -133,7 +132,7 @@ export function PierreDiff({
 
 function DiffSkeleton() {
   return (
-    <div className="p-3 text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
+    <div className="p-3 text-og-sm text-og-fg-subtle">
       Loading diff…
     </div>
   );

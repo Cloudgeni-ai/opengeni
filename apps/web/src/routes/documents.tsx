@@ -6,7 +6,10 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { Notice } from "@/components/ui/notice";
+import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
@@ -29,9 +32,16 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [searching, setSearching] = useState(false);
+  // The query behind the results on screen, so a completed search that found
+  // nothing reads as "No results" rather than the initial prompt.
+  const [searched, setSearched] = useState<string | null>(null);
   const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
   const [retryingAll, setRetryingAll] = useState(false);
+  // Set when background indexing-status polling fails, so stale "indexing…"
+  // rows carry a visible notice instead of silently freezing.
+  const [pollFailed, setPollFailed] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
   const selectedBase = bases.find((base) => base.id === selectedBaseId) ?? null;
   const failedDocuments = documents.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
@@ -45,10 +55,12 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   }, [workspaceId]);
 
   useEffect(() => {
+    setResults([]);
+    setSearched(null);
+    setPollFailed(false);
     if (!selectedBaseId) {
       setDocuments([]);
       setDocumentsError(null);
-      setResults([]);
       return;
     }
     void refreshDocuments(selectedBaseId);
@@ -59,7 +71,12 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       return;
     }
     const timer = window.setInterval(() => {
-      void client.listDocuments(workspaceId, selectedBaseId).then(setDocuments).catch(() => undefined);
+      void client.listDocuments(workspaceId, selectedBaseId)
+        .then((next) => {
+          setDocuments(next);
+          setPollFailed(false);
+        })
+        .catch(() => setPollFailed(true));
     }, 1200);
     return () => window.clearInterval(timer);
   }, [workspaceId, selectedBaseId, documents]);
@@ -101,6 +118,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       setBases((current) => [...current, base]);
       setSelectedBaseId(base.id);
       setName("");
+      toast.success("Document base created", { description: `“${base.name}” is ready for uploads.` });
     } catch (error) {
       toast.error("Failed to create document base", { description: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -136,7 +154,12 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     try {
       const response = await client.searchDocuments(workspaceId, selectedBaseId, { query: query.trim(), limit: 8 });
       setResults(response.results);
+      setSearched(query.trim());
     } catch (error) {
+      // Clear stale matches so a failed search never leaves prior results
+      // reading as current; the toast carries the cause.
+      setResults([]);
+      setSearched(null);
       toast.error("Document search failed", { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setSearching(false);
@@ -188,43 +211,44 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
-          description="Manage indexed document bases for agent search and retry failed document indexing."
+          description="Indexed document bases the agent can search."
           actions={(
             <div className="flex min-w-0 gap-2">
               <Input
+                ref={nameInputRef}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                placeholder="New base"
+                placeholder="New base name"
                 className="h-8 min-w-0 text-xs"
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void handleCreateBase();
                 }}
               />
-              <Button type="button" size="sm" onClick={() => void handleCreateBase()} disabled={creatingBase || !name.trim()} className="h-8 shrink-0">
+              <Button type="button" size="sm" onClick={() => void handleCreateBase()} disabled={creatingBase || !name.trim()} className="h-8 shrink-0 pointer-coarse:min-h-10">
                 {creatingBase ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlusIcon className="size-3.5" />}
-                Create
+                Create base
               </Button>
             </div>
           )}
         />
 
         <div className="mt-5 grid min-h-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
-          <aside className="min-w-0 border-b border-[color:var(--color-border)] pb-4 lg:border-b-0 lg:border-r lg:pr-4">
+          <aside className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase text-[color:var(--color-fg-subtle)]">Bases</div>
-              <div className="text-[11px] text-[color:var(--color-fg-subtle)]">{bases.length}</div>
+              <div className="text-xs font-medium uppercase text-fg-subtle">Bases</div>
+              <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
             <div className="space-y-1">
               {basesView === "loading" ? (
-                <div className="flex items-center gap-2 rounded-lg border border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
+                <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
                   <Loader2Icon className="size-3.5 animate-spin" />
                   Loading bases
                 </div>
               ) : basesView === "error" ? (
                 <LoadErrorState title="Couldn't load document bases" error={basesError} onRetry={() => void refreshBases()} />
               ) : basesView === "empty" ? (
-                <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-3 text-xs text-[color:var(--color-fg-muted)]">
-                  Create a document base to start.
+                <div className="rounded-lg border border-dashed border-border p-3 text-xs leading-5 text-fg-muted">
+                  No bases yet. Name one above to start indexing documents.
                 </div>
               ) : bases.map((base) => (
                 <button
@@ -234,8 +258,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   className={cn(
                     "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
                     selectedBaseId === base.id
-                      ? "border-[color:var(--color-brand)]/40 bg-[color:var(--color-brand)]/10 text-[color:var(--color-fg)]"
-                      : "border-[color:var(--color-border)] bg-[color:var(--color-bg)]/25 text-[color:var(--color-fg-muted)] hover:bg-[color:var(--color-surface-2)]",
+                      ? "border-brand/40 bg-brand/10 text-fg"
+                      : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
                   )}
                 >
                   <span className="truncate">{base.name}</span>
@@ -251,7 +275,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="truncate text-base font-medium">{selectedBase.name}</div>
-                    <div className="text-xs text-[color:var(--color-fg-subtle)]">
+                    <div className="text-xs text-fg-subtle">
                       {documents.length} files · {failedDocuments.length} failed
                     </div>
                   </div>
@@ -288,33 +312,63 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 </div>
 
                 <div className="mt-4 space-y-2">
+                  {pollFailed ? (
+                    <Notice
+                      tone="waiting"
+                      title="Indexing status may be stale"
+                      action={(
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined}
+                        >
+                          <RefreshCwIcon className="size-3" />
+                          Refresh
+                        </Button>
+                      )}
+                    >
+                      Couldn't reach the server to refresh indexing progress. It will keep retrying.
+                    </Notice>
+                  ) : null}
                   {documentsView === "loading" ? (
-                    <div className="flex items-center justify-center gap-2 rounded-lg border border-[color:var(--color-border)] p-6 text-xs text-[color:var(--color-fg-muted)]">
+                    <div className="flex items-center justify-center gap-2 rounded-lg border border-border p-6 text-xs text-fg-muted">
                       <Loader2Icon className="size-3.5 animate-spin" />
                       Loading documents
                     </div>
                   ) : documentsView === "error" ? (
                     <LoadErrorState title="Couldn't load documents" error={documentsError} onRetry={() => selectedBaseId ? void refreshDocuments(selectedBaseId) : undefined} />
                   ) : documentsView === "empty" ? (
-                    <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-6 text-center text-xs text-[color:var(--color-fg-muted)]">
-                      Upload files to index this base.
-                    </div>
+                    <EmptyState
+                      icon={<FilesIcon className="size-4" />}
+                      title="No documents yet"
+                      description={fileUploadsEnabled
+                        ? "Upload files to index them for agent search."
+                        : "File uploads are turned off for this deployment."}
+                      action={fileUploadsEnabled ? (
+                        <Button type="button" size="sm" disabled={uploading} onClick={() => fileInputRef.current?.click()}>
+                          {uploading ? <Loader2Icon className="size-3.5 animate-spin" /> : <FilesIcon className="size-3.5" />}
+                          Upload files
+                        </Button>
+                      ) : undefined}
+                    />
                   ) : (
                     documents.map((document) => (
-                      <div key={document.id} className="flex items-start justify-between gap-3 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 px-3 py-2.5">
+                      <div key={document.id} className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5">
                         <div className="min-w-0">
                           <div className="truncate text-sm font-medium">{document.title}</div>
-                          <div className="mt-1 text-[11px] text-[color:var(--color-fg-subtle)]">
+                          <div className="mt-1 text-2xs text-fg-subtle">
                             {document.status} · {document.chunkCount} chunks · {document.parser}
                           </div>
                           {document.status === "failed" && document.error ? (
-                            <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-[color:var(--color-danger)]">
+                            <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
                               {document.error}
                             </div>
                           ) : null}
                         </div>
                         <div className="flex shrink-0 items-center gap-2 pt-0.5">
-                          <DocumentStatusDot status={document.status} />
+                          <StatusDot tone={documentStatusTone(document.status)} pulse={document.status === "indexing"} />
+                          <span className="sr-only">{document.status}</span>
                           {document.status === "failed" ? (
                             <Button
                               type="button"
@@ -334,16 +388,30 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   )}
                 </div>
               </>
+            ) : basesView === "empty" ? (
+              <EmptyState
+                icon={<FileSearchIcon className="size-4" />}
+                title="Create your first base"
+                description="A document base is an indexed corpus the agent can search. Name one and upload files to it."
+                action={(
+                  <Button type="button" size="sm" onClick={() => nameInputRef.current?.focus()}>
+                    <PlusIcon className="size-3.5" />
+                    Create base
+                  </Button>
+                )}
+              />
             ) : (
-              <div className="grid min-h-48 place-items-center text-center text-xs text-[color:var(--color-fg-muted)]">
-                Select or create a base.
-              </div>
+              <EmptyState
+                icon={<FileSearchIcon className="size-4" />}
+                title="No base selected"
+                description="Pick a base on the left to upload and search its documents."
+              />
             )}
           </div>
 
-          <aside className="min-w-0 border-t border-[color:var(--color-border)] pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
+          <aside className="min-w-0 border-t border-border pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
             <div className="flex items-center gap-2 text-sm font-medium">
-              <FileSearchIcon className="size-4 text-[color:var(--color-brand)]" />
+              <FileSearchIcon className="size-4 text-brand" />
               Search
             </div>
             <div className="mt-3 grid gap-2">
@@ -366,17 +434,21 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             <div className="mt-4 space-y-2">
               {results.length > 0 ? (
                 results.map((result) => (
-                  <div key={result.chunkId} className="rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3">
+                  <div key={result.chunkId} className="rounded-lg border border-border bg-surface/35 p-3">
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate font-medium text-[color:var(--color-fg)]">{result.title}</span>
-                      <span className="shrink-0 text-[color:var(--color-fg-subtle)]">{Math.round(result.score * 100)}%</span>
+                      <span className="truncate font-medium text-fg">{result.title}</span>
+                      <span className="shrink-0 text-fg-subtle">{Math.round(result.score * 100)}%</span>
                     </div>
-                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">{result.text}</p>
+                    <p className="mt-2 line-clamp-4 text-xs leading-5 text-fg-muted">{result.text}</p>
                   </div>
                 ))
+              ) : searched ? (
+                <div className="rounded-lg border border-dashed border-border p-4 text-xs leading-5 text-fg-muted">
+                  No results for “{searched}”.
+                </div>
               ) : (
-                <div className="rounded-lg border border-dashed border-[color:var(--color-border)] p-4 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-                  Search results appear here for the selected base.
+                <div className="rounded-lg border border-dashed border-border p-4 text-xs leading-5 text-fg-muted">
+                  Results appear here.
                 </div>
               )}
             </div>
@@ -387,17 +459,9 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function DocumentStatusDot({ status }: { status: IndexedDocument["status"] }) {
-  return (
-    <span
-      className={cn(
-        "size-2.5 shrink-0 rounded-full",
-        status === "ready" && "bg-emerald-400",
-        status === "failed" && "bg-red-400",
-        (status === "queued" || status === "indexing") && "bg-amber-300",
-      )}
-      aria-label={status}
-      title={status}
-    />
-  );
+function documentStatusTone(status: IndexedDocument["status"]): StatusTone {
+  if (status === "ready") return "idle";
+  if (status === "failed") return "failed";
+  if (status === "indexing") return "running";
+  return "waiting";
 }

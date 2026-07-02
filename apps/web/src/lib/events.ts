@@ -1,4 +1,4 @@
-import { buildTimeline, type TimelineItem } from "@opengeni/react";
+import { buildTimeline, humanizeFailureReason, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
 
@@ -97,7 +97,7 @@ export function summarizeSessionFailure(events: SessionEvent[], sessionStatus: S
       const payload = sanitized.payload && typeof sanitized.payload === "object" && !Array.isArray(sanitized.payload)
         ? sanitized.payload as Record<string, unknown>
         : {};
-      reason = failurePayloadMessage(payload) ?? reason;
+      reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
       failedAt = event.occurredAt;
     }
   }

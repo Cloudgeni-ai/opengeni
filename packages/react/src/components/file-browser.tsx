@@ -51,11 +51,11 @@ export type FileBrowserProps = {
 };
 
 const STATUS_TINT: Record<NonNullable<FileTreeNode["status"]>, string> = {
-  added: "text-[color:var(--og-color-status-idle,var(--color-success,#3fb950))]",
-  modified: "text-[color:var(--og-color-status-running,var(--color-warning,#d29922))]",
-  deleted: "text-[color:var(--og-color-danger,var(--color-danger,#f85149))] line-through",
-  renamed: "text-[color:var(--og-color-accent,var(--color-info,#58a6ff))]",
-  untracked: "text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]",
+  added: "text-og-status-idle",
+  modified: "text-og-status-running",
+  deleted: "text-og-status-failed line-through",
+  renamed: "text-og-accent",
+  untracked: "text-og-fg-subtle",
 };
 
 /** Parent dir of a workspace-relative POSIX path ("" for a root entry). */
@@ -397,15 +397,9 @@ export function FileBrowser({
     };
   }, [menu]);
 
-  if (result.error && result.tree.length === 0) {
-    return (
-      <div className={cn("p-3 text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]", className)}>
-        {fallback ?? `Files unavailable: ${result.error.message}`}
-      </div>
-    );
-  }
-
+  const showErrorEmpty = result.error && result.tree.length === 0 && !draftCreate;
   const showEmpty = !result.loading && result.tree.length === 0 && !draftCreate;
+  const showToolbar = supportsMutation || Boolean(result.error) || result.loading;
 
   const renderRow = (node: FileTreeNode, depth: number): ReactNode => {
     const isOpen = expanded.has(node.path);
@@ -489,13 +483,11 @@ export function FileBrowser({
               setMenu({ node, x: e.clientX, y: e.clientY });
             }}
             className={cn(
-              "group flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-xs",
-              "hover:bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
-              isSelected && "bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
-              isCursor &&
-                "outline outline-1 -outline-offset-1 outline-[color:var(--og-color-accent,var(--color-info,#58a6ff))]",
-              isDropTarget &&
-                "ring-1 ring-inset ring-[color:var(--og-color-accent,var(--color-info,#58a6ff))] bg-[color:var(--og-color-accent-soft,rgba(88,166,255,0.12))]",
+              "group flex w-full items-center gap-1 truncate rounded-og-sm px-1 py-0.5 text-left text-og-sm pointer-coarse:min-h-10",
+              "hover:bg-og-surface-2",
+              isSelected && "bg-og-surface-2",
+              isCursor && "outline outline-1 -outline-offset-1 outline-og-accent",
+              isDropTarget && "bg-og-accent-soft ring-1 ring-inset ring-og-accent",
               node.status ? STATUS_TINT[node.status] : undefined,
             )}
             style={{ paddingLeft: `${depth * 12 + 4}px` }}
@@ -503,7 +495,7 @@ export function FileBrowser({
             {isDir ? (
               isLoading ? (
                 <Loader2Icon
-                  className="size-3 shrink-0 animate-spin text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]"
+                  className="size-3 shrink-0 animate-spin text-og-fg-subtle"
                   aria-label="Loading"
                 />
               ) : (
@@ -526,7 +518,7 @@ export function FileBrowser({
                   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                   setMenu({ node, x: rect.right, y: rect.bottom });
                 }}
-                className="ml-auto hidden shrink-0 px-1 text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))] group-hover:inline"
+                className="ml-auto hidden shrink-0 px-1 text-og-fg-subtle hover:text-og-fg group-hover:inline"
               >
                 ⋯
               </span>
@@ -555,7 +547,7 @@ export function FileBrowser({
             {[0, 1, 2].map((i) => (
               <div
                 key={i}
-                className="h-2.5 animate-pulse rounded bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]"
+                className="h-2.5 animate-pulse rounded-og-sm bg-og-surface-2"
                 style={{ width: `${70 - i * 12}%` }}
               />
             ))}
@@ -570,34 +562,38 @@ export function FileBrowser({
 
   return (
     <div className={cn("flex min-w-0 flex-col", className)}>
-      {supportsMutation && (
-        <div className="flex shrink-0 items-center gap-0.5 border-b border-[color:var(--og-color-border,var(--color-border,#2a2a2a))] px-1 py-1">
-          <ToolbarButton label="New file" onClick={() => startCreate("file")} disabled={busy}>
-            <FilePlusIcon className="size-3.5" />
-          </ToolbarButton>
-          <ToolbarButton label="New folder" onClick={() => startCreate("dir")} disabled={busy}>
-            <FolderPlusIcon className="size-3.5" />
-          </ToolbarButton>
-          <ToolbarButton
-            label="Rename"
-            onClick={() => {
-              const node = cursor ? findNode(result.tree, cursor) : undefined;
-              if (node) startRename(node);
-            }}
-            disabled={busy || !cursor}
-          >
-            <PencilIcon className="size-3.5" />
-          </ToolbarButton>
-          <ToolbarButton
-            label="Delete"
-            onClick={() => {
-              const node = cursor ? findNode(result.tree, cursor) : undefined;
-              if (node) void runDelete(node);
-            }}
-            disabled={busy || !cursor}
-          >
-            <Trash2Icon className="size-3.5" />
-          </ToolbarButton>
+      {showToolbar && (
+        <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-og-border px-1 py-1">
+          {supportsMutation ? (
+            <>
+              <ToolbarButton label="New file" onClick={() => startCreate("file")} disabled={busy}>
+                <FilePlusIcon className="size-3.5" />
+              </ToolbarButton>
+              <ToolbarButton label="New folder" onClick={() => startCreate("dir")} disabled={busy}>
+                <FolderPlusIcon className="size-3.5" />
+              </ToolbarButton>
+              <ToolbarButton
+                label="Rename"
+                onClick={() => {
+                  const node = cursor ? findNode(result.tree, cursor) : undefined;
+                  if (node) startRename(node);
+                }}
+                disabled={busy || !cursor}
+              >
+                <PencilIcon className="size-3.5" />
+              </ToolbarButton>
+              <ToolbarButton
+                label="Delete"
+                onClick={() => {
+                  const node = cursor ? findNode(result.tree, cursor) : undefined;
+                  if (node) void runDelete(node);
+                }}
+                disabled={busy || !cursor}
+              >
+                <Trash2Icon className="size-3.5" />
+              </ToolbarButton>
+            </>
+          ) : null}
           <span className="ml-auto" />
           <ToolbarButton label="Refresh" onClick={() => void result.refresh()} disabled={busy || result.loading}>
             <RefreshCwIcon className={cn("size-3.5", result.loading && "animate-spin")} />
@@ -633,7 +629,7 @@ export function FileBrowser({
         }
         className={cn(
           "min-w-0 flex-1 overflow-auto p-1 outline-none",
-          dragOver === "" && "ring-1 ring-inset ring-[color:var(--og-color-accent,var(--color-info,#58a6ff))]",
+          dragOver === "" && "ring-1 ring-inset ring-og-accent",
         )}
         data-opengeni-file-tree
       >
@@ -647,9 +643,22 @@ export function FileBrowser({
             onCancel={() => setDraftCreate(null)}
           />
         )}
-        {showEmpty ? (
-          <div className="p-2 text-xs text-[color:var(--og-color-fg-subtle,var(--color-fg-subtle,#888))]">
-            {emptyState ?? "No files."}
+        {showErrorEmpty ? (
+          <div className="flex flex-col items-start gap-2 p-2 text-og-sm text-og-fg-subtle">
+            <div>{fallback ?? `Could not load files: ${result.error?.message ?? "refresh the file list to try again"}`}</div>
+            <button
+              type="button"
+              onClick={() => void result.refresh()}
+              disabled={result.loading}
+              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2 py-1 text-og-xs font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-10"
+            >
+              <RefreshCwIcon className={cn("size-3.5", result.loading && "animate-spin")} aria-hidden />
+              Retry
+            </button>
+          </div>
+        ) : showEmpty ? (
+          <div className="p-2 text-og-sm text-og-fg-subtle">
+            {emptyState ?? "This directory is empty"}
           </div>
         ) : (
           result.tree.map((node) => renderRow(node, 0))
@@ -690,8 +699,8 @@ function ToolbarButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        "inline-flex items-center justify-center rounded p-1 text-[color:var(--og-color-fg-muted,var(--color-fg-muted,#aaa))]",
-        "hover:bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))] hover:text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]",
+        "inline-flex items-center justify-center rounded-og-sm p-1 text-og-fg-muted pointer-coarse:min-h-10 pointer-coarse:min-w-10",
+        "hover:bg-og-surface-2 hover:text-og-fg",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}
     >
@@ -759,8 +768,8 @@ function InlineInput({
           e.stopPropagation();
         }}
         className={cn(
-          "min-w-0 flex-1 rounded border bg-[color:var(--og-color-bg,var(--color-bg,#0d0d0d))] px-1 py-0 text-xs",
-          "border-[color:var(--og-color-accent,var(--color-info,#58a6ff))] text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]",
+          "min-w-0 flex-1 rounded-og-sm border bg-og-bg px-1 py-0 text-og-sm",
+          "border-og-accent text-og-fg",
           "outline-none",
         )}
       />
@@ -801,11 +810,9 @@ function ContextMenu({
         onClick();
       }}
       className={cn(
-        "flex w-full items-center gap-2 px-2.5 py-1 text-left text-xs",
-        "hover:bg-[color:var(--og-color-surface-2,var(--color-bg-subtle,#1c1c1c))]",
-        danger
-          ? "text-[color:var(--og-color-danger,var(--color-danger,#f85149))]"
-          : "text-[color:var(--og-color-fg,var(--color-fg,#e6e6e6))]",
+        "flex w-full items-center gap-2 px-2.5 py-1 text-left text-og-sm pointer-coarse:min-h-10",
+        "hover:bg-og-surface-2",
+        danger ? "text-og-status-failed" : "text-og-fg",
       )}
     >
       {icon}
@@ -820,15 +827,15 @@ function ContextMenu({
       style={{ left, top }}
       className={cn(
         "fixed z-50 min-w-[160px] overflow-hidden rounded-md border py-1 shadow-lg",
-        "border-[color:var(--og-color-border,var(--color-border,#2a2a2a))]",
-        "bg-[color:var(--og-color-surface-1,var(--color-surface,#161616))]",
+        "border-og-border",
+        "bg-og-surface-1",
       )}
     >
       {isDir && (
         <>
           {item("New file", <FilePlusIcon className="size-3.5" />, onNewFile)}
           {item("New folder", <FolderPlusIcon className="size-3.5" />, onNewFolder)}
-          <div className="my-1 h-px bg-[color:var(--og-color-border,var(--color-border,#2a2a2a))]" />
+          <div className="my-1 h-px bg-og-border" />
         </>
       )}
       {item("Rename", <PencilIcon className="size-3.5" />, onRename)}

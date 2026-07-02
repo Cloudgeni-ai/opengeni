@@ -48,11 +48,11 @@ function MiniBar({ account, className }: { account: CodexAccount | undefined | n
   const danger = pct <= 10;
   return (
     <span
-      className={`inline-block h-1 w-8 shrink-0 overflow-hidden rounded-full bg-[color:var(--color-surface-2)] ${className ?? ""}`}
+      className={`inline-block h-1 w-8 shrink-0 overflow-hidden rounded-full bg-surface-2 ${className ?? ""}`}
       title={`${pct}% remaining`}
     >
       <span
-        className={`block h-full rounded-full ${danger ? "bg-amber-500" : "bg-[color:var(--color-brand)]"}`}
+        className={`block h-full rounded-full ${danger ? "bg-status-waiting" : "bg-brand"}`}
         style={{ width: `${pct}%` }}
       />
     </span>
@@ -95,12 +95,12 @@ export function CodexAccountIndicator({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-7 max-w-[14rem] gap-1 rounded-full border border-transparent px-2 text-xs text-[color:var(--color-fg-muted)] hover:border-[color:var(--color-border)] hover:bg-[color:var(--color-surface-2)] hover:text-[color:var(--color-fg)]"
+          className="h-7 max-w-[14rem] gap-1 rounded-full border border-transparent px-2 text-xs text-fg-muted hover:border-border hover:bg-surface-2 hover:text-fg"
         >
-          <SparklesIcon className="size-3 shrink-0 text-[color:var(--color-brand)]" />
-          <span className="hidden truncate text-[color:var(--color-fg-subtle)] sm:inline">Account:</span>
-          <span className="truncate font-medium text-[color:var(--color-fg)]">{triggerLabel}</span>
-          {plan ? <span className="hidden shrink-0 text-[color:var(--color-fg-subtle)] md:inline">· {plan}</span> : null}
+          <SparklesIcon className="size-3 shrink-0 text-brand" />
+          <span className="hidden truncate text-fg-subtle sm:inline">Account:</span>
+          <span className="truncate font-medium text-fg">{triggerLabel}</span>
+          {plan ? <span className="hidden shrink-0 text-fg-subtle md:inline">· {plan}</span> : null}
           <MiniBar account={effective} className="hidden sm:inline-block" />
           {codex.pinning ? (
             <Loader2Icon className="size-3 shrink-0 animate-spin" />
@@ -113,9 +113,9 @@ export function CodexAccountIndicator({
         align="end"
         side="bottom"
         sideOffset={8}
-        className="w-64 rounded-xl border-[color:var(--color-border)] bg-[color:var(--color-surface)] p-2 shadow-xl"
+        className="w-64 rounded-xl border-border bg-surface p-2 shadow-xl"
       >
-        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-[color:var(--color-fg-subtle)]">
+        <DropdownMenuLabel className="px-2 pt-1 pb-1 text-xs font-normal text-fg-subtle">
           Run inference on
         </DropdownMenuLabel>
 
@@ -131,7 +131,7 @@ export function CodexAccountIndicator({
           }}
           className="flex h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm"
         >
-          <SparklesIcon className="size-3.5 shrink-0 text-[color:var(--color-fg-subtle)]" />
+          <SparklesIcon className="size-3.5 shrink-0 text-fg-subtle" />
           <span className="min-w-0 flex-1 truncate">Auto (workspace default)</span>
           {codex.pinningTarget === AUTO ? (
             <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
@@ -159,7 +159,7 @@ export function CodexAccountIndicator({
               <span className="min-w-0 flex-1 truncate">{accountLabel(account)}</span>
               <MiniBar account={account} />
               {account.status !== "active" ? (
-                <span className="shrink-0 text-[10px] text-amber-500">{account.status === "needs_relogin" ? "relogin" : account.status}</span>
+                <span className="shrink-0 text-2xs text-status-waiting">{account.status === "needs_relogin" ? "relogin" : account.status}</span>
               ) : null}
               {isPinning ? (
                 <Loader2Icon className="ml-1 size-4 shrink-0 animate-spin" />
@@ -171,14 +171,14 @@ export function CodexAccountIndicator({
         })}
 
         {!hasAccounts ? (
-          <p className="px-2 pt-1 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">No Codex subscriptions connected.</p>
+          <p className="px-2 pt-1 text-2xs text-fg-subtle">No Codex subscriptions connected.</p>
         ) : null}
         {codex.mutationError ? (
-          <p className="px-2 pt-1 text-[11px] leading-4 text-[color:var(--color-danger)]">
+          <p className="px-2 pt-1 text-2xs text-danger">
             Switch failed: {codex.mutationError.message}
           </p>
         ) : (
-          <p className="px-2 pt-1 text-[11px] leading-4 text-[color:var(--color-fg-subtle)]">Applies next turn.</p>
+          <p className="px-2 pt-1 text-2xs text-fg-subtle">Applies next turn.</p>
         )}
       </DropdownMenuContent>
     </DropdownMenu>

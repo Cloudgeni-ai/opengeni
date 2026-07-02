@@ -46,7 +46,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
         <RailShell>
           <ProblemPanel
             title="Workspace unavailable"
-            description="The URL workspace is not available to this subject."
+            description="You don't have access to this workspace."
             action={<Button asChild type="button" variant="secondary"><Link to="/">Open default workspace</Link></Button>}
           />
         </RailShell>

@@ -42,26 +42,26 @@ export function RailFooter() {
   const image = context.authSession?.user.image ?? undefined;
 
   return (
-    <div className="mt-auto border-t border-[color:var(--color-border)] p-2">
+    <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
       <div className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
               aria-label="Account menu"
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-[color:var(--color-surface-2)] focus-visible:outline-none"
+              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
             >
               <Avatar size="sm">
                 {image ? <AvatarImage src={image} alt="" /> : null}
-                <AvatarFallback className="bg-[color:var(--color-surface-3)] text-[11px] text-[color:var(--color-fg-muted)]">
+                <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
                   {userInitial(displayName)}
                 </AvatarFallback>
               </Avatar>
               {!rail.collapsed ? (
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium text-[color:var(--color-fg)]">{displayName}</span>
+                  <span className="block truncate text-xs font-medium text-fg">{displayName}</span>
                   {secondary && secondary !== displayName ? (
-                    <span className="block truncate text-[10px] text-[color:var(--color-fg-subtle)]">{secondary}</span>
+                    <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
                   ) : null}
                 </span>
               ) : null}
@@ -71,7 +71,7 @@ export function RailFooter() {
             <DropdownMenuLabel className="grid gap-0.5">
               <span className="truncate text-sm">{displayName}</span>
               {secondary && secondary !== displayName ? (
-                <span className="truncate text-xs font-normal text-[color:var(--color-fg-subtle)]">{secondary}</span>
+                <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
               ) : null}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
@@ -113,7 +113,7 @@ export function RailFooter() {
               size="icon-sm"
               aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
               onClick={rail.toggleCollapsed}
-              className="shrink-0 text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg)]"
+              className="shrink-0 text-fg-subtle hover:text-fg"
             >
               {rail.collapsed ? <ChevronsRightIcon className="size-4" /> : <ChevronsLeftIcon className="size-4" />}
             </Button>

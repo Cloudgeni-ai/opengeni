@@ -46,6 +46,9 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
       <Collapsible.Trigger
         className={cn(
           "group flex w-full items-center gap-2.5 rounded-og-md border px-3 py-2 text-left text-og-base transition-colors",
+          // A folded turn is a touch target on coarse pointers: grow the row so
+          // it clears the 40px minimum without disturbing the calm desktop rhythm.
+          "pointer-coarse:py-2.5",
           // Only a failed turn earns the one filled/tinted card in the timeline;
           // complete and cancelled stay flat and calm.
           outcome === "failed"
@@ -83,6 +86,21 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
             <span className="text-og-status-failed"> · {failureText}</span>
           ) : null}
           {outcome === "cancelled" ? <span className="text-og-fg-subtle"> · interrupted</span> : null}
+        </span>
+        {/* The disclosure hint. Calm at rest on fine pointers (revealed on hover
+            and keyboard focus), but always present on coarse pointers where there
+            is no hover to lean on — so the fold never reads as a static status
+            line. Purely visual: the trigger's aria-expanded already conveys state
+            to assistive tech, so the hint is hidden from the accessible name. */}
+        <span
+          aria-hidden
+          className={cn(
+            "ml-auto shrink-0 pl-2 text-og-xs text-og-fg-subtle transition-opacity duration-150",
+            "opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100",
+            "pointer-coarse:opacity-100",
+          )}
+        >
+          {open ? "hide steps" : "show steps"}
         </span>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-og-collapse data-[state=open]:animate-og-expand">

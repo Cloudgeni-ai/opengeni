@@ -6,7 +6,7 @@
 import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon, SparkleIcon } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { RailFooter } from "@/components/rail/rail-footer";
@@ -28,7 +28,7 @@ import type { Session } from "@/types";
 function RailBody() {
   const rail = useRail();
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[color:var(--color-surface)]/40">
+    <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
       {/* Brand */}
       <div className={cn("flex h-12 shrink-0 items-center", rail.collapsed ? "justify-center px-2" : "px-3")}>
         <Link
@@ -37,7 +37,7 @@ function RailBody() {
           className="flex items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none"
           aria-label="OpenGeni home"
         >
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
             <SparkleIcon className="size-3.5" />
           </span>
           {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
@@ -46,13 +46,15 @@ function RailBody() {
 
       <SwitcherBlock />
 
-      <div className="mt-2">
-        <WorkspaceNav />
+      {/* Sessions — the product's primary object — sit directly under the
+          switcher (D4.1); the secondary workspace-config group drops below. */}
+      <div className="mt-2 flex min-h-0 flex-1 flex-col">
+        {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
       </div>
 
-      <div className="my-2 border-t border-[color:var(--color-border)]" />
+      <div className="my-2 border-t border-border" />
 
-      {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
+      <WorkspaceNav />
 
       <RailFooter />
     </div>
@@ -62,6 +64,10 @@ function RailBody() {
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
+  // controlled Sheet with no in-tree trigger, so radix can't restore focus on
+  // its own — we point it back at the hamburger that opened it.
+  const hamburgerRef = useRef<HTMLButtonElement>(null);
 
   // Close the mobile drawer on route change.
   useEffect(() => {
@@ -98,7 +104,7 @@ export function RailShell({ children }: { children: ReactNode }) {
             aria-label="Primary"
             data-collapsed={rail.collapsed}
             className={cn(
-              "motion-safe:transition-[width] motion-safe:duration-150 shrink-0 border-r border-[color:var(--color-border)]",
+              "motion-safe:transition-[width] motion-safe:duration-150 shrink-0 border-r border-border",
               rail.collapsed ? "w-[56px]" : "w-[260px]",
             )}
           >
@@ -109,7 +115,15 @@ export function RailShell({ children }: { children: ReactNode }) {
         {/* Mobile overlay drawer. */}
         {rail.isMobile ? (
           <Sheet open={rail.drawerOpen} onOpenChange={rail.setDrawerOpen}>
-            <SheetContent side="left" showCloseButton={false} className="w-[260px] gap-0 p-0">
+            <SheetContent
+              side="left"
+              showCloseButton={false}
+              className="w-[260px] max-w-[85vw] gap-0 p-0"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                hamburgerRef.current?.focus();
+              }}
+            >
               <nav aria-label="Primary" className="h-full">
                 <RailBody />
               </nav>
@@ -119,7 +133,7 @@ export function RailShell({ children }: { children: ReactNode }) {
 
         {/* Main canvas. */}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <CanvasTopStrip />
+          <CanvasTopStrip hamburgerRef={hamburgerRef} />
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
         </div>
       </div>
@@ -132,7 +146,7 @@ export function RailShell({ children }: { children: ReactNode }) {
  * session routes it also carries the session title/status, the connection and
  * lock pills, and the inspector toggle — moved here from the old top header.
  */
-function CanvasTopStrip() {
+function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonElement | null> }) {
   const rail = useRail();
   const context = useAppContext();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -145,9 +159,17 @@ function CanvasTopStrip() {
   }
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b border-[color:var(--color-border)] bg-[color:var(--color-bg)]/75 px-3 backdrop-blur sm:px-4">
+    <header
+      className={cn(
+        "flex shrink-0 items-center gap-3 border-b border-border bg-bg/75 px-3 backdrop-blur sm:px-4",
+        // The session strip carries a two-line block (title + meta) — it gets
+        // breathing room; the plain mobile brand strip stays slim.
+        showSessionActions ? "h-14" : "h-12",
+      )}
+    >
       {rail.isMobile ? (
         <Button
+          ref={hamburgerRef}
           type="button"
           variant="ghost"
           size="icon-sm"
@@ -160,13 +182,15 @@ function CanvasTopStrip() {
 
       {showSessionActions && context.session ? (
         <>
-          <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-1 flex-col justify-center gap-px">
             <SessionTitleEditor session={context.session} onRename={context.updateSessionTitle} />
-            <div className="flex min-w-0 items-center gap-1 truncate text-xs text-[color:var(--color-fg-subtle)]">
-              <span className="truncate">
+            {/* One quiet metadata voice: no label-colon grammar, no separator
+                soup — the model·effort token, then the sandbox pill (its own
+                shape, no interposed dot), then the codex indicator. */}
+            <div className="flex min-w-0 items-center gap-1.5 text-2xs leading-4 text-fg-subtle">
+              <span className="shrink-0">
                 {context.session.model} · {String(context.session.metadata.reasoningEffort ?? "low")}
               </span>
-              <span aria-hidden>·</span>
               <SessionSandboxSwitcher workspaceId={context.session.workspaceId} sessionId={context.session.id} />
               {/* Codex-prefix-gated inside the component: absent for host-credit sessions. */}
               <CodexAccountIndicator
@@ -176,20 +200,20 @@ function CanvasTopStrip() {
               />
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1.5">
+            <ConnectionPill state={context.connectionState} />
+            <SessionStatusBadge status={context.session.status} />
             {context.keyAuthRequired ? (
               <Button type="button" variant="ghost" size="icon-sm" onClick={context.forgetAccessKey} aria-label="Clear access key">
                 <LockIcon className="size-4" />
               </Button>
             ) : null}
-            <ConnectionPill state={context.connectionState} />
-            <SessionStatusBadge status={context.session.status} />
             <Button
               type="button"
               variant={context.inspectorOpen ? "secondary" : "ghost"}
               size="icon-sm"
               onClick={() => context.setInspectorOpen((open) => !open)}
-              aria-label="Toggle session rail"
+              aria-label={context.inspectorOpen ? "Hide session panel" : "Show session panel"}
             >
               <PanelRightIcon className="size-4" />
             </Button>
@@ -201,7 +225,7 @@ function CanvasTopStrip() {
           params={{ workspaceId: rail.workspaceId }}
           className="flex items-center gap-2 text-sm font-semibold"
         >
-          <span className="flex size-5 items-center justify-center rounded bg-[color:var(--color-brand-strong)]/20 text-[color:var(--color-brand)]">
+          <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
             <SparkleIcon className="size-3" />
           </span>
           OpenGeni
@@ -231,6 +255,10 @@ function SessionTitleEditor(props: {
 
   if (rename.editing) {
     return (
+      // A calm in-place edit: same size and position as the display title, a
+      // soft surface tint + hairline instead of a loud focus ring. The global
+      // focus-ring rule is what painted the old blue box; opting out here keeps
+      // the rename feeling like editing the text, not filling in a form field.
       <input
         ref={rename.inputRef}
         value={rename.draft}
@@ -247,30 +275,34 @@ function SessionTitleEditor(props: {
         }}
         maxLength={SESSION_TITLE_MAX_LENGTH}
         aria-label="Session title"
-        className="w-full truncate rounded-sm bg-transparent text-sm font-medium outline-none ring-1 ring-[color:var(--color-ring)]/40 focus-visible:ring-[color:var(--color-ring)]"
+        className="-mx-1.5 w-full truncate rounded-md bg-surface-2/70 px-1.5 text-sm font-medium leading-5 outline-none ring-1 ring-border-strong focus:outline-none focus-visible:outline-none"
+        style={{ outline: "none" }}
       />
     );
   }
 
   return (
-    <div className="flex min-w-0 items-center gap-1">
+    <div className="group/title flex min-w-0 items-center gap-0.5">
       <button
         type="button"
         onClick={rename.startEditing}
         title={`${display} · click to rename`}
-        className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium hover:text-[color:var(--color-fg)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[color:var(--color-ring)]/40"
+        className="min-w-0 shrink truncate rounded-sm text-left text-sm font-medium leading-5 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/40"
       >
         {display}
       </button>
+      {/* The pencil earns its pixels only when relevant: hidden at rest,
+          revealed on hover/focus, always present on coarse pointers where
+          hover doesn't exist. */}
       <Button
         type="button"
         variant="ghost"
         size="icon-xs"
         onClick={rename.startEditing}
         aria-label="Rename session"
-        className="shrink-0 text-[color:var(--color-fg-subtle)] hover:text-[color:var(--color-fg)]"
+        className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/title:opacity-100 pointer-coarse:opacity-100"
       >
-        <PencilIcon className="size-3.5" />
+        <PencilIcon className="size-3" />
       </Button>
     </div>
   );

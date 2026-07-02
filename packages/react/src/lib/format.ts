@@ -82,3 +82,35 @@ export function tryParseJson(text: string): unknown {
     return undefined;
   }
 }
+
+/**
+ * Humanize engine/provider failure text before it reaches the timeline or a
+ * failure banner. Raw provider errors leak the wrong audience's instructions —
+ * "Incorrect API key … find your API key at platform.openai.com" tells a
+ * managed-deployment USER to fix credentials only an OPERATOR controls (and is
+ * flatly wrong for Azure or subscription-backed engines). Auth and quota
+ * failures collapse to one neutral, honest sentence; every other reason passes
+ * through untouched. Raw payloads stay available in the debug surfaces.
+ */
+export function humanizeFailureReason(reason: string | null): string | null {
+  if (!reason) {
+    return reason;
+  }
+  const normalized = reason.toLowerCase();
+  const authFailure =
+    normalized.includes("incorrect api key") ||
+    normalized.includes("invalid api key") ||
+    normalized.includes("invalid_api_key") ||
+    normalized.includes("platform.openai.com/account/api-keys") ||
+    (normalized.includes("401") && (normalized.includes("api key") || normalized.includes("unauthorized")));
+  if (authFailure) {
+    return "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.";
+  }
+  const quotaFailure =
+    normalized.includes("insufficient_quota") ||
+    normalized.includes("exceeded your current quota");
+  if (quotaFailure) {
+    return "The model provider refused the request: this deployment's provider quota is exhausted.";
+  }
+  return reason;
+}

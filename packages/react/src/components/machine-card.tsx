@@ -60,17 +60,17 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
           </span>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="truncate text-sm font-medium text-og-fg">{machine.name}</span>
+              <span className="truncate text-og-base font-medium text-og-fg">{machine.name}</span>
               {machine.active ? (
                 <span
                   data-active-marker
-                  className="shrink-0 rounded-full border border-og-accent/30 bg-og-accent-soft px-1.5 py-px text-[10px] font-medium text-og-accent"
+                  className="shrink-0 rounded-full border border-og-accent/30 bg-og-accent-soft px-1.5 py-px text-og-xs font-medium text-og-accent"
                 >
                   Active
                 </span>
               ) : null}
             </div>
-            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-og-fg-subtle">
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-og-xs text-og-fg-subtle">
               <span className="capitalize">{machine.isSessionGroup ? "session sandbox" : machine.kind}</span>
               <span aria-hidden>·</span>
               <span className="font-og-mono">
@@ -94,7 +94,7 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
       {shared ? (
         <p
           data-shared-disclosure
-          className="flex items-center gap-1.5 rounded-og-md border border-og-accent/25 bg-og-accent-soft px-2.5 py-1.5 text-[11px] text-og-fg-muted"
+          className="flex items-center gap-1.5 rounded-og-md border border-og-accent/25 bg-og-accent-soft px-2.5 py-1.5 text-og-xs text-og-fg-muted"
         >
           <UsersIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden />
           Shared — {machine.sharedSessionCount} sessions are on this machine.
@@ -103,7 +103,7 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
 
       <MachineMetrics metrics={machine.metrics} />
 
-      <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-og-fg-subtle">
+      <div className="mt-1 flex items-center justify-between gap-3 text-og-xs text-og-fg-subtle">
         <span>
           {machine.lastSeenAt ? <>Last seen {formatRelativeTime(machine.lastSeenAt)}</> : "Never connected"}
         </span>
@@ -116,7 +116,7 @@ export function MachineCard({ machine, onAttach, attaching, className }: Machine
             disabled={attaching}
             onClick={() => onAttach?.(machine)}
             className={cn(
-              "rounded-og-sm border border-og-border px-2.5 py-1 text-[11px] font-medium text-og-fg-muted transition-colors",
+              "rounded-og-sm border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors pointer-coarse:min-h-10",
               "hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >

@@ -50,6 +50,7 @@ function makeAttachments(overrides: Partial<UseFileAttachmentsResult> = {}): Use
     uploading: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    retry: () => {},
     remove: () => {},
     clear: () => {},
     ...overrides,

@@ -86,19 +86,19 @@ describe("DiffView", () => {
   test("distinguishes 'no changes' (repo) from 'no repository' (no repo)", async () => {
     const repo = await renderComponent(<DiffView diff={[]} isRepo={true} />);
     await flush();
-    expect(repo.container.textContent).toContain("No changes.");
+    expect(repo.container.textContent).toContain("No changes");
     await repo.unmount();
 
     const noRepo = await renderComponent(<DiffView diff={[]} isRepo={false} />);
     await flush();
-    expect(noRepo.container.textContent).toContain("No repository mounted.");
+    expect(noRepo.container.textContent).toContain("No repository mounted");
     await noRepo.unmount();
   });
 
   test("binary files are not rendered as text", async () => {
     const r = await renderComponent(<DiffView diff={[fakeFileDiff({ isBinary: true, hunks: [] })]} />);
     await flush();
-    expect(r.container.textContent).toContain("Binary file not shown.");
+    expect(r.container.textContent).toContain("Binary file not shown");
     await r.unmount();
   });
 });
