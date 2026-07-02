@@ -18,6 +18,7 @@ Then inspect:
 
 - Contracts: `packages/contracts/src/index.ts` for allowed backend names, the per-backend `CAPABILITY_DESCRIPTORS` metadata table, and resource shapes.
 - Config: `packages/config/src/index.ts` and `.env.example` for env var parsing/defaults/validation (including the `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` gate).
+- Core: domain/access/billing helpers moved to `@opengeni/core` under `packages/core/src`; API routes adapt over that package.
 - Connected Machine (`selfhosted`): `apps/worker/src/activities/agent-turn.ts` (the machine-primary turn branch + `resolveActiveSandboxBackend`), `packages/runtime/src/sandbox/selfhosted/session.ts` (`toMachinePath`, per-session `workingDir`), `repositoryUsesSandboxClone` in `packages/runtime/src/index.ts` (the clone-guard), the routes/services `apps/api/src/routes/{machines,enrollments}.ts` and `apps/api/src/sandbox/{machines,enrollment}.ts`, and the `agent/` Rust crate.
 - Runtime: `packages/runtime/src/index.ts` for sandbox client creation, agent construction, manifest entries, resume behavior, resource mounts, and sandbox lifecycle hooks.
 - Worker env: `apps/worker/src/activities/environment.ts` for per-run sandbox env, GitHub App token injection, git identity, and cloud credential behavior.
@@ -105,7 +106,7 @@ A machine-targeted turn is materially different from a cloud turn. The effective
 - **No repo clone onto the machine.** `repositoryUsesSandboxClone` (`packages/runtime/src/index.ts`) returns false for a selfhosted effective backend, so the repository-clone lifecycle hook is skipped. A connected machine already owns its filesystem, and the clone hook would otherwise write onto the user's real disk — so the platform must never `git clone` there.
 - **Per-session working directory, not `/workspace`.** The machine runs the session under `sessions.working_dir` (added by migration `0027_session_working_dir.sql`). `packages/runtime/src/sandbox/selfhosted/session.ts` keeps a virtual `/workspace` root purely for manifest/root-delta parity with the cloud path, then `toMachinePath` re-anchors that virtual frame onto the chosen host path. An empty/NULL `workingDir` (the default) is a byte-identical no-op that resolves to the agent's launch workspace root.
 
-Targeting a machine at session creation uses `CreateSessionRequest.targetSandboxId` (the enrolled machine's sandbox id) plus optional `workingDir` (validated in `apps/api/src/domain/sessions.ts`); `workingDir` supplied without `targetSandboxId` is a 422. The dashboard/enrollment surfaces are `apps/api/src/routes/machines.ts` and `enrollments.ts` over `apps/api/src/sandbox/{machines,enrollment}.ts`, and the opt-in UI lives at the `@opengeni/react/machines` subpath (the package root stays a clean sandbox-only default).
+Targeting a machine at session creation uses `CreateSessionRequest.targetSandboxId` (the enrolled machine's sandbox id) plus optional `workingDir` (validated in `packages/core/src/domain/sessions.ts`); `workingDir` supplied without `targetSandboxId` is a 422. The dashboard/enrollment surfaces are `apps/api/src/routes/machines.ts` and `enrollments.ts` over `apps/api/src/sandbox/{machines,enrollment}.ts`, and the opt-in UI lives at the `@opengeni/react/machines` subpath (the package root stays a clean sandbox-only default).
 
 ## Workspace And Resources
 
