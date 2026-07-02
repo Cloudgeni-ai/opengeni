@@ -40,7 +40,7 @@ import {
   swapActiveSandbox,
   type FleetContext,
   type FleetServices,
-} from "../src/sandbox/fleet";
+} from "@opengeni/core";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;

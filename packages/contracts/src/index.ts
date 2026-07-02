@@ -1043,6 +1043,155 @@ export const LimitDecision = z.discriminatedUnion("allowed", [
 ]);
 export type LimitDecision = z.infer<typeof LimitDecision>;
 
+// ============ P3 — Entitlements port (§7.5) ============
+//
+// The host-providable admission seam over OpenGeni's TWO existing admission
+// sites: the API edge (`checkLimit`/`requireLimit`, billing/limits.ts) AND the
+// worker edge (`ensureRunAllowed`, agent-turn.ts — both turn-entry and the
+// mid-stream budget valve). A host that owns its OWN ledger/meter binds this to
+// keep OpenGeni from re-deriving admission from its local ledger.
+//
+// CRITICAL CONTRACT: `admitRun` returns a transport-neutral allow/deny decision
+// (+ optional structured reason + the echoed quantity it admitted) and NEVER
+// exposes `getBillingBalance` or any ledger internals — the host's balance math
+// stays on the host side of the boundary. This is what lets the same port serve
+// both PUSH (host funds OpenGeni's ledger; admission is a LOCAL read of that
+// funded ledger) and PULL (a network callback to the host's own meter).
+//
+// `action` is a free `string` (NOT the internal `LimitAction` enum) so a host
+// meter can key on actions OpenGeni does not model. `quantity` is the units the
+// caller is about to consume (tokens, bytes, 1 run, …); the decision MAY echo
+// the admitted quantity so a PULL host can grant a partial allowance.
+export const EntitlementDecision = z.discriminatedUnion("allowed", [
+  z.object({ allowed: z.literal(true), quantity: z.number().optional() }),
+  z.object({ allowed: z.literal(false), reason: z.string(), code: z.string().optional(), quantity: z.number().optional() }),
+]);
+export type EntitlementDecision = z.infer<typeof EntitlementDecision>;
+
+export type AdmitRunInput = {
+  accountId: string;
+  workspaceId: string;
+  action: string;
+  quantity: number;
+};
+
+export type EntitlementsPort = {
+  admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
+};
+
+// ============ P4a — Connection-credential provider (§7.6) ============
+//
+// The host-providable per-run credential-mint seam over OpenGeni's TWO
+// run-scoped credential sites in the worker:
+//   - GIT credentials: the GitHub App installation token minted in
+//     `sandboxEnvironmentForRun` (today `createGitHubAppInstallationToken`
+//     from `settings`) and injected as `GH_TOKEN`/`GITHUB_TOKEN`/the git
+//     extraheader.
+//   - SANDBOX secrets: the decrypted workspace environment values loaded in
+//     `loadWorkspaceEnvironmentForRun` (today decrypted with
+//     `environmentsEncryptionKeyBytes(settings)`).
+//
+// In embedded/separate topologies the HOST owns these external connections
+// (its GitHub App, its secret vault + encryption key). When a host binds this
+// port, OpenGeni asks the host to mint/decrypt per-run instead of self-minting
+// from `settings`. Unset (standalone default) → byte-for-byte today's
+// self-mint.
+//
+// FORK-7 CROSS-CHECK (the host-mapping safety guardrail): a credential
+// provider returns the `workspaceId` it scoped the credential to, and the
+// activity ASSERTS it agrees with the run's workspace BEFORE injecting
+// `GH_TOKEN` (or applying the decrypted values). A host mapping bug that
+// returns tenant B's creds while the run is tenant A is thereby caught at the
+// seam, never silently injected into tenant A's sandbox.
+
+export type GitCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  // The GitHub App installation the run's repository resources resolved to,
+  // and the specific repositories the token must be scoped to. Mirrors the
+  // shape `createGitHubAppInstallationToken` consumes today.
+  installationId: number;
+  repositoryIds: number[];
+};
+
+export type GitCredentials = {
+  // The minted installation token the activity injects as GH_TOKEN/GITHUB_TOKEN
+  // and into the git http extraheader (identical downstream handling to the
+  // self-mint path).
+  token: string;
+  // FORK-7 echo: the workspace the provider scoped this token to. The activity
+  // asserts `workspaceId === request.workspaceId` before injecting.
+  workspaceId: string;
+  // Optional git identity override. When omitted the activity falls back to
+  // today's `githubAppBotIdentity(settings)`.
+  identity?: { name: string; email: string } | null;
+};
+
+export type SandboxSecretsRequest = {
+  accountId: string;
+  workspaceId: string;
+  // The workspace environment the run's session declares (null = unattached;
+  // the provider, like the self-mint path, returns null values for it).
+  environmentId: string;
+};
+
+export type SandboxSecrets = {
+  // The decrypted environment values the run injects, replacing the local
+  // `environmentsEncryptionKeyBytes` decrypt. Same shape the self-mint path
+  // produces (plaintext name→value).
+  values: Record<string, string>;
+  // FORK-7 echo: the workspace the provider scoped these secrets to.
+  workspaceId: string;
+  // Optional environment metadata; when omitted the activity uses the
+  // environmentId as both id and name (the local decrypt carries the row's
+  // id/name/description, but only `id` is load-bearing downstream).
+  id?: string;
+  name?: string;
+  description?: string | null;
+};
+
+export type ConnectionCredentialsPort = {
+  // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
+  // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
+  // unset leg falls through to today's self-mint for THAT leg only.
+  gitCredentials?: (input: GitCredentialsRequest) => Promise<GitCredentials>;
+  sandboxSecrets?: (input: SandboxSecretsRequest) => Promise<SandboxSecrets>;
+};
+
+// ============ P4a — GitHub App API port (BYO-App, §7.6 / SPIKE-2 remainder) ===
+//
+// The host-driven GitHub-API credential leg. SPIKE-2 closed the establishment +
+// gate (storage) axis; this closes the credential leg by making the two live
+// GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
+// credentials (its own JWT-signing key, its own OAuth client) instead of
+// OpenGeni self-minting from `settings`:
+//   - verifyInstallationAccessForUser: the OAuth code→token + installation
+//     lookup that PROVES the install is real (today
+//     `verifyGitHubInstallationAccessForUser(settings, …)`).
+//   - listRepositories: the installation-scoped repo listing behind
+//     `GET /v1/workspaces/:id/github/repositories` (today
+//     `listGitHubAppRepositories(settings, …)`).
+//
+// Unset (standalone default) → today's `settings`-based self-mint runs
+// byte-for-byte (the live GitHub-API verify/list against OpenGeni's own App).
+
+export type GitHubInstallationSummary = {
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+  suspended: boolean;
+};
+
+export type GitHubAppApiPort = {
+  verifyInstallationAccessForUser?: (input: {
+    code: string;
+    installationId: number;
+  }) => Promise<GitHubInstallationSummary>;
+  listRepositories?: (input: {
+    installationIds?: number[];
+  }) => Promise<GitHubRepository[]>;
+};
+
 export const BillingBalance = z.object({
   accountId: z.string().uuid(),
   balanceMicros: z.number().int(),

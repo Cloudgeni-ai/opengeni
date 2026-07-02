@@ -1,4 +1,4 @@
-import { getSettings, resolveNatsControlPlaneAuth } from "@opengeni/config";
+import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
@@ -33,7 +33,15 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
   async function services(): Promise<ActivityServices> {
     servicesPromise ??= (async () => {
       const settings = dependencies.settings ?? getSettings();
-      const dbClient = dependencies.db ? null : createDb(settings.databaseUrl);
+      // Step I: when not injected, build the standalone handle — searchPath
+      // undefined for standalone (public), scoped to the dedicated schema +
+      // host RLS strategy when embedded config is set. An embedded host injects
+      // `dependencies.db` directly and this branch is skipped.
+      const searchPath = dbSearchPath(settings);
+      const dbClient = dependencies.db ? null : createDb(settings.databaseUrl, {
+        ...(searchPath ? { searchPath } : {}),
+        rlsStrategy: settings.rlsStrategy,
+      });
       // The PRIVILEGED control-plane NATS login (M-AUTH): the worker resolves the
       // SAME static account user the API uses to request `agent.*.rpc`. Null in
       // local dev → anonymous connect (the bus default).
@@ -41,6 +49,19 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
       return {
         settings,
         db: dependencies.db ?? dbClient!.db,
+        // §7 Step G — EventBus binding contract. `bus` is the INJECTED
+        // live-fanout port; the ONE production impl is `createNatsEventBus`,
+        // the default on BOTH processes (this worker edge + the API edge in
+        // `apps/api/src/index.ts`). A host that embeds OpenGeni injects ONE
+        // broker binding (the same `createNatsEventBus(natsUrl)`) here AND on
+        // the mounted API, so the two SEPARATE processes share one broker and
+        // derive the IDENTICAL `sessionSubject` — the only way live fanout
+        // (worker emit → API SSE) works cross-process (SPIKE-1 F5/F6, proven).
+        // NEVER default to an in-memory bus: it fans out intra-process only and
+        // would silently break live SSE. unset → today's NATS default,
+        // byte-for-byte. The bus is live-fanout ONLY — the durable Postgres
+        // `session_events` log is source-of-truth (the API backfills missed
+        // events by sequence). See `.agents/skills/opengeni/references/eventbus-binding-contract.md`.
         bus:
           dependencies.bus ??
           (await createNatsEventBus(
@@ -52,6 +73,17 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability: dependencies.observability ?? createObservability(settings, { component: "worker" }),
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
+        // §7.5 P3 — host-entitlements port. No constructed default: standalone
+        // has no host meter, so unset → null → `ensureRunAllowed` reads the
+        // local ledger exactly as today (mirrors `wakeSessionWorkflow`'s
+        // null-degrades-gracefully shape, not a `createX(settings)` default).
+        entitlements: dependencies.entitlements ?? null,
+        // §7.6 P4a — host connection-credential provider. No constructed
+        // default: standalone owns its own GitHub App + encryption key, so unset
+        // → null → the per-run credential mint self-mints from `settings`
+        // (createGitHubAppInstallationToken + environmentsEncryptionKeyBytes)
+        // exactly as today. Same null-degrades shape as `entitlements`.
+        connectionCredentials: dependencies.connectionCredentials ?? null,
       };
     })();
     return servicesPromise;

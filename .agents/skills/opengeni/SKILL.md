@@ -29,6 +29,7 @@ rg -n "app\\.(get|post|patch|delete|all)\\(|/v1/|SessionEvent|ResourceRef|ToolRe
 Then open the smallest source files that answer the question:
 
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
+- Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn.ts`.
@@ -111,14 +112,14 @@ Do not rely on this skill for exact route lists, env var lists, event types, mod
 
 Before editing, identify which layer owns the behavior:
 
-- Public API or validation: routes, domain helpers, contracts, tests.
+- Public API or validation: routes, core domain helpers, contracts, tests.
 - Persistence: DB schema, migrations, mapping functions, integration tests.
 - Event semantics: append helpers, event bus, SSE replay, frontend timeline handling.
 - Orchestration: Temporal workflow/signal/activity code and workflow tests.
 - Agent runtime: runtime package, worker activity, OpenAI Agents SDK integration tests.
 - Sandbox resources: resource validation, manifest building, object storage, sandbox environment.
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
-- Scheduling: scheduled task contracts/routes/domain helpers, Temporal schedule mapping, dispatch activity.
+- Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - UI: `apps/web` API helpers/types/components.
 
 After edits, run the smallest relevant verification first, then broader checks if behavior crosses boundaries. Common checks are:

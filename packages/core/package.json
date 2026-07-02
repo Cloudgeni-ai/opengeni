@@ -1,0 +1,55 @@
+{
+  "name": "@opengeni/core",
+  "version": "0.1.0",
+  "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/core"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opengeni/codex": "workspace:*",
+    "@opengeni/config": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/db": "workspace:*",
+    "@opengeni/events": "workspace:*",
+    "@opengeni/runtime": "workspace:*",
+    "hono": "^4.12.18"
+  },
+  "devDependencies": {
+    "@opengeni/documents": "workspace:*",
+    "@opengeni/observability": "workspace:*",
+    "@opengeni/storage": "workspace:*",
+    "better-auth": "^1.6.14",
+    "tsup": "^8.5.0",
+    "typescript": "^6.0.3"
+  }
+}

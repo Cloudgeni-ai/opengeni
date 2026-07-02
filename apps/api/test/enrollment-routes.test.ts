@@ -8,7 +8,7 @@ import {
 } from "@opengeni/contracts";
 import { createDb, type Database, type DbClient } from "@opengeni/db";
 import { createApp } from "../src/app";
-import type { AppDependencies, SessionWorkflowClient } from "../src/dependencies";
+import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
 
 // M5 — the enrollment device-flow ROUTES, driven end-to-end through createApp + the
 // REAL packages/db against a THROWAWAY postgres (mirrors sandbox-shared-and-viewer).

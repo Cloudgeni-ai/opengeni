@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { ScheduledTaskTriggerType } from "@opengeni/contracts";
+import type { ConnectionCredentialsPort, EntitlementsPort, ScheduledTaskTriggerType } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -26,6 +26,36 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
+  // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
+  // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
+  // AND the mid-stream budget valve) delegates the funding decision to
+  // `admitRun` instead of reading `getBillingBalance` locally. null/undefined
+  // (standalone default) → today's local-ledger read runs unchanged.
+  //
+  // IDEMPOTENCY: the worker calls `admitRun` ONLY as an admission READ ("may
+  // this run/continue?"), never to RECORD consumption. Usage is recorded
+  // exactly once, by `recordUsageEvent` keyed on a deterministic idempotency
+  // key the API already wrote at create-time — so a host PULL meter that also
+  // observes that same recorded event is consulted without double-charging:
+  // admission and metering are separate operations, and only metering carries
+  // the idempotency key.
+  entitlements?: EntitlementsPort | null;
+  // §7.6 P4a — host connection-credential provider, the WORKER half of the
+  // federated-connection boundary. When set, the run's per-run credential mint
+  // delegates to the host instead of self-minting from `settings`:
+  //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
+  //     in `sandboxEnvironmentForRun` (the GH_TOKEN / git-extraheader source).
+  //   - `sandboxSecrets` REPLACES the `environmentsEncryptionKeyBytes(settings)`
+  //     decrypt in `loadWorkspaceEnvironmentForRun`.
+  // Each leg is independently optional; an unset leg falls through to today's
+  // self-mint for THAT leg. null/undefined (standalone default) → both legs
+  // self-mint byte-for-byte as today.
+  //
+  // FORK-7 CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
+  // credential to; the consuming activity ASSERTS agreement with the run's
+  // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
+  // mapping bug returning tenant B's creds for a tenant-A run is caught here.
+  connectionCredentials?: ConnectionCredentialsPort | null;
 };
 
 export type ActivityDependencies = Partial<ActivityServices>;

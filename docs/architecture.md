@@ -109,7 +109,7 @@ Sandbox recovery state is separate again, in `sandbox_session_envelopes` (provid
 - **Two distinct auth headers**: the deployment shared key uses `x-opengeni-access-key`; product API keys and delegated tokens use `Authorization: Bearer`. Don't mix them.
 - **`stream:view` is strictly broader than `sessions:read`** (the pixel plane is un-redacted), `files:write` ≠ `files:read`, `terminal:attach` ≠ `sessions:read`. Do not collapse these.
 
-> Canonical: `apps/api/src/access/index.ts`, `packages/db/src/schema.ts`, [`environments.md`](environments.md), `SECURITY.md`.
+> Canonical: `packages/core/src/access/index.ts`, `packages/db/src/schema.ts`, [`environments.md`](environments.md), `SECURITY.md`.
 
 ### 3.7 The contracts package is the source of truth for wire types
 
@@ -185,7 +185,7 @@ flowchart LR
 
 1. **Edge.** A request hits `apps/api`. Global middleware runs: CORS → observability span/metrics → the deployment access-key gate (`requireAccessKey`).
 2. **Authn/authz.** The route resolves an `AccessContext` (per `productAccessMode`), then `requireAccessGrant(workspaceId, permission)` resolves a per-workspace grant. This is the workspace-scoping boundary; no workspace data is touched before it passes.
-3. **Create session.** `createSessionForRequest` validates payload + resources + tools + environment + model (`assertConfiguredModel` → 422 on unknown), checks usage limits/entitlements, writes durable session/goal rows + an initial event batch, enqueues the first turn, and wakes the Temporal workflow via `signalWithStart`. A create may target a **Connected Machine** with `CreateSessionRequest.targetSandboxId` (+ optional `workingDir`, which is a **422 without a `targetSandboxId`**): the active-sandbox pointer is seeded at creation — race-free, committed before the worker turn can read it — so the **first** turn routes to the chosen machine and lands in its working directory; an invalid/unowned/offline target **422s** (never a silent fall-back to the default box). Canonical: `apps/api/src/domain/sessions.ts`, `packages/contracts/src/index.ts` (`CreateSessionRequest`).
+3. **Create session.** `createSessionForRequest` validates payload + resources + tools + environment + model (`assertConfiguredModel` → 422 on unknown), checks usage limits/entitlements, writes durable session/goal rows + an initial event batch, enqueues the first turn, and wakes the Temporal workflow via `signalWithStart`. A create may target a **Connected Machine** with `CreateSessionRequest.targetSandboxId` (+ optional `workingDir`, which is a **422 without a `targetSandboxId`**): the active-sandbox pointer is seeded at creation — race-free, committed before the worker turn can read it — so the **first** turn routes to the chosen machine and lands in its working directory; an invalid/unowned/offline target **422s** (never a silent fall-back to the default box). Canonical: `packages/core/src/domain/sessions.ts`, `packages/contracts/src/index.ts` (`CreateSessionRequest`).
 4. **Orchestrate.** The `sessionWorkflow` (id `session-<sessionId>`) claims the queued turn and dispatches the agent activity (scheduled under the legacy name `runAgentSegment` — an alias for `runAgentTurn` defined in `apps/worker/src/activities.ts` — for replay determinism; see §3.3 / §7.2).
 5. **Execute.** `runAgentTurn` builds + runs the OpenAI Agents SDK stream inside a sandbox, publishes realtime events, dual-writes conversation truth to `session_history_items`, meters/bills usage per model call, and settles the turn (`idle` / `requires_action` / `failed` / `cancelled` / `preempted`).
 6. **Stream back.** Events were durably appended then live-published; the client's SSE connection delivers them exactly-once, in-order, gap-free.
@@ -243,33 +243,33 @@ See §3.5 — the three stores (`session_history_items`, `agent_run_states`, `se
 
 ### 5.6 Scheduled tasks (cron)
 
-A **scheduled task** is a stored, cron-style trigger that wakes a session and runs a turn unattended — the same `signalWithStart` entry the live API uses, so a scheduled wake-up is just another turn through the §5.2 lifecycle. The control surface (validation, CRUD, next-fire computation) lives in `apps/api/src/domain/scheduled-tasks.ts` (exposed via `apps/api/src/routes/scheduled-tasks.ts`); the worker side that fires due tasks and dispatches the turn lives in `apps/worker/src/activities/scheduled-tasks.ts`. Scheduled-task turns get the first-party `opengeni` MCP server attached like any other turn (`withFirstPartyTools`, §7.2). **Firing is idempotent** — a re-dispatched or replayed scheduled wake-up must not double-run the task (deduped on the schedule's fire key); see [`reliability-fixes.md`](reliability-fixes.md). The deployment-conformance harness includes a scheduled-task check (§12).
+A **scheduled task** is a stored, cron-style trigger that wakes a session and runs a turn unattended — the same `signalWithStart` entry the live API uses, so a scheduled wake-up is just another turn through the §5.2 lifecycle. The control surface (validation, CRUD, next-fire computation) lives in `packages/core/src/domain/scheduled-tasks.ts` (exposed via `apps/api/src/routes/scheduled-tasks.ts`); the worker side that fires due tasks and dispatches the turn lives in `apps/worker/src/activities/scheduled-tasks.ts`. Scheduled-task turns get the first-party `opengeni` MCP server attached like any other turn (`withFirstPartyTools`, §7.2). **Firing is idempotent** — a re-dispatched or replayed scheduled wake-up must not double-run the task (deduped on the schedule's fire key); see [`reliability-fixes.md`](reliability-fixes.md). The deployment-conformance harness includes a scheduled-task check (§12).
 
-> Canonical: `apps/api/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, [`reliability-fixes.md`](reliability-fixes.md).
+> Canonical: `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts`, [`reliability-fixes.md`](reliability-fixes.md).
 
 ### 5.7 Usage metering, entitlements & billing
 
 Each model call is metered and billed during turn execution (§4.2 step 5). Two enums in `packages/contracts/src/index.ts` parameterize this per deployment, each `"none" | "static" | "managed"`:
 
-- **`UsageLimitsMode`** — whether usage limits are off, enforced from static config, or managed externally. `createSessionForRequest` checks limits before enqueueing the first turn (§4.2 step 3), and a recoverable budget/credit exhaustion **idles** the session rather than failing it (§3.4).
+- **`UsageLimitsMode`** — whether usage limits are off, enforced from static config, or managed externally. `createSessionForRequest` checks limits before enqueueing the first turn (§4.2 step 3) through `packages/core/src/billing/limits.ts`, and a recoverable budget/credit exhaustion **idles** the session rather than failing it (§3.4).
 - **`EntitlementsMode`** — whether feature/quota entitlements are off, statically configured, or managed.
 
 In `managed` mode, billing integrates with **Stripe**, which is confined to `apps/api/src/routes/billing.ts` (the Stripe webhook is on the access-key exempt-path allow-list, §10). The `check-workspace-billing-static.ts` static guard (§11) enforces that Stripe usage stays inside `routes/billing.ts` and that no operational `/v1` route is unscoped. Scheduled-task and billing idempotency are covered in [`reliability-fixes.md`](reliability-fixes.md).
 
-> Canonical: `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `apps/api/src/routes/billing.ts`, `scripts/check-workspace-billing-static.ts`, [`reliability-fixes.md`](reliability-fixes.md).
+> Canonical: `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `packages/core/src/billing/limits.ts`, `apps/api/src/routes/billing.ts`, `scripts/check-workspace-billing-static.ts`, [`reliability-fixes.md`](reliability-fixes.md).
 
 ---
 
 ## 6. Repository layout
 
-The monorepo is a **Bun workspace** (`workspaces: [apps/*, packages/*]`). TS packages are consumed as **source** (no build step for internal use; `main`/`types` point at `./src/index.ts`); the three publishable packages additionally build to `dist` for npm. The Rust agent is a separate Cargo workspace under `agent/`.
+The monorepo is a **Bun workspace** (`workspaces: [apps/*, packages/*]`). TS packages are consumed as **source** for internal use (`main`/`types` point at `./src/index.ts`). The publish matrix is split: the client/API contract closure is `@opengeni/contracts` -> `@opengeni/sdk` -> `@opengeni/react`; the engine/embed distribution surfaces are `@opengeni/core`, `@opengeni/api-router`, `@opengeni/worker-bundle`, `@opengeni/db`, `@opengeni/config`, and `@opengeni/agent-proto` (package manifests own the exact publish/build settings). The Rust agent is a separate Cargo workspace under `agent/`.
 
 ### 6.1 Applications (`apps/`)
 
 | Path | Package | Role | Canonical source |
 | --- | --- | --- | --- |
-| `apps/api` | `@opengeni/api` | The only public HTTP surface (Hono). Auth/authz at the workspace boundary, session lifecycle, event ingestion + history, SSE, the API-direct sandbox control plane (Channel-A FS/Git/Terminal), scheduled tasks, billing, and the per-workspace first-party MCP server. | `apps/api/src/app.ts`, `apps/api/src/access/index.ts` |
-| `apps/worker` | `@opengeni/worker` | Temporal worker: the session workflow + the activities that run agent turns, bill usage, drive goals, fire scheduled tasks, manage sandbox leases, and reap idle boxes. | `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn.ts` |
+| `apps/api` | `@opengeni/api-router` | The public HTTP adapter/router (Hono) over `@opengeni/core`: middleware, `/v1` routes, MCP HTTP transport, SSE, and API-direct sandbox control-plane endpoints. Domain/access/billing decisions live in core; routes adapt them to HTTP. | `apps/api/src/app.ts`, `packages/core/src/access/index.ts` |
+| `apps/worker` | `@opengeni/worker-bundle` | Temporal worker bundle: `createOpenGeniWorker`, the session workflow + the activities that run agent turns, bill usage, drive goals, fire scheduled tasks, manage sandbox leases, and reap idle boxes. | `apps/worker/src/index.ts`, `apps/worker/src/workflows/session.ts`, `apps/worker/src/activities/agent-turn.ts` |
 | `apps/web` | `opengeni-web` | React 19 + Vite operator console. A thin shell over `@opengeni/sdk` + `@opengeni/react`. Leaf app — nothing imports it. | `apps/web/src/App.tsx`, `apps/web/src/context.tsx` |
 
 ### 6.2 Packages (`packages/`)
@@ -278,6 +278,7 @@ The monorepo is a **Bun workspace** (`workspaces: [apps/*, packages/*]`). TS pac
 | --- | --- | --- | --- | --- |
 | `contracts` | `@opengeni/contracts` | **Wire contract source of truth**: all shared enums/zod schemas, `CAPABILITY_DESCRIPTORS`, port constants, the HMAC token family. | Imported by ~everything (runtime, db, sdk, events, documents, github, storage, api, worker, web, config). | `packages/contracts/src/index.ts` |
 | `config` | `@opengeni/config` | All `OPENGENI_*` settings: parse → default → validate (fail-fast) → derive. Owns `SANDBOX_REQUIRED_ENV`, sandbox preparation profiles, model/pricing resolution, secret resolvers. | `getSettings()`/`Settings`, `validateSettings`, model/pricing/secret resolvers. | `packages/config/src/index.ts` |
+| `core` | `@opengeni/core` | Framework-agnostic domain/access/billing/dependency layer extracted from `apps/api`: access grants, session/domain flows, scheduled-task validators, usage limits, sandbox fleet/routing helpers, and the shared dependency types. | `AppDependencies`/`ApiRouteDeps`, `requireAccessGrant`, `createSessionForRequest`, `acceptSessionUserMessage`, `checkLimit`/`requireLimit`, scheduled-task/domain helpers. | `packages/core/src/index.ts`, `packages/core/src/dependencies.ts`, `packages/core/src/domain/sessions.ts` |
 | `db` | `@opengeni/db` | Postgres data layer: Drizzle schema (43 `pgTable` declarations), forward-only SQL migrations, RLS posture, role provisioning, the typed repository API. | `createDb`, `with*Rls` wrappers, hundreds of CRUD/transactional helpers; the **tables themselves are a cross-service contract**. | `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/` |
 | `runtime` | `@opengeni/runtime` | The agent runtime: SDK agent build, model routing, input prep, streamed run, **the 11-backend sandbox abstraction**, compaction, history sanitization, computer-use, bundled skills. Two entrypoints: the barrel (agent loop) and `/sandbox` (agent-loop-free leaf). | `createProductionAgentRuntime()`, `runAgentStream`, `buildOpenGeniAgent`; leaf: `createSandboxClient`, `establishSandboxSessionFromEnvelope`, `PROVIDER_REGISTRY`. | `packages/runtime/src/index.ts`, `packages/runtime/src/sandbox/index.ts` |
 | `events` | `@opengeni/events` | Realtime NATS transport: session fanout, the selfhosted control-plane request/reply, the auth-callout responder + NATS JWT minting, `appendAndPublishEvents`, `formatSse`. | `createNatsEventBus`, `appendAndPublishEvents`, `formatSse`, `mintUserJwt`/`mintAuthResponse`. | `packages/events/src/index.ts`, `packages/events/src/nats-jwt.ts` |
@@ -291,11 +292,11 @@ The monorepo is a **Bun workspace** (`workspaces: [apps/*, packages/*]`). TS pac
 | `react` | `@opengeni/react` | **Published.** React hooks + styled components over the SDK: live streaming, chat, timeline, sandbox surfaces. Connected-machine UI (machines dashboard, enrollment, status) lives on the opt-in **`@opengeni/react/machines`** subpath so the root import is the clean sandbox-only default and machine-free consumers never pull it in (the root re-exports it deprecated for back-compat, #144). | `OpenGeniProvider`, the `use*` hooks, `ChatComposer`/`MessageTimeline`/`WorkspaceDock`/etc., CSS subpath exports; `./machines` for machine UI. | `packages/react/src/index.ts`, `packages/react/src/machines.ts`, `packages/react/src/client.ts` |
 | `testing` | `@opengeni/testing` | Shared test harness/fixtures (`startTestServices`, `buildSandboxImage`, `ScriptedModel`, e2e worker). | Consumed only by tests. | `packages/testing` |
 
-**Dependency direction (high level):** `contracts` and `config` are the foundation. `db`/`runtime`/`events`/`storage`/`documents`/`github` build on them. `apps/api` and `apps/worker` compose everything. The **client closure** (`contracts → sdk → react`) is kept strictly server-free; `apps/web` consumes `sdk` + `react`. The Rust `agent/` and TS `agent-proto` are bound by one shared `.proto`.
+**Dependency direction (high level):** `contracts` and `config` are the foundation. `db`/`runtime`/`events`/`storage`/`documents`/`github` build on them. `core` depends on those foundations/leaves for domain/access/billing logic; `apps/api` and `apps/worker` compose core with HTTP and Temporal process wiring. The **client closure** (`contracts → sdk → react`) is kept strictly server-free; `apps/web` consumes `sdk` + `react`. The Rust `agent/` and TS `agent-proto` are bound by one shared `.proto`.
 
 ### 6.3 The self-hosted agent (`agent/`) — Rust
 
-A Cargo workspace building the box-side binary for the `selfhosted` backend. `agent/proto/opengeni_agent.proto` is the single source of truth for the control↔agent wire protocol, codegen'd to **both** Rust (prost/protox) and TS (`@opengeni/agent-proto`). Crates: `opengeni-agent` (supervisor/dispatch/enrollment/config), `opengeni-agent-platform` (the OS seam), `opengeni-agent-stream` (the shared stream codec / `ChannelKey`), `opengeni-relay` (the stateless stream-relay edge — see §6.6 / §7.10), `opengeni-agent-update` (signed self-update), `opengeni-agent-proto`. Canonical: `agent/proto/opengeni_agent.proto`, `agent/README.md`.
+A Cargo workspace building the box-side binary for the `selfhosted` backend. `agent/proto/opengeni_agent.proto` is the single source of truth for the control↔agent wire protocol, codegen'd to **both** Rust (prost/protox) and TS (`@opengeni/agent-proto`). Crates: `opengeni-agent` (supervisor/dispatch/enrollment/config), `opengeni-agent-platform` (the OS seam), `opengeni-agent-stream` (the shared stream codec / `ChannelKey`), `opengeni-relay` (the stateless stream-relay edge — see §6.6 / §7.11), `opengeni-agent-update` (signed self-update), `opengeni-agent-proto`. Canonical: `agent/proto/opengeni_agent.proto`, `agent/README.md`.
 
 ### 6.4 Deployment (`deploy/`)
 
@@ -307,7 +308,7 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 
 ### 6.6 The relay edge (BYO-compute data plane)
 
-The **relay** (`opengeni-relay`) is the data-plane edge that carries live pixel (desktop) and terminal (pty) bytes for self-hosted boxes — see §7.10 for the protocol. It is owned by the Helm chart (§6.4 / §12) and sits on its own fate-isolated tier so stream load can never starve the control plane. Conceptually: the agent **dials out** as the frame *producer*, the browser viewer **dials out** as the *consumer*, and the relay splices bytes between them by channel key — it holds **no state beyond live channels** (a relay pod death drops live streams; both ends auto-reconnect and resume against the same channel key). Lease ownership stays in Postgres; the relay only routes and rate-limits.
+The **relay** (`opengeni-relay`) is the data-plane edge that carries live pixel (desktop) and terminal (pty) bytes for self-hosted boxes — see §7.11 for the protocol. It is owned by the Helm chart (§6.4 / §12) and sits on its own fate-isolated tier so stream load can never starve the control plane. Conceptually: the agent **dials out** as the frame *producer*, the browser viewer **dials out** as the *consumer*, and the relay splices bytes between them by channel key — it holds **no state beyond live channels** (a relay pod death drops live streams; both ends auto-reconnect and resume against the same channel key). Lease ownership stays in Postgres; the relay only routes and rate-limits.
 
 ---
 
@@ -315,7 +316,7 @@ The **relay** (`opengeni-relay`) is the data-plane edge that carries live pixel 
 
 ### 7.1 `apps/api` — the public edge
 
-A thin control-plane Hono app: durable state lives in Postgres, agent turns run in the worker, live fanout rides NATS. `createApp()` (`app.ts`) is the composition root: middleware chain + every `/v1` router. **The auth/authz boundary is `access/index.ts`** (`requireAccessGrant`/`requirePermission` + `resolveAccessContext` per `productAccessMode`). Session lifecycle logic lives in `domain/sessions.ts` (shared by routes **and** the MCP server); scheduled-task logic in `domain/scheduled-tasks.ts`; billing/Stripe is confined to `routes/billing.ts`. SSE semantics are in `http/sse.ts`. The API-direct sandbox seam (`sandbox/access.ts`, `sandbox/channel-a.ts`, `sandbox/viewer.ts`) resumes a box by id **in-process** (no Temporal/worker) for FS/Git/Terminal point ops and viewer attach, importing **only** the agent-loop-free leaf; it injects a NON-OWNED handle and drops it with the `dropEstablishedHandle` no-op (§3.9) so it never kills a resumed box.
+A thin control-plane Hono app: durable state lives in Postgres, agent turns run in the worker, live fanout rides NATS. `createApp(deps)` (`apps/api/src/app.ts`) is the composition root: middleware chain + every `/v1` router. **The auth/authz boundary is in core** (`packages/core/src/access/index.ts`: `requireAccessGrant`/`requirePermission` + the `resolveAccessContext` chain per `productAccessMode`). Session lifecycle logic lives in `packages/core/src/domain/sessions.ts` (shared by routes **and** the MCP server); scheduled-task logic in `packages/core/src/domain/scheduled-tasks.ts`; usage-limit admission is in `packages/core/src/billing/limits.ts`. `apps/api` routes are HTTP adapters over those core helpers, with Stripe integration still confined to `routes/billing.ts`. SSE semantics are in `http/sse.ts`. The API-direct sandbox seam (`sandbox/access.ts`, `sandbox/channel-a.ts`, `sandbox/viewer.ts`) resumes a box by id **in-process** (no Temporal/worker) for FS/Git/Terminal point ops and viewer attach, importing **only** the agent-loop-free leaf; it injects a NON-OWNED handle and drops it with the `dropEstablishedHandle` no-op (§3.9) so it never kills a resumed box.
 
 Critical route discipline (canonical: `routes/sessions.ts`):
 - `requireAccessGrant` **before** any Zod parse; explicit `HTTPException(400)` on parse failure (never a raw `ZodError` → 500); `HTTPException(409)` on an epoch fence.
@@ -337,27 +338,31 @@ Bootstraps `/v1/config/client`, resolves the auth mode, gates, then loads access
 
 Both are single large single-file packages. `contracts` (~3148 lines) owns the enums, schemas, `CAPABILITY_DESCRIPTORS` (one row per backend, every cell `available:false + reason`, never absent), port constants (`DESKTOP_STREAM_PORT=6080`, `TERMINAL_STREAM_PORT=7681`), the access/usage/entitlements enums (`ProductAccessMode`, `UsageLimitsMode`, `EntitlementsMode`), and four HMAC token families (`ogd_`/`oge_`/`ogs_`/`ogr_`) sharing **one** envelope distinguished only by prefix. `config` (~2035 lines) parses every `OPENGENI_*` var, owns `SANDBOX_REQUIRED_ENV` (validated for the active backend only) and sandbox preparation profiles, and enforces boot invariants (lease cadence ordering, modal idle-vs-hard-lifetime, managed-mode secrets, storage exclusivity). Boolean flags must use `EnvBoolean`, never `z.coerce.boolean()`.
 
-### 7.5 `db` — Postgres data layer
+### 7.5 `core` — domain/access/billing
 
-Forward-only migrations under `drizzle/0000..` applied by a bespoke runner (`migrate.ts`, advisory-locked, tracked in its own `schema_migrations` table — **the `drizzle/meta/_journal.json` is stale and not authoritative**). The schema declares **43** `pgTable`s; every workspace-scoped table carries `account_id` + `workspace_id`, FORCE RLS, and a `workspace_isolation` policy. Leases enforce one-box-per-group via `UNIQUE (workspace_id, sandbox_group_id)` + `FOR UPDATE` + cold→warming CAS + integer epoch fence. `index.ts` is ~6000 lines (read by offset/grep). Note: pgvector embeddings are `vector(3072)` with **no ANN index** (3072 dims exceed pgvector's HNSW limit) — search is a sequential scan.
+`@opengeni/core` is the extracted, framework-agnostic server layer. It owns the access resolver (`packages/core/src/access/index.ts`), dependency types (`AppDependencies`, `ApiRouteDeps`, `SessionWorkflowClient`), domain helpers (`createSessionForRequest`, `acceptSessionUserMessage`, scheduled-task/environment/pack/capability/workspace-member logic), and billing admission (`checkLimit`/`requireLimit`/`recordWorkspaceUsage`). It deliberately still throws Hono `HTTPException` in this extraction pass; typed transport-neutral errors are a later cleanup. `apps/api` imports core and adapts it to HTTP, while the first-party MCP server and embedded hosts can call the same core functions directly.
 
-### 7.6 `runtime` — the agent loop + sandbox abstraction
+### 7.6 `db` — Postgres data layer
+
+Forward-only migrations under `drizzle/0000..` applied by a bespoke runner (`migrate.ts`, advisory-locked, tracked in its own `schema_migrations` table — **the `drizzle/meta/_journal.json` is stale and not authoritative**). Migrations are schema-agnostic: standalone runs in the server default schema, while embedded runs may set a target schema/search path through `migrate(databaseUrl, schema)` / `runMigrations(adminConnection, targetSchema)`. The SQL must use `current_schema()` in policy guards and avoid hard-pinning `public` except for extension/type lookup through the trailing `public` search-path entry. The schema declares **43** `pgTable`s; every workspace-scoped table carries `account_id` + `workspace_id`, FORCE RLS, and a `workspace_isolation` policy. Leases enforce one-box-per-group via `UNIQUE (workspace_id, sandbox_group_id)` + `FOR UPDATE` + cold→warming CAS + integer epoch fence. `index.ts` is ~6000 lines (read by offset/grep). Note: pgvector embeddings are `vector(3072)` with **no ANN index** (3072 dims exceed pgvector's HNSW limit) — search is a sequential scan.
+
+### 7.7 `runtime` — the agent loop + sandbox abstraction
 
 The barrel (`index.ts`, 2600+ lines) drives the SDK run: instruction composition (a non-bypassable CORE substituted into a white-label persona template), multi-provider model routing (`MultiProviderModelProvider` installed in *both* the run scope and process default), per-turn input prep, the streamed run with owned/per-run sandbox wiring, and the compaction summarizer. The **sandbox leaf** (`sandbox/index.ts`) is agent-loop-free (enforced by a test) and owns `establishSandboxSessionFromEnvelope` (the one resume/cold-restore primitive) and `PROVIDER_REGISTRY` (the 11 backends, self-tested at module load: `descriptor.backendId === client.backendId`). Selfhosted (a Connected Machine) is a structural session over `ControlRpc` (`agent.<ws>.<id>.rpc`) that re-anchors the virtual `/workspace` frame onto the machine's real filesystem via `toMachinePath`, rooted at the **per-session** `sessions.working_dir` (default = the agent's launch `workspace_root`); routing is a hot-swap proxy that re-reads the active pointer per op. Client-side compaction lands only at clean turn boundaries (orphan-safe).
 
-### 7.7 `events`, `storage`, `documents` — infra leaves
+### 7.8 `events`, `storage`, `documents` — infra leaves
 
 `events`: ONE managed NATS connection with **infinite reconnect** (`maxReconnectAttempts: -1`, load-bearing — dropping it caused a prod outage), durable-first publish, plus a **separate** auth-callout responder connection. Per-workspace isolation is cryptographic: `workspaceAgentPermissions(ws)` allow-lists only `agent.<ws>.>` + `_INBOX.>` (deny-all-else). `storage`: returns `null` when s3-compatible is selected but unconfigured (feature-disabled, not an error); `putObject` is the trusted in-process twin of `createPutUrl` for split public/internal endpoint topologies. `documents`: RLS everywhere; embedding model is part of the search filter (changing it without re-indexing silently hides old chunks).
 
-### 7.8 `github` + `observability` — small leaves
+### 7.9 `github` + `observability` — small leaves
 
 `github`: gate every privileged call on full configuration; HMAC CSRF state bounded to 3600s. **Footgun:** if `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` is unset, the secret is random per process — set it explicitly for multi-instance deploys. GitHub Enterprise hosts are hardcoded (not supported). `observability`: in-memory metrics per-process (reset on restart); `/metrics` reflects only the serving process.
 
-### 7.9 `sdk` + `react` — published clients
+### 7.10 `sdk` + `react` — published clients
 
 `sdk` must carry **zero runtime deps** (hand-mirrors contract types; pinned by `contract-parity.test.ts`). Streaming is exactly-once/in-order/gap-free anchored on `sequence` (backfill **throws** rather than skip). `SessionEvent.type`/`Permission`/`UsageEventType` are **open unions** — do not narrow. `react`'s optional DOM-only peers (noVNC, xterm, Pierre diffs, CodeMirror) **must be lazily imported** so SSR/non-desktop bundles stay clean. Connected-machine UI (dashboard, enrollment, status pills, metrics) is carved into the **`@opengeni/react/machines`** subpath (`src/machines.ts`) so the root import is the clean sandbox-only default and machine surfaces are opt-in (the root still re-exports them deprecated for back-compat, #144). The two are version-linked via changesets; the desktop pixel plane is consent-gated (409 until acknowledged).
 
-### 7.10 `agent/` (Rust) + `agent-proto` + the relay
+### 7.11 `agent/` (Rust) + `agent-proto` + the relay
 
 The proto is the single source of truth, codegen'd to both stacks; **generated code is never hand-edited** — edit the proto then run `agent/scripts/codegen.sh` (CI fails if the tree changed). A cross-stack round-trip test proves no drift. Field numbers are append-only; handler errors are typed values, never panics (`unsafe_code = forbid`). Subscribing to `agent.<ws>.<id>.rpc` **is** the registry. Self-update trust root is one pinned minisign key; a bad update rolls back on a failed boot health gate.
 
@@ -367,6 +372,20 @@ The proto is the single source of truth, codegen'd to both stacks; **generated c
 - **Per connection** the relay parses the channel-key query, requires the in-band `StreamOpen.channel` to match it (defense in depth), validates the token, acks (`StreamOpenAck`), pairs producer↔consumer by key, and splices bidirectionally with bounded ring buffers, backpressure, and per-token leaky-bucket rate limits. It **resumes from `resume_from_seq`** on reconnect (replays the bounded ring), and an epoch-fence swap-away tears down with `reason = FENCED`.
 
 **"Two tokens, one key."** The agent and the viewer dial **independently** with **different** tokens but the **same** channel key: the agent presents its enrollment-scoped `ogr_` **producer** token (`verify_relay_token`); the viewer presents the control-plane-minted `ogs_` **stream** token (`verify_stream_token`), validated **including the lease/active-epoch fence** so a stale-epoch viewer can never reach a swapped-away box. The relay validates each side on its own merits and pairs by key — the agent never mints the viewer token. The Rust token verify is the single place the relay and the TypeScript control plane must agree on the HMAC envelope; it mirrors `packages/contracts`'s `signStreamToken`/`signRelayToken` byte-for-byte (proven by `agent/crates/opengeni-relay/tests/cross_stack_token.rs`).
+
+### 7.12 Embedding & ports
+
+Embedding is a **binding model**: a deployment binds host-owned concerns into OpenGeni. With all ports unset, OpenGeni runs standalone and preserves byte-identical behavior. See [`embedding.md`](embedding.md) for the detailed guide.
+
+The current map:
+
+- **Identity resolver chain.** `packages/core/src/access/index.ts` resolves `AccessContext` through local bootstrap, configured delegated `ogd_` bearer/bootstrap, or managed delegated/API-key/Better Auth session. V2 callers may skip HTTP and pass an `AccessGrant` to core domain functions directly.
+- **Tenancy / bootstrap workspace.** `bootstrapWorkspace` in `packages/db/src/index.ts` creates or updates the external account/workspace/member mapping and returns an `AccessContext`; the workspace remains the operational boundary.
+- **Entitlements / admission.** `EntitlementsPort.admitRun(input)` (`packages/contracts/src/index.ts`) is wired through worker `ActivityDependencies` and can replace local credit-balance admission for managed non-Codex turns; unset uses the local ledger/configured limits. Core API admission still runs through `requireLimit`.
+- **Connection credentials.** `ConnectionCredentialsPort` can provide per-run GitHub installation tokens and sandbox secrets. FORK-7 requires each provider result to echo `workspaceId`, and the worker asserts the echo before injection. The first-party MCP `ogd_` delegated token is still self-minted from `settings.delegationSecret`, not supplied by this port.
+- **Persistence.** Hosts can inject a `Database` handle or use `createDb(databaseUrl, { searchPath, rlsStrategy, userLookup })`; dedicated-schema embeds use postgres-js `search_path`, and `rlsStrategy` is `"force"` (non-owner, FORCE RLS) or `"scoped"` (host-owned role, GUCs still emitted).
+- **Worker.** `createOpenGeniWorker({ settings, activityDependencies })` runs the durable Temporal worker as a separate process next to the host app; it is never optional for real agent turns.
+- **EventBus binding.** API and worker must share a real broker-backed `EventBus` (`createNatsEventBus`) for cross-process live fanout and SSE. An in-memory bus only fans out inside one process and would silently break worker -> API SSE.
 
 ---
 
@@ -420,9 +439,9 @@ The proto is the single source of truth, codegen'd to both stacks; **generated c
 - **Write-only environments.** No API response, event, log, span, or audit record ever contains a variable value; values are AES-256-GCM-encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` held outside Postgres. **Agents cannot self-attach secrets** — the worker's default first-party MCP token never carries `environments:use`/`manage`; a stronger token exists only when the creator granted it at creation (`firstPartyMcpPermissions`), capped by the creating grant. (Residual: `agent_run_states` may still contain echoed values — RLS-protected, never API-returned, deliberately not redacted so resume works.)
 - **Env layering precedence (fixed):** deployment allowlist < git identity < workspace environment < run-scoped GitHub auth (later wins); reserved/loader-injection names are rejected.
 - **Cryptographic per-workspace NATS isolation.** Each agent connection is scoped by a signed JWT to `agent.<ws>.>` + `_INBOX.>`; the auth-callout fails closed (a responder bug never grants access).
-- **Relay token isolation.** The pixel/terminal data plane is gated by two distinct HMAC tokens (`ogr_` producer, `ogs_` viewer) over a shared channel key, with the viewer token fenced on the active lease epoch (§7.10) — a stale-epoch viewer can never reach a swapped-away box.
+- **Relay token isolation.** The pixel/terminal data plane is gated by two distinct HMAC tokens (`ogr_` producer, `ogs_` viewer) over a shared channel key, with the viewer token fenced on the active lease epoch (§7.11) — a stale-epoch viewer can never reach a swapped-away box.
 
-> Canonical: `apps/api/src/access/index.ts`, `apps/api/src/http/auth.ts`, `SECURITY.md`, [`environments.md`](environments.md), `deploy/nats/auth-callout.conf`.
+> Canonical: `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts`, `SECURITY.md`, [`environments.md`](environments.md), `deploy/nats/auth-callout.conf`.
 
 ---
 
@@ -433,7 +452,7 @@ The proto is the single source of truth, codegen'd to both stacks; **generated c
 - **Test tiers.** `test`/`test:unit` (bun test, **no infra**), `test:integration` (a fixed enumerated list of `*.integration.ts`), `test:e2e` (browser harness + Docker sandbox + Channel-A), `test:live` (opt-in via `OPENGENI_ENABLE_LIVE_TESTS`). **Unit tests and typecheck require no Temporal/NATS/Postgres/sandbox/model credentials** — keep new unit tests in that tier.
 - **Typecheck/check/prep.** `typecheck` is a hand-ordered `cd`-chain (add new packages to it). `check` = typecheck + unit + build sdk/react + web build; `check:full`/`prep` add integration + e2e; `check:workspace-billing` adds the static auth/billing guard.
 - **Static guards (build steps).** `publish-closure-guard.ts` (client closure is exactly `{contracts, sdk, react}`, zero server-internal deps), `check-workspace-billing-static.ts` (no unscoped `/v1` routes; Stripe only in `routes/billing.ts`, Better Auth only under `auth/`), `source-hygiene.test.ts` (no raw NUL bytes).
-- **Changesets / publish.** Releases publish via **npm `changeset publish`** (bun can't emit provenance). Committed publishable `package.json` entry points point at `./src/...` (CI builds from source before `dist` exists); `rewrite-entry-points.ts` + `rewrite-workspace-deps.ts` swap to `dist`/concrete ranges only in the ephemeral CI checkout. `sdk` + `react` are version-linked; server packages are in the changesets `ignore` list.
+- **Changesets / publish.** Releases publish via **npm `changeset publish`** (bun can't emit provenance). Committed publishable `package.json` entry points point at `./src/...` (CI builds from source before `dist` exists); `rewrite-entry-points.ts` + `rewrite-workspace-deps.ts` swap to `dist`/concrete ranges only in the ephemeral CI checkout. `sdk` + `react` are version-linked; package manifests and `.changeset/config.json` own which server/embed packages publish versus stay ignored.
 - **CI.** `ci.yml` (typecheck + unit + guards + package/image builds + deployment-artifact validation; asserts no floating `latest` tags), `release.yml` (changesets Version-PR/publish + GHCR images, dormant until `RELEASE_ENABLED=true`), `agent-ci.yml`/`agent-release.yml` (Rust agent, path-filtered, independently versioned via `agent-v*` tags).
 
 > Canonical: `package.json`, `tsconfig.base.json`, `.changeset/config.json`, `scripts/release-publish.sh`, `.github/workflows/*`, [`../AGENTS.md`](../AGENTS.md) (Verification).
@@ -462,13 +481,13 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The activity registry / the `runAgentSegment` alias | `apps/worker/src/activities.ts` (alias) vs `apps/worker/src/workflows/activities.ts` (`maximumAttempts:1`) | [`run-lifecycle.md`](run-lifecycle.md) |
 | Worker-death / preempt / requeue | `apps/worker/src/activities/session-state.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Goals / continuation loop | `apps/worker/src/activities/goals.ts` | [`goals.md`](goals.md) |
-| Scheduled tasks / cron | `apps/api/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
-| Usage limits / entitlements / Stripe billing | `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `apps/api/src/routes/billing.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
+| Scheduled tasks / cron | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
+| Usage limits / entitlements / Stripe billing | `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `packages/core/src/billing/limits.ts`, `apps/api/src/routes/billing.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
 | Any cross-boundary wire type / enum / permission | `packages/contracts/src/index.ts` | `packages/sdk/test/contract-parity.test.ts` |
 | Any `OPENGENI_*` setting / default / boot validation | `packages/config/src/index.ts` | — |
 | DB schema / a new table / RLS | `packages/db/src/schema.ts`, `packages/db/drizzle/0001_*.sql` (RLS infra) | — |
 | A migration | `packages/db/src/migrate.ts` (ordering is filename, not `_journal.json`) | — |
-| Auth / authz / access modes | `apps/api/src/access/index.ts`, `apps/api/src/http/auth.ts` | `SECURITY.md` |
+| Auth / authz / access modes | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | `SECURITY.md` |
 | HTTP routes / middleware | `apps/api/src/app.ts`, `apps/api/src/routes/sessions.ts` | — |
 | SSE / streaming semantics | `apps/api/src/http/sse.ts`, `packages/sdk/src/stream.ts` | — |
 | Sandbox backends / the registry | `packages/runtime/src/sandbox/providers/index.ts`, `packages/contracts` (the enum) | [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
@@ -507,6 +526,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`manager-session-robustness.md`](manager-session-robustness.md) | Manager-session failure modes and fixes (point-in-time; verification timestamps are historical). |
 | [`reliability-fixes.md`](reliability-fixes.md) | Reliability bugs/fixes (bounded Temporal history, orphan repair, scheduled-task/billing idempotency). |
 | [`deployment.md`](deployment.md) | Operator guide: profiles, preflight/stack plans, Helm/Terraform; the disposable-fixtures rule. |
+| [`embedding.md`](embedding.md) | Host-app embedding guide: router mounting, direct core calls, ports/bindings, schema/RLS, worker, and EventBus. |
 | [`design/sandbox-surfacing/`](design/sandbox-surfacing/) | Master design dossier for swappable sandboxes / BYO-compute (including the relay edge). |
 | [`design/desktop-hibernation.md`](design/desktop-hibernation.md) | Research/reference only (NOT shipped) — pause/resume/hibernation primitives across providers. |
 | [`../AGENTS.md`](../AGENTS.md) | How to run the stack + the load-bearing contributor guardrails. |
@@ -526,6 +546,6 @@ You **must** update this file (and the relevant topic doc) in the same PR when y
 - change the **request/data-flow shape** (§4 diagram) or the **session/turn lifecycle** (§5.2 diagram);
 - add a doc, or change which file is **canonical** for a change area (update §13 and §14).
 
-What this doc **must never become**: a second source of truth for route lists, env defaults, table names, enum members, or permission names. Those live in code (`contracts`/`config`/`db`/`api`); this doc names *where* they live and *why they matter* — it deliberately follows them. If you find a list here drifting from code, delete or correct it rather than letting it lie.
+What this doc **must never become**: a second source of truth for route lists, env defaults, table names, enum members, or permission names. Those live in code (`contracts`/`config`/`core`/`db`/`api`); this doc names *where* they live and *why they matter* — it deliberately follows them. If you find a list here drifting from code, delete or correct it rather than letting it lie.
 
 When in doubt, prefer **omission over invention**: an empty cell that points at the canonical source is better than a confident-but-wrong line that sends the next agent to the wrong file.

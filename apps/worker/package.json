@@ -1,17 +1,43 @@
 {
-  "name": "@opengeni/worker",
+  "name": "@opengeni/worker-bundle",
   "version": "0.1.0",
-  "private": true,
+  "description": "OpenGeni worker entry: runOpenGeniWorker/createOpenGeniWorker(deps) + the un-bundled Temporal workflow source tree. An engine-distribution surface — its runtime closure includes engine-internal packages and the workflow bundle ships as on-disk TS source.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "apps/worker"
+  },
   "type": "module",
   "main": "./src/index.ts",
+  "module": "./src/index.ts",
   "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "dev": "bun src/index.ts",
     "dev:watch": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsup"
   },
   "dependencies": {
+    "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
@@ -22,8 +48,7 @@
     "@temporalio/activity": "^1.17.0",
     "@temporalio/client": "^1.17.0",
     "@temporalio/worker": "^1.17.0",
-    "@temporalio/workflow": "^1.17.0",
-    "@opengeni/codex": "workspace:*"
+    "@temporalio/workflow": "^1.17.0"
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",

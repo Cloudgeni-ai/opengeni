@@ -6,9 +6,9 @@ import {
   updateScheduledTask,
 } from "@opengeni/db";
 import type { Hono } from "hono";
-import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -19,7 +19,7 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
-} from "../domain/scheduled-tasks";
+} from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {

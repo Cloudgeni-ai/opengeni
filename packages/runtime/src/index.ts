@@ -1,5 +1,5 @@
 import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
-import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
+import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
 import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
@@ -1285,7 +1285,9 @@ function firstPartyMcpServerUrlForRun(settings: Settings, config: Settings["mcpS
     ? settings.opengeniMcpUrl.replaceAll("{workspaceId}", workspaceId)
     : settings.opengeniMcpUrl
       ? scopedMcpUrlFromConfiguredBase(settings.opengeniMcpUrl, workspaceId)
-      : `http://127.0.0.1:${settings.apiPort}/v1/workspaces/${workspaceId}/mcp`;
+      // unset → the shared loopback default (a `{workspaceId}` template owned by
+      // @opengeni/config's firstPartyMcpBaseUrl), scoped to this run's workspace.
+      : firstPartyMcpBaseUrl(settings).replaceAll("{workspaceId}", workspaceId);
   const url = new URL(rawBase);
   if (config.id === "docs") {
     url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
@@ -1302,7 +1304,9 @@ function scopedMcpUrlFromConfiguredBase(raw: string, workspaceId: string): strin
 }
 
 function firstPartyMcpUrls(settings: Settings): string[] {
-  const base = normalizeUrl(settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`);
+  // Route the unset case through the shared loopback default so the literal
+  // lives in exactly one place (@opengeni/config's firstPartyMcpBaseUrl).
+  const base = normalizeUrl(settings.opengeniMcpUrl ?? firstPartyMcpBaseUrl(settings));
   if (!base) {
     return [];
   }

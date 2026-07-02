@@ -11,11 +11,11 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "./dependencies";
-import { requireAccessGrant } from "./access";
+import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
+import { requireAccessGrant } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
-import { requireLimit } from "./billing/limits";
+import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
@@ -41,7 +41,7 @@ export type {
   DocumentIndexClient,
   ObjectStorageDependency,
   SessionWorkflowClient,
-} from "./dependencies";
+} from "@opengeni/core";
 export {
   mergeResourceRefs,
   mergeToolRefs,
@@ -51,8 +51,8 @@ export {
   validateGitHubRepositorySelectionShape,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
-} from "./domain/resources";
-export { workflowIdForSession } from "./domain/sessions";
+} from "@opengeni/core";
+export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream } from "./http/sse";
 
 export function createApp(deps: AppDependencies): Hono {

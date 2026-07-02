@@ -6,7 +6,7 @@
 // unconfigured → "" (graceful no-relay degrade), and producer/consumer agreement.
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { relayConfigFromSettings, relayDialBaseFromSettings } from "../src/sandbox/routing";
+import { relayConfigFromSettings, relayDialBaseFromSettings } from "@opengeni/core";
 
 const base = (selfhostedRelayUrl: string | undefined) =>
   relayDialBaseFromSettings(testSettings({ selfhostedRelayUrl }));

@@ -53,7 +53,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'sandbox_pty_sessions' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'sandbox_pty_sessions' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "sandbox_pty_sessions";
   END IF;

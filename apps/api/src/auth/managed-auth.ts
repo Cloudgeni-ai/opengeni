@@ -1,12 +1,17 @@
 import type { Settings } from "@opengeni/config";
+import { type ManagedAuth } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
-import { betterAuth, type Auth } from "better-auth";
+import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { Pool } from "pg";
 import { Resend } from "resend";
 
-export type ManagedAuth = Auth<any>;
+// `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
+// (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
+// type-only slot. We re-export it from this construction site so existing
+// importers (`app.ts`) keep the same import path.
+export type { ManagedAuth };
 
 export function createManagedAuth(settings: Settings, db: Database): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {

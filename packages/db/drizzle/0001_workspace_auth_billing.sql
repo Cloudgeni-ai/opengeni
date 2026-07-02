@@ -481,7 +481,7 @@ BEGIN
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', table_name);
     IF EXISTS (
       SELECT 1 FROM pg_policies
-      WHERE schemaname = 'public' AND tablename = table_name AND policyname = 'workspace_isolation'
+      WHERE schemaname = current_schema() AND tablename = table_name AND policyname = 'workspace_isolation'
     ) THEN
       EXECUTE format('DROP POLICY workspace_isolation ON %I', table_name);
     END IF;
@@ -498,7 +498,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'api_keys' AND policyname = 'api_keys_account_workspace_or_hash_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'api_keys' AND policyname = 'api_keys_account_workspace_or_hash_isolation'
   ) THEN
     DROP POLICY "api_keys_account_workspace_or_hash_isolation" ON "api_keys";
   END IF;
@@ -519,7 +519,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'usage_events' AND policyname = 'usage_events_account_workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'usage_events' AND policyname = 'usage_events_account_workspace_isolation'
   ) THEN
     DROP POLICY "usage_events_account_workspace_isolation" ON "usage_events";
   END IF;
@@ -534,7 +534,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'credit_ledger_entries' AND policyname = 'credit_ledger_account_workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'credit_ledger_entries' AND policyname = 'credit_ledger_account_workspace_isolation'
   ) THEN
     DROP POLICY "credit_ledger_account_workspace_isolation" ON "credit_ledger_entries";
   END IF;
@@ -549,7 +549,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'billing_customers' AND policyname = 'billing_customers_account_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'billing_customers' AND policyname = 'billing_customers_account_isolation'
   ) THEN
     DROP POLICY "billing_customers_account_isolation" ON "billing_customers";
   END IF;
@@ -564,7 +564,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'audit_events' AND policyname = 'audit_events_account_workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'audit_events' AND policyname = 'audit_events_account_workspace_isolation'
   ) THEN
     DROP POLICY "audit_events_account_workspace_isolation" ON "audit_events";
   END IF;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
-import { assertAllowedEnvironmentVariableName, requireEnvironmentEncryption } from "../src/domain/environments";
+import { assertAllowedEnvironmentVariableName, requireEnvironmentEncryption } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 
 describe("environment variable name policy", () => {

@@ -72,7 +72,7 @@ import {
   mergeToolRefs,
 } from "./common";
 import { maybeCompactContext } from "./context-compaction";
-import { loadWorkspaceEnvironmentForRun, sandboxEnvironmentForRun } from "./environment";
+import { loadWorkspaceEnvironmentForRunWithCredentials, sandboxEnvironmentForRun } from "./environment";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import { resolveWorkspaceAgentInstructions, resolveWorkspacePackRuntime, settingsWithPackSandboxImage } from "./packs";
 import { notifyParentOfChildTerminal } from "./parent-wake";
@@ -355,7 +355,7 @@ async function refreshCappedCodexUsageRows(
 
 export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
-    const { settings, db, bus, runtime, objectStorage, observability, wakeSessionWorkflow } = await services();
+    const { settings, db, bus, runtime, objectStorage, observability, wakeSessionWorkflow, entitlements, connectionCredentials } = await services();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
@@ -528,7 +528,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // below needs it; mirrors the same active-credential read the codex provider
       // overlay uses, so billing and routing agree on what "codex" is.
       const isCodexTurn = await isCodexBilledTurn({ db, settings, workspaceId: input.workspaceId, model: turn.model, active: codexSubscriptionActive });
-      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn);
+      // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
+      // AND the optional host `entitlements` port (when bound, its admitRun replaces
+      // the local credit read). Unset port → today's local-ledger path.
+      await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn, entitlements);
       const activityContext = currentActivityContext();
       // Setup (environment load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
@@ -777,7 +780,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // resolved at connect time from the codex ALS (see the withCodex-wrapped
       // prepareTools call below).
       const turnTools = withCodexAppsTool(runSettings, withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)));
-      const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(db, runSettings, input.workspaceId, session.environmentId);
+      // §7.6 P4a — load (and decrypt) the workspace environment via the host
+      // `sandboxSecrets` provider when bound; unset → today's local decrypt.
+      const connectionScope = { accountId: input.accountId, workspaceId: input.workspaceId };
+      const workspaceEnvironment = await loadWorkspaceEnvironmentForRunWithCredentials(
+        db,
+        runSettings,
+        connectionScope,
+        session.environmentId,
+        connectionCredentials?.sandboxSecrets,
+      );
       environmentId = workspaceEnvironment?.id ?? "";
       redact = createSecretRedactor(
         Object.entries(workspaceEnvironment?.values ?? {}).map(([name, value]) => ({ name, value })),
@@ -828,13 +840,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // run-scoped GitHub token minted ONCE per turn as `gitToken`. The env feeds BOTH
       // the box manifest AND the agent (env-parity, as before); the token is threaded
       // OFF-MANIFEST as the clone-seed `gitTokenSeed` to buildAgent (below) so the box
-      // never carries a rotating value on its manifest. gitToken is undefined on the
-      // selfhosted skip path (the machine uses its own git creds).
+      // never carries a rotating value on its manifest. When the platform token IS
+      // minted, the host `gitCredentials` provider may supply it; unset → self-mint
+      // from settings. gitToken is undefined on the selfhosted skip path (the machine
+      // uses its own git creds).
       const { environment: sandboxEnvironment, gitToken: sandboxGitToken } = await sandboxEnvironmentForRun(
         runSettings,
         turnResources,
         workspaceEnvironment?.values ?? {},
-        { skipGitHubToken: activeSandboxBackend === "selfhosted" },
+        {
+          skipGitHubToken: activeSandboxBackend === "selfhosted",
+          scope: connectionScope,
+          gitCredentials: connectionCredentials?.gitCredentials,
+        },
       );
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
@@ -1309,7 +1327,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
             await reconcileConversationTruth();
             try {
-              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn);
+              await ensureRunAllowed(settings, db, input.accountId, input.workspaceId, isCodexTurn, entitlements);
             } catch (limitError) {
               // Capture the run state at the boundary so the budget valve in
               // the outer catch can end this segment gracefully with full
@@ -2035,12 +2053,44 @@ class BudgetExhaustedError extends Error {
   }
 }
 
-// Exported for unit testing the codex-billed bypass; not part of the activity surface.
-export async function ensureRunAllowed(settings: Settings, db: ActivityServices["db"], accountId: string, workspaceId: string, isCodexTurn: boolean): Promise<void> {
+// Exported for unit testing the codex-billed bypass (codex-billing.test.ts); not part
+// of the activity surface. Takes BOTH `isCodexTurn` (codex-plan turns bypass the credit
+// and token gates) and the optional §7.5 P3 host `entitlements` port (when bound, its
+// `admitRun` REPLACES the local credit read for a non-codex turn; unset → local ledger).
+export async function ensureRunAllowed(
+  settings: Settings,
+  db: ActivityServices["db"],
+  accountId: string,
+  workspaceId: string,
+  isCodexTurn: boolean,
+  entitlements?: ActivityServices["entitlements"],
+): Promise<void> {
   // Codex-billed turns are paid by the user's ChatGPT/Codex plan: skip the
   // credit-balance gate and the monthly token cap. The agent-run COUNT cap below
   // is a volume/fairness quota (not a credit/cost gate) and is intentionally kept.
-  if (!isCodexTurn && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
+  //
+  // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
+  // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
+  // `admitRun` decision REPLACES the local credit-balance read below: a host that owns
+  // its ledger/meter is the funding authority. A deny throws the SAME Error the local
+  // read throws, so the mid-stream budget-valve at :727 wraps it in a
+  // `BudgetExhaustedError` and pauses identically — the valve never learns whether the
+  // deny came from the local ledger or the host meter.
+  //
+  // This is an admission READ only; it records NO usage (metering stays the sole,
+  // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
+  // is consulted without ever double-charging.
+  if (!isCodexTurn && entitlements && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
+    const decision = await entitlements.admitRun({
+      accountId,
+      workspaceId,
+      action: "agent_run:create",
+      quantity: 1,
+    });
+    if (!decision.allowed) {
+      throw new Error(decision.reason || "insufficient OpenGeni credits");
+    }
+  } else if (!isCodexTurn && (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient OpenGeni credits");

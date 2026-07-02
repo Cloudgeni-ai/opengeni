@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { listCapabilityPacks } from "../src/domain/packs";
+import { listCapabilityPacks } from "@opengeni/core";
 
 describe("built-in capability packs", () => {
   // The worker's pack-scoped runtime resolution

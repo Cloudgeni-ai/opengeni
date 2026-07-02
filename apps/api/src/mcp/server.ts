@@ -44,16 +44,16 @@ import {
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
-import { hasPermission } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
+import { hasPermission } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertAllowedEnvironmentVariableName,
   MAX_ENVIRONMENTS_PER_WORKSPACE,
   MAX_VARIABLES_PER_ENVIRONMENT,
   recordEnvironmentAuditEvent,
   requireEnvironmentEncryption,
-} from "../domain/environments";
+} from "@opengeni/core";
 import {
   createValidatedScheduledTask,
   manualScheduledTaskTriggerUsageKey,
@@ -63,8 +63,8 @@ import {
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
-} from "../domain/scheduled-tasks";
-import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle, workflowIdForSession } from "../domain/sessions";
+} from "@opengeni/core";
+import { acceptSessionUserMessage, createSessionForRequest, updateSessionTitle, workflowIdForSession } from "@opengeni/core";
 import {
   buildFleetContextForSession,
   listFleet,
@@ -74,7 +74,7 @@ import {
   type FleetContext,
   type FleetServices,
   type RunOnOp,
-} from "../sandbox/fleet";
+} from "@opengeni/core";
 import { capEventPage, capSessionDetail } from "./session-view";
 
 export type McpServerOptions = {

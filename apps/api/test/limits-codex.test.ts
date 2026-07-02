@@ -2,8 +2,8 @@ import { describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Settings } from "@opengeni/config";
-import { checkLimit, requireLimit } from "../src/billing/limits";
-import type { ApiRouteDeps } from "../src/dependencies";
+import { checkLimit, requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";

@@ -46,7 +46,7 @@ import {
   type ChannelASession,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { routingEnabled, wrapChannelABoxWithRouting } from "./routing";
+import { routingEnabled, wrapChannelABoxWithRouting } from "@opengeni/core";
 
 export type ChannelAServices = {
   db: Database;

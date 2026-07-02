@@ -8,8 +8,6 @@
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
   "ignore": [
-    "@opengeni/api",
-    "@opengeni/worker",
     "opengeni-web",
     "@opengeni/config",
     "@opengeni/db",

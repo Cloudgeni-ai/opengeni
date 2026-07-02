@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import type { ApiRouteDeps } from "../dependencies";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 // The get.<domain> install-serving routes (dossier §23.1). These are
 // UNAUTHENTICATED (see http/auth.ts isAuthExempt — the `installExemptPaths` set)

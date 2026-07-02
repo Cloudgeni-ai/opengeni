@@ -61,7 +61,7 @@ import {
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
 } from "@opengeni/db";
-import { relayDialBaseFromSettings } from "./routing";
+import { relayDialBaseFromSettings } from "@opengeni/core";
 
 // The device-flow timing knobs (RFC 8628). Short TTL + a poll interval the agent
 // must honor (the route rate-limits to the same cadence). These mirror the proto's

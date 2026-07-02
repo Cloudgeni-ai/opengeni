@@ -17,7 +17,7 @@ import {
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import { createApp } from "../src/app";
-import type { AppDependencies, SessionWorkflowClient } from "../src/dependencies";
+import type { AppDependencies, SessionWorkflowClient } from "@opengeni/core";
 import { startMetricsIngestion } from "../src/sandbox/metrics-ingestion";
 
 // Track started ingestion consumers so afterEach can unsubscribe them (each test

@@ -77,7 +77,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'session_stream_acknowledgments' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'session_stream_acknowledgments' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "session_stream_acknowledgments";
   END IF;

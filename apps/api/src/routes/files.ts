@@ -14,9 +14,9 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;

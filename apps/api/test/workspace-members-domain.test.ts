@@ -7,7 +7,7 @@ import {
   isUserMember,
   memberCanAdminister,
   resolveMemberSubjectId,
-} from "../src/domain/workspace-members";
+} from "@opengeni/core";
 
 function member(overrides: Partial<WorkspaceMember> & Pick<WorkspaceMember, "subjectId">): WorkspaceMember {
   return {

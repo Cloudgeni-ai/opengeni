@@ -26,10 +26,10 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requireAccessContext, requireAccessGrant } from "../access";
-import { requireLimit } from "../billing/limits";
-import type { ApiRouteDeps } from "../dependencies";
-import { assertWorkspaceDeletable, assertWorkspaceMemberRemovable, resolveMemberSubjectId } from "../domain/workspace-members";
+import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
+import { requireLimit } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
+import { assertWorkspaceDeletable, assertWorkspaceMemberRemovable, resolveMemberSubjectId } from "@opengeni/core";
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {

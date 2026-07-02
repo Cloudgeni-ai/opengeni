@@ -43,7 +43,7 @@ import {
   type ControlRpc,
   type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "./routing";
+import { relayConfigFromSettings } from "@opengeni/core";
 
 export type MachinesServices = {
   db: Database;

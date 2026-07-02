@@ -23,8 +23,8 @@ import {
 import type { Context, Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "../access";
-import type { ApiRouteDeps } from "../dependencies";
+import { requireAccessGrant } from "@opengeni/core";
+import type { ApiRouteDeps } from "@opengeni/core";
 
 const githubStateCookie = "opengeni_github_state";
 

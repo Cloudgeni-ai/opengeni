@@ -2,7 +2,7 @@ import { getSettings } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { createOpenGeniWorker } from "@opengeni/worker";
+import { createOpenGeniWorker } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import { functionCall, ScriptedModel, type ScriptedModelStep } from "./scripted-model";
 

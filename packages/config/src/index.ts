@@ -106,6 +106,16 @@ const SettingsSchema = z.object({
   environment: z.string().default("local"),
   deploymentRevision: z.string().default("dev"),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
+  // topology. Default "" → standalone: no search_path scoping, server default
+  // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
+  // pool send `search_path = "<dbSchema>","opengeni_private","public"` so every
+  // query resolves into the dedicated schema with NO query rewrite (SPIKE-1 F1).
+  dbSchema: z.string().default(""),
+  // Step I (§7.7). RLS posture. "force" (default) = today's FORCE-RLS via the
+  // non-owner `opengeni_app` role. "scoped" = the embedded owner-role path (the
+  // GUC is still emitted defensively, so the query path is identical).
+  rlsStrategy: z.enum(["force", "scoped"]).default("force"),
   natsUrl: z.string().default("nats://127.0.0.1:4222"),
   temporalHost: z.string().default("127.0.0.1:7233"),
   temporalNamespace: z.string().default("default"),
@@ -821,6 +831,8 @@ export function getSettings(): Settings {
     environment: optional("OPENGENI_ENVIRONMENT"),
     deploymentRevision: optional("OPENGENI_DEPLOYMENT_REVISION") ?? optional("SOURCE_VERSION") ?? optional("GITHUB_SHA"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    dbSchema: optional("OPENGENI_DB_SCHEMA"),
+    rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     natsUrl: optional("OPENGENI_NATS_URL"),
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),
     temporalNamespace: optional("OPENGENI_TEMPORAL_NAMESPACE"),
@@ -1348,6 +1360,27 @@ export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array |
   return new Uint8Array(decoded);
 }
 
+/**
+ * The connection `search_path` for OpenGeni's db handles + the managed-auth pool
+ * (Step I, §7.8 runtime half). Returns `undefined` when `dbSchema` is unset
+ * (standalone) so no `search_path` startup parameter is sent and the server
+ * default (`public`) applies — byte-for-byte today's behavior. When `dbSchema`
+ * is set (embedded), returns `"<schema>,opengeni_private,public"` — `public`
+ * stays LAST so `gen_random_uuid()` (pgcrypto) and the `vector` type still
+ * resolve (the SPIKE-1 live footgun). `opengeni_private` is on the path so the
+ * RLS GUC-reader helpers resolve when referenced unqualified.
+ */
+export function dbSearchPath(settings: Pick<Settings, "dbSchema">): string | undefined {
+  const schema = settings.dbSchema?.trim();
+  if (!schema) {
+    return undefined;
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(schema)) {
+    throw new Error(`OPENGENI_DB_SCHEMA is not a valid Postgres identifier: ${schema}`);
+  }
+  return `${schema},opengeni_private,public`;
+}
+
 export function collectGitIdentityEnvironment(settings: Settings): Record<string, string> {
   return Object.fromEntries(Object.entries({
     GIT_AUTHOR_NAME: settings.gitAuthorName,
@@ -1755,8 +1788,33 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   ];
 }
 
-function firstPartyMcpServerUrl(settings: Settings): string {
+/**
+ * The base URL of OpenGeni's own first-party MCP endpoint, as a `{workspaceId}`
+ * template — the SINGLE source of truth for the `opengeniMcpUrl`-or-loopback
+ * decision. Every site that needs the first-party MCP base (config's tool
+ * registry here, and the worker-side `firstPartyMcpServerUrlForRun` /
+ * `firstPartyMcpUrls` in @opengeni/runtime) MUST route through this so the
+ * default lives in exactly one place.
+ *
+ * BINDING CONTRACT (`opengeniMcpUrl`):
+ *   - STANDALONE (unset): falls back to the loopback default
+ *     `http://127.0.0.1:${apiPort}/v1/workspaces/{workspaceId}/mcp` — the worker
+ *     and API are in/next to the same host:port, so loopback resolves the
+ *     workspace-scoped MCP. Byte-for-byte today's behavior.
+ *   - EMBEDDED / MOUNTED (must set): when OpenGeni's API is mounted as a host
+ *     sub-app under a prefix (e.g. `https://host/og/v1/...`), the loopback
+ *     default is WRONG — the worker runs in the host process and `127.0.0.1:
+ *     ${apiPort}` is not where the mounted, sandbox-routable MCP lives. The host
+ *     MUST set `OPENGENI_MCP_URL` to the externally/sandbox-routable base (a
+ *     `{workspaceId}` template, or a concrete base that gets re-scoped). This is
+ *     the one binding a mounted embed cannot leave unset.
+ */
+export function firstPartyMcpBaseUrl(settings: Settings): string {
   return settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`;
+}
+
+function firstPartyMcpServerUrl(settings: Settings): string {
+  return firstPartyMcpBaseUrl(settings);
 }
 
 function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {

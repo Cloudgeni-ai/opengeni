@@ -17,7 +17,7 @@ import {
 import type { AppDependencies } from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
-import { discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "../src/domain/capabilities";
+import { discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "@opengeni/core";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";

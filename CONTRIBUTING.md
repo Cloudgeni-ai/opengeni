@@ -47,3 +47,7 @@ bun run test:e2e
 - Prefer existing repository patterns over new abstractions.
 - Keep public API and contract changes explicit.
 - Treat agent activity retries carefully because model calls, sandbox commands, GitHub operations, and cloud-provider actions can be side-effectful.
+
+## Migration Authoring
+
+- Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin OpenGeni tables to `public` or issue `SET search_path` inside a migration.

@@ -1,4 +1,4 @@
-import { getSettings, resolveNatsCalloutConfig, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions } from "@opengeni/config";
+import { dbSearchPath, getSettings, resolveNatsCalloutConfig, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions } from "@opengeni/config";
 import type { ScheduledTask, ScheduledTaskOverlapPolicy, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
@@ -143,7 +143,14 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
 export async function startApi() {
   const settings = getSettings();
   const observability = createObservability(settings, { component: "api" });
-  const dbClient = createDb(settings.databaseUrl);
+  // Step I: standalone → dbSchema unset → searchPath undefined → today's plain
+  // handle (public). Embedded → scoped to the dedicated schema + the host's RLS
+  // strategy.
+  const searchPath = dbSearchPath(settings);
+  const dbClient = createDb(settings.databaseUrl, {
+    ...(searchPath ? { searchPath } : {}),
+    rlsStrategy: settings.rlsStrategy,
+  });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;
   const retryOptions = startupRetryOptions(settings);

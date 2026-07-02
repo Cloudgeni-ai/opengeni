@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { HTTPException } from "hono/http-exception";
 import { testSettings } from "@opengeni/testing";
 import type { AccessGrant, CreateScheduledTaskRequest } from "@opengeni/contracts";
-import { createValidatedScheduledTask } from "../src/domain/scheduled-tasks";
+import { createValidatedScheduledTask } from "@opengeni/core";
 
 // A scheduled task is a session the worker runs later, so its agentConfig.model
 // must pass the same host allow-list as the session choke points. The guard is
