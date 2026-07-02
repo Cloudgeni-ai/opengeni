@@ -2,6 +2,7 @@ import { BotIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
+import { useEntranceAnimation } from "./entrance";
 import type { ToolRegistry } from "./registry";
 import { PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./projection";
@@ -42,6 +43,7 @@ function familyOf(item: ActivityItem): string {
 }
 
 export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpenSession, bare, className }: ActivityRailProps) {
+  const enter = useEntranceAnimation();
   return (
     <div
       className={cn(
@@ -49,7 +51,8 @@ export function ActivityRail({ items, toolRegistry = defaultToolRegistry, onOpen
         // calm cluster; a family change opens real breathing room (mt-3) below,
         // so a long rail reads as a few clusters, not a metronome of rows.
         "flex flex-col gap-0.5",
-        !bare && "animate-og-enter border-l-2 border-og-border pl-3 sm:pl-4",
+        !bare && "border-l-2 border-og-border pl-3 sm:pl-4",
+        !bare && enter && "animate-og-enter",
         className,
       )}
     >

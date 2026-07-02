@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
+import { useEntranceAnimation } from "./entrance";
 import { applyPatchOps, isApplyPatch, screenshotDataUrl } from "./parsers";
 import { rawTypeOf } from "./registry";
 import type { ActivityItem, TurnOutcome } from "./types";
@@ -39,10 +40,11 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
   const [open, setOpen] = useState(defaultOpen ?? forcedDefaultOpen ?? false);
+  const enter = useEntranceAnimation();
   const facets = summarizeTurn(items, durationMs);
 
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen} className="animate-og-enter">
+    <Collapsible.Root open={open} onOpenChange={setOpen} className={enter ? "animate-og-enter" : undefined}>
       <Collapsible.Trigger
         className={cn(
           "group flex w-full items-center gap-2.5 rounded-og-md border px-3 py-2 text-left text-og-base transition-colors",

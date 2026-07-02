@@ -32,6 +32,7 @@ import {
   TurnSummary,
 } from "../timeline";
 import { SESSION_STATUS_META, StatusDot } from "./session-status";
+import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -91,6 +92,15 @@ export function MessageTimeline({
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
   const [bulkActive, setBulkActive] = useState(true);
+  // Content stays invisible until its first bottom-anchored frame, so a flash
+  // of the window's TOP while a large timeline lays out across commits is
+  // structurally impossible — the reader only ever sees it already at the
+  // bottom. An empty timeline reveals immediately (there is nothing to anchor).
+  const [revealed, setRevealed] = useState(false);
+  // Our own scrollTop assignments echo back as scroll events; those must never
+  // UNPIN the reader (they are not reader intent). Marked around every
+  // programmatic assignment and consumed by onScroll.
+  const programmaticScrollRef = useRef(false);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
   const pinnedRef = useRef(true);
@@ -138,9 +148,21 @@ export function MessageTimeline({
   useLayoutEffect(() => {
     const node = scrollRef.current;
     if (node && autoFollow && pinned) {
+      programmaticScrollRef.current = true;
       node.scrollTop = node.scrollHeight;
     }
-  }, [resolvedItems, working, autoFollow, pinned]);
+    if (!revealed && groups.length > 0) {
+      setRevealed(true);
+    }
+  }, [resolvedItems, working, autoFollow, pinned, revealed, groups.length]);
+
+  // A cleared timeline (stream identity change) re-arms the reveal so the next
+  // session also first paints at its bottom.
+  useLayoutEffect(() => {
+    if (groups.length === 0 && revealed) {
+      setRevealed(false);
+    }
+  }, [groups.length, revealed]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -191,6 +213,7 @@ export function MessageTimeline({
         return;
       }
       if (autoFollow && pinnedRef.current) {
+        programmaticScrollRef.current = true;
         current.scrollTop = current.scrollHeight;
       } else {
         const anchor = anchorRef.current;
@@ -199,6 +222,7 @@ export function MessageTimeline({
           const now = anchor.el.getBoundingClientRect().top - containerTop;
           const diff = now - anchor.top;
           if (diff !== 0) {
+            programmaticScrollRef.current = true;
             current.scrollTop += diff;
           }
         }
@@ -214,16 +238,30 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
+    const programmatic = programmaticScrollRef.current;
+    programmaticScrollRef.current = false;
     const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
-    pinnedRef.current = nextPinned;
-    setPinned(nextPinned);
+    // Echoes of our own assignments may PIN but never UNPIN — only the reader
+    // scrolling away releases the bottom-follow.
+    if (nextPinned || !programmatic) {
+      pinnedRef.current = nextPinned;
+      setPinned(nextPinned);
+    }
     captureAnchor();
   };
 
   return (
     <LightboxProvider>
-    <div data-og-bulk={bulkRender ? "" : undefined} className={cn("og-root relative flex min-h-0 flex-col", className)}>
-      <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 sm:px-6">
+    <EntranceAnimationProvider value={!bulkRender}>
+    <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+      {/* overflow-anchor off: the browser's native scroll anchoring would fight
+          the ResizeObserver corrections above — one authority only. */}
+      <div
+        ref={scrollRef}
+        onScroll={onScroll}
+        style={groups.length > 0 && !revealed ? { visibility: "hidden" } : undefined}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-6 [overflow-anchor:none] sm:px-6"
+      >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
           {groups.length === 0 && !working
             ? (emptyState ?? <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>)
@@ -244,7 +282,7 @@ export function MessageTimeline({
             />
           ))}
           {working ? (
-            <div className="animate-og-enter flex items-center gap-2 text-sm">
+            <div className="flex items-center gap-2 text-sm">
               <span className="og-shimmer-text font-medium">Working…</span>
             </div>
           ) : null}
@@ -279,6 +317,7 @@ export function MessageTimeline({
         ) : null}
       </AnimatePresence>
     </div>
+    </EntranceAnimationProvider>
     </LightboxProvider>
   );
 }
@@ -429,8 +468,9 @@ function UserMessageRow({
   item: UserMessageItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
 }) {
+  const enter = useEntranceAnimation();
   return (
-    <div className="animate-og-enter flex justify-end">
+    <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         {item.pending ? <span className="px-1 text-og-xs text-og-fg-subtle">queued</span> : null}
         <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
@@ -448,11 +488,12 @@ function AgentMessageRow({
   item: AgentMessageItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
 }) {
+  const enter = useEntranceAnimation();
   const caret = item.streaming ? (
     <span className="ml-0.5 inline-block h-[1.1em] w-[2px] translate-y-[3px] animate-og-blink rounded-full bg-og-accent" aria-hidden />
   ) : null;
   return (
-    <div className="animate-og-enter min-w-0 text-og-md leading-7 text-og-fg">
+    <div className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}>
       {renderMessageText ? (
         <>
           {renderMessageText(item.text, item)}
@@ -472,9 +513,10 @@ function AgentMessageRow({
 }
 
 function SessionStatusRow({ item }: { item: { status: SessionStatus; occurredAt: string } }) {
+  const enter = useEntranceAnimation();
   const meta = SESSION_STATUS_META[item.status];
   return (
-    <div className="animate-og-enter flex items-center gap-3 text-og-xs text-og-fg-subtle" role="status">
+    <div className={cn(enter && "animate-og-enter", "flex items-center gap-3 text-og-xs text-og-fg-subtle")} role="status">
       <span className="h-px flex-1 bg-og-border" />
       <span className="inline-flex items-center gap-1.5">
         <StatusDot status={item.status} className="size-1" />
@@ -521,9 +563,10 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
  * palette stays restrained — see that table for the per-action rationale.
  */
 function GoalRow({ item }: { item: GoalItem }) {
+  const enter = useEntranceAnimation();
   const { label, pill, icon: Icon } = GOAL_META[item.action];
   return (
-    <div className="animate-og-enter flex justify-center">
+    <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span className={cn("inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1 text-og-sm", pill)}>
         <Icon className="size-3.5 shrink-0" />
         <span className="truncate">
@@ -536,6 +579,7 @@ function GoalRow({ item }: { item: GoalItem }) {
 }
 
 function NoticeRow({ item }: { item: NoticeItem }) {
+  const enter = useEntranceAnimation();
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -543,7 +587,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
-    <div className={cn("animate-og-enter flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm", tone)} role="status">
+    <div className={cn(enter && "animate-og-enter", "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm", tone)} role="status">
       <TriangleAlertIcon className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")} />
       <span className="min-w-0 whitespace-pre-wrap break-words">{item.text}</span>
     </div>

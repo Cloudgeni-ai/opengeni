@@ -127,10 +127,6 @@
   }
 }
 
-[data-og-bulk] .animate-og-enter {
-  animation: none;
-}
-
 /* Live/running indicators breathe; they do not flash. */
 @keyframes og-pulse {
   0%,

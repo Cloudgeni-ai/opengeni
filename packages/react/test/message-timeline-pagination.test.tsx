@@ -75,7 +75,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("bulk attribute is present on initial paint and clears after a frame", async () => {
+  test("rows born in the initial bulk paint never animate; rows appended live do", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -83,14 +83,24 @@ describe("MessageTimeline pagination affordances", () => {
     };
     globalThis.cancelAnimationFrame = () => undefined;
 
-    const r = await renderComponent(<MessageTimeline events={[event(1)]} />);
-    expect(r.container.querySelector("[data-og-bulk]")).not.toBeNull();
+    const initial = [event(1)];
+    const r = await renderComponent(<MessageTimeline events={initial} />);
+    // Mounted during the bulk paint: no entrance animation class — and none
+    // appears later either (nothing is toggled, so nothing can replay).
+    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
 
     for (const frame of frames.splice(0)) {
       frame(performance.now());
     }
     await flush();
-    expect(r.container.querySelector("[data-og-bulk]")).toBeNull();
+    expect(r.container.querySelector(".animate-og-enter")).toBeNull();
+
+    // A row appended AFTER the bulk window animates in exactly as before.
+    await r.rerender(<MessageTimeline events={[...initial, event(2)]} />);
+    await flush();
+    const animated = Array.from(r.container.querySelectorAll(".animate-og-enter"));
+    expect(animated).toHaveLength(1);
+    expect(animated[0]?.textContent).toContain("message 2");
     await r.unmount();
   });
 });
