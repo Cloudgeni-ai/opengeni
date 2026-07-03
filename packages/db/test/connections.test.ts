@@ -13,6 +13,7 @@ import {
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordConnectionTokenRefresh,
+  revokeConnection,
   setConnectionStatus,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
@@ -268,6 +269,55 @@ describe("connections table and helpers", () => {
     const afterStatus = await getConnectionMetadata(db, ws.workspaceId, connection.id);
     expect(afterStatus?.status).toBe("needs_reauth");
     expect(afterStatus?.lastError).toBe("expired");
+  });
+
+  test("a revoke cannot be undone by an in-flight refresh", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const connection = await createConnection(db, {
+      ...ws,
+      providerDomain: "oauth.example.com",
+      kind: "oauth2",
+      credentialEncrypted: enc({ access_token: "AC", refresh_token: "RF", token_type: "Bearer" }),
+    });
+    const inFlight = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      connectionId: connection.id,
+      providerDomain: "oauth.example.com",
+    });
+
+    const revoked = await revokeConnection(db, ws.workspaceId, connection.id);
+    expect(revoked?.status).toBe("revoked");
+
+    // The refresh raced the revoke: it still holds the pre-revoke version.
+    expect(await recordConnectionTokenRefresh(db, {
+      id: inFlight!.id,
+      version: inFlight!.version,
+      workspaceId: ws.workspaceId,
+      credentialEncrypted: enc({ access_token: "AC2", refresh_token: "RF2", token_type: "Bearer" }),
+      expiresAt: new Date(Date.now() + 3_600_000),
+      lastRefreshAt: new Date(),
+    })).toBe(false);
+    const after = await getConnectionMetadata(db, ws.workspaceId, connection.id);
+    expect(after?.status).toBe("revoked");
+  });
+
+  test("revoke respects subject visibility — another subject's private connection stays untouched", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const subjectConnection = await createConnection(db, {
+      ...ws,
+      subjectId: "subject-a",
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer subject-a" } }),
+    });
+
+    expect(await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-b")).toBeNull();
+    expect((await getConnectionMetadata(db, ws.workspaceId, subjectConnection.id, "subject-a"))?.status).toBe("active");
+
+    const ownRevoke = await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-a");
+    expect(ownRevoke?.status).toBe("revoked");
   });
 });
 

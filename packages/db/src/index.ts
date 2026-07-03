@@ -1878,10 +1878,20 @@ export async function revokeConnection(db: Database, workspaceId: string, connec
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.update(schema.connections).set({
       status: "revoked",
+      // The version bump invalidates any in-flight refresh's (id, version) CAS,
+      // so a racing refresh cannot commit and flip the row back to active.
+      version: sql`${schema.connections.version} + 1`,
       updatedBySubjectId: updatedBySubjectId ?? null,
       updatedAt: new Date(),
     })
-      .where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)))
+      .where(and(
+        eq(schema.connections.workspaceId, workspaceId),
+        eq(schema.connections.id, connectionId),
+        // Same visibility rule as get/update: shared rows plus the caller's own
+        // subject rows. Cross-subject revocation (admin janitorial) arrives with
+        // the subject-connections UX in I5, deliberately not before.
+        connectionSubjectVisibility(updatedBySubjectId),
+      ))
       .returning(connectionMetadataColumns);
     return row ? mapConnectionMetadata(row) : null;
   });
@@ -1974,6 +1984,9 @@ export async function recordConnectionTokenRefresh(db: Database, input: {
         eq(schema.connections.id, input.id),
         eq(schema.connections.workspaceId, input.workspaceId),
         eq(schema.connections.version, input.version),
+        // A refresh may only ever renew a live credential; revoked/errored rows
+        // stay dead even if a status change somewhere forgot to bump version.
+        eq(schema.connections.status, "active"),
       ))
       .returning({ id: schema.connections.id });
     return updated.length > 0;
