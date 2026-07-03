@@ -351,4 +351,56 @@ mod tests {
         assert_eq!(decoded.width(), fitted.width);
         assert_eq!(decoded.height(), fitted.height);
     }
+
+    /// REGRESSION GUARD (blank-screenshot incident): fitting NEVER yields empty or
+    /// blank bytes from a VALID capture — the whole "Mac screenshot came back blank"
+    /// class of failure cannot originate in `fit_frame_to_budget`. Uses the EXACT
+    /// macOS wire encoding (a tightly-packed RGBA8 buffer through `PngEncoder`, same
+    /// as `macos::encode_png`) at a Retina-ish size, forces an aggressive downscale,
+    /// and asserts the result is a non-empty, decodable, NON-degenerate image.
+    #[test]
+    fn fit_never_produces_empty_or_degenerate_bytes_from_a_valid_macos_capture() {
+        use image::ImageEncoder as _;
+
+        // Encode a 1600×1000 pseudo-random RGBA8 buffer the macOS way (PngEncoder,
+        // Rgba8) — a realistic busy-desktop stand-in that will not compress to nothing.
+        let (w, h) = (1600u32, 1000u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        let mut state: u32 = 0x9E37_79B9;
+        for chunk in rgba.chunks_exact_mut(4) {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let b = state.to_le_bytes();
+            chunk.copy_from_slice(&[b[0], b[1], b[2], 0xFF]);
+        }
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .expect("encode macOS-style png");
+        assert!(!png.is_empty());
+
+        // Force a hard downscale: budget a fraction of the native PNG size.
+        let budget = png.len() / 8;
+        let fitted = fit_frame_to_budget(
+            CapturedFrame {
+                png,
+                width: w,
+                height: h,
+            },
+            budget,
+        );
+
+        // The core regression assertions: bytes are NEVER empty, geometry NEVER
+        // collapses to a degenerate 1×1, native geometry is preserved, and the bytes
+        // decode back to a real image at the reported size.
+        assert!(!fitted.png.is_empty(), "fit must never emit empty bytes");
+        assert!(fitted.downscaled);
+        assert_eq!((fitted.native_width, fitted.native_height), (w, h));
+        assert!(fitted.width >= MIN_FIT_EDGE || fitted.height >= MIN_FIT_EDGE);
+        let decoded = image::load_from_memory_with_format(&fitted.png, image::ImageFormat::Png)
+            .expect("fitted macOS png must decode");
+        assert_eq!(decoded.width(), fitted.width);
+        assert_eq!(decoded.height(), fitted.height);
+    }
 }

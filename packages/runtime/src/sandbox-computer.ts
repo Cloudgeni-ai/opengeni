@@ -403,11 +403,34 @@ const POINTER_BUTTON: Record<ComputerButton, PointerButton> = {
   forward: PointerButton.POINTER_BUTTON_UNSPECIFIED,
 };
 
+// Native capture (ScreenCaptureKit / x11) can hand back a null/empty FIRST frame in
+// the moments right after the agent connects — the capture stream still warming — the
+// same class of transient the scrot path retries around for a cold :0. Native capture
+// is normally sub-second, so the warm-up budget is much shorter than the scrot path's
+// 30 s cold-Modal-box budget; enough to ride a first-frame miss, not enough to hang a
+// turn on a genuinely dead capture. A TERMINAL failure (permission denied) short-
+// circuits the budget and fails immediately.
+const NATIVE_SCREENSHOT_WARMUP_BUDGET_MS = 6_000;
+const NATIVE_SCREENSHOT_RETRY_DELAY_MS = 400;
+
 export type NativeDesktopComputerOptions = {
   dimensions?: [number, number]; // the display geometry (must match the capture size)
   environment?: NonNullable<Computer["environment"]>; // "ubuntu" (default) | "mac" | ...; model uses it for OS key conventions
   readOnly?: boolean; // when true, every WRITE action throws ComputerReadOnlyError
+  screenshotWarmupBudgetMs?: number; // wall-clock budget to retry a warming/empty first frame
+  screenshotRetryDelayMs?: number; // delay between warm-up retries
 };
+
+/** A capture failure that RETRYING cannot cure — Screen Recording (TCC) has not been
+ *  granted to the agent, so every capture will deny until the user grants it. We fail
+ *  FAST on this rather than burn the warm-up budget, and surface the reason verbatim so
+ *  the operator sees "grant Screen Recording", not a blank screen. Matches the agent's
+ *  `capture_rgba` denial strings ("Screen Recording permission is not granted",
+ *  "no shareable content (Screen Recording denied?)"). */
+function isTerminalCaptureDenial(error: unknown): boolean {
+  const msg = (error instanceof Error ? error.message : String(error ?? "")).toLowerCase();
+  return msg.includes("screen recording") || msg.includes("permission is not granted") || msg.includes("consent");
+}
 
 /**
  * A `Computer` that drives a SELF-HOSTED machine's OWN desktop NATIVELY over the
@@ -428,6 +451,8 @@ export class NativeDesktopComputer implements Computer {
   readonly dimensions: [number, number];
   private session: NativeDesktopSession;
   private readonly readOnly: boolean;
+  private readonly screenshotWarmupBudgetMs: number;
+  private readonly screenshotRetryDelayMs: number;
   // The ENCODED vs NATIVE geometry of the MOST RECENT screenshot the model saw. The
   // model computes click coordinates in the encoded-pixel space of that screenshot;
   // when the agent downscaled the PNG to fit the transport budget, encoded < native,
@@ -445,6 +470,8 @@ export class NativeDesktopComputer implements Computer {
     // should pass "mac" so the model uses ⌘-based shortcuts — see the coordinate TODO.
     this.environment = opts.environment ?? "ubuntu";
     this.readOnly = opts.readOnly ?? false;
+    this.screenshotWarmupBudgetMs = opts.screenshotWarmupBudgetMs ?? NATIVE_SCREENSHOT_WARMUP_BUDGET_MS;
+    this.screenshotRetryDelayMs = opts.screenshotRetryDelayMs ?? NATIVE_SCREENSHOT_RETRY_DELAY_MS;
   }
 
   /** Rebind to a freshly resumed-by-id session after a box rollover / re-establish. */
@@ -487,19 +514,57 @@ export class NativeDesktopComputer implements Computer {
   async screenshot(): Promise<string> {
     // CRITICAL CONTRACT (mirrors SandboxComputer.screenshot): NEVER return "". The
     // Agents SDK builds the model image as `data:image/png;base64,${output}`; an
-    // empty output → `image_url: ''` → the model API 400s and kills the turn. A
-    // missing/empty frame is therefore a THROW, never a silent "". Native capture
-    // (ScreenCaptureKit / x11) does not have the cold-scrot warm-up the xdotool path
-    // retries around, so a single capture + a hard empty-guard is sufficient.
-    const { png, width, height, nativeWidth, nativeHeight } = await this.session.screenshot();
-    if (png.length === 0) {
-      throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
+    // empty output → `image_url: ''`. On the hosted computer_use_preview path the SDK
+    // catches a throw here, sets output='', and the wire-seam sanitizer rewrites the
+    // empty image_url to a BLANK 1×1 placeholder to dodge a 400 — so a capture MISS
+    // silently reaches the model as a "blank desktop" it then confidently reports.
+    //
+    // Native capture (ScreenCaptureKit / x11) can hand back a null/empty FIRST frame
+    // in the moments right after the agent connects (the capture stream warming) — the
+    // same transient the scrot path retries around for a cold :0. This path previously
+    // did a SINGLE capture, so one warm-up miss became a blank. We now RETRY across a
+    // bounded budget and, on a terminal failure, FAIL LOUD with the agent's actual
+    // reason (logged) — never a silent blank. A permission (TCC) denial is terminal:
+    // retrying cannot grant Screen Recording, so we break immediately.
+    let lastError: unknown;
+    const deadline = Date.now() + this.screenshotWarmupBudgetMs;
+    let attempt = 0;
+    while (true) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, this.screenshotRetryDelayMs));
+      }
+      attempt++;
+      try {
+        const { png, width, height, nativeWidth, nativeHeight } = await this.session.screenshot();
+        if (png.length === 0) {
+          // A warming capture yields an empty frame — retry rather than hand the model
+          // a blank; throw once the budget is spent.
+          throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
+        }
+        // Record the encoded (what the model sees) vs native geometry of THIS frame so
+        // the next click/move/scroll/drag scales its coordinates back to native pixels.
+        this.lastEncoded = [width, height];
+        this.lastNative = [nativeWidth || width, nativeHeight || height];
+        return Buffer.from(png).toString("base64");
+      } catch (error) {
+        lastError = error;
+        // A permission denial will deny on every retry — fail fast with the reason.
+        if (isTerminalCaptureDenial(error)) break;
+      }
+      // Stop once the warm-up budget is spent — the NEXT sleep would push us past it.
+      if (Date.now() + this.screenshotRetryDelayMs >= deadline) {
+        break;
+      }
     }
-    // Record the encoded (what the model sees) vs native geometry of THIS frame so
-    // the next click/move/scroll/drag scales its coordinates back to native pixels.
-    this.lastEncoded = [width, height];
-    this.lastNative = [nativeWidth || width, nativeHeight || height];
-    return Buffer.from(png).toString("base64");
+    // Exhausted the budget (or hit a terminal denial): FAIL LOUD. Log the specific
+    // reason so the failure is DIAGNOSABLE (not a silent blank the model misreads),
+    // then rethrow — never return "".
+    const reason = lastError instanceof Error ? lastError.message : String(lastError);
+    console.warn(`[NativeDesktopComputer] screenshot failed after ${attempt} attempt(s): ${reason}`);
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+    throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
   }
 
   async click(x: number, y: number, button: ComputerButton) {

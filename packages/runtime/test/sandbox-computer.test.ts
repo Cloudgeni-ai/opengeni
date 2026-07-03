@@ -293,27 +293,49 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
 // surface. Records every injected DesktopInput event so tests can assert the exact
 // protos (event $case + fields + enum values), and returns a configurable PNG.
 function makeNativeSession(
-  opts: { png?: Uint8Array; width?: number; height?: number; nativeWidth?: number; nativeHeight?: number } = {},
+  opts: {
+    png?: Uint8Array;
+    width?: number;
+    height?: number;
+    nativeWidth?: number;
+    nativeHeight?: number;
+    // Per-attempt PNG sequence: attempt N returns pngPerAttempt[N] (last value sticks).
+    // Used to model a warming capture that returns an empty frame then a real one.
+    pngPerAttempt?: Uint8Array[];
+    // When set, screenshot() THROWS this per attempt (last value sticks; null = resolve).
+    // Models the agent surfacing a capture AgentError (permission denied / null image).
+    throwPerAttempt?: (Error | null)[];
+  } = {},
 ) {
   const inputs: NonNullable<DesktopInputRequest["event"]>[] = [];
   const width = opts.width ?? 1280;
   const height = opts.height ?? 800;
+  let attempt = 0;
+  const at = <T>(arr: T[] | undefined, i: number): T | undefined => (arr ? (arr[Math.min(i, arr.length - 1)]) : undefined);
   const session: NativeDesktopSession = {
     desktopInput: async (event) => {
       if (event) inputs.push(event);
     },
-    screenshot: async () => ({
-      png: opts.png ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
-      width,
-      height,
-      // Default: native == encoded (no downscale). Tests that exercise the
-      // downscale coordinate-scaling override nativeWidth/nativeHeight.
-      nativeWidth: opts.nativeWidth ?? width,
-      nativeHeight: opts.nativeHeight ?? height,
-    }),
+    screenshot: async () => {
+      const i = attempt++;
+      const toThrow = at(opts.throwPerAttempt, i);
+      if (toThrow) throw toThrow;
+      return {
+        png: at(opts.pngPerAttempt, i) ?? opts.png ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
+        width,
+        height,
+        // Default: native == encoded (no downscale). Tests that exercise the
+        // downscale coordinate-scaling override nativeWidth/nativeHeight.
+        nativeWidth: opts.nativeWidth ?? width,
+        nativeHeight: opts.nativeHeight ?? height,
+      };
+    },
   };
-  return { session, inputs };
+  return { session, inputs, attempts: () => attempt };
 }
+
+// Fast warm-up timing so the retry-loop tests don't wait the 6 s production budget.
+const FAST_WARMUP = { screenshotWarmupBudgetMs: 40, screenshotRetryDelayMs: 4 } as const;
 
 describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", () => {
   test("click emits a POINTER CLICK event with the coords + LEFT button", async () => {
@@ -447,13 +469,39 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     expect(shot.startsWith("data:")).toBe(false);
   });
 
-  test("REGRESSION: an empty PNG THROWS (never an empty image_url that would 400 the turn)", async () => {
-    const { session } = makeNativeSession({ png: new Uint8Array() });
-    const c = new NativeDesktopComputer(session);
+  test("REGRESSION: a persistently empty PNG THROWS (never an empty image_url / blank placeholder)", async () => {
+    const { session, attempts } = makeNativeSession({ png: new Uint8Array() });
+    const c = new NativeDesktopComputer(session, FAST_WARMUP);
     const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error(`screenshot() resolved to ${JSON.stringify(result.s)} — an empty image_url would 400 the model turn`);
     expect(result.e).toBeInstanceOf(ComputerUnavailableError);
+    // It RETRIED across the warm-up budget before failing (not a single-shot throw).
+    expect(attempts()).toBeGreaterThan(1);
+  });
+
+  test("BLANK-SCREENSHOT FIX: a warming empty FIRST frame self-heals on retry (no blank placeholder)", async () => {
+    // The agent's ScreenCaptureKit can hand back an empty first frame right after
+    // connect; the old single-shot path turned that into a blank the model misread.
+    const real = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const { session, attempts } = makeNativeSession({ pngPerAttempt: [new Uint8Array(), new Uint8Array(), real] });
+    const c = new NativeDesktopComputer(session, FAST_WARMUP);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(real).toString("base64"));
+    expect(attempts()).toBe(3); // two empty misses, then the real frame
+  });
+
+  test("BLANK-SCREENSHOT FIX: a permission (TCC) denial FAILS FAST and loud — no retry, no blank", async () => {
+    const denial = new Error("Screen Recording permission is not granted");
+    const { session, attempts } = makeNativeSession({ throwPerAttempt: [denial] });
+    const c = new NativeDesktopComputer(session, FAST_WARMUP);
+    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("a denied capture must throw, never resolve to a blank");
+    // The AGENT's reason is surfaced verbatim (operator sees "grant Screen Recording").
+    expect((result.e as Error).message).toContain("Screen Recording");
+    // Terminal denial short-circuits the warm-up budget — exactly ONE attempt.
+    expect(attempts()).toBe(1);
   });
 
   test("readOnly blocks every write but screenshot is always allowed", async () => {
