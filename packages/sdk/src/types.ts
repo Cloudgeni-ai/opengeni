@@ -262,6 +262,91 @@ export type SessionMcpServerMetadata = {
   credentialVersion: number;
 };
 
+export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
+export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
+
+export type McpServerConnectionRef = {
+  connectionId?: string | undefined;
+  providerDomain: string;
+  kind?: ConnectionKind | undefined;
+  scopes?: string[] | undefined;
+  resource?: string | undefined;
+  subjectScope?: "workspace" | "subject" | undefined;
+};
+
+export type ConnectionMetadata = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  kind: ConnectionKind;
+  status: ConnectionStatus;
+  grantedScopes: string[];
+  expiresAt: string | null;
+  lastRefreshAt: string | null;
+  lastUsedAt: string | null;
+  lastError: string | null;
+  version: number;
+  metadata: Record<string, unknown>;
+  createdBySubjectId: string | null;
+  updatedBySubjectId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateConnectionRequest = {
+  providerDomain: string;
+  kind: ConnectionKind;
+  subjectId?: string | null | undefined;
+  credential: Record<string, unknown>;
+  grantedScopes?: string[] | undefined;
+  expiresAt?: string | null | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type UpdateConnectionRequest = {
+  providerDomain?: string | undefined;
+  subjectId?: string | null | undefined;
+  kind?: ConnectionKind | undefined;
+  status?: ConnectionStatus | undefined;
+  credential?: Record<string, unknown> | undefined;
+  grantedScopes?: string[] | undefined;
+  expiresAt?: string | null | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
+export type ConnectionResponse = {
+  connection: ConnectionMetadata;
+};
+
+export type ListConnectionsResponse = {
+  connections: ConnectionMetadata[];
+};
+
+export type OAuthStartRequest = {
+  providerDomain: string;
+  resource?: string | undefined;
+  requestedScopes?: string[] | undefined;
+  returnPath?: string | undefined;
+  connectionId?: string | undefined;
+};
+
+export type OAuthStartResponse = {
+  state: string;
+  authorizationUrl: string | null;
+  expiresAt: string;
+};
+
+export type IntegrationClientMetadata = {
+  client_id: string;
+  client_name: "OpenGeni";
+  redirect_uris: string[];
+  token_endpoint_auth_method: "none";
+  grant_types: Array<"authorization_code" | "refresh_token">;
+  response_types: ["code"];
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -346,6 +431,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "tool.auth_needed",
   "agent.updated",
   "sandbox.operation.started",
   "sandbox.operation.completed",
@@ -399,6 +485,18 @@ export type SessionEvent = {
   occurredAt: string;
   clientEventId?: string | null | undefined;
   turnId?: string | null | undefined;
+};
+
+export type ToolAuthNeededPayload = {
+  serverId: string;
+  toolName?: string | null | undefined;
+  providerDomain: string;
+  connectionId?: string | null | undefined;
+  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+  scopes?: string[] | undefined;
+  resource?: string | undefined;
+  authorizationUrl?: string | undefined;
+  subjectId?: string | null | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -681,6 +779,8 @@ export const KNOWN_PERMISSIONS = [
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "connections:read",
+  "connections:write",
   "environments:manage",
   "environments:use",
   "mcp_servers:attach",
@@ -1475,6 +1575,7 @@ export type CreateCapabilityCatalogItemRequest = {
 export type EnableCapabilityRequest = {
   config?: Record<string, unknown> | undefined;
   metadata?: Record<string, unknown> | undefined;
+  connectionRef?: McpServerConnectionRef | undefined;
   /**
    * Credential headers for remote MCP capabilities. Write-only: encrypted at
    * rest, injected only into the runtime MCP client, never returned by the

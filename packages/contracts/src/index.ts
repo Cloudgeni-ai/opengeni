@@ -470,6 +470,8 @@ export const Permission = z.enum([
   "github:manage",
   "github:use",
   "api_keys:manage",
+  "connections:read",
+  "connections:write",
   "environments:manage",
   "environments:use",
   // Attach or rotate per-session third-party MCP server credentials. Deliberately
@@ -2043,6 +2045,106 @@ export const CreateSocialPostRequest = z.object({
 });
 export type CreateSocialPostRequest = z.infer<typeof CreateSocialPostRequest>;
 
+export const ConnectionKind = z.enum(["oauth2", "api_key", "app_install", "delegated"]);
+export type ConnectionKind = z.infer<typeof ConnectionKind>;
+
+export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
+export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
+
+export const McpServerConnectionRef = z.object({
+  connectionId: z.string().uuid().optional(),
+  providerDomain: z.string().min(1),
+  kind: ConnectionKind.optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  subjectScope: z.enum(["workspace", "subject"]).optional(),
+}).strict();
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+
+export const ConnectionMetadata = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  subjectId: z.string().nullable(),
+  providerDomain: z.string(),
+  kind: ConnectionKind,
+  status: ConnectionStatus,
+  grantedScopes: z.array(z.string()),
+  expiresAt: z.string().nullable(),
+  lastRefreshAt: z.string().nullable(),
+  lastUsedAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+  version: z.number().int().positive(),
+  metadata: z.record(z.string(), z.unknown()),
+  createdBySubjectId: z.string().nullable(),
+  updatedBySubjectId: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
+
+export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
+export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
+
+export const CreateConnectionRequest = z.object({
+  providerDomain: z.string().min(1),
+  kind: ConnectionKind,
+  subjectId: z.string().min(1).nullable().optional(),
+  credential: ConnectionCredentialBundle,
+  grantedScopes: z.array(z.string().min(1)).default([]),
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
+
+export const UpdateConnectionRequest = z.object({
+  providerDomain: z.string().min(1).optional(),
+  subjectId: z.string().min(1).nullable().optional(),
+  kind: ConnectionKind.optional(),
+  status: ConnectionStatus.optional(),
+  credential: ConnectionCredentialBundle.optional(),
+  grantedScopes: z.array(z.string().min(1)).optional(),
+  expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
+
+export const ConnectionResponse = z.object({
+  connection: ConnectionMetadata,
+});
+export type ConnectionResponse = z.infer<typeof ConnectionResponse>;
+
+export const ListConnectionsResponse = z.object({
+  connections: z.array(ConnectionMetadata),
+});
+export type ListConnectionsResponse = z.infer<typeof ListConnectionsResponse>;
+
+export const OAuthStartRequest = z.object({
+  providerDomain: z.string().min(1),
+  resource: z.string().min(1).optional(),
+  requestedScopes: z.array(z.string().min(1)).default([]),
+  returnPath: z.string().min(1).optional(),
+  connectionId: z.string().uuid().optional(),
+});
+export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
+
+export const OAuthStartResponse = z.object({
+  state: z.string().min(1),
+  authorizationUrl: z.string().url().nullable(),
+  expiresAt: z.string(),
+});
+export type OAuthStartResponse = z.infer<typeof OAuthStartResponse>;
+
+export const IntegrationClientMetadata = z.object({
+  client_id: z.string().url(),
+  client_name: z.literal("OpenGeni"),
+  redirect_uris: z.array(z.string().url()),
+  token_endpoint_auth_method: z.literal("none"),
+  grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
+  response_types: z.array(z.literal("code")),
+});
+export type IntegrationClientMetadata = z.infer<typeof IntegrationClientMetadata>;
+
 export const MarketingDailyAnalysisTaskRequest = z.object({
   name: z.string().min(1).optional(),
   connectionIds: z.array(z.string().uuid()).default([]),
@@ -2131,6 +2233,7 @@ export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapability
 export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  connectionRef: McpServerConnectionRef.optional(),
   /**
    * Credential headers for remote MCP capabilities (for example an
    * Authorization bearer token). Values are encrypted at rest with the
@@ -2246,6 +2349,7 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "tool.auth_needed",
   "agent.updated",
   "sandbox.operation.started",
   "sandbox.operation.completed",
@@ -2292,6 +2396,19 @@ export const SessionEventType = z.enum([
   "codex.account.switched",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
+
+export const ToolAuthNeededPayload = z.object({
+  serverId: z.string().min(1),
+  toolName: z.string().min(1).nullable().optional(),
+  providerDomain: z.string().min(1),
+  connectionId: z.string().uuid().nullable().optional(),
+  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  authorizationUrl: z.string().url().optional(),
+  subjectId: z.string().min(1).nullable().optional(),
+});
+export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
 // z.unknown() (NOT a discriminated union) — these are standalone schemas parsed

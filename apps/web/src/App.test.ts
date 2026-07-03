@@ -201,6 +201,7 @@ describe("api key permission options", () => {
       "Files & documents",
       "Scheduled tasks",
       "Environments",
+      "Connections",
       "Machines",
       "GitHub",
       "Goals",

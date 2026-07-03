@@ -101,6 +101,16 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
 ].join(" ");
 
+export const McpServerConnectionRefSchema = z.object({
+  connectionId: z.string().uuid().optional(),
+  providerDomain: z.string().min(1),
+  kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  subjectScope: z.enum(["workspace", "subject"]).optional(),
+}).strict();
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -153,6 +163,8 @@ const SettingsSchema = z.object({
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
   environmentsEncryptionKey: z.string().optional(),
+  integrationsEnabled: EnvBoolean.default(false),
+  integrationsStateSecret: z.string().optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -591,6 +603,7 @@ const SettingsSchema = z.object({
      * OPENGENI_MCP_SERVERS.
      */
     headers: z.record(z.string(), z.string()).optional(),
+    connectionRef: McpServerConnectionRefSchema.optional(),
   })).default([]),
 });
 
@@ -865,6 +878,8 @@ export function getSettings(): Settings {
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
+    integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
@@ -1851,6 +1866,17 @@ function validateSettings(settings: Settings): void {
     }
   }
   environmentsEncryptionKeyBytes(settings);
+  if (settings.integrationsEnabled) {
+    if (settings.productAccessMode === "managed" && !settings.publicBaseUrl) {
+      throw new Error("OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_INTEGRATIONS_ENABLED=true and OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (settings.publicBaseUrl && !settings.publicBaseUrl.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error("OPENGENI_PUBLIC_BASE_URL must use https when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test");
+    }
+    if (!settings.integrationsStateSecret && !["local", "test"].includes(settings.environment)) {
+      throw new Error("OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test");
+    }
+  }
   if (
     settings.productAccessMode === "configured"
     && !["local", "test"].includes(settings.environment)

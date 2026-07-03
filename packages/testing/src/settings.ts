@@ -35,6 +35,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     environmentsEncryptionKey: undefined,
+    integrationsEnabled: false,
+    integrationsStateSecret: undefined,
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
     agentMaxModelCallsPerTurn: 40,

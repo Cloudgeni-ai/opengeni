@@ -174,7 +174,7 @@ afterAll(async () => {
     await client?.close();
   } catch { /* noop */ }
   await shared?.release();
-});
+}, 180_000);
 
 // A solo session (its own singleton group), warm-boxed and ready to attach.
 async function soloSession(): Promise<{ accountId: string; workspaceId: string; sessionId: string; sandboxGroupId: string }> {

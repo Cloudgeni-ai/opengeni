@@ -158,6 +158,36 @@ export const codexSubscriptionCredentials = pgTable("codex_subscription_credenti
   workspace: index("codex_subscription_credentials_workspace_lookup_idx").on(table.workspaceId),
 }));
 
+// Generic external-service credential spine. credential_encrypted is the ONLY
+// secret-bearing column; normal API reads use metadata-only helpers below the DB
+// layer. Runtime token material is decrypted only by the broker accessor.
+export const connections = pgTable("connections", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id"),
+  providerDomain: text("provider_domain").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull().default("active"),
+  credentialEncrypted: text("credential_encrypted").notNull(),
+  grantedScopes: jsonb("granted_scopes").$type<string[]>().notNull().default([]),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  lastRefreshAt: timestamp("last_refresh_at", { withTimezone: true }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  version: integer("version").notNull().default(1),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdBySubjectId: text("created_by_subject_id"),
+  updatedBySubjectId: text("updated_by_subject_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspaceProviderStatus: index("connections_workspace_provider_status_idx").on(table.workspaceId, table.providerDomain, table.status),
+  workspaceSubjectProvider: index("connections_workspace_subject_provider_idx").on(table.workspaceId, table.subjectId, table.providerDomain),
+  workspaceKind: index("connections_workspace_kind_idx").on(table.workspaceId, table.kind),
+  workspaceExpires: index("connections_workspace_expires_idx").on(table.workspaceId, table.expiresAt),
+}));
+
 // Per-workspace Codex account selection (the ACTIVE pointer) + P3 rotation
 // forward-compat. One row per workspace. The only P1-load-bearing column is
 // activeCredentialId — the account a session runs on when it has no pin. NULL ⇒
