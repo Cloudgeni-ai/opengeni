@@ -534,33 +534,45 @@ Do not put provider credentials, model keys, storage keys, kubeconfigs, TLS priv
 
 ## Observability
 
-The API exposes Prometheus-compatible metrics at `/metrics` and records request counters and duration histograms with service, environment, component, route, method, and status labels. API and worker processes can emit structured JSON logs and OTLP/HTTP JSON traces.
+OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not route scraped metrics through OTLP. API and worker processes also emit structured JSON logs and optional OTLP/HTTP JSON traces.
+
+Service endpoints:
+
+- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /readyz` checks Postgres, NATS, and Temporal with bounded timeouts.
+- Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness checks the same dependencies.
+- Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
 Useful settings:
 
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
-- `OPENGENI_OBSERVABILITY_METRICS_ENABLED=true` to expose API metrics.
+- `OPENGENI_OBSERVABILITY_METRICS_ENABLED=true` to expose process and domain metrics.
+- `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
+- `OPENGENI_AUTH_ALLOW_HEALTH=true` allows both `/healthz` and `/readyz` through the deployment-key gate.
+- `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
+- `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
 
-The Helm chart can deploy a lightweight OpenTelemetry Collector:
+The Helm chart has optional Prometheus Operator wiring, off by default:
 
 ```bash
 helm upgrade --install opengeni deploy/helm/opengeni \
   --namespace opengeni \
-  --set observability.otel.enabled=true \
-  --set observability.collector.enabled=true \
+  --set observability.serviceMonitor.enabled=true \
+  --set observability.prometheusRule.enabled=true \
   --set secret.existingSecret=opengeni-runtime
 ```
 
-When the chart-managed collector is enabled and no explicit OTLP endpoint is set, workloads export spans to the release-local collector service. The default collector config receives OTLP/HTTP traces and scrapes the API `/metrics` endpoint, then exports through the collector `debug` exporter. Production operators should replace `observability.collector.config` with their Azure Monitor, OTLP, Prometheus remote-write, Grafana, Datadog, or other backend exporter configuration.
+`ServiceMonitor` and `PrometheusRule` templates render only when `monitoring.coreos.com/v1` CRDs are installed. The starter rules cover stuck turns (`opengeni_turn_oldest_inflight_age_seconds > 900`), sandbox create failure ratio, orphan sandbox growth, and scraped target availability. The chart-managed OpenTelemetry Collector remains optional and is for traces/logs forwarding, not scraped metrics.
 
 Minimum production dashboards should cover:
 
 - API traffic: request rate, error rate, and p50/p95/p99 latency by `route`, `method`, `status`, `environment`, and `component`.
-- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentSegment` duration by `activity`, `status`, `environment`, and `component`.
+- Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `environment`, and `component`.
+- Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, and `opengeni_turn_oldest_inflight_age_seconds`.
+- Model and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_sandbox_creates_total{backend,outcome}`, `opengeni_sandbox_create_duration_seconds{backend}`, `opengeni_sandbox_leases{liveness}`, `opengeni_sandbox_warming_timeouts_total`, and `opengeni_sandbox_orphans_terminated_total`.
+- Queue and billing: `opengeni_turns_queued`, `opengeni_credit_micros_total{kind}`, and `opengeni_build_info{version,revision}`.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
-- Session health: sessions created, turns completed, turns failed, scheduled task dispatch latency, SSE reconnect/replay success, and queue depth once those counters are added.
 - Runtime health: API/worker restarts, CPU/memory saturation, pod pending time, collector scrape/export errors, and OTLP export failures.
 
 Prometheus-style examples:
@@ -593,17 +605,24 @@ histogram_quantile(
 )
 ```
 
+```promql
+max(opengeni_turn_oldest_inflight_age_seconds{environment="production"})
+```
+
 Minimum production alerts:
 
-- API availability: `/healthz` is unavailable from the ingress or synthetic probe for more than 2 minutes.
+- API/worker availability: `/healthz` or `/readyz` is unavailable from probes for more than 2 minutes.
 - API errors: 5xx ratio is above 2% for 10 minutes, or any critical route stays above 5% for 5 minutes.
 - API latency: p95 latency is above the product SLO for 10 minutes, tracked separately for `/v1/workspaces/:workspaceId/sessions`, event replay, SSE, scheduled-task trigger, and file routes.
-- Worker failures: `runAgentSegment` failure ratio is above 5% for 10 minutes.
-- Worker duration: p95 `runAgentSegment` duration is above the expected model/tool budget for 15 minutes.
+- Turn stuck: the oldest in-flight turn is older than 15 minutes for 5 minutes.
+- Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
+- Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
+- Worker failures: `runAgentTurn` failure ratio is above 5% for 10 minutes.
+- Worker duration: p95 `runAgentTurn` duration is above the expected model/tool budget for 15 minutes.
 - Scheduler health: manual scheduled-task conformance does not dispatch a session through Temporal within the configured timeout.
 - Storage health: object-storage conformance cannot create, complete, presign, and read a file.
 - Streaming health: SSE replay conformance does not return persisted events after reconnect.
-- Collector health: collector pod is not ready, cannot scrape API metrics, or its configured exporter reports failures.
+- Collector health: collector pod is not ready or its configured OTLP exporter reports failures.
 - Secret/sandbox hygiene: conformance detects unintended sandbox environment variables or sandbox backend startup failures.
 
 ## Azure Reference

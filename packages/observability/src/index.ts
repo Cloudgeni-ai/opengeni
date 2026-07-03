@@ -1,9 +1,18 @@
+import {
+  collectDefaultMetrics,
+  Counter,
+  Gauge,
+  Histogram,
+  Registry,
+} from "prom-client";
+
 export type AttributeValue = string | number | boolean | null | undefined;
 export type Attributes = Record<string, AttributeValue>;
 
 export type ObservabilitySettings = {
   serviceName: string;
   environment: string;
+  deploymentRevision?: string | undefined;
   observabilityStructuredLogs: boolean;
   observabilityMetricsEnabled: boolean;
   observabilityOtlpEndpoint?: string | undefined;
@@ -22,14 +31,26 @@ export type Span = {
   end: (input?: { attributes?: Attributes; error?: unknown }) => void;
 };
 
-const histogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+export type MetricLabels = Record<string, AttributeValue>;
+
+const httpHistogramBuckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
+const durationHistogramBuckets = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 900, 1800, 3600];
 
 export function createObservability(settings: ObservabilitySettings, options: ObservabilityOptions): Observability {
   return new Observability(settings, options);
 }
 
+type MetricRegistration = {
+  kind: "counter" | "gauge" | "histogram";
+  labelNames: string[];
+};
+
 export class Observability {
-  private readonly metrics = new MetricsRegistry();
+  private readonly registry = new Registry();
+  private readonly counters = new Map<string, Counter<string>>();
+  private readonly gauges = new Map<string, Gauge<string>>();
+  private readonly histograms = new Map<string, Histogram<string>>();
+  private readonly registrations = new Map<string, MetricRegistration>();
   private readonly now: () => number;
   private readonly exporter: (url: string, body: unknown, headers: Record<string, string>) => Promise<void>;
   private readonly resourceAttributes: Attributes;
@@ -42,6 +63,27 @@ export class Observability {
       "deployment.environment": settings.environment,
       "opengeni.component": options.component,
     };
+    this.registry.setDefaultLabels({
+      service: settings.serviceName,
+      environment: settings.environment,
+      component: options.component,
+    });
+    if (settings.observabilityMetricsEnabled) {
+      collectDefaultMetrics({ register: this.registry, prefix: "opengeni_" });
+      this.setGauge({
+        name: "opengeni_build_info",
+        help: "OpenGeni build information.",
+        labels: {
+          version: buildVersion(),
+          revision: settings.deploymentRevision ?? "dev",
+        },
+        value: 1,
+      });
+    }
+  }
+
+  debug(message: string, attributes: Attributes = {}): void {
+    this.log("debug", message, attributes);
   }
 
   info(message: string, attributes: Attributes = {}): void {
@@ -119,45 +161,154 @@ export class Observability {
   }
 
   recordHttpRequest(input: { method: string; route: string; status: number; durationSeconds: number }): void {
-    if (!this.settings.observabilityMetricsEnabled) {
-      return;
-    }
-    const labels = {
-      method: input.method,
-      route: input.route,
-      status: String(input.status),
-      component: this.options.component,
-    };
-    this.metrics.increment("opengeni_http_requests_total", labels);
-    this.metrics.observe("opengeni_http_request_duration_seconds", histogramBuckets, input.durationSeconds, {
-      method: input.method,
-      route: input.route,
-      component: this.options.component,
+    this.incrementCounter({
+      name: "opengeni_http_requests_total",
+      help: "Total HTTP requests handled by OpenGeni.",
+      labels: {
+        method: input.method,
+        route: input.route,
+        status: String(input.status),
+        component: this.options.component,
+      },
+    });
+    this.observeHistogram({
+      name: "opengeni_http_request_duration_seconds",
+      help: "HTTP request duration in seconds.",
+      buckets: httpHistogramBuckets,
+      value: input.durationSeconds,
+      labels: {
+        method: input.method,
+        route: input.route,
+        component: this.options.component,
+      },
     });
   }
 
   recordWorkerActivity(input: { activity: string; status: string; durationSeconds: number }): void {
-    if (!this.settings.observabilityMetricsEnabled) {
-      return;
-    }
-    const labels = {
-      activity: input.activity,
-      status: input.status,
-      component: this.options.component,
-    };
-    this.metrics.increment("opengeni_worker_activity_runs_total", labels);
-    this.metrics.observe("opengeni_worker_activity_duration_seconds", histogramBuckets, input.durationSeconds, {
-      activity: input.activity,
-      component: this.options.component,
+    this.incrementCounter({
+      name: "opengeni_worker_activity_runs_total",
+      help: "Total worker activity executions.",
+      labels: {
+        activity: input.activity,
+        status: input.status,
+        component: this.options.component,
+      },
+    });
+    this.observeHistogram({
+      name: "opengeni_worker_activity_duration_seconds",
+      help: "Worker activity duration in seconds.",
+      buckets: durationHistogramBuckets,
+      value: input.durationSeconds,
+      labels: {
+        activity: input.activity,
+        component: this.options.component,
+      },
     });
   }
 
-  prometheusMetrics(): string {
-    return this.metrics.toPrometheus({
-      service: this.settings.serviceName,
-      environment: this.settings.environment,
-      component: this.options.component,
-    });
+  incrementCounter(input: { name: string; help?: string; labels?: MetricLabels; amount?: number }): void {
+    if (!this.settings.observabilityMetricsEnabled) {
+      return;
+    }
+    const labels = normalizeLabels(input.labels);
+    const counter = this.counter(input.name, input.help ?? `${input.name} counter.`, Object.keys(labels));
+    counter.inc(labels as never, input.amount ?? 1);
+  }
+
+  setGauge(input: { name: string; help?: string; labels?: MetricLabels; value: number }): void {
+    if (!this.settings.observabilityMetricsEnabled) {
+      return;
+    }
+    const labels = normalizeLabels(input.labels);
+    const gauge = this.gauge(input.name, input.help ?? `${input.name} gauge.`, Object.keys(labels));
+    gauge.set(labels as never, input.value);
+  }
+
+  incrementGauge(input: { name: string; help?: string; labels?: MetricLabels; amount?: number }): void {
+    if (!this.settings.observabilityMetricsEnabled) {
+      return;
+    }
+    const labels = normalizeLabels(input.labels);
+    const gauge = this.gauge(input.name, input.help ?? `${input.name} gauge.`, Object.keys(labels));
+    gauge.inc(labels as never, input.amount ?? 1);
+  }
+
+  observeHistogram(input: { name: string; help?: string; labels?: MetricLabels; value: number; buckets?: number[] }): void {
+    if (!this.settings.observabilityMetricsEnabled) {
+      return;
+    }
+    const labels = normalizeLabels(input.labels);
+    const histogram = this.histogram(
+      input.name,
+      input.help ?? `${input.name} histogram.`,
+      Object.keys(labels),
+      input.buckets ?? durationHistogramBuckets,
+    );
+    histogram.observe(labels as never, input.value);
+  }
+
+  async prometheusMetrics(): Promise<string> {
+    if (!this.settings.observabilityMetricsEnabled) {
+      return "";
+    }
+    return await this.registry.metrics();
+  }
+
+  private counter(name: string, help: string, labelNames: string[]): Counter<string> {
+    const existing = this.counters.get(name);
+    if (existing) {
+      this.assertRegistration(name, "counter", labelNames);
+      return existing;
+    }
+    this.register(name, "counter", labelNames);
+    const metric = new Counter({ name, help, labelNames, registers: [this.registry] });
+    this.counters.set(name, metric);
+    return metric;
+  }
+
+  private gauge(name: string, help: string, labelNames: string[]): Gauge<string> {
+    const existing = this.gauges.get(name);
+    if (existing) {
+      this.assertRegistration(name, "gauge", labelNames);
+      return existing;
+    }
+    this.register(name, "gauge", labelNames);
+    const metric = new Gauge({ name, help, labelNames, registers: [this.registry] });
+    this.gauges.set(name, metric);
+    return metric;
+  }
+
+  private histogram(name: string, help: string, labelNames: string[], buckets: number[]): Histogram<string> {
+    const existing = this.histograms.get(name);
+    if (existing) {
+      this.assertRegistration(name, "histogram", labelNames);
+      return existing;
+    }
+    this.register(name, "histogram", labelNames);
+    const metric = new Histogram({ name, help, labelNames, buckets, registers: [this.registry] });
+    this.histograms.set(name, metric);
+    return metric;
+  }
+
+  private register(name: string, kind: MetricRegistration["kind"], labelNames: string[]): void {
+    const sorted = [...labelNames].sort();
+    this.registrations.set(name, { kind, labelNames: sorted });
+  }
+
+  private assertRegistration(name: string, kind: MetricRegistration["kind"], labelNames: string[]): void {
+    const registration = this.registrations.get(name);
+    const sorted = [...labelNames].sort();
+    if (
+      !registration
+      || registration.kind !== kind
+      || registration.labelNames.length !== sorted.length
+      || registration.labelNames.some((label, index) => label !== sorted[index])
+    ) {
+      throw new Error(
+        `Metric ${name} was already registered as ${registration?.kind ?? "unknown"} `
+        + `with labels [${registration?.labelNames.join(",") ?? ""}], not ${kind} [${sorted.join(",")}]`,
+      );
+    }
   }
 
   private exportSpan(span: {
@@ -221,85 +372,19 @@ export function logStartupDependencyRetry(observability: Observability, event: S
   });
 }
 
-class MetricsRegistry {
-  private readonly counters = new Map<string, number>();
-  private readonly histograms = new Map<string, { buckets: number[]; counts: number[]; sum: number; count: number; labels: Record<string, string> }>();
-
-  increment(name: string, labels: Record<string, string>, amount = 1): void {
-    const key = metricKey(name, labels);
-    this.counters.set(key, (this.counters.get(key) ?? 0) + amount);
-  }
-
-  observe(name: string, buckets: number[], value: number, labels: Record<string, string>): void {
-    const key = metricKey(name, labels);
-    const histogram = this.histograms.get(key) ?? {
-      buckets,
-      counts: buckets.map(() => 0),
-      sum: 0,
-      count: 0,
-      labels,
-    };
-    histogram.sum += value;
-    histogram.count += 1;
-    for (let index = 0; index < buckets.length; index += 1) {
-      if (value <= buckets[index]!) {
-        histogram.counts[index] = (histogram.counts[index] ?? 0) + 1;
-      }
-    }
-    this.histograms.set(key, histogram);
-  }
-
-  toPrometheus(resourceLabels: Record<string, string>): string {
-    const lines = [
-      "# HELP opengeni_http_requests_total Total HTTP requests handled by the OpenGeni API.",
-      "# TYPE opengeni_http_requests_total counter",
-    ];
-    for (const [key, value] of this.counters) {
-      const { name, labels } = parseMetricKey(key);
-      if (name.endsWith("_total")) {
-        lines.push(`${name}${formatLabels({ ...resourceLabels, ...labels })} ${value}`);
-      }
-    }
-    lines.push(
-      "# HELP opengeni_http_request_duration_seconds HTTP request duration in seconds.",
-      "# TYPE opengeni_http_request_duration_seconds histogram",
-      "# HELP opengeni_worker_activity_runs_total Total worker activity executions.",
-      "# TYPE opengeni_worker_activity_runs_total counter",
-      "# HELP opengeni_worker_activity_duration_seconds Worker activity duration in seconds.",
-      "# TYPE opengeni_worker_activity_duration_seconds histogram",
-    );
-    for (const [key, histogram] of this.histograms) {
-      const { name, labels } = parseMetricKey(key);
-      const baseLabels = { ...resourceLabels, ...labels };
-      for (let index = 0; index < histogram.buckets.length; index += 1) {
-        lines.push(`${name}_bucket${formatLabels({ ...baseLabels, le: String(histogram.buckets[index]) })} ${histogram.counts[index]}`);
-      }
-      lines.push(`${name}_bucket${formatLabels({ ...baseLabels, le: "+Inf" })} ${histogram.count}`);
-      lines.push(`${name}_sum${formatLabels(baseLabels)} ${histogram.sum}`);
-      lines.push(`${name}_count${formatLabels(baseLabels)} ${histogram.count}`);
-    }
-    return `${lines.join("\n")}\n`;
-  }
+function normalizeLabels(labels: MetricLabels = {}): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(labels)
+      .filter(([, value]) => value !== undefined && value !== null)
+      .map(([key, value]): [string, string] => [key, String(value)])
+      .sort((left, right) => left[0].localeCompare(right[0])),
+  );
 }
 
-function metricKey(name: string, labels: Record<string, string>): string {
-  return JSON.stringify({ name, labels: Object.fromEntries(Object.entries(labels).sort(([a], [b]) => a.localeCompare(b))) });
-}
-
-function parseMetricKey(key: string): { name: string; labels: Record<string, string> } {
-  return JSON.parse(key) as { name: string; labels: Record<string, string> };
-}
-
-function formatLabels(labels: Record<string, string>): string {
-  const entries = Object.entries(labels).filter(([, value]) => value.length > 0);
-  if (entries.length === 0) {
-    return "";
-  }
-  return `{${entries.map(([key, value]) => `${key}="${escapeMetricLabel(value)}"`).join(",")}}`;
-}
-
-function escapeMetricLabel(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n");
+function buildVersion(): string {
+  return process.env.OPENGENI_VERSION
+    ?? process.env.npm_package_version
+    ?? "dev";
 }
 
 function cleanAttributes(attributes: Attributes): Record<string, string | number | boolean | null> {

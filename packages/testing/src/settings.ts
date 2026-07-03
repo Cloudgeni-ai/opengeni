@@ -58,6 +58,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     stripeWebhookSecret: undefined,
     apiHost: "127.0.0.1",
     apiPort: 0,
+    workerHttpPort: 8001,
     corsAllowOriginRegex: String.raw`https?://(localhost|127\.0\.0\.1)(:\d+)?`,
     openaiProvider: "openai",
     openaiApiKey: "test-openai-key",

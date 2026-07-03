@@ -33,6 +33,8 @@
 import {
   accrueWarmSeconds,
   confirmDrainCold,
+  countQueuedTurns,
+  countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
   listLiveModalSandboxLeaseAttributions,
@@ -60,6 +62,12 @@ import {
   terminateModalSandboxById,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
+import {
+  recordCreditMicros,
+  recordSandboxLeaseGauges,
+  recordSandboxOrphansTerminated,
+  recordTurnsQueuedGauge,
+} from "../observability-metrics";
 
 export type ReapSandboxLeasesResult = {
   /** Stale viewer holders + warming-death rows the sweep touched is folded into
@@ -166,6 +174,7 @@ export function createSandboxLeaseActivities(
     if (!settings.sandboxOwnershipEnabled) {
       return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0, modalOrphansTerminated: 0 };
     }
+    await refreshQueueAndLeaseGauges(db, observability);
 
     // (0) Warm-meter tick (P2.1) — accrue warm-seconds for every WARM viewer-only
     // box (turn-held boxes meter on the turn heartbeat, so the list fn excludes
@@ -213,11 +222,14 @@ export function createSandboxLeaseActivities(
 
     try {
       modalOrphansTerminated = await sweepModalOrphans(settings, db, observability);
+      recordSandboxOrphansTerminated(observability, modalOrphansTerminated);
     } catch (error) {
       observability.warn("sandbox reaper: Modal orphan sweep failed", {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+
+    await refreshQueueAndLeaseGauges(db, observability);
 
     if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0 || modalOrphansTerminated > 0) {
       observability.info("sandbox reaper swept", {
@@ -275,6 +287,7 @@ async function accrueWarmTick(
       if (result.accrued) {
         accrued += 1;
       }
+      recordCreditMicros(observability, "usage", result.costMicros);
     } catch (error) {
       observability.warn("sandbox reaper: warm-seconds accrual failed for lease", {
         workspaceId: lease.workspaceId,
@@ -284,6 +297,26 @@ async function accrueWarmTick(
     }
   }
   return { accrued, workspaceIds };
+}
+
+async function refreshQueueAndLeaseGauges(
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+): Promise<void> {
+  try {
+    recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
+  } catch (error) {
+    observability.warn("sandbox reaper: queued-turn gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
+  } catch (error) {
+    observability.warn("sandbox reaper: sandbox-lease gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

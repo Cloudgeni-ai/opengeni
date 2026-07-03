@@ -357,7 +357,7 @@ The barrel (`index.ts`, 2600+ lines) drives the SDK run: instruction composition
 
 ### 7.9 `github` + `observability` — small leaves
 
-`github`: gate every privileged call on full configuration; HMAC CSRF state bounded to 3600s. **Footgun:** if `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` is unset, the secret is random per process — set it explicitly for multi-instance deploys. GitHub Enterprise hosts are hardcoded (not supported). `observability`: in-memory metrics per-process (reset on restart); `/metrics` reflects only the serving process.
+`github`: gate every privileged call on full configuration; HMAC CSRF state bounded to 3600s. **Footgun:** if `OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` is unset, the secret is random per process — set it explicitly for multi-instance deploys. GitHub Enterprise hosts are hardcoded (not supported). `observability`: prom-client sits behind the `Observability` facade; metrics remain per-process (reset on restart), so API `/metrics` reflects the API process and worker `/metrics` is served by the worker HTTP listener (`OPENGENI_WORKER_HTTP_PORT`, default 8001).
 
 ### 7.10 `sdk` + `react` — published clients
 

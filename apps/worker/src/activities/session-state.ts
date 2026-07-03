@@ -1,5 +1,6 @@
 import {
   claimNextQueuedTurn as claimNextQueuedTurnDb,
+  countQueuedTurns,
   countTurnSessionHistoryItems,
   finishTurn,
   getSessionEvent,
@@ -13,6 +14,7 @@ import { appendAndPublishEvents } from "@opengeni/events";
 import { WORKER_DEATH_RESUME_TEXT } from "./agent-turn";
 import { isSteerInterrupt, pauseActiveGoalOnInterrupt } from "./goals";
 import { notifyParentOfChildTerminal } from "./parent-wake";
+import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
   ActivityServices,
   ClaimNextQueuedTurnInput,
@@ -67,7 +69,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
   }
 
   async function interruptActiveTurn(input: RunAgentTurnInput): Promise<void> {
-    const { db, bus } = await services();
+    const { db, bus, observability } = await services();
     const session = await requireSession(db, input.workspaceId, input.sessionId);
     const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
     // Pause an active goal before the early return below: an interrupt can
@@ -96,6 +98,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     ]);
     await finishTurn(db, input.workspaceId, session.activeTurnId, "cancelled");
     await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
+    await refreshQueuedTurnsGauge(db, observability);
   }
 
   /**
@@ -116,7 +119,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
    * WORKER_DEATH_MAX_REDISPATCHES, persisted on the turn row.
    */
   async function requeueTurnAfterWorkerDeath(input: RequeueTurnAfterWorkerDeathInput): Promise<RequeueTurnAfterWorkerDeathResult> {
-    const { settings, db, bus } = await services();
+    const { settings, db, bus, observability } = await services();
     const turn = await getSessionTurn(db, input.workspaceId, input.turnId);
     if (!turn || (turn.status !== "running" && turn.status !== "requires_action")) {
       // The timed-out attempt was a zombie that actually settled the turn
@@ -169,12 +172,15 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
       throw requeueError;
     }
     await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null);
+    await refreshQueuedTurnsGauge(db, observability);
     return { action: "requeued", redispatches };
   }
 
   async function claimNextQueuedTurn(input: ClaimNextQueuedTurnInput) {
-    const { db } = await services();
-    return await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
+    const { db, observability } = await services();
+    const turn = await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
+    await refreshQueuedTurnsGauge(db, observability);
+    return turn;
   }
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
@@ -183,6 +189,7 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     if (session.status === "queued" || session.status === "running") {
       await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
     }
+    await refreshQueuedTurnsGauge(db, observability);
     // The workflow reaches markSessionIdle exactly when it has decided to stop
     // for now (no queued turn, no goal continuation): the terminal-for-now
     // point for a spawned worker, whatever the cause (goal completed, agent or
@@ -198,4 +205,15 @@ export function createSessionStateActivities(services: () => Promise<ActivitySer
     claimNextQueuedTurn,
     markSessionIdle,
   };
+}
+
+async function refreshQueuedTurnsGauge(
+  db: ActivityServices["db"],
+  observability: ActivityServices["observability"],
+): Promise<void> {
+  try {
+    recordTurnsQueuedGauge(observability, await countQueuedTurns(db));
+  } catch {
+    // Best-effort telemetry; session state transitions remain authoritative.
+  }
 }

@@ -11,16 +11,53 @@ const settings = {
 };
 
 describe("observability", () => {
-  test("renders prometheus metrics with resource and request labels", () => {
+  test("renders prometheus metrics with resource and request labels", async () => {
     const obs = createObservability(settings, { component: "api", now: () => 1 });
     obs.recordHttpRequest({ method: "GET", route: "/healthz", status: 200, durationSeconds: 0.012 });
 
-    const metrics = obs.prometheusMetrics();
+    const metrics = await obs.prometheusMetrics();
     expect(metrics).toContain("opengeni_http_requests_total");
     expect(metrics).toContain('service="opengeni"');
     expect(metrics).toContain('environment="test"');
     expect(metrics).toContain('route="/healthz"');
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
+    expect(metrics).toContain("opengeni_build_info");
+    expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
+  });
+
+  test("registers generic counters gauges and histograms with bounded labels", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    obs.incrementCounter({
+      name: "opengeni_model_calls_total",
+      help: "Total model calls.",
+      labels: { provider: "openai", outcome: "completed" },
+    });
+    obs.setGauge({
+      name: "opengeni_turns_inflight",
+      help: "In-flight turns.",
+      value: 2,
+    });
+    obs.observeHistogram({
+      name: "opengeni_model_call_duration_seconds",
+      help: "Model call duration.",
+      labels: { provider: "openai" },
+      value: 0.25,
+    });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toContain("opengeni_model_calls_total");
+    expect(metrics).toContain('provider="openai"');
+    expect(metrics).toContain('outcome="completed"');
+    expect(metrics).toContain("opengeni_turns_inflight");
+    expect(metrics).toContain("opengeni_model_call_duration_seconds_bucket");
+  });
+
+  test("rejects inconsistent metric label registrations", () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    obs.incrementCounter({ name: "opengeni_turns_total", labels: { outcome: "completed" } });
+
+    expect(() => obs.incrementCounter({ name: "opengeni_turns_total", labels: { status: "idle" } }))
+      .toThrow("already registered");
   });
 
   test("exports OTLP JSON spans", async () => {

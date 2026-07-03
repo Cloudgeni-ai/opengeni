@@ -29,6 +29,7 @@ import type {
 import { PROVIDER_REGISTRY } from "./providers";
 import { SandboxConfigError } from "./errors";
 import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
+import type { RuntimeMetricsHooks } from "../metrics";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -660,6 +661,7 @@ export async function establishSandboxSessionFromEnvelope(
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
+    metrics?: RuntimeMetricsHooks;
   },
 ): Promise<EstablishedSandboxSession> {
   const envelopeBackend = typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
@@ -706,7 +708,15 @@ export async function establishSandboxSessionFromEnvelope(
   // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
   // cold-restore branch (b) below.
   const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
-    const restored = await client.create!({ manifest: createManifest });
+    const createStarted = Date.now();
+    let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
+    try {
+      restored = await client.create!({ manifest: createManifest });
+      recordSandboxCreateMetric(opts.metrics, client.backendId, "completed", createStarted);
+    } catch (error) {
+      recordSandboxCreateMetric(opts.metrics, client.backendId, "failed", createStarted);
+      throw error;
+    }
     let restoredState = (restored as { state?: unknown }).state;
     let established: EstablishedSandboxSession = {
       client,
@@ -828,6 +838,23 @@ export async function establishSandboxSessionFromEnvelope(
   // /workspace survives the box churn (sandbox-file-persistence). No archive -> a
   // clean empty box (a never-warmed session).
   return await coldRestore();
+}
+
+function recordSandboxCreateMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  outcome: "completed" | "failed",
+  startedMs: number,
+): void {
+  try {
+    metrics?.onSandboxCreate?.({
+      backend,
+      outcome,
+      durationSeconds: Math.max(0, (Date.now() - startedMs) / 1000),
+    });
+  } catch {
+    // Metrics emission must not affect sandbox lifecycle.
+  }
 }
 
 // A client that can SERIALIZE a live session state back to the persistable

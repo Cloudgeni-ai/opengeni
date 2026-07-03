@@ -24,6 +24,7 @@ export type SessionWorkflowClient = {
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: { task: ScheduledTask; agentRunUsageIdempotencyKey?: string; triggerWorkflowId?: string }) => Promise<void>;
+  check?: () => Promise<void>;
 };
 
 export type DocumentIndexClient = {
@@ -38,6 +39,7 @@ export type AppDependencies = {
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
   observability?: Observability;
+  readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
   managedAuth?: ManagedAuth | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from

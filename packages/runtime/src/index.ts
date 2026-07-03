@@ -27,6 +27,7 @@ import {
   setDefaultOpenAIClient,
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
+  setTracingDisabled,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
@@ -101,6 +102,9 @@ import {
   setSelfhostedApplyDiff,
 } from "./sandbox";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
+import type { RuntimeMetricsHooks } from "./metrics";
+
+export type { RuntimeMetricsHooks } from "./metrics";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -253,6 +257,12 @@ export type SandboxFileDownload = {
   sizeBytes?: number;
 };
 
+let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
+
+export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
+  runtimeMetricsHooks = hooks ?? null;
+}
+
 export type OpenGeniRuntime = {
   configure: (settings: Settings) => void;
   // Multi-provider per-turn model routing. Returns the resolved provider, its
@@ -270,11 +280,15 @@ export type OpenGeniRuntime = {
 export type ProductionRuntimeOverrides = {
   model?: Model;
   sandboxClient?: unknown;
+  metrics?: RuntimeMetricsHooks;
 };
 
 export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrides = {}): OpenGeniRuntime {
   return {
-    configure: configureOpenAI,
+    configure: (settings) => {
+      configureRuntimeMetricsHooks(overrides.metrics);
+      configureOpenAI(settings);
+    },
     // A test/override model shadows the registry routing entirely (the scripted
     // model used in worker tests is not in any provider's allow-list), so when
     // one is supplied resolveTurnModel reports "no resolution" and the caller
@@ -301,7 +315,7 @@ export function createProductionAgentRuntime(overrides: ProductionRuntimeOverrid
  * the OpenAI-platform path has only a key (the SDK default client is used via
  * setDefaultOpenAIKey there); the caller then constructs a key-only client.
  */
-export function buildOpenAIClientFromSettings(settings: Settings): OpenAI {
+export function buildOpenAIClientFromSettings(settings: Settings, providerId: string = settings.openaiProvider): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
@@ -318,13 +332,14 @@ export function buildOpenAIClientFromSettings(settings: Settings): OpenAI {
       // seam — below the SDK responses converter, which always re-synthesizes BOTH
       // `action` and `actions` (rejected 400 "exactly one of action or actions").
       // See computerCallNormalizingFetch / rewriteComputerCallsToActionsOnly.
-      fetch: computerCallNormalizingFetch(globalThis.fetch),
+      fetch: computerCallNormalizingFetch(instrumentedModelFetch(providerId, globalThis.fetch)),
     });
   }
   return new OpenAI({
     apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
     ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
     maxRetries: settings.openaiMaxRetries,
+    fetch: instrumentedModelFetch(providerId, globalThis.fetch),
   });
 }
 
@@ -346,7 +361,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     return cached;
   }
   const client = provider.builtin
-    ? buildOpenAIClientFromSettings(settings)
+    ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
       // Codex subscription: the static apiKey is a placeholder — the real per-request
       // bearer + ChatGPT-Account-ID, the /responses->/codex/responses rewrite, and the
@@ -358,7 +373,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
         apiKey: provider.apiKey ?? "codex-subscription",
         ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
         maxRetries: settings.openaiMaxRetries,
-        fetch: codexSubscriptionFetch(globalThis.fetch),
+        fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
       })
     // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
     // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -369,6 +384,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
       maxRetries: settings.openaiMaxRetries,
       ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
       ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
+      fetch: instrumentedModelFetch(provider.id, globalThis.fetch),
     });
   providerClientCache.set(provider.id, client);
   return client;
@@ -521,6 +537,7 @@ export class CodexSubscriptionUnavailableError extends Error {
 
 export function configureOpenAI(settings: Settings): void {
   setOpenAIResponsesTransport(settings.openaiResponsesTransport);
+  setTracingDisabled(settings.disableOpenaiTracing || !settings.observabilityOtlpEndpoint);
   // Install the registry-aware router as the process default model provider so a
   // model name re-resolved on the SandboxAgent/Modal path (where a Model instance
   // does not survive) routes to its provider instead of the built-in client.
@@ -538,6 +555,51 @@ export function configureOpenAI(settings: Settings): void {
     setDefaultOpenAIClient(buildOpenAIClientFromSettings(settings));
   }
   setDefaultModelProvider(router);
+}
+
+function instrumentedModelFetch(provider: string, inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (!isModelCallFetch(input)) {
+      return await inner(input, init);
+    }
+    const started = performance.now();
+    try {
+      const response = await inner(input, init);
+      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      return response;
+    } catch (error) {
+      recordModelCallMetric(provider, "failed", started);
+      throw error;
+    }
+  }) as typeof fetch;
+}
+
+function isModelCallFetch(input: Parameters<typeof fetch>[0]): boolean {
+  const rawUrl = typeof input === "string"
+    ? input
+    : input instanceof URL
+      ? input.toString()
+      : (input as { url?: unknown }).url;
+  if (typeof rawUrl !== "string" || rawUrl.length === 0) {
+    return false;
+  }
+  try {
+    const pathname = new URL(rawUrl, "http://opengeni.local").pathname;
+    return pathname.endsWith("/responses")
+      || pathname.endsWith("/chat/completions")
+      || pathname.endsWith("/codex/responses");
+  } catch {
+    return /\/(?:codex\/)?responses(?:\?|$)|\/chat\/completions(?:\?|$)/.test(rawUrl);
+  }
+}
+
+function recordModelCallMetric(provider: string, outcome: "completed" | "failed", started: number): void {
+  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  try {
+    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
 }
 
 /**
@@ -1982,7 +2044,6 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // every mid-turn follow-up.
     callModelInputFilter,
   };
-  void settings.disableOpenaiTracing;
   if (client) {
     runOptions.sandbox = {
       client,

@@ -31,5 +31,8 @@
     "type": "git",
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
     "directory": "packages/observability"
+  },
+  "dependencies": {
+    "prom-client": "^15.1.3"
   }
 }

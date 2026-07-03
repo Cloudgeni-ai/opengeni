@@ -39,6 +39,7 @@ config:
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"
+  OPENGENI_WORKER_HTTP_PORT: "8001"
   OPENGENI_TEMPORAL_NAMESPACE: default
   OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
   OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
@@ -197,6 +198,7 @@ worker:
     digest: ""
     pullPolicy: IfNotPresent
   command: []
+  containerPort: 8001
   resources:
     requests:
       cpu: 500m
@@ -234,16 +236,26 @@ worker:
   tolerations: []
   affinity: {}
   probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
     liveness:
-      enabled: false
-      exec: []
-      initialDelaySeconds: 30
-      periodSeconds: 30
-      timeoutSeconds: 5
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 2
       failureThreshold: 3
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 8001
   autoscaling:
     enabled: false
     minReplicas: 2
@@ -746,12 +758,16 @@ observability:
     enabled: true
     path: /metrics
   serviceMonitor:
+    # Optional Prometheus Operator ServiceMonitors for api/worker/relay. The
+    # template is also guarded on monitoring.coreos.com/v1 being installed.
     enabled: false
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
     annotations: {}
   prometheusRule:
+    # Optional Prometheus Operator starter alerts. The template is also guarded
+    # on monitoring.coreos.com/v1 being installed.
     enabled: false
     labels: {}
     annotations: {}
