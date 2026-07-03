@@ -385,7 +385,11 @@ export class SandboxComputer implements Computer {
  *  leaf; the duck-typed `isNativeDesktopSession` probe (below) selects on it. */
 export type NativeDesktopSession = {
   desktopInput(event: DesktopInputRequest["event"]): Promise<void>;
-  screenshot(): Promise<{ png: Uint8Array; width: number; height: number }>;
+  // `nativeWidth`/`nativeHeight` are the PRE-DOWNSCALE capture geometry (equal to
+  // width/height when the agent did not have to shrink the PNG to fit the transport
+  // budget). NativeDesktopComputer scales model clicks from the ENCODED pixel space
+  // back to native pixels using their ratio before injecting.
+  screenshot(): Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
 };
 
 /** Model `Button` → wire `PointerButton`. The proto has no back/forward button, so
@@ -424,6 +428,15 @@ export class NativeDesktopComputer implements Computer {
   readonly dimensions: [number, number];
   private session: NativeDesktopSession;
   private readonly readOnly: boolean;
+  // The ENCODED vs NATIVE geometry of the MOST RECENT screenshot the model saw. The
+  // model computes click coordinates in the encoded-pixel space of that screenshot;
+  // when the agent downscaled the PNG to fit the transport budget, encoded < native,
+  // so we scale coordinates back up to native pixels before injecting (the agent's
+  // native inject — macOS CGEvent / Linux XTEST — expects native-pixel coordinates,
+  // exactly as it received them pre-downscale). Null until the first screenshot;
+  // equal encoded==native (or absent) ⇒ scale factor 1.0 ⇒ byte-identical behavior.
+  private lastEncoded: [number, number] | null = null;
+  private lastNative: [number, number] | null = null;
 
   constructor(session: NativeDesktopSession, opts: NativeDesktopComputerOptions = {}) {
     this.session = session;
@@ -441,17 +454,34 @@ export class NativeDesktopComputer implements Computer {
     if (this.readOnly) throw new ComputerReadOnlyError();
   }
 
+  /** Scale a coordinate the model expressed in the MOST RECENT screenshot's
+   *  ENCODED pixel space back to NATIVE pixels. When the last frame was not
+   *  downscaled (encoded == native), or no screenshot has been taken yet, this is a
+   *  1:1 identity — the byte-identical current behavior. The agent then applies its
+   *  own platform mapping (macOS divides native pixels by the backing scale to reach
+   *  CGEvent points; Linux XTEST is 1:1) exactly as it did pre-downscale. */
+  private toNative(x: number, y: number): { x: number; y: number } {
+    const enc = this.lastEncoded;
+    const nat = this.lastNative;
+    if (!enc || !nat || enc[0] <= 0 || enc[1] <= 0) return { x, y };
+    if (enc[0] === nat[0] && enc[1] === nat[1]) return { x, y };
+    return {
+      x: Math.round((x * nat[0]) / enc[0]),
+      y: Math.round((y * nat[1]) / enc[1]),
+    };
+  }
+
   private async pointer(x: number, y: number, action: PointerAction, button: PointerButton): Promise<void> {
-    // COORDINATE SEAM — TODO(verify e2e on macOS): the model computes x/y against the
-    // pixels of the screenshot it just saw, and the agent's macOS CGEvent inject
-    // treats x/y as raw screen coordinates. On a Retina Mac, ScreenCaptureKit may
-    // capture at 2× the logical POINT space while CGEvent expects logical points — a
-    // potential 2× mismatch between the coords the model derives and the coords the
-    // inject applies. This MUST be measured on a real Retina Mac (compare the
-    // screenshot's reported width/height against the logical display bounds) before
-    // any DPR scaling is added. Do NOT add scaling speculatively. Self-hosted Linux
-    // (XTEST/x11) is 1:1 and unaffected.
-    await this.session.desktopInput({ $case: "pointer", pointer: { x, y, action, button } });
+    // COORDINATE SEAM: the model computes x/y against the pixels of the screenshot it
+    // just saw — which the agent may have DOWNSCALED to fit the transport's max
+    // payload (a full-res Retina/busy screen exceeds NATS's 1 MiB default). We scale
+    // those encoded-pixel coordinates back to native pixels here, using the native
+    // geometry the last screenshot reported, so the agent's native inject lands the
+    // click where the model intended. When no downscale occurred the factor is 1.0
+    // and the coordinates pass through unchanged. Self-hosted Linux (XTEST/x11) and
+    // any non-downscaled frame are 1:1 and unaffected.
+    const n = this.toNative(x, y);
+    await this.session.desktopInput({ $case: "pointer", pointer: { x: n.x, y: n.y, action, button } });
   }
 
   async screenshot(): Promise<string> {
@@ -461,10 +491,14 @@ export class NativeDesktopComputer implements Computer {
     // missing/empty frame is therefore a THROW, never a silent "". Native capture
     // (ScreenCaptureKit / x11) does not have the cold-scrot warm-up the xdotool path
     // retries around, so a single capture + a hard empty-guard is sufficient.
-    const { png } = await this.session.screenshot();
+    const { png, width, height, nativeWidth, nativeHeight } = await this.session.screenshot();
     if (png.length === 0) {
       throw new ComputerUnavailableError("native desktop screenshot returned an empty frame (display not up?)");
     }
+    // Record the encoded (what the model sees) vs native geometry of THIS frame so
+    // the next click/move/scroll/drag scales its coordinates back to native pixels.
+    this.lastEncoded = [width, height];
+    this.lastNative = [nativeWidth || width, nativeHeight || height];
     return Buffer.from(png).toString("base64");
   }
 
@@ -482,11 +516,12 @@ export class NativeDesktopComputer implements Computer {
   }
   async scroll(x: number, y: number, sx: number, sy: number) {
     this.guardWrite();
-    // The model's scroll deltas are PIXELS — forward them straight to the agent as a
-    // ScrollEvent{x,y,deltaX,deltaY} and let the native inject translate to wheel
-    // events per platform. No xdotool "notch" quantization here (that is an
-    // xdotool-specific artifact); the agent owns the platform-appropriate scaling.
-    await this.session.desktopInput({ $case: "scroll", scroll: { x, y, deltaX: sx, deltaY: sy } });
+    // The scroll ANCHOR (x,y) is a screenshot-pixel position → scale to native like a
+    // click. The deltas (sx,sy) are relative scroll AMOUNTS, not positions; the agent
+    // owns the platform-appropriate wheel translation, so they pass through unscaled
+    // (no xdotool "notch" quantization here — that is an xdotool-specific artifact).
+    const n = this.toNative(x, y);
+    await this.session.desktopInput({ $case: "scroll", scroll: { x: n.x, y: n.y, deltaX: sx, deltaY: sy } });
   }
   async type(text: string) {
     this.guardWrite();

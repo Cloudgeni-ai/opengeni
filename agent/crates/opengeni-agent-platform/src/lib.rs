@@ -53,7 +53,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use opengeni_agent_proto::v1;
 
-pub use desktop::{resolve_desktop, CapturedFrame, DesktopBackend, NoDesktop};
+pub use desktop::{
+    fit_frame_to_budget, resolve_desktop, CapturedFrame, DesktopBackend, FittedFrame, NoDesktop,
+};
 pub use error::{PlatformError, PlatformResult};
 pub use native::NativePlatform;
 pub use pty::{spawn_pty, PtyProcess};

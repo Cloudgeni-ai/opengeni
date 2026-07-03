@@ -48,7 +48,22 @@ pub struct DispatchContext {
     /// [`Op::DesktopInput`] arm refuses synthetic input with
     /// [`ErrorCode::ConsentRequired`] when this is `false`, BEFORE touching the OS.
     pub consented_screen_control: bool,
+    /// The connection's NEGOTIATED max reply payload in bytes (the NATS
+    /// `server_info().max_payload`, deployment-agnostic — never a hardcoded 1 MiB).
+    /// A reply larger than this cannot be published, so an op that produces a large
+    /// reply (a full-res screenshot) fits it under this budget agent-side. `0` means
+    /// "no known bound" (a test/sync context) → ops pass their reply through
+    /// untouched and the wire-seam backstop is the only guard.
+    pub max_reply_bytes: usize,
 }
+
+/// Headroom subtracted from [`DispatchContext::max_reply_bytes`] when an op bounds
+/// its own reply body (the screenshot), covering the `ControlResponse` envelope the
+/// body is wrapped in (`request_id`, field tags, the width/height varints) so the
+/// FULLY-encoded reply — not just the body — stays under the negotiated max. The
+/// generic wire-seam backstop checks the true encoded size regardless, so this is a
+/// best-effort first cut, not the sole guard.
+pub const REPLY_ENVELOPE_MARGIN: usize = 4 * 1024;
 
 impl DispatchContext {
     /// Milliseconds since the agent process started (the monotonic clock the
@@ -161,6 +176,13 @@ async fn dispatch_future<P: Platform>(
         }
 
         // --- platform-backed Channel-A ops -----------------------------------
+        // NOTE: `exec` (large stdout/stderr) and `fs_read` (a big file) produce
+        // UNBOUNDED replies that can exceed the transport's max payload — the same
+        // latent wall the screenshot hit. They are NOT bounded here; the generic
+        // wire-seam backstop in `supervisor::handle_message` converts any such
+        // oversized reply into a structured `PayloadTooLarge` error rather than a
+        // silent publish failure + caller timeout. If a future need arises to stream
+        // or chunk these bodies, bound them at the op like the screenshot does.
         Op::Exec(req) => result(request_id, platform.exec(&req).await, RespResult::Exec),
         Op::FsRead(req) => result(request_id, platform.fs_read(&req).await, RespResult::FsRead),
         Op::FsWrite(req) => result(
@@ -198,7 +220,7 @@ async fn dispatch_future<P: Platform>(
         // --- computer-use control ops: the AGENT drives its own desktop --------
         // Extracted to helpers so this dispatch match stays compact + readable.
         Op::DesktopInput(req) => desktop_input(request_id, req, platform, ctx).await,
-        Op::DesktopScreenshot(_req) => desktop_screenshot(request_id, platform).await,
+        Op::DesktopScreenshot(_req) => desktop_screenshot(request_id, platform, ctx).await,
         Op::PtyWrite(req) => result(
             request_id,
             platform.pty_write(&req).await,
@@ -263,18 +285,34 @@ async fn desktop_input<P: Platform>(
 /// NO consent gate: a screenshot is a VIEW op — it needs a DISPLAY, not
 /// screen-control consent (the view/control decoupling). A headless host surfaces
 /// `Unsupported` from the backend, mapped like any other error.
-async fn desktop_screenshot<P: Platform>(request_id: String, platform: &Arc<P>) -> ControlResponse {
+async fn desktop_screenshot<P: Platform>(
+    request_id: String,
+    platform: &Arc<P>,
+    ctx: &DispatchContext,
+) -> ControlResponse {
+    // Fit the captured PNG under the connection's negotiated reply budget so the
+    // reply can actually be published. A full-res capture of a busy or Retina
+    // display can exceed the transport's max payload (NATS defaults to 1 MiB); the
+    // reply publish then fails agent-side and the caller times out with no cause.
+    // `fit_frame_to_budget` downscales (lossless PNG kept) to the largest geometry
+    // that fits, reporting BOTH the encoded and the native geometry so the
+    // control-plane coordinate mapping can scale model clicks back to native pixels.
+    // A `budget` of 0 (no known bound) passes the frame through untouched. The
+    // envelope margin leaves room for the `ControlResponse` wrapper; the wire-seam
+    // backstop still catches any residual that even the minimum size cannot fit.
+    let budget = ctx.max_reply_bytes.saturating_sub(REPLY_ENVELOPE_MARGIN);
     result(
         request_id,
-        platform
-            .desktop()
-            .capture()
-            .await
-            .map(|frame| v1::DesktopScreenshotResponse {
-                png: frame.png.into(),
-                width: frame.width,
-                height: frame.height,
-            }),
+        platform.desktop().capture().await.map(|frame| {
+            let fitted = opengeni_agent_platform::fit_frame_to_budget(frame, budget);
+            v1::DesktopScreenshotResponse {
+                png: fitted.png.into(),
+                width: fitted.width,
+                height: fitted.height,
+                native_width: fitted.native_width,
+                native_height: fitted.native_height,
+            }
+        }),
         RespResult::DesktopScreenshot,
     )
 }
@@ -313,6 +351,39 @@ fn err_response(
     ControlResponse {
         request_id,
         error: Some(agent_error),
+        result: None,
+    }
+}
+
+/// Builds the structured [`ErrorCode::PayloadTooLarge`] `ControlResponse` the
+/// supervisor's wire-seam backstop publishes IN PLACE OF an oversized reply — the
+/// reply the op produced could not be published (it exceeds the connection's
+/// negotiated max payload), so rather than let the publish fail with only a WARN and
+/// leave the caller to time out opaquely, we replace it with a small, diagnosable
+/// error carrying the offending/negotiated sizes. Not retryable: the same op would
+/// produce the same oversized reply.
+#[must_use]
+pub fn oversized_reply_error(
+    request_id: String,
+    op_label: &str,
+    encoded_len: usize,
+    max_payload: usize,
+) -> ControlResponse {
+    let mut detail = std::collections::HashMap::new();
+    detail.insert("op".to_string(), op_label.to_string());
+    detail.insert("encoded_bytes".to_string(), encoded_len.to_string());
+    detail.insert("max_payload".to_string(), max_payload.to_string());
+    ControlResponse {
+        request_id,
+        error: Some(AgentError {
+            code: ErrorCode::PayloadTooLarge as i32,
+            message: format!(
+                "reply for op '{op_label}' is {encoded_len} bytes, over the transport's \
+                 negotiated max payload of {max_payload} bytes; it could not be published"
+            ),
+            retryable: false,
+            detail,
+        }),
         result: None,
     }
 }
@@ -502,6 +573,9 @@ mod tests {
             epoch: 5,
             started: std::time::Instant::now(),
             consented_screen_control,
+            // Tests exercise the dispatch logic, not the wire budget; 0 = unbounded
+            // (frames pass through untouched, matching pre-backstop behavior).
+            max_reply_bytes: 0,
         }
     }
 
@@ -702,6 +776,11 @@ mod tests {
                 assert_eq!(&s.png[..], FakeDesktop::PNG);
                 assert_eq!(s.width, FakeDesktop::WIDTH);
                 assert_eq!(s.height, FakeDesktop::HEIGHT);
+                // With no budget (max_reply_bytes = 0) the frame passes through
+                // untouched: native geometry equals the encoded geometry (no
+                // downscale), the byte-identical current behavior.
+                assert_eq!(s.native_width, FakeDesktop::WIDTH);
+                assert_eq!(s.native_height, FakeDesktop::HEIGHT);
             }
             other => panic!("expected DesktopScreenshot, got {other:?}"),
         }

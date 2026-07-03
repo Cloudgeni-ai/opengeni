@@ -76,6 +76,12 @@ enum ErrorCode {
   ERROR_CODE_AGENT_OFFLINE = 9;
   // An epoch fence rejected a stale op; caller should re-resolve and retry.
   ERROR_CODE_FENCED = 10;
+  // The op's reply would exceed the transport's negotiated max payload and could
+  // not be published (e.g. a full-res screenshot, or an unbounded file read/exec
+  // output). The agent's wire-seam backstop synthesizes THIS instead of letting
+  // the oversized publish fail silently and the caller time out opaquely.
+  // Not retryable — the same op would produce the same oversized reply.
+  ERROR_CODE_PAYLOAD_TOO_LARGE = 11;
 }
 
 // The operating system family the agent runs on.
@@ -529,8 +535,20 @@ message DesktopInputResponse {}
 message DesktopScreenshotRequest {}
 message DesktopScreenshotResponse {
   bytes png = 1;
+  // The geometry of the ENCODED image (what a viewer/model actually sees). When
+  // the raw capture is too large to fit the control-plane transport's max payload,
+  // the agent DOWNSCALES the PNG so the reply publishes (a full-res Retina/busy
+  // screen can exceed NATS's 1 MiB default); width/height then describe the
+  // downscaled image, and `native_width`/`native_height` below carry the original.
   uint32 width = 2;
   uint32 height = 3;
+  // The ORIGINAL (pre-downscale) capture geometry. Equal to width/height when no
+  // downscale was needed. The computer-use coordinate mapping scales a model click
+  // (expressed in the ENCODED pixel space it saw) back up to this native pixel
+  // space before injecting, so clicks land correctly even on a downscaled frame.
+  // 0 (unset by an older agent) MUST be read as "same as width/height" (no scale).
+  uint32 native_width = 4;
+  uint32 native_height = 5;
 }
 
 // =============================================================================

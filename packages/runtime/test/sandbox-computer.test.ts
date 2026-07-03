@@ -292,16 +292,24 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
 // A FAKE self-hosted session presenting the `{ desktopInput, screenshot }` native
 // surface. Records every injected DesktopInput event so tests can assert the exact
 // protos (event $case + fields + enum values), and returns a configurable PNG.
-function makeNativeSession(opts: { png?: Uint8Array; width?: number; height?: number } = {}) {
+function makeNativeSession(
+  opts: { png?: Uint8Array; width?: number; height?: number; nativeWidth?: number; nativeHeight?: number } = {},
+) {
   const inputs: NonNullable<DesktopInputRequest["event"]>[] = [];
+  const width = opts.width ?? 1280;
+  const height = opts.height ?? 800;
   const session: NativeDesktopSession = {
     desktopInput: async (event) => {
       if (event) inputs.push(event);
     },
     screenshot: async () => ({
       png: opts.png ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]),
-      width: opts.width ?? 1280,
-      height: opts.height ?? 800,
+      width,
+      height,
+      // Default: native == encoded (no downscale). Tests that exercise the
+      // downscale coordinate-scaling override nativeWidth/nativeHeight.
+      nativeWidth: opts.nativeWidth ?? width,
+      nativeHeight: opts.nativeHeight ?? height,
     }),
   };
   return { session, inputs };
@@ -392,6 +400,41 @@ describe("NativeDesktopComputer (self-hosted / macOS native inject+capture)", ()
     if (first.$case !== "pointer" || last.$case !== "pointer") throw new Error("expected pointers");
     expect([first.pointer.x, first.pointer.y]).toEqual([0, 0]);
     expect([last.pointer.x, last.pointer.y]).toEqual([20, 20]);
+  });
+
+  test("COORD-SCALE: after a DOWNSCALED screenshot, clicks scale from encoded→native pixels", async () => {
+    // The agent downscaled a 1280×800 native capture to a 640×400 encoded PNG to fit
+    // the transport budget. The model clicks in the ENCODED space it saw (640×400);
+    // the injected coordinates must be scaled back up 2× to native (1280×800).
+    const { session, inputs } = makeNativeSession({
+      width: 640,
+      height: 400,
+      nativeWidth: 1280,
+      nativeHeight: 800,
+    });
+    const c = new NativeDesktopComputer(session);
+    await c.screenshot(); // records encoded 640×400 / native 1280×800
+    await c.click(320, 200, "left"); // center of the encoded frame
+    const ev = inputs[0]!;
+    if (ev.$case !== "pointer") throw new Error("expected pointer");
+    // 320 * (1280/640) = 640 ; 200 * (800/400) = 400 → center of the NATIVE frame.
+    expect([ev.pointer.x, ev.pointer.y]).toEqual([640, 400]);
+
+    // Scroll anchor scales too; the deltas are amounts and pass through unscaled.
+    await c.scroll(320, 200, -3, 7);
+    const s = inputs[1]!;
+    if (s.$case !== "scroll") throw new Error("expected scroll");
+    expect(s.scroll).toEqual({ x: 640, y: 400, deltaX: -3, deltaY: 7 });
+  });
+
+  test("COORD-SCALE: with NO downscale (native == encoded), coordinates pass through byte-identical", async () => {
+    const { session, inputs } = makeNativeSession({ width: 1280, height: 800 }); // native defaults to encoded
+    const c = new NativeDesktopComputer(session);
+    await c.screenshot();
+    await c.click(640, 400, "left");
+    const ev = inputs[0]!;
+    if (ev.$case !== "pointer") throw new Error("expected pointer");
+    expect([ev.pointer.x, ev.pointer.y]).toEqual([640, 400]); // 1.0 factor, unchanged
   });
 
   test("screenshot returns the base64 of the fake PNG (non-empty, no data-URL prefix)", async () => {

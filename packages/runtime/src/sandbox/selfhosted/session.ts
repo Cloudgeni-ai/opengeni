@@ -545,16 +545,32 @@ export class SelfhostedSession {
   /** Computer-use VIEW op: capture a single PNG screenshot of the machine's desktop
    *  plus its geometry (via ScreenCaptureKit / x11). NOT consent-gated (a view op —
    *  the view/control decoupling), so it works with a display but no screen-control
-   *  consent. Returns the raw encoded bytes + width/height. */
-  async screenshot(): Promise<{ png: Uint8Array; width: number; height: number }> {
+   *  consent. Returns the raw encoded bytes + the ENCODED width/height, plus the
+   *  NATIVE (pre-downscale) geometry: when the agent had to downscale the PNG to fit
+   *  the transport's max payload, `nativeWidth`/`nativeHeight` carry the original
+   *  capture size so the computer-use layer can scale model clicks (in encoded-pixel
+   *  space) back to native pixels. An older agent leaves them 0 → read as "same as
+   *  width/height" (no downscale). */
+  async screenshot(): Promise<{
+    png: Uint8Array;
+    width: number;
+    height: number;
+    nativeWidth: number;
+    nativeHeight: number;
+  }> {
     const result = await this.call({ $case: "desktopScreenshot", desktopScreenshot: {} });
     if (result.$case !== "desktopScreenshot") {
       throw new Error(`selfhosted screenshot: unexpected result ${result.$case}`);
     }
+    const s = result.desktopScreenshot;
+    // Back-compat: an agent predating the native-geometry fields sends 0 → treat the
+    // encoded geometry AS the native geometry (scale factor 1.0, no coordinate shift).
     return {
-      png: result.desktopScreenshot.png,
-      width: result.desktopScreenshot.width,
-      height: result.desktopScreenshot.height,
+      png: s.png,
+      width: s.width,
+      height: s.height,
+      nativeWidth: s.nativeWidth || s.width,
+      nativeHeight: s.nativeHeight || s.height,
     };
   }
 

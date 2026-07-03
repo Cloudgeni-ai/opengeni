@@ -397,21 +397,32 @@ impl<P: Platform + 'static> Supervisor<P> {
             return;
         };
 
+        // The connection's NEGOTIATED max reply payload (deployment-agnostic — NOT a
+        // hardcoded 1 MiB). Threaded into dispatch so a large-reply op (the
+        // screenshot) fits its body under the budget, and used by the wire-seam
+        // backstop below to convert any residual oversized reply into a diagnosable
+        // error instead of a silent publish failure + caller timeout.
+        let max_payload = client.server_info().max_payload;
+
         let request = match ControlRequest::decode(message.payload.as_ref()) {
             Ok(req) => req,
             Err(e) => {
                 // Reply with a protocol error rather than drop — the caller waits
                 // on the reply and would otherwise time out.
                 error!(error = %e, "undecodable ControlRequest");
-                let resp =
-                    dispatch::dispatch_bytes(message.payload.as_ref(), &self.platform, &self.ctx());
+                let resp = dispatch::dispatch_bytes(
+                    message.payload.as_ref(),
+                    &self.platform,
+                    &self.ctx(max_payload),
+                );
                 let _ = client.publish(reply, resp.into()).await;
                 return;
             }
         };
 
-        let ctx = self.ctx();
+        let ctx = self.ctx(max_payload);
         let op_label = op_label(&request);
+        let request_id = request.request_id.clone();
         let started = Instant::now();
         let response = dispatch::dispatch(request, &self.platform, &ctx).await;
         let elapsed = started.elapsed();
@@ -425,13 +436,38 @@ impl<P: Platform + 'static> Supervisor<P> {
             );
         }
 
-        if let Err(e) = client.publish(reply, response.encode_to_vec().into()).await {
+        // WIRE-SEAM BACKSTOP (generic, ALL ops): a reply larger than the connection's
+        // negotiated max payload cannot be published — the publish fails agent-side
+        // with only a WARN and the caller times out with no cause (the original
+        // screenshot bug; file reads / large exec output share the latent wall).
+        // Rather than let that happen, when the encoded reply would exceed the max we
+        // publish a small structured PAYLOAD_TOO_LARGE error IN ITS PLACE, turning
+        // every silent oversized-reply timeout into a diagnosable, typed failure.
+        let encoded = response.encode_to_vec();
+        let payload = if max_payload > 0 && encoded.len() > max_payload {
+            warn!(
+                op = op_label,
+                encoded_bytes = encoded.len(),
+                max_payload,
+                "reply exceeds the negotiated max payload; replacing it with a \
+                 structured PAYLOAD_TOO_LARGE error so the caller sees a cause"
+            );
+            dispatch::oversized_reply_error(request_id, op_label, encoded.len(), max_payload)
+                .encode_to_vec()
+        } else {
+            encoded
+        };
+
+        if let Err(e) = client.publish(reply, payload.into()).await {
             warn!(error = %e, "failed to publish rpc reply");
         }
     }
 
-    /// Builds the dispatch context snapshot for a request.
-    fn ctx(&self) -> DispatchContext {
+    /// Builds the dispatch context snapshot for a request. `max_reply_bytes` is the
+    /// connection's NEGOTIATED max payload (from `server_info()`), threaded so an op
+    /// that produces a large reply (the screenshot) can fit it under the budget
+    /// agent-side rather than emit an un-publishable reply the caller waits out.
+    fn ctx(&self, max_reply_bytes: usize) -> DispatchContext {
         DispatchContext {
             agent_id: self.creds.agent_id.clone(),
             epoch: self.epoch.load(),
@@ -439,6 +475,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // The computer-use input consent gate reads the SAME enrollment grant
             // the relay pump's `allow_input` uses.
             consented_screen_control: self.creds.consented_screen_control,
+            max_reply_bytes,
         }
     }
 

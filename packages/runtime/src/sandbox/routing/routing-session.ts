@@ -74,7 +74,7 @@ export interface RoutableBackendSession {
   // `event` is kept `unknown` (mirroring the interface's structural style + avoiding
   // a proto import into the leaf); the SelfhostedSession takes `DesktopInputRequest["event"]`.
   desktopInput?(event: unknown): Promise<void>;
-  screenshot?(): Promise<{ png: Uint8Array; width: number; height: number }>;
+  screenshot?(): Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -189,7 +189,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // that cannot serve them. So the constructor assigns them ONLY when the
   // construction-time default backend actually implements the native surface (below).
   desktopInput?: (event: unknown) => Promise<void>;
-  screenshot?: () => Promise<{ png: Uint8Array; width: number; height: number }>;
+  screenshot?: () => Promise<{ png: Uint8Array; width: number; height: number; nativeWidth: number; nativeHeight: number }>;
 
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;

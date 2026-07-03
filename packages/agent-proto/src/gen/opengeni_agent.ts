@@ -31,6 +31,14 @@ export enum ErrorCode {
   ERROR_CODE_AGENT_OFFLINE = 9,
   /** ERROR_CODE_FENCED - An epoch fence rejected a stale op; caller should re-resolve and retry. */
   ERROR_CODE_FENCED = 10,
+  /**
+   * ERROR_CODE_PAYLOAD_TOO_LARGE - The op's reply would exceed the transport's negotiated max payload and could
+   * not be published (e.g. a full-res screenshot, or an unbounded file read/exec
+   * output). The agent's wire-seam backstop synthesizes THIS instead of letting
+   * the oversized publish fail silently and the caller time out opaquely.
+   * Not retryable — the same op would produce the same oversized reply.
+   */
+  ERROR_CODE_PAYLOAD_TOO_LARGE = 11,
 }
 
 export function errorCodeFromJSON(object: any): ErrorCode {
@@ -68,6 +76,9 @@ export function errorCodeFromJSON(object: any): ErrorCode {
     case 10:
     case "ERROR_CODE_FENCED":
       return ErrorCode.ERROR_CODE_FENCED;
+    case 11:
+    case "ERROR_CODE_PAYLOAD_TOO_LARGE":
+      return ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE;
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -97,6 +108,8 @@ export function errorCodeToJSON(object: ErrorCode): string {
       return "ERROR_CODE_AGENT_OFFLINE";
     case ErrorCode.ERROR_CODE_FENCED:
       return "ERROR_CODE_FENCED";
+    case ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE:
+      return "ERROR_CODE_PAYLOAD_TOO_LARGE";
     default:
       throw new globalThis.Error("Unrecognized enum value " + object + " for enum ErrorCode");
   }
@@ -1105,8 +1118,24 @@ export interface DesktopScreenshotRequest {
 
 export interface DesktopScreenshotResponse {
   png: Uint8Array;
+  /**
+   * The geometry of the ENCODED image (what a viewer/model actually sees). When
+   * the raw capture is too large to fit the control-plane transport's max payload,
+   * the agent DOWNSCALES the PNG so the reply publishes (a full-res Retina/busy
+   * screen can exceed NATS's 1 MiB default); width/height then describe the
+   * downscaled image, and `native_width`/`native_height` below carry the original.
+   */
   width: number;
   height: number;
+  /**
+   * The ORIGINAL (pre-downscale) capture geometry. Equal to width/height when no
+   * downscale was needed. The computer-use coordinate mapping scales a model click
+   * (expressed in the ENCODED pixel space it saw) back up to this native pixel
+   * space before injecting, so clicks land correctly even on a downscaled frame.
+   * 0 (unset by an older agent) MUST be read as "same as width/height" (no scale).
+   */
+  nativeWidth: number;
+  nativeHeight: number;
 }
 
 /**
@@ -5990,7 +6019,7 @@ export const DesktopScreenshotRequest: MessageFns<DesktopScreenshotRequest> = {
 };
 
 function createBaseDesktopScreenshotResponse(): DesktopScreenshotResponse {
-  return { png: new Uint8Array(0), width: 0, height: 0 };
+  return { png: new Uint8Array(0), width: 0, height: 0, nativeWidth: 0, nativeHeight: 0 };
 }
 
 export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = {
@@ -6003,6 +6032,12 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
     }
     if (message.height !== 0) {
       writer.uint32(24).uint32(message.height);
+    }
+    if (message.nativeWidth !== 0) {
+      writer.uint32(32).uint32(message.nativeWidth);
+    }
+    if (message.nativeHeight !== 0) {
+      writer.uint32(40).uint32(message.nativeHeight);
     }
     return writer;
   },
@@ -6038,6 +6073,22 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
           message.height = reader.uint32();
           continue;
         }
+        case 4: {
+          if (tag !== 32) {
+            break;
+          }
+
+          message.nativeWidth = reader.uint32();
+          continue;
+        }
+        case 5: {
+          if (tag !== 40) {
+            break;
+          }
+
+          message.nativeHeight = reader.uint32();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -6052,6 +6103,16 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
       png: isSet(object.png) ? bytesFromBase64(object.png) : new Uint8Array(0),
       width: isSet(object.width) ? globalThis.Number(object.width) : 0,
       height: isSet(object.height) ? globalThis.Number(object.height) : 0,
+      nativeWidth: isSet(object.nativeWidth)
+        ? globalThis.Number(object.nativeWidth)
+        : isSet(object.native_width)
+        ? globalThis.Number(object.native_width)
+        : 0,
+      nativeHeight: isSet(object.nativeHeight)
+        ? globalThis.Number(object.nativeHeight)
+        : isSet(object.native_height)
+        ? globalThis.Number(object.native_height)
+        : 0,
     };
   },
 
@@ -6066,6 +6127,12 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
     if (message.height !== 0) {
       obj.height = Math.round(message.height);
     }
+    if (message.nativeWidth !== 0) {
+      obj.nativeWidth = Math.round(message.nativeWidth);
+    }
+    if (message.nativeHeight !== 0) {
+      obj.nativeHeight = Math.round(message.nativeHeight);
+    }
     return obj;
   },
 
@@ -6077,6 +6144,8 @@ export const DesktopScreenshotResponse: MessageFns<DesktopScreenshotResponse> = 
     message.png = object.png ?? new Uint8Array(0);
     message.width = object.width ?? 0;
     message.height = object.height ?? 0;
+    message.nativeWidth = object.nativeWidth ?? 0;
+    message.nativeHeight = object.nativeHeight ?? 0;
     return message;
   },
 };
