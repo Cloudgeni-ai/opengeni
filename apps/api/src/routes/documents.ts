@@ -196,14 +196,17 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/knowledge/memories", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const payload = KnowledgeMemorySearchRequest.parse({
+    const parsed = KnowledgeMemorySearchRequest.safeParse({
       query: c.req.query("query") || undefined,
       status: c.req.query("status") || undefined,
       kind: c.req.query("kind") || undefined,
       scope: c.req.query("scope") || undefined,
       limit: c.req.query("limit") ? Number(c.req.query("limit")) : undefined,
     });
-    return c.json((await listKnowledgeMemories(db, workspaceId, payload)).map((memory) => KnowledgeMemory.parse(memory)));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid knowledge memory query parameters" });
+    }
+    return c.json((await listKnowledgeMemories(db, workspaceId, parsed.data)).map((memory) => KnowledgeMemory.parse(memory)));
   });
 
   app.get("/v1/workspaces/:workspaceId/knowledge/memories/:memoryId", async (c) => {

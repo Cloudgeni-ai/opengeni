@@ -41,7 +41,7 @@ BEGIN
   END IF;
 END $$;
 
-CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_status_idx" ON "knowledge_memories" ("workspace_id", "status");
+CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_status_idx" ON "knowledge_memories" ("workspace_id", "status", "updated_at");
 CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_kind_idx" ON "knowledge_memories" ("workspace_id", "kind");
 CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_scope_idx" ON "knowledge_memories" ("workspace_id", "scope");
 CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_created_by_session_idx" ON "knowledge_memories" ("workspace_id", "created_by_session_id");
@@ -53,7 +53,7 @@ DO $$
 BEGIN
   IF EXISTS (
     SELECT 1 FROM pg_policies
-    WHERE schemaname = 'public' AND tablename = 'knowledge_memories' AND policyname = 'workspace_isolation'
+    WHERE schemaname = current_schema() AND tablename = 'knowledge_memories' AND policyname = 'workspace_isolation'
   ) THEN
     DROP POLICY workspace_isolation ON "knowledge_memories";
   END IF;
@@ -65,6 +65,9 @@ CREATE POLICY workspace_isolation ON "knowledge_memories"
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
+    EXECUTE format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO opengeni_app',
+      current_schema()
+    );
   END IF;
 END $$;

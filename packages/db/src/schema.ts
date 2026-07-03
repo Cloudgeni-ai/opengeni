@@ -457,7 +457,7 @@ export const knowledgeMemories = pgTable("knowledge_memories", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
-  workspaceStatus: index("knowledge_memories_workspace_status_idx").on(table.workspaceId, table.status),
+  workspaceStatus: index("knowledge_memories_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt),
   workspaceKind: index("knowledge_memories_workspace_kind_idx").on(table.workspaceId, table.kind),
   workspaceScope: index("knowledge_memories_workspace_scope_idx").on(table.workspaceId, table.scope),
   createdBySession: index("knowledge_memories_workspace_created_by_session_idx").on(table.workspaceId, table.createdBySessionId),

@@ -2055,6 +2055,9 @@ export async function recordConnectionUsed(db: Database, workspaceId: string, co
       lastUsedAt: new Date(),
       updatedAt: new Date(),
     }).where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)));
+  });
+}
+
 export async function createKnowledgeMemory(db: Database, input: CreateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
   const text = requireDbString(input.text, "knowledge memory text");
   const scope = cleanDbString(input.scope) ?? "workspace";
@@ -2096,6 +2099,9 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
       ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
       ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      // Re-proposing clears review metadata; an explicit reviewedBy in the same
+      // update still wins via the later spread.
+      ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
       ...(reviewedBy !== undefined ? { reviewedBy } : {}),
       ...(reviewStatus ? { reviewedAt: new Date() } : {}),
       updatedAt: new Date(),
@@ -8522,6 +8528,11 @@ function mapConnectionMetadata(row: {
     metadata: row.metadata,
     createdBySubjectId: row.createdBySubjectId,
     updatedBySubjectId: row.updatedBySubjectId,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
 function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): KnowledgeMemory {
   return {
     id: row.id,

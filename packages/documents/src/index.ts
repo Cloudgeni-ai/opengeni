@@ -331,7 +331,23 @@ export async function addDocumentToBase(db: Database, input: AddDocumentRequest 
       .where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.baseId, input.baseId), eq(schema.documents.fileId, input.fileId)))
       .limit(1);
     if (existing) {
-      return mapDocument(existing);
+      // Idempotent re-add: refresh caller-supplied source metadata on the
+      // existing row instead of silently discarding it (aclTags especially —
+      // a re-add that tightens tags must not be a no-op).
+      const [updated] = await scopedDb.update(schema.documents).set({
+        title: cleanString(input.title) ?? cleanString(input.sourceTitle) ?? existing.title,
+        ...(input.sourceKind !== undefined ? { sourceKind: input.sourceKind } : {}),
+        sourceUri: cleanString(input.sourceUri) ?? existing.sourceUri,
+        sourceExternalId: cleanString(input.sourceExternalId) ?? existing.sourceExternalId,
+        sourceTitle: cleanString(input.sourceTitle) ?? existing.sourceTitle,
+        sourceAuthor: cleanString(input.sourceAuthor) ?? existing.sourceAuthor,
+        sourceCreatedAt: parseOptionalDate(input.sourceCreatedAt) ?? existing.sourceCreatedAt,
+        sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt) ?? existing.sourceUpdatedAt,
+        sourceVersion: cleanString(input.sourceVersion) ?? existing.sourceVersion,
+        ...(input.aclTags !== undefined ? { aclTags: cleanStringArray(input.aclTags) } : {}),
+        updatedAt: now,
+      }).where(and(eq(schema.documents.workspaceId, input.workspaceId), eq(schema.documents.id, existing.id))).returning();
+      return mapDocument(updated ?? existing);
     }
     const [row] = await scopedDb.insert(schema.documents).values({
       accountId: input.accountId,

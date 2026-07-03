@@ -3073,6 +3073,23 @@ describe("API component integration", () => {
       console.warn = originalWarn;
     }
 
+    const readdResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents`), {
+      method: "POST",
+      body: JSON.stringify({
+        fileId: upload.fileId,
+        sourceKind: "document",
+        sourceAuthor: "security team",
+        aclTags: ["platform"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(readdResponse.status).toBe(200);
+    const readded = await readdResponse.json() as { id: string; sourceKind: string; sourceAuthor: string | null; aclTags: string[] };
+    expect(readded.id).toBe(document.id);
+    expect(readded.sourceKind).toBe("document");
+    expect(readded.sourceAuthor).toBe("security team");
+    expect(readded.aclTags).toEqual(["platform"]);
+
     const deleteResponse = await app.request(workspacePath(workspaceId, `/document-bases/${base.id}/documents/${document.id}`), { method: "DELETE" });
     expect(deleteResponse.status).toBe(204);
     expect(await deleteResponse.text()).toBe("");
@@ -3145,6 +3162,22 @@ describe("API component integration", () => {
     const memories = await approvedSearchAfter.json() as Array<{ id: string; text: string }>;
     expect(memories[0]?.id).toBe(proposed.id);
     expect(memories[0]?.text).toContain("Azure Blob");
+
+    const invalidLimitResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories?limit=abc"));
+    expect(invalidLimitResponse.status).toBe(400);
+    const invalidStatusResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=pending"));
+    expect(invalidStatusResponse.status).toBe(400);
+
+    const reproposedResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposed.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "proposed" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(reproposedResponse.status).toBe(200);
+    const reproposed = await reproposedResponse.json() as { status: string; reviewedBy: string | null; reviewedAt: string | null };
+    expect(reproposed.status).toBe("proposed");
+    expect(reproposed.reviewedBy).toBeNull();
+    expect(reproposed.reviewedAt).toBeNull();
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
