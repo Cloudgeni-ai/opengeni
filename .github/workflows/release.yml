@@ -196,6 +196,8 @@ jobs:
           target: api
           platforms: linux/amd64
           push: true
+          build-args: |
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: |
             ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.version }}
             ghcr.io/cloudgeni-ai/opengeni-api:sha-${{ steps.meta.outputs.sha }}
@@ -209,6 +211,8 @@ jobs:
           target: worker
           platforms: linux/amd64
           push: true
+          build-args: |
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: |
             ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.version }}
             ghcr.io/cloudgeni-ai/opengeni-worker:sha-${{ steps.meta.outputs.sha }}
@@ -224,6 +228,7 @@ jobs:
           push: true
           build-args: |
             OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: |
             ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.version }}
             ghcr.io/cloudgeni-ai/opengeni-web:sha-${{ steps.meta.outputs.sha }}

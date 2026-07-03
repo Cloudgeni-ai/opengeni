@@ -2,6 +2,9 @@ FROM oven/bun:1.3.13 AS base
 
 WORKDIR /app
 
+ARG OPENGENI_SERVER_VERSION
+ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
+
 COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
