@@ -43,6 +43,7 @@ import {
   type AgentInputItem,
   type CallModelInputFilter,
   type MCPServer,
+  type MCPToolErrorFunction,
   type Model,
   type ModelProvider,
   type RunStreamEvent,
@@ -918,6 +919,42 @@ const agentGitTokenSeed = new WeakMap<object, string>();
 // connected machines (a user's real computer).
 const agentActiveSandboxBackend = new WeakMap<object, Settings["sandboxBackend"]>();
 
+/**
+ * The tool output emitted for an MCP tool call that FAILED with a THROWN error
+ * — a JSON-RPC protocol error (e.g. -32602 invalid params), an auth 401/403, a
+ * transport failure, a timeout, or tool-not-found. Shaped as an MCP
+ * `{ isError: true, content }` result so the failure is CARRIED on the tool
+ * output rather than erased.
+ *
+ * The SDK's `defaultToolErrorFunction` would instead turn a thrown tool error
+ * into a plain STRING ("An error occurred while running the tool…") returned as
+ * a NORMAL, successful-looking result — so `agent.toolCall.output` carried no
+ * error signal and the timeline rendered the failure as success. `normalizeSdkEvent`
+ * captures `RunToolCallOutputItem.output` (the raw function return) verbatim, so
+ * returning this object makes the emitted payload's `output.isError === true`,
+ * which the timeline projection's `isErrorOutput` (packages/react/src/timeline/
+ * projection.ts) settles to "failed" and downstream client normalizers read the same field.
+ *
+ * SCOPE: this only covers THROWN MCP failures (the ones that reach an
+ * errorFunction). An MCP tool result carrying `isError: true` INLINE alongside
+ * content is stripped to its `content` by @openai/agents-core's streamable-http
+ * shim (dist/shims/mcp-server/node.js `callTool` returns `parsed.content`,
+ * dropping `parsed.isError`) BEFORE the runtime ever sees it. Covering that mode
+ * requires an SDK-level change (preserve `isError`) or reading the raw
+ * CallToolResult — tracked separately.
+ */
+export function mcpToolErrorOutput(error: unknown): { isError: true; content: [{ type: "text"; text: string }] } {
+  const details = error instanceof Error ? error.message : String(error);
+  return { isError: true, content: [{ type: "text", text: `An error occurred while running the tool. Please try again. Error: ${details}` }] };
+}
+
+// Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`
+// (server-level errorFunctions would win, but PrefixedMcpServer sets none). The
+// SDK types the return as `string`; the runtime actually stores the raw return
+// as the tool output, so we return the MCP-shaped error object and cast — this
+// is the only way to attach an `isError` flag to a failed MCP tool call's output.
+const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) => mcpToolErrorOutput(error) as unknown as string;
+
 export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[], options: BuildAgentOptions = {}): Agent<any, any> {
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
@@ -993,6 +1030,13 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
     ...(hostedTools.length ? { tools: hostedTools } : {}),
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
+    // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
+    // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
+    // flat error string, so a thrown MCP failure (protocol error, auth, timeout,
+    // tool-not-found) settles the timeline tool to "failed" rather than rendering
+    // as success. Applies to every MCP server on this agent (session, first-party,
+    // capability, codex_apps) since none set a server-level errorFunction.
+    mcpConfig: { errorFunction: mcpToolErrorFunction },
   } as const;
 
   if (settings.sandboxBackend === "none") {

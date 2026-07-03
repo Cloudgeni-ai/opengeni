@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -253,6 +253,49 @@ describe("runtime event normalization", () => {
     test("MCP isError object output is unchanged", () => {
       const mcp = { isError: true, content: [{ type: "text", text: "delivery failed" }] };
       expect(normalizeToolOutputForEvent(mcp)).toEqual(mcp);
+    });
+  });
+
+  describe("failed MCP tool calls carry an isError flag", () => {
+    test("mcpToolErrorOutput shapes a thrown error as an MCP isError result", () => {
+      const out = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
+      expect(out.isError).toBe(true);
+      expect(out.content[0]?.text).toContain("-32602");
+      // Non-Error values stringify rather than throwing.
+      expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
+    });
+
+    test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
+      // Both agent paths share baseConfig, so both carry the errorFunction.
+      for (const backend of ["none", "docker"] as const) {
+        const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: backend }), []);
+        const errorFunction = (agent as any).mcpConfig?.errorFunction as
+          | ((args: { context: unknown; error: unknown }) => unknown)
+          | undefined;
+        expect(typeof errorFunction).toBe("function");
+        // The runtime stores the raw return as the tool output; it must be an
+        // isError object (not the SDK's flat default string) so the timeline
+        // projection settles the tool to "failed".
+        const produced = errorFunction!({ context: {}, error: new Error("boom") });
+        expect((produced as { isError?: unknown }).isError).toBe(true);
+      }
+    });
+
+    test("an isError tool output survives normalizeSdkEvent as the event output", () => {
+      const errored = mcpToolErrorOutput(new Error("MCP error -32602: Invalid params"));
+      const [event] = normalizeSdkEvent({
+        type: "run_item_stream_event",
+        item: {
+          id: "item-err",
+          type: "tool_call_output_item",
+          rawItem: { callId: "call-err", type: "function_call_result" },
+          output: errored,
+        },
+      } as any);
+      expect(event?.type).toBe("agent.toolCall.output");
+      const payload = event?.payload as { id: string; output: { isError?: unknown } };
+      expect(payload.id).toBe("call-err");
+      expect(payload.output.isError).toBe(true);
     });
   });
 
