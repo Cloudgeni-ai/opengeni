@@ -172,7 +172,29 @@ and migration images are pinned.
 
 ## Helm
 
-Render the chart with an existing secret:
+Released OpenGeni charts are published to GHCR as OCI artifacts. For release
+installs, pin the chart version explicitly; the release pipeline packages the
+chart with `appVersion` set to the same OpenGeni version, and the default image
+tags resolve to that appVersion:
+
+```bash
+OPENGENI_VERSION="<published-version>"
+
+helm upgrade --install opengeni oci://ghcr.io/cloudgeni-ai/charts/opengeni \
+  --namespace opengeni \
+  --create-namespace \
+  --version "$OPENGENI_VERSION" \
+  --set secret.existingSecret=opengeni-runtime
+```
+
+Use the repo checkout chart path only for development, chart edits, local
+rendering, or smoke tests against locally built images. `deploy/helm/opengeni`
+keeps a source-tree `Chart.yaml` version for development; releases do not commit
+Chart.yaml bumps. If you install from a clone instead of the OCI chart, set
+`api.image.tag`, `worker.image.tag`, `web.image.tag`, `migrations.image.tag`,
+and, when enabled, `relay.image.tag` to the image tag you intend to run.
+
+Render the development chart path with an existing secret:
 
 ```bash
 helm template opengeni deploy/helm/opengeni \

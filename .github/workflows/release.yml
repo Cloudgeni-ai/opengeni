@@ -137,6 +137,9 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "sha=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -146,6 +149,23 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and push Helm chart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "$GHCR_TOKEN" | helm registry login ghcr.io \
+            --username "${{ github.actor }}" \
+            --password-stdin
+          mkdir -p .release/charts
+          helm package deploy/helm/opengeni \
+            --destination .release/charts \
+            --version "$RELEASE_VERSION" \
+            --app-version "$RELEASE_VERSION"
+          helm push ".release/charts/opengeni-${RELEASE_VERSION}.tgz" "oci://ghcr.io/${org}/charts"
 
       # "The agent ships inside the control-plane": compile + SIGN the per-SHA agent
       # binaries and stage them into agent/install/baked/ BEFORE the API image build,
