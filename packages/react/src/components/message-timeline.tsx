@@ -368,7 +368,7 @@ function TimelineGroupView({
 }) {
   switch (group.kind) {
     case "activity":
-      return group.outcome || foldLiveCluster ? (
+      return group.outcome || (foldLiveCluster && clusterIsSettled(group)) ? (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
@@ -421,6 +421,18 @@ function timelineGroupKey(group: TimelineGroup): string {
     case "turn":
       return group.id;
   }
+}
+
+/** No item still running or streaming — the only state safe to fold live.
+    Position alone is a broken proxy: a pending queued message (or any trailing
+    item) can sit after the ACTIVE cluster, which must never fold mid-work. */
+function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): boolean {
+  return group.items.every((item) => {
+    if (item.kind === "reasoning") {
+      return !item.streaming;
+    }
+    return item.status !== "running";
+  });
 }
 
 function flattenActivityItems(groups: TimelineGroup[]): ActivityItem[] {

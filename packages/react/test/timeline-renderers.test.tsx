@@ -231,6 +231,33 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("a STREAMING cluster never folds, even when a pending queued message sits after it", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Do a long job" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
+      timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
+      // The ACTIVE cluster: tool call still running (no output yet).
+      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two running" } }),
+      // A queued follow-up renders at the tail (#197 pending anchoring) —
+      // making the running cluster second-to-last. It must STILL not fold.
+      timelineEvent("user.message", { text: "queued follow-up" }, null),
+      timelineEvent("turn.queued", { turnId: "turn-b", triggerEventId: "timeline-evt-7", source: "user" }, "turn-b"),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} status="running" />);
+    await flush();
+
+    // The settled first cluster folds; the RUNNING second cluster stays bare.
+    const triggers = turnSummaryTriggers(r.container);
+    expect(triggers).toHaveLength(1);
+    expect(r.container.textContent).toContain("step two running");
+    expect(r.container.textContent).toContain("queued follow-up");
+
+    await r.unmount();
+  });
+
   test("when the running turn settles, live-cluster chips give way to the single turn fold", async () => {
     resetTimelineEvents();
     const events = [
