@@ -122,3 +122,39 @@ API and worker must share the same broker-backed EventBus binding. The productio
 Do not replace this with an in-memory bus in an embedded deployment. In-memory fanout only reaches subscribers in the same process and would make worker -> API live SSE silently disappear; clients would only recover on replay/gap backfill.
 
 For embedded UIs that page historical timelines, prefer `GET .../events?compact=1` (or SDK `listEvents(..., { compact: true })`) for windowed replay. It coalesces consecutive delta fragments in the page while preserving first-member `sequence`; use `payload.coalescedUntil` as the resume cursor for the live SSE stream. Streaming/gap backfill should keep using raw sequence replay.
+
+## Trust model
+
+The embed boundary has a deliberate split of authority. Getting this wrong in
+either direction creates real vulnerabilities (too little host gating) or
+pointless coupling (host ownership of engine internals), so it is a contract:
+
+**The host owns the perimeter and external identity.**
+
+- Every request reaching the mounted api-router has already passed the HOST's
+  authentication. OpenGeni's own checks (delegated tokens, API keys) are the
+  second gate, not the first — an embedded deployment must never be reachable
+  except through the host's front door.
+- The host decides which of its principals maps to which OpenGeni
+  account/workspace, and mints `ogd_` delegated tokens (with the deployment's
+  delegation secret) to act as them. Admission policy that depends on the
+  host's business state (plans, quotas, feature gates) enters through the
+  entitlements port on the worker side.
+
+**The engine owns its internal plumbing tokens.**
+
+- First-party MCP delegated tokens, stream tokens, and NATS credentials are
+  self-minted by the engine with its own secrets. They never leave the engine's
+  trust domain (the host's process and infrastructure), so routing them through
+  a host token issuer would add coupling without adding security. Do not expect
+  a port for these; there isn't one on purpose.
+- Corollary for hosts: protect the engine's secrets (delegation secret,
+  encryption keys) exactly like your own signing keys — inside the engine's
+  trust domain they are root authority.
+
+**API-side admission is local by design.** The API validates structure,
+permissions, and workspace scoping; host-specific admission (may this tenant
+run another turn?) is enforced where the work actually starts — the worker's
+entitlements port. A request can therefore be *accepted* by the API and still
+be *declined* at run admission; hosts that want earlier rejection should gate
+at their own perimeter, which they control.

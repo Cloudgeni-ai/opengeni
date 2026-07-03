@@ -105,6 +105,9 @@ const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
   deploymentRevision: z.string().default("dev"),
+  // The release-train version baked into official images (OPENGENI_SERVER_VERSION).
+  // Absent on dev/source builds — consumers must treat it as optional.
+  serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
@@ -835,6 +838,7 @@ export function getSettings(): Settings {
     serviceName: optional("OPENGENI_SERVICE_NAME"),
     environment: optional("OPENGENI_ENVIRONMENT"),
     deploymentRevision: optional("OPENGENI_DEPLOYMENT_REVISION") ?? optional("SOURCE_VERSION") ?? optional("GITHUB_SHA"),
+    serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),

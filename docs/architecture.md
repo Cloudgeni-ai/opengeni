@@ -142,6 +142,28 @@ A **Connected Machine** (the `selfhosted` backend) is a user's own physical mach
 - **Sandbox-access import discipline in the API:** `apps/api` accesses sandbox symbols **only** via the agent-loop-free leaf `@opengeni/runtime/sandbox`, never the bare `@opengeni/runtime` barrel (which pulls the agent loop into the API process). Enforced by a guard test.
 - **The npm publish closure is the full `@opengeni/*` runtime closure.** Stage C publishes the client packages plus the server/embed packages they need (`api-router`, `worker-bundle`, `core`, `config`, `db`, `runtime`, `events`, `storage`, `documents`, `github`, `observability`, `codex`, `agent-proto`, etc.). Leaf apps/test/deployment-only packages may stay ignored only when no publishable package depends on them. The client bundle remains stricter: `sdk` is zero-runtime-dep and `react` may only depend on `sdk` among `@opengeni/*`.
 
+### 3.10 Client/server compatibility policy
+
+The published clients (`@opengeni/sdk`, `@opengeni/react`) and a server build
+are compatible when they share a **major version**; within a major, evolution
+is **additive only** and both sides are tolerant readers:
+
+- Servers ignore unknown request params; new params must degrade gracefully
+  when absent (e.g. `compact=1` on the events route — an older server simply
+  returns uncompacted pages and the client renders identically).
+- Clients ignore unknown response fields and unknown event types; the react
+  timeline projection is a tolerant reader by construction, pinned by the
+  golden event-grammar suite in `packages/react`.
+- Removing or re-typing an existing field/param/event shape is a MAJOR bump —
+  of the whole release train (sdk and react versions are changeset-linked; the
+  server images are tagged with the same train version).
+
+Official server images carry the train version in `OPENGENI_SERVER_VERSION`,
+surfaced on `/healthz` and `/v1/config/client` as `serverVersion` (absent on
+dev/source builds). There is deliberately **no runtime version negotiation** —
+the policy above plus tolerant readers is the mechanism; a client that wants to
+assert compatibility reads `serverVersion` and compares majors.
+
 ---
 
 ## 4. System architecture

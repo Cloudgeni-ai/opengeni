@@ -163,6 +163,23 @@ Every public endpoint group has typed methods:
 | API keys | `listApiKeys`, `createApiKey`, `deleteApiKey` |
 | Billing | `getBilling`, `getBillingUsage`, `getBillingEntitlements`, `createBillingCheckout` |
 
+### Protocol routes (deliberately not in the SDK)
+
+Some endpoints are wire protocols for specific counterparts, not client
+surface, and are intentionally absent from the SDK: machine-agent enrollment
+device flow and NATS auth-callout, viewer/stream internals beyond minting,
+OAuth/GitHub browser callbacks, Stripe webhooks, the MCP transports themselves
+(`/v1/workspaces/:id/mcp`, `/mcp/docs` — speak MCP to those), and the install
+script routes. If you find yourself calling one of these raw from a product,
+reconsider — they can change with their counterpart, not with the SDK.
+
+## Compatibility
+
+Clients and servers are compatible within the same **major** release-train
+version; evolution is additive within a major and both sides are tolerant
+readers. Official server builds expose `serverVersion` on `/healthz` and
+`/v1/config/client`. Full policy: `docs/architecture.md` §3.10.
+
 ## Proxy through your own API
 
 Keep your OpenGeni API key on your server and re-emit the stream to your own
