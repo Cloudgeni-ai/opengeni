@@ -117,6 +117,11 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(cmd).toContain("wc -c < ");
     expect(cmd).toContain("-ge 60000");
     expect(cmd).not.toContain("[ -s ");
+    // SETTLE: must also require two consecutive above-floor probes that agree within the
+    // settle delta (the gVisor staged-paint fix), not merely a single floor crossing.
+    expect(cmd).toContain("prev=0");
+    expect(cmd).toContain('"$prev" -ge 60000');
+    expect(cmd).toContain("-le 2000");
     expect(cmd).toContain("exit 14");
     expect(cmd).toContain("OPENGENI_DESKTOP_NOT_PAINTING");
     // chained so a failed bring-up never reaches the paint probe.

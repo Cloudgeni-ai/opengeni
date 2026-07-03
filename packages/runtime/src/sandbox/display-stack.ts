@@ -60,6 +60,22 @@ const PAINT_PROBE_INTERVAL_S = 0.2;
 // framebuffer only scales the painted frame further above the floor.)
 const PAINT_MIN_BYTES = 60_000;
 
+// SETTLE gate (the gVisor staged-paint fix): crossing the 60 KB floor is necessary but
+// NOT sufficient. On a fast runc host the paint is atomic (black 13.5 KB -> full 209 KB
+// in one step, panel + icons included). On a STONE-COLD gVisor Modal box it is STAGED:
+// the wallpaper gradient paints and crosses 60 KB a beat BEFORE xfdesktop draws the
+// panel / launcher icons / logo. A screenshot in that window shows a bare teal wallpaper
+// with no panel — which the model correctly reports as "graphical, but the desktop
+// hasn't fully loaded" (VERIFIED live on staging: a cold-box turn's first agent
+// screenshot caught exactly this). So the gate additionally waits for the frame to
+// SETTLE: two consecutive probes both above the floor whose byte-sizes agree within
+// PAINT_SETTLE_DELTA_BYTES. A still-painting desktop grows between probes; a fully
+// rendered, static one is byte-stable (scrot -o omits the cursor, and the clock is
+// minute-precision, so consecutive captures of a settled desktop are near-identical).
+// This makes ensureDisplayStack block until the FULL desktop is up, so the turn's first
+// screenshot — which runs AFTER this gate — sees the panel, not a bare wallpaper.
+const PAINT_SETTLE_DELTA_BYTES = 2_000;
+
 /** Desktop geometry for the framebuffer. v1 has no live RANDR: a resolution
  *  change is a full down -> up restart (a separate op). */
 export type DesktopGeometry = {
@@ -197,17 +213,22 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
     `env ${env} opengeni-desktop-up; ` +
     `fi`;
   const paintProbe =
-    `p=/tmp/opengeni-desktop/paint-probe.png; ` +
+    `p=/tmp/opengeni-desktop/paint-probe.png; prev=0; ` +
     `for i in $(seq 1 ${PAINT_PROBE_ATTEMPTS}); do ` +
     // Capture, then measure the PNG byte-size. `wc -c < "$p"` yields a bare integer; a
     // failed scrot leaves sz=0. A frame at/above PAINT_MIN_BYTES is a real painted desktop.
     `if DISPLAY=:0 scrot -o "$p" >/dev/null 2>&1; then sz=$(wc -c < "$p" 2>/dev/null || echo 0); else sz=0; fi; ` +
     `rm -f "$p"; ` +
-    `if [ "$sz" -ge ${PAINT_MIN_BYTES} ]; then break; fi; ` +
+    // SETTLE: accept only when THIS probe AND the PREVIOUS one are both above the floor
+    // and their sizes agree within PAINT_SETTLE_DELTA_BYTES — i.e., the paint has stopped
+    // growing (the full desktop, panel + icons included, is up), not merely crossed the
+    // floor mid-paint on a staged gVisor boot. ($sz/$prev/$d are bare shell — no ${}
+    // braces — so JS leaves them for bash; ${PAINT_*} ARE JS constants and interpolate.)
+    `if [ "$sz" -ge ${PAINT_MIN_BYTES} ] && [ "$prev" -ge ${PAINT_MIN_BYTES} ]; then d=$((sz-prev)); [ "$d" -lt 0 ] && d=$((0-d)); [ "$d" -le ${PAINT_SETTLE_DELTA_BYTES} ] && break; fi; ` +
+    `prev=$sz; ` +
     // NOTE: NOT_PAINTING goes to STDOUT (not stderr): Modal is execCommand-only, so the
     // caller infers the outcome by string-matching the output — stdout is always captured.
-    // ($sz is bare shell here — no ${} braces — so JS leaves it for bash to expand.)
-    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot below ${PAINT_MIN_BYTES}B after warmup (last=$sz)"; exit 14; fi; ` +
+    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot below ${PAINT_MIN_BYTES}B or unsettled after warmup (last=$sz)"; exit 14; fi; ` +
     `sleep ${PAINT_PROBE_INTERVAL_S}; ` +
     `done`;
   return `mkdir -p /tmp/opengeni-desktop; { ${bringUp} ; } && { ${paintProbe} ; }`;
