@@ -187,15 +187,35 @@ export function buildConnectionTokenResolver(
       try {
         cred = await refreshSingleFlight(cred, ref);
       } catch (error) {
-        await deps.setStatus(db, input.workspaceId, "needs_reauth", error instanceof Error ? error.message : String(error), {
-          id: cred.id,
-          version: cred.version,
-        }).catch(() => undefined);
+        // Only a rejected grant may poison the connection; transient failures
+        // (network errors, AS 5xx) leave it active so the next resolve retries.
+        if (isPermanentRefreshError(error)) {
+          await deps.setStatus(db, input.workspaceId, "needs_reauth", error instanceof Error ? error.message : String(error), {
+            id: cred.id,
+            version: cred.version,
+          }).catch(() => undefined);
+        }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
     }
     return await snapshot(cred, ref);
   };
+}
+
+export class ConnectionRefreshHttpError extends Error {
+  readonly httpStatus: number;
+
+  constructor(httpStatus: number) {
+    super(`connection refresh failed with HTTP ${httpStatus}`);
+    this.name = "ConnectionRefreshHttpError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+// The token endpoint rejecting the grant itself (4xx) means re-auth is the only
+// way forward; anything else — network failure, AS 5xx — is retryable.
+function isPermanentRefreshError(error: unknown): boolean {
+  return error instanceof ConnectionRefreshHttpError && error.httpStatus >= 400 && error.httpStatus < 500;
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
@@ -283,7 +303,7 @@ export async function refreshOAuthConnectionCredential(
     body,
   });
   if (!response.ok) {
-    throw new Error(`connection refresh failed with HTTP ${response.status}`);
+    throw new ConnectionRefreshHttpError(response.status);
   }
   const payload = await response.json() as Record<string, unknown>;
   const accessToken = stringValue(payload.access_token);

@@ -5,6 +5,7 @@ import { acquireSharedTestDatabase, testSettings, type SharedTestDatabase } from
 import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
+  ConnectionRefreshHttpError,
   createConnection,
   createDb,
   encryptEnvironmentValue,
@@ -358,5 +359,55 @@ describe("buildConnectionTokenResolver", () => {
       { status: "ok", headers: { authorization: "Bearer AC2" }, connectionId: "conn_oauth", expiresAt: refreshed.expiresAt },
       { status: "ok", headers: { authorization: "Bearer AC2" }, connectionId: "conn_oauth", expiresAt: refreshed.expiresAt },
     ]);
+  });
+
+  test("a transient refresh failure (AS 5xx / network) does not poison the connection", async () => {
+    const stale = brokerCredential({
+      id: "conn_oauth",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(Date.now() - 1_000),
+      version: 3,
+    });
+    const { deps, counts } = resolverDeps({
+      loadCredential: async () => stale,
+      refresh: async () => {
+        counts.refresh += 1;
+        throw new ConnectionRefreshHttpError(503);
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+    });
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+    expect(counts.status).toBe(0);
+  });
+
+  test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
+    const stale = brokerCredential({
+      id: "conn_oauth",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(Date.now() - 1_000),
+      version: 3,
+    });
+    const { deps, counts } = resolverDeps({
+      loadCredential: async () => stale,
+      refresh: async () => {
+        counts.refresh += 1;
+        throw new ConnectionRefreshHttpError(400);
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+    });
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+    expect(counts.status).toBe(1);
   });
 });
