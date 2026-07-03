@@ -10,12 +10,12 @@ metadata:
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/path: {{ .Values.observability.metrics.path | quote }}
-    prometheus.io/port: {{ .Values.worker.service.port | quote }}
+    prometheus.io/port: {{ (.Values.worker.service).port | default 8001 | quote }}
   {{- end }}
 spec:
-  type: {{ .Values.worker.service.type }}
+  type: {{ (.Values.worker.service).type | default "ClusterIP" }}
   ports:
-    - port: {{ .Values.worker.service.port }}
+    - port: {{ (.Values.worker.service).port | default 8001 }}
       targetPort: http
       protocol: TCP
       name: http
