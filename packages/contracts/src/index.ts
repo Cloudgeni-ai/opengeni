@@ -429,20 +429,6 @@ export const ErrorEnvelope = z.object({
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
-export const PageInfo = z.object({
-  limit: z.number().int().positive(),
-  nextCursor: z.string().nullable(),
-  hasMore: z.boolean(),
-});
-export type PageInfo = z.infer<typeof PageInfo>;
-
-export function paginated<T extends z.ZodTypeAny>(item: T) {
-  return z.object({
-    data: z.array(item),
-    page: PageInfo,
-  });
-}
-
 export const Permission = z.enum([
   "account:read",
   "account:admin",
@@ -3493,6 +3479,10 @@ export type ClientModel = z.infer<typeof ClientModel>;
 
 export const ClientConfig = z.object({
   deploymentRevision: z.string(),
+  // Release-train version of the server (absent on dev/source builds). The
+  // compatibility policy lives in docs/architecture.md — clients within the
+  // same major are supported; evolution is additive within a major.
+  serverVersion: z.string().optional(),
   defaultModel: z.string(),
   allowedModels: z.array(z.string()).min(1),
   // Richer model list (provider-grouped) for the picker. Defaults to [] for

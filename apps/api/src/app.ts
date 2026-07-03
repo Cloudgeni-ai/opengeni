@@ -167,6 +167,7 @@ export function createApp(deps: AppDependencies): Hono {
     service: deps.settings.serviceName,
     environment: deps.settings.environment,
     deploymentRevision: deps.settings.deploymentRevision,
+    ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
     ok: true,
   }));
 
@@ -181,6 +182,7 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.get("/v1/config/client", (c) => c.json(ClientConfig.parse({
     deploymentRevision: deps.settings.deploymentRevision,
+    ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
     defaultModel: deps.settings.openaiModel,
     allowedModels: configuredAllowedModels(deps.settings),
     // Provider-grouped model list for the picker. configuredModels() carries the
