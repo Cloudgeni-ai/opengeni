@@ -260,7 +260,7 @@ jobs:
           echo "$APPLE_CERT_P12" | base64 -d > /tmp/cert.p12
           # Sign the WHOLE bundle with the hardened runtime + the stable identifier.
           rcodesign sign --p12-file /tmp/cert.p12 --p12-password "$APPLE_CERT_PASSWORD" \
-            --code-signature-flags runtime --identifier ai.opengeni.agent "$APP"
+            --code-signature-flags runtime --binary-identifier ai.opengeni.agent "$APP"
           # Zip with the .app dir as the archive root (install.sh extracts into
           # ~/Applications and expects exactly that layout).
           ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"
