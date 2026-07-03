@@ -24,7 +24,12 @@ export type { TurnOutcome } from "./types";
 export type TurnSummaryProps = {
   /** The activity items in the turn (used only to compute the facet counts). */
   items: ActivityItem[];
-  outcome: TurnOutcome;
+  /**
+   * The settled verdict — or absent for a completed CLUSTER of a still-running
+   * turn, which folds neutrally: no verdict glyph (the turn has none yet), a
+   * quiet pulse dot in its place so alignment and the running feel both hold.
+   */
+  outcome?: TurnOutcome | undefined;
   /** A short failure reason shown inline on a failed chip (never hidden). */
   failureText?: string | undefined;
   /** Elapsed turn duration; shown as a trailing facet when at least 1s. */
@@ -78,8 +83,10 @@ export function TurnSummary({ items, outcome, failureText, durationMs, defaultOp
             <TriangleAlertIcon className="size-3" />
           ) : outcome === "cancelled" ? (
             <CircleSlashIcon className="size-3" />
-          ) : (
+          ) : outcome === "complete" ? (
             <CheckIcon className="size-3.5" />
+          ) : (
+            <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
           )}
         </span>
         <span className="min-w-0 flex-1 truncate text-og-fg-muted">

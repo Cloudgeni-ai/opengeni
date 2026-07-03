@@ -204,6 +204,59 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("completed clusters of a RUNNING turn fold behind neutral chips; the live tail stays bare", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Do a long job" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
+      timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
+      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two" } }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} status="running" />);
+    await flush();
+
+    const triggers = turnSummaryTriggers(r.container);
+    // Exactly ONE chip: the completed first cluster. It is NEUTRAL — no verdict
+    // glyph (chevron is the only svg; the slot holds the pulse dot span).
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(1);
+    expect(triggers[0]?.querySelector(".animate-og-pulse")).not.toBeNull();
+    // The live tail cluster renders bare: its command is visible without expanding.
+    expect(r.container.textContent).toContain("step two");
+    // The folded cluster's contents are NOT in the DOM until expanded.
+    expect(r.container.textContent).not.toContain("step one");
+
+    await r.unmount();
+  });
+
+  test("when the running turn settles, live-cluster chips give way to the single turn fold", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Do a long job" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "step one" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-1", output: "ok" }),
+      timelineEvent("agent.message.delta", { text: "Step one done, moving on." }),
+      timelineEvent("agent.message.completed", { text: "Step one done, moving on." }),
+      timelineEvent("agent.toolCall.created", { id: "call-2", name: "exec_command", arguments: { cmd: "step two" } }),
+      timelineEvent("agent.toolCall.output", { id: "call-2", output: "ok" }),
+      timelineEvent("agent.message.completed", { text: "All finished." }),
+      timelineEvent("turn.completed", {}),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const triggers = turnSummaryTriggers(r.container);
+    // One settled OUTER chip (check glyph present: chevron + check = 2 svgs);
+    // the final answer sits outside it.
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]?.querySelectorAll("svg")).toHaveLength(2);
+    expect(r.container.textContent).toContain("All finished.");
+
+    await r.unmount();
+  });
+
   test("nested chips inside a failed turn stay quiet — the outer chip owns the failure", async () => {
     resetTimelineEvents();
     const events = [

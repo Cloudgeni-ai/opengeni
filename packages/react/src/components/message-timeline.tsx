@@ -279,13 +279,14 @@ export function MessageTimeline({
               <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
             </div>
           ) : null}
-          {groups.map((group) => (
+          {groups.map((group, index) => (
             <TimelineGroupView
               key={timelineGroupKey(group)}
               group={group}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
               toolRegistry={toolRegistry}
+              foldLiveCluster={index < groups.length - 1}
             />
           ))}
           {working ? (
@@ -350,11 +351,16 @@ function TimelineGroupView({
   onOpenSession,
   toolRegistry,
   insideTurn = false,
+  foldLiveCluster = false,
 }: {
   group: TimelineGroup;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   toolRegistry: ToolRegistry;
+  /** A completed cluster of a still-RUNNING turn (not the live tail) folds
+      behind a neutral chip — the one place activity without an outcome still
+      folds, bounding the DOM of days-long autonomous turns. */
+  foldLiveCluster?: boolean;
   /** Rendering inside an expanded turn group: the outer chip already owns the
       failure surface, so nested chips stay tinted but quiet (no repeated
       failure text, no auto-open) — one loud error, N calm sub-expands. */
@@ -362,7 +368,7 @@ function TimelineGroupView({
 }) {
   switch (group.kind) {
     case "activity":
-      return group.outcome ? (
+      return group.outcome || foldLiveCluster ? (
         <TurnSummary
           items={group.items}
           outcome={group.outcome}
