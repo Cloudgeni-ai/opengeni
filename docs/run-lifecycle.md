@@ -36,13 +36,17 @@ failing the session, so a top-up lets the same session continue.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
-`runAgentTurn` forces client-side compaction and makes one bounded recovery
-attempt. If no model/tool progress was persisted for this turn, it retries the
-run once in the same activity against the compacted history. If progress was
-already persisted, it does not replay the trigger; it publishes a clear
-`turn.failed` recovery message, leaves the session `idle`, and the next user
-message continues on compacted history. A second overflow in the same turn falls
-through to the normal failure path so recovery cannot loop.
+`runAgentTurn` forces client-side compaction through a bounded recovery
+pipeline. Compaction first summarizes a rendered transcript, retries once with a
+hard-trimmed rendered transcript on summarizer failure, then falls back to a
+deterministic non-LLM rebuild if the summarizer still fails. A
+`compacted:false` result is never a retry ticket. If no model/tool progress was
+persisted for this turn, the activity retries only after an actual compacted
+write, bounded by a per-turn recovery cap. If progress was already persisted,
+it does not replay the trigger; it requeues the turn with a compaction resume
+notice when possible, or publishes a clear recovery message and leaves the
+session `idle`. Exhausted or impossible compaction fails with an error that
+names compaction summarization/fallback, not the threshold event.
 
 Sandbox lease warming is bounded for the same reason: it is a capacity/setup
 symptom, not legitimate agent work. A turn that attaches while another worker is

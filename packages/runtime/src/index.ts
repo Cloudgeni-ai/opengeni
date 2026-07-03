@@ -151,8 +151,10 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 export {
   CompactionNeededError,
   buildCompactionPromptInput,
+  buildDeterministicFallbackCompactionHistory,
   buildCompactionReplacementHistory,
   clientCompactionThresholdTokens,
+  clampCompactionThresholdRatio,
   decideClientCompaction,
   enforceInputBudget,
   buildSummaryItem,
@@ -166,7 +168,9 @@ export {
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
   COMPACT_USER_MESSAGE_MAX_TOKENS,
-  CLIENT_COMPACTION_TRIGGER_FRACTION,
+  DEFAULT_COMPACTION_THRESHOLD_RATIO,
+  MIN_COMPACTION_THRESHOLD_RATIO,
+  MAX_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_BUFFER_TOKENS,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
@@ -631,9 +635,10 @@ function recordModelCallMetric(provider: string, outcome: "completed" | "failed"
  * Run the compaction summarizer as one plain, tool-less, non-streaming model
  * call against the resolved provider. `input` is the active history plus
  * Codex's checkpoint prompt. Returns the trimmed summary text, or null on any
- * failure (the caller treats a failed summarize as "skip compaction this turn"
- * - never fatal). The call deliberately does NOT request reasoning encryption,
- * tools, or server-side compaction; it is a self-contained summarize.
+ * failure (the caller can retry with a harder-trimmed transcript, then fall
+ * back to deterministic non-LLM compaction). The call deliberately does NOT
+ * request reasoning encryption, tools, or server-side compaction; it is a
+ * self-contained summarize.
  *
  * Provider-aware: the summary always runs on the SAME provider that serves the
  * turn (registry providers can't summarize through OpenAI/Azure, and vice
@@ -647,18 +652,24 @@ function recordModelCallMetric(provider: string, outcome: "completed" | "failed"
 export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
-  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string } = {},
+  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
   const model = options.model ?? settings.openaiModel;
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
+  const transcript = renderCompactionPromptInputForChat(
+    input,
+    typeof options.maxTranscriptTokens === "number" && options.maxTranscriptTokens > 0
+      ? { maxEstimatedTokens: options.maxTranscriptTokens }
+      : {},
+  );
   try {
     if (api === "chat") {
       const completion = await client.chat.completions.create({
         model,
         max_tokens: maxTokens,
-        messages: [{ role: "user", content: renderCompactionPromptInputForChat(input) }],
+        messages: [{ role: "user", content: transcript }],
       } as any);
       const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
       const trimmed = typeof text === "string" ? text.trim() : "";
@@ -671,13 +682,13 @@ export async function summarizeForCompaction(
       // built-in path (api "responses"), so gate it on the built-in provider.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
       max_output_tokens: maxTokens,
-      input,
+      input: transcript,
     } as any);
     const text = extractResponseOutputText(response);
     const trimmed = text.trim();
     return trimmed.length > 0 ? trimmed : null;
   } catch (error) {
-    console.error("context compaction summarize failed (compaction skipped this turn)", error);
+    console.error("context compaction summarize failed", error);
     return null;
   }
 }

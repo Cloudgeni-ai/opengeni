@@ -37,20 +37,21 @@ Code wins over this document. The main files are:
 | `off` | no compaction |
 
 The server path still uses `contextServerCompactThresholdTokens` when set,
-otherwise `floor((contextWindowTokens - contextReservedOutputTokens) *
-contextCompactSoftFraction)`.
+otherwise `floor(contextWindowTokens * contextCompactionThresholdRatio)`.
+`contextCompactionThresholdRatio` is configured with
+`OPENGENI_COMPACTION_THRESHOLD_RATIO`, defaults to `0.6`, and is clamped to
+`[0.3, 0.9]`.
 
 ## Client Trigger
 
 Client mode has one threshold:
 
 ```
-signal > 0.9 * (contextWindowTokens - contextReservedOutputTokens - 20_000)
+signal > contextWindowTokens * contextCompactionThresholdRatio
 ```
 
-`20_000` is `SUMMARY_BUFFER_TOKENS`, matching the output budget for the
-checkpoint summary. With the defaults (`1,050,000` window, `128,000` reserved
-output), the threshold is `811,800`.
+With the defaults (`1,050,000` window, ratio `0.6`), the threshold is
+`630,000`.
 
 The signal prefers provider-reported input tokens:
 
@@ -63,17 +64,23 @@ The signal prefers provider-reported input tokens:
 
 The old client soft/hard fraction pair and `contextKeepRecentTokens` no longer
 drive client compaction. Those config keys remain parsed for environment
-back-compat and server threshold compatibility, but the client path ignores
-them. `contextSummaryMaxTokens` is also parsed for back-compat; client
-compaction uses the fixed `SUMMARY_BUFFER_TOKENS` output ceiling.
+back-compat, but both client and server default thresholds now use
+`contextCompactionThresholdRatio`. `contextSummaryMaxTokens` is also parsed for
+back-compat; client compaction uses the fixed `SUMMARY_BUFFER_TOKENS` output
+ceiling.
 
 ## Client Rebuild
 
-The checkpoint summarizer call is tool-less and receives:
+The checkpoint summarizer call is tool-less and receives a rendered transcript
+string, not raw SDK/Responses history items. The transcript is built from:
 
 1. Current active history.
 2. One synthesized user message containing Codex CLI's
    `prompts/templates/compact/prompt.md` text verbatim.
+
+Rendering all providers to text deliberately avoids provider tool-call protocol
+validation during summarization; SDK-vs-wire item drift such as `callId` vs
+`call_id` cannot reject a compaction request.
 
 The model output is wrapped with Codex CLI's `summary_prefix.md` text verbatim
 and stored as one plain user `message` item with
@@ -91,6 +98,15 @@ from active history. They are not deleted: the compaction DB transaction marks
 the old active rows inactive and inserts replacement active rows, preserving the
 audit trail.
 
+If the full rendered summarizer call fails or returns no summary, OpenGeni
+retries the summarizer once with a hard-trimmed transcript that drops the oldest
+rendered items and keeps the checkpoint prompt. If that also fails, OpenGeni
+performs a deterministic non-LLM fallback compaction: keep initial instruction
+messages and the most recent user messages that fit a strict fallback budget,
+middle-truncate any oversized retained message, and append a mechanical
+fallback summary item. A required compaction therefore writes a smaller active
+history whenever a DB write is possible.
+
 ## Turn Flows
 
 Turn-start client compaction runs before reading history for a fresh
@@ -102,12 +118,15 @@ input budget guard. In client mode, when the single threshold is crossed
 mid-turn, it throws `CompactionNeededError`. `agent-turn.ts` handles that error
 through the same recovery loop as provider context-window overflow:
 
-- If no model/tool progress was persisted, compact and retry once inside the
-  same activity.
+- If no model/tool progress was persisted, compact and retry inside the same
+  activity, bounded by a per-turn recovery cap.
 - If progress was persisted, compact and requeue the turn with a resume notice
   (`reason: "context_compacted"`).
 - If a turn already resumed from compaction immediately needs compaction again,
   it falls back to idle instead of looping.
+- A `compacted:false` result is never treated as success. The turn reports
+  `compaction summarization failed: ...` instead of retrying unchanged or
+  surfacing a misleading `Context compaction needed` threshold error.
 
 Provider context-window overflow remains a reactive safety path and reuses the
 same compaction/retry/requeue logic.

@@ -8,6 +8,8 @@
  * from the active model-facing history; the database audit rows remain.
  */
 
+import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
+
 export type CompactionItem = Record<string, unknown>;
 
 /**
@@ -18,7 +20,10 @@ export const COMPACTION_SUMMARY_MARKER = "opengeni_context_summary";
 
 export const SUMMARY_BUFFER_TOKENS = 20_000;
 export const COMPACT_USER_MESSAGE_MAX_TOKENS = 20_000;
-export const CLIENT_COMPACTION_TRIGGER_FRACTION = 0.9;
+export const DEFAULT_COMPACTION_THRESHOLD_RATIO = 0.6;
+export const MIN_COMPACTION_THRESHOLD_RATIO = 0.3;
+export const MAX_COMPACTION_THRESHOLD_RATIO = 0.9;
+export const COMPACTION_FALLBACK_TARGET_RATIO = 0.5;
 
 // Verbatim from Codex CLI:
 // codex-rs/prompts/templates/compact/prompt.md
@@ -42,12 +47,7 @@ export const SUMMARY_PREFIX =
 export const USER_MESSAGE_TRUNCATION_MARKER =
   "\n[... middle truncated for context compaction ...]\n";
 
-const RESULT_TYPE_BY_CALL_TYPE: Record<string, string> = {
-  function_call: "function_call_result",
-  computer_call: "computer_call_result",
-  shell_call: "shell_call_output",
-  apply_patch_call: "apply_patch_call_output",
-};
+const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
 
 function itemType(item: unknown): string | undefined {
@@ -101,15 +101,19 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
   return total;
 }
 
+export function clampCompactionThresholdRatio(value: number | undefined | null): number {
+  const numeric = typeof value === "number" && Number.isFinite(value)
+    ? value
+    : DEFAULT_COMPACTION_THRESHOLD_RATIO;
+  return Math.min(MAX_COMPACTION_THRESHOLD_RATIO, Math.max(MIN_COMPACTION_THRESHOLD_RATIO, numeric));
+}
+
 export function clientCompactionThresholdTokens(input: {
   contextWindowTokens: number;
   contextReservedOutputTokens: number;
+  contextCompactionThresholdRatio?: number | null;
 }): number {
-  const available = Math.max(
-    0,
-    input.contextWindowTokens - input.contextReservedOutputTokens - SUMMARY_BUFFER_TOKENS,
-  );
-  return Math.floor(available * CLIENT_COMPACTION_TRIGGER_FRACTION);
+  return Math.floor(Math.max(0, input.contextWindowTokens) * clampCompactionThresholdRatio(input.contextCompactionThresholdRatio));
 }
 
 export type ClientCompactionDecision = {
@@ -124,6 +128,7 @@ export function decideClientCompaction(input: {
   lastInputTokens?: number | null;
   contextWindowTokens: number;
   contextReservedOutputTokens: number;
+  contextCompactionThresholdRatio?: number | null;
   force?: boolean;
 }): ClientCompactionDecision {
   const thresholdTokens = clientCompactionThresholdTokens(input);
@@ -272,6 +277,70 @@ export function buildCompactionReplacementHistory(
   return history;
 }
 
+export type DeterministicFallbackCompactionInput = {
+  items: readonly CompactionItem[];
+  cause?: string;
+  targetTokens?: number;
+};
+
+export function buildDeterministicFallbackCompactionHistory(input: DeterministicFallbackCompactionInput): CompactionItem[] {
+  const sourceTokens = Math.max(1, estimateTokens(input.items));
+  const requestedTarget = typeof input.targetTokens === "number" && input.targetTokens > 0
+    ? Math.floor(input.targetTokens)
+    : Math.floor(sourceTokens * COMPACTION_FALLBACK_TARGET_RATIO);
+  const targetTokens = Math.max(1, Math.min(requestedTarget, Math.max(1, sourceTokens - 1)));
+  const summaryItem = buildSummaryItem([
+    "Non-LLM context compaction fallback.",
+    input.cause ? `Summarizer failure: ${input.cause}` : "Summarizer failure: unavailable.",
+    "Older assistant, tool, reasoning, and image history was dropped deterministically.",
+    "Retained context above is limited to initial instructions and the most recent user messages that fit the fallback budget; oversized retained messages may be middle-truncated.",
+  ].join("\n"));
+  const summaryTokens = estimateItemTokens(summaryItem);
+  let remaining = Math.max(0, targetTokens - summaryTokens);
+  const retainedInstructions: CompactionItem[] = [];
+
+  for (const item of input.items) {
+    if (!isInitialInstructionMessage(item)) {
+      if (isUserMessage(item)) {
+        break;
+      }
+      continue;
+    }
+    if (remaining <= 0) {
+      break;
+    }
+    const capped = compactMessageToEstimatedItemBudget(item, Math.min(2_000, remaining));
+    if (!capped) {
+      continue;
+    }
+    const tokens = estimateItemTokens(capped);
+    if (tokens <= remaining) {
+      retainedInstructions.push(capped);
+      remaining -= tokens;
+    }
+  }
+
+  const retainedUsers: CompactionItem[] = [];
+  for (let index = input.items.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = input.items[index]!;
+    if (!isUserMessage(item) || isCompactionSummary(item)) {
+      continue;
+    }
+    const capped = compactMessageToEstimatedItemBudget(item, Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, remaining));
+    if (!capped) {
+      continue;
+    }
+    const tokens = estimateItemTokens(capped);
+    if (tokens <= remaining) {
+      retainedUsers.push(capped);
+      remaining -= tokens;
+    }
+  }
+  retainedUsers.reverse();
+
+  return [...retainedInstructions, ...retainedUsers, summaryItem];
+}
+
 /**
  * Build the synthetic summary item (a plain user message) appended to the
  * rebuilt active history.
@@ -287,14 +356,39 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
 }
 
 function compactUserMessage(item: CompactionItem): CompactionItem {
+  return compactMessageToTokenBudget(item, COMPACT_USER_MESSAGE_MAX_TOKENS);
+}
+
+function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): CompactionItem {
   const text = messageText(item);
   const next = { ...item };
-  if (estimatedTextTokens(text) > COMPACT_USER_MESSAGE_MAX_TOKENS) {
-    next.content = truncateMiddleByEstimatedTokens(text, COMPACT_USER_MESSAGE_MAX_TOKENS);
+  if (estimatedTextTokens(text) > maxTokens) {
+    next.content = truncateMiddleByEstimatedTokens(text, maxTokens);
     return next;
   }
   next.content = contentWithoutImages(item);
   return next;
+}
+
+function compactMessageToEstimatedItemBudget(item: CompactionItem, maxItemTokens: number): CompactionItem | null {
+  if (maxItemTokens <= 0) {
+    return null;
+  }
+  const overheadTokens = estimateItemTokens({ ...item, content: "" });
+  let contentBudget = Math.max(0, maxItemTokens - overheadTokens);
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const capped = compactMessageToTokenBudget(item, contentBudget);
+    const estimated = estimateItemTokens(capped);
+    if (estimated <= maxItemTokens) {
+      return capped;
+    }
+    const overage = estimated - maxItemTokens;
+    if (contentBudget <= 0) {
+      break;
+    }
+    contentBudget = Math.max(0, contentBudget - Math.max(1, overage));
+  }
+  return null;
 }
 
 function estimatedTextTokens(text: string): number {
@@ -353,8 +447,42 @@ function messageText(item: CompactionItem): string {
   return "";
 }
 
-export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(renderItem).join("\n");
+function isInitialInstructionMessage(item: unknown): boolean {
+  const type = itemType(item);
+  const role = itemRole(item);
+  return type === "message" && (role === "system" || role === "developer");
+}
+
+export type RenderCompactionTranscriptOptions = {
+  /**
+   * Hard cap for a rendered transcript. When set, oldest rendered items are
+   * dropped first while preserving the final checkpoint prompt; if the retained
+   * item itself is too large, it is middle-truncated instead of looping.
+   */
+  maxEstimatedTokens?: number;
+};
+
+export function renderCompactionPromptInputForChat(
+  input: readonly CompactionItem[],
+  options: RenderCompactionTranscriptOptions = {},
+): string {
+  const rendered = input.map(renderItem);
+  if (typeof options.maxEstimatedTokens !== "number" || options.maxEstimatedTokens <= 0) {
+    return rendered.join("\n");
+  }
+  const maxChars = Math.max(1, Math.floor(options.maxEstimatedTokens * 4));
+  const last = rendered.at(-1);
+  const prefix = rendered.slice(0, -1);
+  let kept = prefix.slice();
+  while (kept.length > 0 && transcriptLength([...kept, last].filter((line): line is string => line !== undefined)) > maxChars) {
+    kept.shift();
+  }
+  const lines = [...kept, last].filter((line): line is string => line !== undefined);
+  const joined = lines.join("\n");
+  if (joined.length <= maxChars) {
+    return joined;
+  }
+  return truncateMiddleByChars(joined, maxChars);
 }
 
 function renderItem(item: CompactionItem): string {
@@ -404,4 +532,24 @@ function truncateForTranscript(text: string, max: number): string {
     return text;
   }
   return `${text.slice(0, max)}... (${text.length - max} more chars)`;
+}
+
+function transcriptLength(lines: readonly string[]): number {
+  if (lines.length === 0) {
+    return 0;
+  }
+  return lines.reduce((sum, line) => sum + line.length, 0) + Math.max(0, lines.length - 1);
+}
+
+function truncateMiddleByChars(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  if (maxChars <= USER_MESSAGE_TRUNCATION_MARKER.length) {
+    return USER_MESSAGE_TRUNCATION_MARKER.slice(0, maxChars);
+  }
+  const keepChars = maxChars - USER_MESSAGE_TRUNCATION_MARKER.length;
+  const headChars = Math.ceil(keepChars / 2);
+  const tailChars = Math.floor(keepChars / 2);
+  return `${text.slice(0, headChars)}${USER_MESSAGE_TRUNCATION_MARKER}${text.slice(text.length - tailChars)}`;
 }

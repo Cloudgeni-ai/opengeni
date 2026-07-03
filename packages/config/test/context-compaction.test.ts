@@ -27,6 +27,7 @@ describe("context compaction config defaults", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.contextCompactionMode).toBe("auto");
     expect(settings.contextWindowTokens).toBe(1_050_000);
+    expect(settings.contextCompactionThresholdRatio).toBeCloseTo(0.6);
     expect(settings.contextReservedOutputTokens).toBe(128_000);
     expect(settings.contextServerCompactThresholdTokens).toBeUndefined();
     expect(settings.contextCompactSoftFraction).toBeCloseTo(0.7);
@@ -40,6 +41,7 @@ describe("context compaction config defaults", () => {
       {
         OPENGENI_CONTEXT_COMPACTION_MODE: "client",
         OPENGENI_CONTEXT_WINDOW_TOKENS: "400000",
+        OPENGENI_COMPACTION_THRESHOLD_RATIO: "0.75",
         OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS: "64000",
         OPENGENI_CONTEXT_COMPACT_SOFT_FRACTION: "0.6",
         OPENGENI_CONTEXT_KEEP_RECENT_TOKENS: "16000",
@@ -48,9 +50,15 @@ describe("context compaction config defaults", () => {
     );
     expect(settings.contextCompactionMode).toBe("client");
     expect(settings.contextWindowTokens).toBe(400_000);
+    expect(settings.contextCompactionThresholdRatio).toBeCloseTo(0.75);
     expect(settings.contextReservedOutputTokens).toBe(64_000);
     expect(settings.contextCompactSoftFraction).toBeCloseTo(0.6);
     expect(settings.contextKeepRecentTokens).toBe(16_000);
+  });
+
+  test("threshold ratio is clamped to the supported range", () => {
+    expect(withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "0.1" }, () => getSettings()).contextCompactionThresholdRatio).toBe(0.3);
+    expect(withEnv({ OPENGENI_COMPACTION_THRESHOLD_RATIO: "2" }, () => getSettings()).contextCompactionThresholdRatio).toBe(0.9);
   });
 });
 
@@ -75,15 +83,16 @@ describe("budget + server threshold", () => {
     expect(contextInputBudgetTokens({ contextWindowTokens: 1_050_000, contextReservedOutputTokens: 128_000 })).toBe(922_000);
   });
 
-  test("server threshold defaults to floor(B * softFraction)", () => {
+  test("server threshold defaults to floor(window * threshold ratio)", () => {
     expect(
       contextServerCompactThreshold({
         contextWindowTokens: 1_050_000,
         contextReservedOutputTokens: 128_000,
         contextServerCompactThresholdTokens: undefined,
         contextCompactSoftFraction: 0.7,
+        contextCompactionThresholdRatio: 0.6,
       }),
-    ).toBe(Math.floor(922_000 * 0.7));
+    ).toBe(Math.floor(1_050_000 * 0.6));
   });
 
   test("server threshold honors an explicit override", () => {
@@ -93,6 +102,7 @@ describe("budget + server threshold", () => {
         contextReservedOutputTokens: 128_000,
         contextServerCompactThresholdTokens: 500_000,
         contextCompactSoftFraction: 0.7,
+        contextCompactionThresholdRatio: 0.6,
       }),
     ).toBe(500_000);
   });

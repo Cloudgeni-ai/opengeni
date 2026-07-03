@@ -82,7 +82,7 @@ These are the load-bearing, cross-cutting rules. Breaking one tends to be a subt
 ### 3.4 No run-length limits, by design — bounded by symptoms
 
 - Runs legitimately span days. **Run length is bounded by symptoms** (no-progress detection, budget exhaustion), never by counts or clocks. **Do not add or lower caps** on model calls per turn, continuation count, or activity timeout "to be safe" — fix the pathology instead.
-- Recoverable conditions **idle** the session (keep context) rather than fail it: retryable provider failures, provider context overflow after compaction, the max-turns segment cap, and budget/credit exhaustion. A failed session would reject the very retry it asks for.
+- Recoverable conditions **idle or explicitly resume** the session (keep context) rather than fail it: retryable provider failures, provider context overflow after bounded compaction recovery, the max-turns segment cap, and budget/credit exhaustion. A failed session would reject the very retry it asks for.
 - **Failed sessions are revivable**: a new `user.message` transitions `failed → queued` and restarts the workflow (`signalWithStart`). Only `cancelled` is terminal.
 
 > Canonical: [`run-lifecycle.md`](run-lifecycle.md), [`goals.md`](goals.md).
@@ -232,7 +232,7 @@ stateDiagram-v2
   queued --> running: workflow claims turn -> runAgentTurn
   running --> requires_action: human approval needed (RunState saved)
   requires_action --> running: user.approvalDecision (replays original trigger)
-  running --> idle: natural stop / max-turns / provider backpressure / budget / compacted overflow
+  running --> idle: natural stop / max-turns / provider backpressure / budget / compacted overflow fallback
   idle --> queued: new user.message OR goal continuation
   running --> preempted: graceful shutdown OR worker death
   preempted --> queued: re-dispatch (resume notice; bounded x3)
@@ -543,7 +543,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`architecture.md`](architecture.md) (this file) | The whole-system map, invariants, repo layout, and the change-decision table. |
 | [`run-lifecycle.md`](run-lifecycle.md) | Turns, the no-length-limit doctrine, the three memory stores, graceful-preempt vs ungraceful-death recovery, provider-item-id stripping. |
 | [`goals.md`](goals.md) | Goal-driven long runs: lifecycle, the replay-safe continuation loop, no-progress/budget guards, goal MCP tools, settings. |
-| [`context-compaction.md`](context-compaction.md) | Provider-aware compaction: server-side on the OpenAI platform, client-side on Azure; the never-double-compact rule. |
+| [`context-compaction.md`](context-compaction.md) | Provider-aware compaction: server-side on the OpenAI platform, client-side on Azure; rendered-transcript summarization, deterministic fallback, and bounded recovery. |
 | [`model-providers.md`](model-providers.md) | Multi-provider model support; per-model routing via `MultiProviderModelProvider`; responses vs chat wire APIs. |
 | [`capabilities.md`](capabilities.md) | The workspace capability catalog; probe-on-enable; encrypted credential headers; default tool attachment. |
 | [`packs.md`](packs.md) | Capability packs: role bundles, `credentialRef` vs Postgres secrets, pack-scoped `sandboxImage` + skills (no composition). |

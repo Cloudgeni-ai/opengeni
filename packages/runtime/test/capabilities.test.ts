@@ -49,8 +49,8 @@ describe("provider-aware capability selection", () => {
     const params = compactionCap!.samplingParams({ model: "gpt-5.5" });
     const contextManagement = params.context_management as Array<{ type: string; compact_threshold: number }>;
     expect(contextManagement[0]!.type).toBe("compaction");
-    // floor((1_050_000 - 128_000) * 0.70) = 645_400, NOT the SDK's 240_000 fallback.
-    expect(contextManagement[0]!.compact_threshold).toBe(Math.floor((1_050_000 - 128_000) * 0.7));
+    // floor(1_050_000 * 0.60) = 630_000, NOT the SDK's 240_000 fallback.
+    expect(contextManagement[0]!.compact_threshold).toBe(Math.floor(1_050_000 * 0.6));
     expect(contextManagement[0]!.compact_threshold).not.toBe(240_000);
   });
 });

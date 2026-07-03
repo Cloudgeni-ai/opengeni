@@ -43,6 +43,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sessionHistorySource: "run_state",
     contextCompactionMode: "auto",
     contextWindowTokens: 1_050_000,
+    contextCompactionThresholdRatio: 0.6,
     contextReservedOutputTokens: 128_000,
     contextServerCompactThresholdTokens: undefined,
     contextCompactSoftFraction: 0.70,

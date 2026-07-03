@@ -38,7 +38,7 @@ export type HistoryItem = Record<string, unknown>;
  * the one observed live, the rest are included so the same pairing logic holds
  * for every tool-call kind the SDK can emit.
  */
-const RESULT_TYPE_BY_CALL_TYPE: Record<string, string> = {
+export const TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE: Record<string, string> = {
   function_call: "function_call_result",
   computer_call: "computer_call_result",
   shell_call: "shell_call_output",
@@ -52,6 +52,7 @@ const RESULT_TYPE_BY_CALL_TYPE: Record<string, string> = {
   tool_search_call: "tool_search_output",
 };
 
+const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
 
 function itemType(item: unknown): string | undefined {

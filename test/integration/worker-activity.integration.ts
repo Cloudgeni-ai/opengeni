@@ -662,6 +662,15 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old context" } },
+        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) } },
+      ],
+    });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "overflow then retry" } },
     ]);
@@ -673,7 +682,7 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
       db: dbClient.db,
       bus,
-      runtime: createProductionAgentRuntime({ model }),
+      runtime: runtimeWithFakeCompactionSummarizer(model, "overflow recovery summary"),
     });
 
     await expect(activities.runAgentTurn({
@@ -688,7 +697,182 @@ describe("worker activities integration", () => {
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+  });
+
+  test("goal continuation over threshold compacts through rendered Responses input and continues", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "goal context",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "deploy the app" } },
+        { position: 1, item: { type: "function_call", callId: "call_vern", name: "opengeni__sessions_list", arguments: "{}" } },
+        { position: 2, item: { type: "function_call_result", callId: "call_vern", status: "completed", output: "ok" } },
+        { position: 3, item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) } },
+      ],
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "goal.continuation", payload: { text: "continue the goal" } },
+    ]);
+    const model = new ScriptedModel([{ outputText: "continued", chunks: ["continued"] }]);
+    let summarizerInput: unknown;
+    const runtime = runtimeWithCompactionClient(model, async (request) => {
+      summarizerInput = request.input;
+      if (typeof request.input !== "string") {
+        throw Object.assign(new Error("Missing required parameter: input[1].call_id. You provided callId."), { status: 400 });
+      }
+      return { output_text: "rendered goal continuation summary" };
+    });
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 100_000,
+        contextReservedOutputTokens: 0,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-goal-rendered-compaction",
+    })).resolves.toEqual({ status: "idle" });
+
+    expect(model.calls).toBe(1);
+    expect(typeof summarizerInput).toBe("string");
+    expect(String(summarizerInput)).toContain("[tool_call function_call]");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "session.context.compacted")).toBe(true);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+  });
+
+  test("compacted false never retries the unchanged turn", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "tiny overflow",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "tiny" } },
+      ],
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "overflow but do not retry unchanged" } },
+    ]);
+    const model = new ScriptedModel([
+      { error: contextOverflowError("Your input exceeds the context window of this model.") },
+      { outputText: "must not run" },
+    ]);
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 100_000,
+        contextReservedOutputTokens: 0,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: runtimeWithFakeCompactionSummarizer(model, "summary larger than source"),
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-compacted-false-no-retry",
+    })).resolves.toEqual({ status: "failed" });
+
+    expect(model.calls).toBe(1);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 80);
+    const failed = events.find((event) => event.type === "turn.failed");
+    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).toContain("compaction summarization failed:");
+    expect(String((failed?.payload as Record<string, unknown> | undefined)?.error)).not.toContain("Context compaction needed");
+  });
+
+  test("summarizer hard failure uses deterministic fallback and the turn continues", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "fallback turn",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old fallback context" } },
+        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(80_000 * 4) } },
+      ],
+    });
+    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "continue after fallback" } },
+    ]);
+    const model = new ScriptedModel([{ outputText: "continued after fallback", chunks: ["continued"] }]);
+    let summarizerCalls = 0;
+    const activities = createActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        sessionHistorySource: "items",
+        contextCompactionMode: "client",
+        contextWindowTokens: 100_000,
+        contextReservedOutputTokens: 0,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: runtimeWithCompactionClient(model, async () => {
+        summarizerCalls += 1;
+        throw Object.assign(new Error("provider summarizer unavailable"), { status: 500 });
+      }),
+    });
+
+    await expect(activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      triggerEventId: trigger!.id,
+      workflowId: "workflow-fallback-compaction-continues",
+    })).resolves.toEqual({ status: "idle" });
+
+    expect(summarizerCalls).toBe(2);
+    expect(model.calls).toBe(1);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
+    expect(active.some((row) => String((row.item as Record<string, unknown>).content).includes("Non-LLM context compaction fallback"))).toBe(true);
   });
 
   test("mid-turn proactive compaction before model progress retries once in-activity", async () => {
@@ -952,6 +1136,15 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
+    await appendSessionHistoryItems(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      items: [
+        { position: 0, item: { type: "message", role: "user", content: "old overflow context" } },
+        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(100_000 * 4) } },
+      ],
+    });
     const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "overflow twice" } },
     ]);
@@ -963,7 +1156,7 @@ describe("worker activities integration", () => {
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", contextCompactionMode: "client" }),
       db: dbClient.db,
       bus,
-      runtime: createProductionAgentRuntime({ model }),
+      runtime: runtimeWithFakeCompactionSummarizer(model, "first overflow recovery summary"),
     });
 
     await expect(activities.runAgentTurn({
@@ -3466,7 +3659,7 @@ describe("worker activities integration", () => {
     expect(called).toBe(false);
   });
 
-  test("maybeCompactContext skips (no write) when the summarizer fails", async () => {
+  test("maybeCompactContext falls back deterministically when the summarizer hard-fails", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "summarize-fail",
@@ -3481,23 +3674,32 @@ describe("worker activities integration", () => {
       sessionId: session.id,
       items: [
         { position: 0, item: { type: "message", role: "user", content: "old" } },
-        { position: 1, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a1" }] } },
+        { position: 1, item: { type: "message", role: "assistant", content: "x".repeat(50_000 * 4) } },
         { position: 2, item: { type: "message", role: "user", content: "recent" } },
         { position: 3, item: { type: "message", role: "assistant", content: [{ type: "output_text", text: "a2" }] } },
       ],
     });
+    let attempts = 0;
     const result = await maybeCompactContext(
       dbClient.db,
       testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl, sessionHistorySource: "items", openaiProvider: "azure", contextCompactionMode: "client", contextWindowTokens: 1000, contextReservedOutputTokens: 0, contextCompactSoftFraction: 0.5, contextKeepRecentTokens: 30 }),
       { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
       900,
-      async () => null, // model call failed
+      async (_settings, _messages, options) => {
+        attempts += 1;
+        if (attempts === 2) {
+          expect(options?.attempt).toBe("hard_trim");
+          expect(options?.maxTranscriptTokens).toBeGreaterThan(0);
+        }
+        return null;
+      },
     );
-    expect(result).toEqual({ compacted: false, reason: "summarize_failed" });
-    // No summary row written; all original rows stay active.
+    expect(result.compacted).toBe(true);
+    expect(result.compacted && result.method).toBe("fallback");
+    expect(attempts).toBe(2);
     const active = await getActiveSessionHistoryItems(dbClient.db, grant.workspaceId, session.id);
-    expect(active.map((row) => row.position)).toEqual([0, 1, 2, 3]);
-    expect(active.some((row) => (row.item as Record<string, unknown>).opengeni_context_summary)).toBe(false);
+    expect(active.some((row) => String((row.item as Record<string, unknown>).content).includes("Non-LLM context compaction fallback"))).toBe(true);
+    expect(active.some((row) => (row.item as Record<string, unknown>).content === "x".repeat(50_000 * 4))).toBe(false);
   });
 
   test("maybeCompactContext force bypasses the budget trigger (the /compact path)", async () => {
@@ -3643,11 +3845,14 @@ function contextOverflowError(message: string): Error {
   return error;
 }
 
-function runtimeWithFakeCompactionSummarizer(model: ScriptedModel, summary: string): OpenGeniRuntime {
+function runtimeWithCompactionClient(
+  model: ScriptedModel,
+  create: (request: Record<string, unknown>) => Promise<Record<string, unknown>>,
+): OpenGeniRuntime {
   const runtime = createProductionAgentRuntime({ model });
   const fakeClient = {
     responses: {
-      create: async () => ({ output_text: summary }),
+      create,
     },
   };
   return {
@@ -3659,6 +3864,10 @@ function runtimeWithFakeCompactionSummarizer(model: ScriptedModel, summary: stri
       configured: { id: "scripted-model", hostedWebSearch: false },
     } as never),
   };
+}
+
+function runtimeWithFakeCompactionSummarizer(model: ScriptedModel, summary: string): OpenGeniRuntime {
+  return runtimeWithCompactionClient(model, async () => ({ output_text: summary }));
 }
 
 function fakeObjectStorage(body: string): ObjectStorage {

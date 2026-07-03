@@ -7,8 +7,10 @@ import {
 import {
   SUMMARY_BUFFER_TOKENS,
   buildCompactionPromptInput,
+  buildDeterministicFallbackCompactionHistory,
   buildCompactionReplacementHistory,
   decideClientCompaction,
+  estimateTokens,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   type CompactionItem,
@@ -23,6 +25,9 @@ export type MaybeCompactResult =
       summaryPosition: number;
       signalTokens: number;
       thresholdTokens: number;
+      method: "summary" | "fallback";
+      estimatedTokensBefore: number;
+      estimatedTokensAfter: number;
     };
 
 /**
@@ -35,16 +40,23 @@ export type MaybeCompactResult =
  * supersedes the old active rows and inserts replacement active rows:
  * all real user messages plus one summary.
  *
- * Best-effort by design: any failure (planner says no, summarize fails, DB
- * hiccup) returns without compacting and never throws — the turn proceeds with
- * the un-compacted history. The read path's existing sanitizer keeps that safe.
+ * Required compactions are fail-closed on the summarizer: full rendered
+ * transcript, hard-trim rendered retry, then deterministic non-LLM fallback.
+ * DB errors still throw to the caller; "compacted:false" is reserved for
+ * structural no-ops or impossible shrink, not summarizer failures.
  *
  * There is no kept assistant/tool tail in client mode now. Assistant messages,
  * tool calls/results, reasoning, and images stay only in inactive audit rows.
  */
+export type CompactionSummarizerOptions = {
+  maxTranscriptTokens?: number;
+  attempt: "full" | "hard_trim";
+};
+
 export type CompactionSummarizer = (
   settings: Settings,
   input: CompactionItem[],
+  options?: CompactionSummarizerOptions,
 ) => Promise<string | null>;
 
 export async function maybeCompactContext(
@@ -53,10 +65,13 @@ export async function maybeCompactContext(
   scope: { accountId: string; workspaceId: string; sessionId: string; turnId?: string | null },
   lastInputTokens: number | null,
   // Injectable for tests; defaults to the real provider-aware model call.
-  summarize: CompactionSummarizer = (s, m) => summarizeForCompaction(s, m, { maxOutputTokens: SUMMARY_BUFFER_TOKENS }),
+  summarize: CompactionSummarizer = (s, m, o) => summarizeForCompaction(s, m, {
+    maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+    ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+  }),
   // Operator-forced (the /compact command): bypass the budget trigger and
   // compact now if there is anything to summarize. Structural guards still hold.
-  options: { force?: boolean } = {},
+  options: { force?: boolean; requireShrink?: boolean } = {},
 ): Promise<MaybeCompactResult> {
   if (resolveContextCompactionMode(settings) !== "client") {
     return { compacted: false, reason: "mode_not_client" };
@@ -73,6 +88,7 @@ export async function maybeCompactContext(
     lastInputTokens,
     contextWindowTokens: settings.contextWindowTokens,
     contextReservedOutputTokens: settings.contextReservedOutputTokens,
+    contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
     ...(options.force ? { force: true } : {}),
   });
   if (!decision.shouldCompact) {
@@ -80,15 +96,65 @@ export async function maybeCompactContext(
   }
 
   const promptInput = buildCompactionPromptInput(items);
-  const summaryBody = await summarize(settings, promptInput);
-  if (!summaryBody) {
-    return { compacted: false, reason: "summarize_failed" };
+  const estimatedTokensBefore = estimateTokens(items);
+  const shrinkBaselineTokens = Math.max(estimatedTokensBefore, decision.signalTokens);
+  const requireShrink = options.requireShrink || decision.reason === "above_threshold";
+  let summarizerFailure = "summarizer returned no summary";
+  let summaryBody: string | null = null;
+
+  const fullAttempt = await runSummarizerAttempt(summarize, settings, promptInput, { attempt: "full" });
+  if (fullAttempt.summary) {
+    summaryBody = fullAttempt.summary;
+  } else {
+    summarizerFailure = fullAttempt.failure;
+    const hardTrimBudget = Math.max(1, Math.floor(Math.max(1, decision.thresholdTokens) * 0.5));
+    const retryAttempt = await runSummarizerAttempt(summarize, settings, promptInput, {
+      attempt: "hard_trim",
+      maxTranscriptTokens: hardTrimBudget,
+    });
+    if (retryAttempt.summary) {
+      summaryBody = retryAttempt.summary;
+    } else {
+      summarizerFailure = retryAttempt.failure || summarizerFailure;
+    }
   }
 
-  const replacementHistory = buildCompactionReplacementHistory(items, summaryBody);
+  let replacementHistory: CompactionItem[] | null = null;
+  let method: "summary" | "fallback" = "summary";
+  if (summaryBody) {
+    const summaryReplacement = buildCompactionReplacementHistory(items, summaryBody);
+    const summaryEstimate = estimateTokens(summaryReplacement);
+    if (!requireShrink || summaryEstimate < shrinkBaselineTokens) {
+      replacementHistory = summaryReplacement;
+    } else {
+      summarizerFailure = `summary replacement did not reduce context signal (${summaryEstimate} >= ${shrinkBaselineTokens})`;
+    }
+  }
+
+  if (!replacementHistory) {
+    method = "fallback";
+    const fallbackTargetTokens = Math.max(
+      1,
+      Math.min(
+        Math.max(1, Math.floor(shrinkBaselineTokens * 0.5)),
+        Math.max(1, Math.floor(Math.max(1, decision.thresholdTokens) * 0.5)),
+      ),
+    );
+    replacementHistory = buildDeterministicFallbackCompactionHistory({
+      items,
+      cause: summarizerFailure,
+      targetTokens: fallbackTargetTokens,
+    });
+  }
+
+  const estimatedTokensAfter = estimateTokens(replacementHistory);
+  if (requireShrink && estimatedTokensAfter >= shrinkBaselineTokens) {
+    return { compacted: false, reason: `compaction summarization failed: fallback did not reduce context signal (${estimatedTokensAfter} >= ${shrinkBaselineTokens})` };
+  }
+
   const summaryItem = replacementHistory.at(-1);
   if (!summaryItem) {
-    return { compacted: false, reason: "empty_replacement_history" };
+    return { compacted: false, reason: `compaction summarization failed: ${summarizerFailure}` };
   }
   const nextPosition = await nextSessionHistoryPosition(db, scope.workspaceId, scope.sessionId);
   const replacementItems = replacementHistory.slice(0, -1).map((item, index) => ({
@@ -114,5 +180,25 @@ export async function maybeCompactContext(
     summaryPosition,
     signalTokens: decision.signalTokens,
     thresholdTokens: decision.thresholdTokens,
+    method,
+    estimatedTokensBefore,
+    estimatedTokensAfter,
   };
+}
+
+async function runSummarizerAttempt(
+  summarize: CompactionSummarizer,
+  settings: Settings,
+  promptInput: CompactionItem[],
+  options: CompactionSummarizerOptions,
+): Promise<{ summary: string | null; failure: string }> {
+  try {
+    const summary = await summarize(settings, promptInput, options);
+    if (summary && summary.trim().length > 0) {
+      return { summary, failure: "" };
+    }
+    return { summary: null, failure: "summarizer returned no summary" };
+  } catch (error) {
+    return { summary: null, failure: error instanceof Error ? error.message : String(error) };
+  }
 }

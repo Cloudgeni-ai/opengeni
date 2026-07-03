@@ -4,13 +4,17 @@ import {
   COMPACTION_PROMPT,
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
-  SUMMARY_BUFFER_TOKENS,
+  DEFAULT_COMPACTION_THRESHOLD_RATIO,
+  MAX_COMPACTION_THRESHOLD_RATIO,
+  MIN_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
+  buildDeterministicFallbackCompactionHistory,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   buildSummaryItem,
   clientCompactionThresholdTokens,
+  clampCompactionThresholdRatio,
   decideClientCompaction,
   enforceInputBudget,
   estimateTokens,
@@ -18,10 +22,12 @@ import {
   findKeepBoundary,
   isCompactionSummary,
   isUserMessage,
+  renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
-import { extractResponseOutputText } from "../src/index";
+import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
+import { testSettings } from "@opengeni/testing";
 
 function user(text: string): CompactionItem {
   return { type: "message", role: "user", content: text };
@@ -49,7 +55,7 @@ function bigUser(tokens: number, char: string): CompactionItem {
 
 const WINDOW = 1_050_000;
 const RESERVED_OUTPUT = 128_000;
-const THRESHOLD = Math.floor((WINDOW - RESERVED_OUTPUT - SUMMARY_BUFFER_TOKENS) * 0.9);
+const THRESHOLD = Math.floor(WINDOW * DEFAULT_COMPACTION_THRESHOLD_RATIO);
 
 describe("codex-parity constants and summary marker", () => {
   test("uses Codex's checkpoint prompt and summary prefix verbatim", () => {
@@ -79,11 +85,21 @@ describe("codex-parity constants and summary marker", () => {
 });
 
 describe("single client compaction threshold", () => {
-  test("computes 90 percent of window minus reserved output minus summary buffer", () => {
+  test("computes 60 percent of the model context window by default", () => {
     expect(clientCompactionThresholdTokens({
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     })).toBe(THRESHOLD);
+  });
+
+  test("supports an env-configurable ratio with a defensive clamp", () => {
+    expect(clampCompactionThresholdRatio(0.1)).toBe(MIN_COMPACTION_THRESHOLD_RATIO);
+    expect(clampCompactionThresholdRatio(2)).toBe(MAX_COMPACTION_THRESHOLD_RATIO);
+    expect(clientCompactionThresholdTokens({
+      contextWindowTokens: 1000,
+      contextReservedOutputTokens: 0,
+      contextCompactionThresholdRatio: 0.75,
+    })).toBe(750);
   });
 
   test("prefers provider-reported input tokens over the estimate", () => {
@@ -184,6 +200,71 @@ describe("codex-parity rebuild", () => {
       user("new"),
     ], "summary");
     expect(sanitizeHistoryItemsForModel(rebuilt)).toEqual(rebuilt);
+  });
+});
+
+describe("provider-proof compaction transcript", () => {
+  test("renders tool calls/results to text instead of provider-validating raw SDK items", async () => {
+    let seenInput: unknown;
+    const fakeClient = {
+      responses: {
+        create: async (request: { input?: unknown }) => {
+          seenInput = request.input;
+          if (Array.isArray(request.input) && request.input.some((item) => item && typeof item === "object" && "callId" in item)) {
+            throw Object.assign(new Error("Missing required parameter: input[1].call_id. You provided callId."), { status: 400 });
+          }
+          return { output_text: "rendered summary" };
+        },
+      },
+    };
+    const input = buildCompactionPromptInput([user("deploy it"), call("call_vern"), result("call_vern")]);
+
+    const summary = await summarizeForCompaction(
+      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
+      input,
+      { client: fakeClient as any, api: "responses", model: "scripted-model" },
+    );
+
+    expect(summary).toBe("rendered summary");
+    expect(typeof seenInput).toBe("string");
+    expect(seenInput).toContain("[tool_call function_call]");
+    expect(seenInput).toContain("[tool_result]");
+    expect(seenInput).not.toContain("callId");
+  });
+
+  test("hard-trimmed transcript drops oldest items and keeps the checkpoint prompt", () => {
+    const rendered = renderCompactionPromptInputForChat(
+      buildCompactionPromptInput([
+        user("old ".repeat(400)),
+        assistant("middle ".repeat(400)),
+        user("recent user message"),
+      ]),
+      { maxEstimatedTokens: 80 },
+    );
+
+    expect(rendered).not.toContain("old old");
+    expect(rendered).toContain("CONTEXT CHECKPOINT COMPACTION");
+  });
+});
+
+describe("deterministic fallback compaction", () => {
+  test("shrinks without a model call and middle-truncates an oversized retained user message", () => {
+    const items = [
+      { type: "message", role: "system", content: "always keep deployment instructions" },
+      bigUser(10_000, "x"),
+    ];
+
+    const fallback = buildDeterministicFallbackCompactionHistory({
+      items,
+      cause: "provider 400",
+      targetTokens: 1_000,
+    });
+
+    expect(estimateTokens(fallback)).toBeLessThan(estimateTokens(items));
+    expect(fallback.at(-1)).toMatchObject({ [COMPACTION_SUMMARY_MARKER]: true });
+    expect(String(fallback.at(-1)?.content)).toContain("Non-LLM context compaction fallback");
+    expect(fallback.some((item) => item.role === "system")).toBe(true);
+    expect(String(fallback.find((item) => item.role === "user")?.content)).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
   });
 });
 

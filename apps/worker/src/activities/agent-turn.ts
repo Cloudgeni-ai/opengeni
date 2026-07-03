@@ -172,6 +172,13 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
 
 export const CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE =
   "The conversation reached the model context compaction threshold; it has been compacted. Send a message to continue.";
+const MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS = 3;
+
+function compactionFailureReason(reason: string): string {
+  return reason.startsWith("compaction summarization failed:")
+    ? reason
+    : `compaction summarization failed: ${reason}`;
+}
 
 export function classifyContextWindowOverflowError(error: unknown): { message: string; code?: string; detail?: string } | null {
   const fields = collectErrorStrings(error);
@@ -1362,18 +1369,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {}),
       });
       const compactSummarizer = resolvedModel
-        ? (s: Settings, m: Array<Record<string, unknown>>) => withCodex(() => summarizeForCompaction(s, m, {
+        ? (s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) => withCodex(() => summarizeForCompaction(s, m, {
             client: resolvedModel.client,
             api: resolvedModel.provider.api,
             model: resolvedModel.configured.id,
             maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+            ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
           }))
         : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
       // history as [user messages..., summary] BEFORE the model input is read.
-      // Best-effort: a no-op or failure leaves the un-compacted history intact.
+      // Summarizer failures fall through to hard-trim retry and deterministic
+      // fallback; only structural no-ops leave the history unchanged.
       // Skipped on approval/preempt resumes (no fresh user turn; the frozen
       // RunState or in-flight tail must replay verbatim).
       if (triggerType === "user.message" || triggerType === "goal.continuation") {
@@ -1469,7 +1478,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId: activeTurnId },
           session.lastInputTokens,
           compactSummarizer,
-          { force: true },
+          { force: true, requireShrink: true },
         );
         if (outcome.compacted) {
           await publish!([{ type: "session.context.compacted", payload: { summaryPosition: outcome.summaryPosition, trigger: triggerLabel } }]);
@@ -1671,7 +1680,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
 
       await prepareRunAttemptInput();
-      let compactionRecoveryAttempted = false;
+      let compactionRecoveryAttempts = 0;
       let retriedAfterCompaction = false;
       while (true) {
         try {
@@ -1687,10 +1696,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const overflow = classifyContextWindowOverflowError(attemptError);
           const compactionNeeded = findCompactionNeededError(attemptError);
           const recoveryKind = compactionNeeded ? "proactive" : overflow ? "overflow" : null;
-          if (!recoveryKind || !publish || !turnStartedPublished || compactionRecoveryAttempted) {
+          if (recoveryKind && compactionRecoveryAttempts >= MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS) {
+            throw new Error(
+              `compaction summarization failed: context compaction recovery attempt cap reached (${MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS})`,
+              { cause: attemptError },
+            );
+          }
+          if (!recoveryKind || !publish || !turnStartedPublished) {
             throw attemptError;
           }
-          compactionRecoveryAttempted = true;
+          compactionRecoveryAttempts += 1;
           await flushRuntimeBatcher();
           await reconcileConversationTruth({ skipInputOnlyRows: true });
           const progressPersisted = modelOrToolProgressPersisted;
@@ -1705,15 +1720,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             thresholdTokens: compactionNeeded?.thresholdTokens,
           });
           let compacted = false;
+          let compactionFailureMessage: string | null = null;
           try {
             const outcome = await forceContextCompaction(recoveryKind);
             compacted = outcome.compacted;
+            if (!outcome.compacted) {
+              compactionFailureMessage = compactionFailureReason(outcome.reason);
+            }
           } catch (compactError) {
+            compactionFailureMessage = compactionFailureReason(compactError instanceof Error ? compactError.message : String(compactError));
             observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
-              error: compactError instanceof Error ? compactError.message : String(compactError),
+              error: compactionFailureMessage,
             });
+          }
+          if (!compacted) {
+            const errorMessage = compactionFailureMessage ?? "compaction summarization failed: compaction produced no replacement history";
+            if (!progressPersisted) {
+              throw new Error(errorMessage, { cause: attemptError });
+            }
+            await publish!([
+              {
+                type: "turn.failed",
+                payload: {
+                  error: errorMessage,
+                  code: "context_compaction_failed",
+                  retryable: false,
+                  recovery: "user_message",
+                  compacted: false,
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ], true);
+            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+            turnMetricOutcome = "failed";
+            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
+            activityStatus = "idle";
+            activityError = attemptError;
+            return { status: "idle" };
           }
           if (progressPersisted) {
             // The user's intent was live mid-turn — after a successful

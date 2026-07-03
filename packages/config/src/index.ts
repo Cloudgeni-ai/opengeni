@@ -201,15 +201,26 @@ const SettingsSchema = z.object({
   // derived from these settings on the server path, and use the same numbers to
   // budget the client path.
   contextWindowTokens: z.coerce.number().int().positive().default(1_050_000),
+  // Proactive compaction threshold as a ratio of the model context window.
+  // Defaults to 60% and is clamped to [0.3, 0.9] so deployments can tune the
+  // trigger without accidentally disabling compaction or waiting until the
+  // provider is already at the cliff.
+  contextCompactionThresholdRatio: z.coerce.number().default(0.6).transform((value) => {
+    if (!Number.isFinite(value)) {
+      return 0.6;
+    }
+    return Math.min(0.9, Math.max(0.3, value));
+  }),
   // Tokens reserved for model output; subtracted from the window to get the
   // usable input budget B = contextWindowTokens - contextReservedOutputTokens.
   contextReservedOutputTokens: z.coerce.number().int().nonnegative().default(128_000),
   // Server path only: explicit compact_threshold (tokens) handed to the SDK's
-  // StaticCompactionPolicy. Defaults to floor(B * contextCompactSoftFraction)
-  // when unset.
+  // StaticCompactionPolicy. Defaults to floor(contextWindowTokens *
+  // contextCompactionThresholdRatio) when unset.
   contextServerCompactThresholdTokens: z.coerce.number().int().positive().optional(),
-  // Server path/back-compat knobs. The client compaction path ignores these:
-  // it uses Codex-parity 0.9 * (window - reserved output - 20k summary buffer).
+  // Deprecated back-compat knobs. The threshold is now controlled by
+  // contextCompactionThresholdRatio; these remain parsed so older deployments do
+  // not fail boot when their env still contains them.
   contextCompactSoftFraction: z.coerce.number().positive().max(1).default(0.70),
   contextCompactHardFraction: z.coerce.number().positive().max(1).default(0.85),
   // Deprecated for the client path; parsed for env/back-compat only.
@@ -894,6 +905,7 @@ export function getSettings(): Settings {
     sessionHistorySource: optional("OPENGENI_SESSION_HISTORY_SOURCE"),
     contextCompactionMode: optional("OPENGENI_CONTEXT_COMPACTION_MODE"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
+    contextCompactionThresholdRatio: optional("OPENGENI_COMPACTION_THRESHOLD_RATIO"),
     contextReservedOutputTokens: optional("OPENGENI_CONTEXT_RESERVED_OUTPUT_TOKENS"),
     contextServerCompactThresholdTokens: optional("OPENGENI_CONTEXT_SERVER_COMPACT_THRESHOLD_TOKENS"),
     contextCompactSoftFraction: optional("OPENGENI_CONTEXT_COMPACT_SOFT_FRACTION"),
@@ -1333,11 +1345,11 @@ export function contextInputBudgetTokens(settings: Pick<Settings, "contextWindow
  * floor(B * softFraction). This is what sidesteps the SDK's wrong 240k
  * fallback for gpt-5.5 (which is absent from its hardcoded window map).
  */
-export function contextServerCompactThreshold(settings: Pick<Settings, "contextWindowTokens" | "contextReservedOutputTokens" | "contextServerCompactThresholdTokens" | "contextCompactSoftFraction">): number {
+export function contextServerCompactThreshold(settings: Pick<Settings, "contextWindowTokens" | "contextReservedOutputTokens" | "contextServerCompactThresholdTokens" | "contextCompactSoftFraction" | "contextCompactionThresholdRatio">): number {
   if (settings.contextServerCompactThresholdTokens) {
     return settings.contextServerCompactThresholdTokens;
   }
-  return Math.floor(contextInputBudgetTokens(settings) * settings.contextCompactSoftFraction);
+  return Math.floor(settings.contextWindowTokens * settings.contextCompactionThresholdRatio);
 }
 
 export function configuredStaticUsageLimits(settings: Settings): StaticUsageLimitsConfig {
