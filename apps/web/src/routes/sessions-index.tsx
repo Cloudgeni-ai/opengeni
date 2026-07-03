@@ -127,9 +127,6 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
         <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
           What should the agent do?
         </h1>
-        <p className="max-w-md text-sm text-fg-muted">
-          It runs in a live sandbox you can watch and steer.
-        </p>
       </section>
 
       <div className="mt-8">
