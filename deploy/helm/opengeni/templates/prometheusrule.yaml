@@ -1,4 +1,4 @@
-{{- if .Values.observability.prometheusRule.enabled }}
+{{- if and .Values.observability.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -19,46 +19,32 @@ spec:
         {{- if .Values.observability.prometheusRule.rules }}
         {{- toYaml .Values.observability.prometheusRule.rules | nindent 8 }}
         {{- else }}
-        - alert: OpenGeniApiHighErrorRate
-          expr: sum(rate(opengeni_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(opengeni_http_requests_total[5m])), 1) > 0.05
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: OpenGeni API 5xx error rate is above 5%
-        - alert: OpenGeniApiHighLatency
-          expr: histogram_quantile(0.95, sum(rate(opengeni_http_request_duration_seconds_bucket[5m])) by (le)) > 5
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: OpenGeni API p95 request latency is above 5 seconds
-        {{- if .Values.relay.enabled }}
-        # Bring-your-own-compute stream relay (dossier §18). The relay is a net-new
-        # byte path; these alerts surface a relay that is shedding load (rate
-        # limits / full ring buffers) or rejecting connections (bad tokens / stale
-        # epochs), and a relay tier that has lost all replicas.
-        - alert: OpenGeniRelayDown
-          expr: sum(up{job=~".*relay.*"}) == 0
+        - alert: OpenGeniTurnStuck
+          expr: opengeni_turn_oldest_inflight_age_seconds > 900
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: All OpenGeni stream-relay replicas are down (selfhosted streaming unavailable)
-        - alert: OpenGeniRelayHighRejectRate
-          expr: sum(rate(opengeni_relay_opens_rejected_total[5m])) / clamp_min(sum(rate(opengeni_relay_opens_accepted_total[5m])) + sum(rate(opengeni_relay_opens_rejected_total[5m])), 1) > 0.5
+            summary: OpenGeni has an agent turn stuck for more than 15 minutes
+        - alert: OpenGeniSandboxCreateFailureRatio
+          expr: sum(rate(opengeni_sandbox_creates_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_sandbox_creates_total[10m])), 1) > 0.2
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni relay is rejecting over 50% of channel opens (token/scope/epoch failures)
-        - alert: OpenGeniRelaySheddingLoad
-          expr: sum(rate(opengeni_relay_rate_limit_drops_total[5m])) + sum(rate(opengeni_relay_buffer_drops_total[5m])) > 0
-          for: 10m
+            summary: OpenGeni sandbox create failures exceed 20%
+        - alert: OpenGeniSandboxOrphansTerminatedGrowing
+          expr: increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni relay is shedding frames (rate-limit or buffer-full backpressure)
-        {{- end }}
+            summary: OpenGeni reaper terminated provider-side orphan sandboxes
+        - alert: OpenGeniServiceDown
+          expr: up{job=~".*opengeni.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenGeni service target is down
         {{- end }}
 {{- end }}

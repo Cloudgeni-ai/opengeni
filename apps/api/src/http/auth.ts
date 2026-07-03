@@ -58,7 +58,7 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }
-  if (settings.authAllowHealth && path === "/healthz") {
+  if (settings.authAllowHealth && (path === "/healthz" || path === "/readyz")) {
     return true;
   }
   if (settings.authAllowMetrics && path === "/metrics") {

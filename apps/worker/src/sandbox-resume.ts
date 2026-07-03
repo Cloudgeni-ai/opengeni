@@ -47,6 +47,7 @@ import {
   tagModalSandbox,
   type EstablishedSandboxSession,
   type ExposedPortEndpoint,
+  type RuntimeMetricsHooks,
 } from "@opengeni/runtime";
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
 
@@ -60,6 +61,7 @@ export type ResumeHolderKind = LeaseHolderKind;
 export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
+  sandboxMetrics?: RuntimeMetricsHooks;
 };
 
 export type ResumeBoxIds = {
@@ -171,6 +173,17 @@ function asSandboxWarmingError(error: unknown, backend: string, timeoutMs: numbe
   return /sandbox creation timed out|warming timed out|capacity.*timed out/i.test(message)
     ? new SandboxWarmingTimeoutError(backend, timeoutMs)
     : error;
+}
+
+function recordSandboxWarmingTimeout(metrics: RuntimeMetricsHooks | undefined, error: unknown): void {
+  if (!(error instanceof SandboxWarmingTimeoutError)) {
+    return;
+  }
+  try {
+    metrics?.onSandboxWarmingTimeout?.({ backend: error.backend });
+  } catch {
+    // Metrics emission must never affect sandbox recovery or error propagation.
+  }
 }
 
 function workspaceArchiveFromEnvelope(envelope: Record<string, unknown> | null | undefined): string | null {
@@ -293,6 +306,7 @@ export async function resumeBoxForTurn(
         sessionId: ids.sessionId,
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
+        ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
           const resumeEnvelope = preserveWorkspaceArchiveOnInterimResumeState(
@@ -374,7 +388,9 @@ export async function resumeBoxForTurn(
         });
       }
       await release();
-      throw asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+      const warmingError = asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+      recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
+      throw warmingError;
     }
   }
 
@@ -400,6 +416,7 @@ export async function resumeBoxForTurn(
       sessionId: ids.sessionId,
       backendOverride: ids.backend as never,
       ...(ids.environment ? { environment: ids.environment } : {}),
+      ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
     });
     // Re-ensure the desktop display stack on the ATTACHED/REARMED path too — NOT
     // just the spawner path. A turn attaching to a warm box whose :0 was never
@@ -414,7 +431,9 @@ export async function resumeBoxForTurn(
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
-    throw asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+    const warmingError = asSandboxWarmingError(error, ids.backend, settings.sandboxWarmingTimeoutMs);
+    recordSandboxWarmingTimeout(services.sandboxMetrics, warmingError);
+    throw warmingError;
   }
 }
 

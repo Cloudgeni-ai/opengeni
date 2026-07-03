@@ -94,6 +94,7 @@ import type {
 } from "./types";
 import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
 import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
+import { recordCreditMicros, runtimeMetricsHooksForObservability, turnLifecycleMetricsFor, type TurnOutcome } from "../observability-metrics";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { desktopCapableBackend, sandboxRunAs } from "@opengeni/runtime";
@@ -510,7 +511,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       "opengeni.workflow_id": input.workflowId,
       "opengeni.trigger_event_id": input.triggerEventId,
     });
-    let activityStatus = "unknown";
+    let activityStatus: RunAgentTurnResult["status"] | "unknown" = "unknown";
+    let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
     let turnId: string | undefined;
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
@@ -680,6 +682,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
       }
       turnId = turn.id;
+      turnLifecycleMetricsFor(observability).start(turnId);
       // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
       // workspace credential). Computed once and threaded through every billing
       // gate + the usage recorder so a turn paid by the user's ChatGPT/Codex plan
@@ -836,6 +839,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               { type: "session.status.changed", payload: { status: "idle" } },
             ], true);
             await finishTurn(db, input.workspaceId, turnId, "failed");
+            turnMetricOutcome = "failed";
             await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
@@ -1100,7 +1104,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           };
         } else {
           resolvedSandbox = await resumeBoxForTurn(
-            { db, settings },
+            { db, settings, sandboxMetrics: runtimeMetricsHooksForObservability(observability) },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1192,7 +1196,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             expectedEpoch: heartbeatEpoch,
             warmRateMicrosPerSecond: warmRate,
             subjectId: input.sessionId,
-          }).catch(() => undefined);
+          })
+            .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
+            .catch(() => undefined);
         }, 10_000);
         if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
           leaseHeartbeatTimer.unref();
@@ -1534,6 +1540,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   dispatchId,
                   positionalKey: `response-${responseUsageCount}`,
                 }),
+                observability,
               });
               await reconcileConversationTruth();
               try {
@@ -1588,6 +1595,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             isCodexTurn,
             usage: stream.state.usage,
             sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
+            observability,
           });
         }
         if (lastInputTokensObserved !== null) {
@@ -1640,6 +1648,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, activeTurnId, "idle");
+        turnMetricOutcome = "completed";
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -1735,6 +1744,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               await requeuePreemptedTurn(db, input.workspaceId, activeTurnId, preemptedEvent ? preemptedEvent.id : input.triggerEventId);
               await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
               activityStatus = "preempted";
+              turnMetricOutcome = "preempted";
               observability.info("context compaction recovery succeeded by compacting and auto-continuing", {
                 sessionId: input.sessionId,
                 turnId: activeTurnId,
@@ -1757,6 +1767,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               { type: "session.status.changed", payload: { status: "idle" } },
             ], true);
             await finishTurn(db, input.workspaceId, activeTurnId, "failed");
+            turnMetricOutcome = "failed";
             await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             activityError = attemptError;
@@ -1808,6 +1819,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, input.triggerEventId);
           await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
           activityStatus = "preempted";
+          turnMetricOutcome = "preempted";
           return { status: "preempted" };
         } catch (requeueError) {
           console.error("sandbox lease supersession requeue failed; falling back", requeueError);
@@ -1868,6 +1880,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId);
           await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(() => undefined);
           activityStatus = "preempted";
+          turnMetricOutcome = "preempted";
           return { status: "preempted" };
         } catch (preemptError) {
           // A failing checkpoint/requeue must not surface as an arbitrary
@@ -1885,6 +1898,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await flushRuntimeBatcher();
         if (preemptTurnId) {
           await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
+          turnMetricOutcome = "cancelled";
         }
         throw error;
       }
@@ -1920,6 +1934,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, turnId, "idle");
+        turnMetricOutcome = "completed";
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -2044,6 +2059,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, turnId, "failed");
+        turnMetricOutcome = "failed";
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
@@ -2096,6 +2112,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, turnId, "idle");
+        turnMetricOutcome = "completed";
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
@@ -2146,6 +2163,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           { type: "session.status.changed", payload: { status: "idle" } },
         ], true);
         await finishTurn(db, input.workspaceId, turnId, "failed");
+        turnMetricOutcome = "failed";
         await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
@@ -2161,6 +2179,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         { type: "session.status.changed", payload: { status: "failed" } },
       ], true);
       await finishTurn(db, input.workspaceId, turnId, "failed");
+      turnMetricOutcome = "failed";
       await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
       // The common failure path ends here: runAgentTurn marks the session
       // failed and returns "failed", and the session workflow then exits
@@ -2178,6 +2197,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         status: activityStatus,
         durationSeconds,
       });
+      if (turnId && activityStatus !== "unknown") {
+        turnLifecycleMetricsFor(observability).finish(turnId, turnMetricOutcome, durationSeconds);
+      }
       activitySpan.end({
         attributes: {
           "opengeni.turn_id": turnId ?? "",
@@ -2469,6 +2491,7 @@ export async function recordModelUsageAndDebitCredits(settings: Settings, db: Ac
   isCodexTurn: boolean;
   usage?: ModelUsageInput | null;
   sourceKey: string;
+  observability?: ActivityServices["observability"];
 }): Promise<void> {
   if (!input.usage) {
     return;
@@ -2529,7 +2552,7 @@ export async function recordModelUsageAndDebitCredits(settings: Settings, db: Ac
     idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
   });
   if (costMicros > 0) {
-    await applyCreditDebitUpToBalance(db, {
+    const result = await applyCreditDebitUpToBalance(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
@@ -2547,6 +2570,7 @@ export async function recordModelUsageAndDebitCredits(settings: Settings, db: Ac
         totalTokens,
       },
     });
+    recordCreditMicros(input.observability, "usage", result.debitedMicros);
   }
 }
 

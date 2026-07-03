@@ -268,6 +268,7 @@ async function handleCheckoutSessionCompleted(deps: ApiRouteDeps, event: Stripe.
       stripeCreditAmountUsd: credit.amountUsd,
     },
   });
+  recordCreditMicrosMetric(deps, "topup", credit.amountMicros);
 }
 
 async function mirrorPaymentIntentCustomer(deps: ApiRouteDeps, event: Stripe.Event): Promise<void> {
@@ -304,18 +305,23 @@ async function applyRefundDebit(deps: ApiRouteDeps, stripe: Stripe, refund: Stri
   if (!accountId) {
     return;
   }
+  const idempotencyKey = `stripe:refund:${refund.id}`;
+  if (await hasCreditLedgerEntry(deps.db, accountId, idempotencyKey)) {
+    return;
+  }
   await applyCreditLedgerEntry(deps.db, {
     accountId,
     type: "credit_refund",
     amountMicros: -centsToMicros(refund.amount),
     sourceType: "stripe_refund",
     sourceId: refund.id,
-    idempotencyKey: `stripe:refund:${refund.id}`,
+    idempotencyKey,
     metadata: {
       stripeRefundId: refund.id,
       stripePaymentIntentId: paymentIntentId(refund.payment_intent),
     },
   });
+  recordCreditMicrosMetric(deps, "refund", centsToMicros(refund.amount));
 }
 
 async function holdDisputedCredits(deps: ApiRouteDeps, stripe: Stripe, event: Stripe.Event): Promise<void> {
@@ -371,6 +377,18 @@ async function mirrorCustomer(deps: ApiRouteDeps, event: Stripe.Event, customer:
     provider: stripeCustomerProvider(event),
     providerCustomerId: customer.id,
     email: typeof customer.email === "string" ? customer.email : null,
+  });
+}
+
+function recordCreditMicrosMetric(deps: ApiRouteDeps, kind: "grant" | "topup" | "refund", amountMicros: number): void {
+  if (amountMicros <= 0) {
+    return;
+  }
+  deps.observability?.incrementCounter({
+    name: "opengeni_credit_micros_total",
+    help: "Total credit micros recorded by kind.",
+    labels: { kind },
+    amount: amountMicros,
   });
 }
 

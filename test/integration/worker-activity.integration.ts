@@ -1068,7 +1068,7 @@ describe("worker activities integration", () => {
     const span = exported[0]!.body.resourceSpans[0].scopeSpans[0].spans[0];
     expect(span.name).toBe("worker.run_agent_segment");
     expect(span.status.code).toBe(2);
-    expect(observability.prometheusMetrics()).toContain('status="failed"');
+    expect(await observability.prometheusMetrics()).toContain('status="failed"');
   });
 
   test("does not publish turn failure before turn start when status update fails", async () => {

@@ -5113,6 +5113,32 @@ export async function listMeterableWarmLeases(db: Database): Promise<MeterableWa
   }));
 }
 
+export async function countQueuedTurns(db: Database): Promise<number> {
+  const rows = await rawRows<{ count: number | string }>(db, sql`
+    select opengeni_private.count_queued_turns() as count
+  `);
+  return Number(rows[0]?.count ?? 0);
+}
+
+export async function countSandboxLeasesByLiveness(db: Database): Promise<Record<SandboxLeaseLiveness, number>> {
+  const counts: Record<SandboxLeaseLiveness, number> = {
+    cold: 0,
+    warming: 0,
+    warm: 0,
+    draining: 0,
+  };
+  const rows = await rawRows<{ liveness: SandboxLeaseLiveness; count: number | string }>(db, sql`
+    select liveness, count
+    from opengeni_private.count_sandbox_leases_by_liveness()
+  `);
+  for (const row of rows) {
+    if (row.liveness in counts) {
+      counts[row.liveness] = Number(row.count);
+    }
+  }
+  return counts;
+}
+
 // Cross-workspace live Modal lease read for the provider-side orphan sweep. The
 // SECURITY DEFINER function is the sanctioned RLS bypass; see migration 0036.
 export async function listLiveModalSandboxLeaseAttributions(db: Database): Promise<LiveModalSandboxLeaseAttribution[]> {

@@ -6,6 +6,7 @@ import { createObservability, logStartupDependencyRetry } from "@opengeni/observ
 import { Connection, Client as TemporalClient, ScheduleNotFoundError, ScheduleOverlapPolicy, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createApp, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { observabilityEventLogger } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
 
@@ -92,7 +93,7 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
     deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
       await temporal.schedule.getHandle(temporalScheduleId).delete().catch(() => undefined);
     },
-	    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
+    triggerScheduledTask: async ({ task, agentRunUsageIdempotencyKey, triggerWorkflowId }) => {
 	      // Deterministic workflowId (derived from the trigger token by the
 	      // caller) + REJECT_DUPLICATE makes a retried manual trigger idempotent:
 	      // the second start collides on the id and is rejected instead of
@@ -117,9 +118,12 @@ export async function createTemporalWorkflowClient(settings: ReturnType<typeof g
 	        if (isWorkflowAlreadyStarted(error)) {
 	          return;
 	        }
-	        throw error;
-	      }
-	    },
+        throw error;
+      }
+    },
+    check: async () => {
+      await connection.workflowService.getSystemInfo({});
+    },
   };
   const documentIndexer: DocumentIndexClient = {
     indexDocument: async ({ accountId, workspaceId, documentId }) => {
@@ -166,6 +170,7 @@ export async function startApi() {
         createNatsEventBus(
           settings.natsUrl,
           controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+          { logger: observabilityEventLogger(observability) },
         ),
       {
         ...retryOptions,

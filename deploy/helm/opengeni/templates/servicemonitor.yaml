@@ -1,4 +1,4 @@
-{{- if and .Values.api.enabled .Values.observability.serviceMonitor.enabled }}
+{{- if and .Values.api.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -24,7 +24,34 @@ spec:
       interval: {{ .Values.observability.serviceMonitor.interval | quote }}
       scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
 {{- end }}
-{{- if and .Values.relay.enabled .Values.observability.serviceMonitor.enabled }}
+{{- if and .Values.worker.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opengeni.fullname" . }}-worker
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.observability.serviceMonitor.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  endpoints:
+    - port: http
+      path: {{ .Values.observability.metrics.path | quote }}
+      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+{{- end }}
+{{- if and .Values.relay.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor

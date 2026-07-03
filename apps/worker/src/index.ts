@@ -1,9 +1,13 @@
-import { getSettings, retryStartupDependency, startupRetryOptions, type Settings } from "@opengeni/config";
+import { dbSearchPath, getSettings, resolveNatsControlPlaneAuth, retryStartupDependency, startupRetryOptions, type Settings } from "@opengeni/config";
+import { createDb } from "@opengeni/db";
+import { createNatsEventBus } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry, type Observability } from "@opengeni/observability";
 import { Connection, ScheduleAlreadyRunning, ScheduleOverlapPolicy, Client as TemporalClient } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { createActivities, type ActivityDependencies } from "./activities";
 import type { WakeSessionWorkflowSignal } from "./activities/types";
+import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
+import { observabilityEventLogger } from "./observability-metrics";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to
@@ -57,7 +61,11 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
 // idled and let its run finish, so a plain signal would not start one).
 // Separate from the worker's NativeConnection: the @temporalio/client
 // Connection is what exposes workflow.signalWithStart.
-export async function createWorkerWorkflowSignaler(settings: Settings): Promise<{ wakeSessionWorkflow: WakeSessionWorkflowSignal; close: () => Promise<void> }> {
+export async function createWorkerWorkflowSignaler(settings: Settings): Promise<{
+  wakeSessionWorkflow: WakeSessionWorkflowSignal;
+  check: () => Promise<void>;
+  close: () => Promise<void>;
+}> {
   const connection = await Connection.connect({ address: settings.temporalHost });
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   return {
@@ -69,6 +77,9 @@ export async function createWorkerWorkflowSignaler(settings: Settings): Promise<
         args: [{ accountId, workspaceId, sessionId }],
         signal: "queueChanged",
       });
+    },
+    check: async () => {
+      await connection.workflowService.getSystemInfo({});
     },
     close: async () => {
       await connection.close();
@@ -148,39 +159,76 @@ export async function registerSandboxReaperSchedule(
 export async function startWorker() {
   const settings = getSettings();
   const observability = createObservability(settings, { component: "worker" });
-  const signaler = await retryStartupDependency(
-    "Temporal client",
-    () => createWorkerWorkflowSignaler(settings),
-    {
-      ...startupRetryOptions(settings),
-      onRetry: (event) => logStartupDependencyRetry(observability, event),
-    },
-  );
-  const { worker, connection } = await createOpenGeniWorker({
-    settings,
-    activityDependencies: { observability, wakeSessionWorkflow: signaler.wakeSessionWorkflow },
+  const retryOptions = startupRetryOptions(settings);
+  const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) => logStartupDependencyRetry(observability, event);
+  const searchPath = dbSearchPath(settings);
+  const dbClient = createDb(settings.databaseUrl, {
+    ...(searchPath ? { searchPath } : {}),
+    rlsStrategy: settings.rlsStrategy,
   });
-  // Register the ONE global reaper Schedule (no-op when sandboxOwnershipEnabled
-  // is false). Idempotent across the pool: only the first worker creates it. The
-  // static global-queue Worker.create above is UNCHANGED — there is no
-  // per-session worker factory.
-  const reaperSchedule = await retryStartupDependency(
-    "Temporal schedule (sandbox reaper)",
-    () => registerSandboxReaperSchedule(settings, observability),
-    {
-      ...startupRetryOptions(settings),
-      onRetry: (event) => logStartupDependencyRetry(observability, event),
-    },
-  );
-  observability.info("OpenGeni worker listening", {
-    temporalTaskQueue: settings.temporalTaskQueue,
-  });
+  const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
+  let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
+  let signaler: Awaited<ReturnType<typeof createWorkerWorkflowSignaler>> | undefined;
+  let workerBundle: Awaited<ReturnType<typeof createOpenGeniWorker>> | undefined;
+  let reaperSchedule: Awaited<ReturnType<typeof registerSandboxReaperSchedule>> | undefined;
+  let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   try {
-    await worker.run();
+    bus = await retryStartupDependency(
+      "NATS",
+      () =>
+        createNatsEventBus(
+          settings.natsUrl,
+          controlPlaneAuth ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password } : undefined,
+          { logger: observabilityEventLogger(observability) },
+        ),
+      { ...retryOptions, onRetry },
+    );
+    signaler = await retryStartupDependency(
+      "Temporal client",
+      () => createWorkerWorkflowSignaler(settings),
+      { ...retryOptions, onRetry },
+    );
+    workerBundle = await createOpenGeniWorker({
+      settings,
+      activityDependencies: {
+        observability,
+        wakeSessionWorkflow: signaler.wakeSessionWorkflow,
+        db: dbClient.db,
+        bus,
+      },
+    });
+    httpServer = startWorkerHttpServer({
+      settings,
+      observability,
+      checks: {
+        db: dbReadyCheck(dbClient.db),
+        nats: natsReadyCheck(bus),
+        temporal: signaler.check,
+      },
+    });
+    // Register the ONE global reaper Schedule (no-op when sandboxOwnershipEnabled
+    // is false). Idempotent across the pool: only the first worker creates it. The
+    // static global-queue Worker.create above is UNCHANGED — there is no
+    // per-session worker factory.
+    reaperSchedule = await retryStartupDependency(
+      "Temporal schedule (sandbox reaper)",
+      () => registerSandboxReaperSchedule(settings, observability),
+      { ...retryOptions, onRetry },
+    );
+    observability.info("OpenGeni worker listening", {
+      temporalTaskQueue: settings.temporalTaskQueue,
+      httpPort: settings.workerHttpPort,
+    });
+    await workerBundle.worker.run();
   } finally {
-    await connection.close();
-    await signaler.close();
-    await reaperSchedule.close();
+    httpServer?.stop(true);
+    await Promise.allSettled([
+      workerBundle?.connection.close(),
+      signaler?.close(),
+      reaperSchedule?.close(),
+      bus?.close(),
+      dbClient.close(),
+    ]);
   }
 }
 

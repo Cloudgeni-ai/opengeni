@@ -4,6 +4,20 @@ import { connect, JSONCodec, type ConnectionOptions, type Msg, type NatsConnecti
 
 const codec = JSONCodec<SessionBusMessage | SessionEvent>();
 
+export type EventLogger = {
+  debug?: (message: string, attributes?: Record<string, unknown>) => void;
+  warn?: (message: string, attributes?: Record<string, unknown>) => void;
+};
+
+export type EventBusOptions = {
+  logger?: EventLogger;
+};
+
+const silentLogger: Required<EventLogger> = {
+  debug: () => {},
+  warn: () => {},
+};
+
 export { coalesceSessionEventDeltas } from "./coalesce";
 
 /**
@@ -82,17 +96,32 @@ async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<
  * connection closes. `label` distinguishes the event-bus connection from the
  * auth-callout responder in the logs.
  */
-function logConnectionStatus(nc: NatsConnection, label: string): void {
+function logConnectionStatus(
+  nc: NatsConnection,
+  label: string,
+  logger: EventLogger = silentLogger,
+  onStatus?: (type: string) => void,
+): void {
   void (async () => {
     try {
       for await (const status of nc.status()) {
-        console.warn(`[nats:${label}] ${status.type}`, status.data);
+        onStatus?.(status.type);
+        const attributes = { label, status: status.type, data: status.data };
+        if (isWarnNatsStatus(status.type)) {
+          (logger.warn ?? silentLogger.warn)("NATS connection status", attributes);
+        } else {
+          (logger.debug ?? silentLogger.debug)("NATS connection status", attributes);
+        }
       }
     } catch {
       // The status iterator simply ends when the connection closes; never let it
       // throw out of this background loop.
     }
   })();
+}
+
+function isWarnNatsStatus(type: string): boolean {
+  return type === "disconnect" || type === "error" || type === "staleConnection";
 }
 
 export {
@@ -180,6 +209,7 @@ export type EventBus = {
    * plane injects this so the transport never opens a second connection.
    */
   getRequestConnection: () => RequestConnection;
+  isConnected?: () => boolean;
   close: () => Promise<void>;
 };
 
@@ -194,6 +224,7 @@ export type EventBus = {
 export async function createNatsEventBus(
   natsUrl: string,
   auth?: { user: string; pass: string },
+  options: EventBusOptions = {},
 ): Promise<EventBus> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
   if (auth) {
@@ -201,7 +232,14 @@ export async function createNatsEventBus(
     connectOptions.pass = auth.pass;
   }
   const nc = await connect(withReconnectDefaults(connectOptions));
-  logConnectionStatus(nc, "event-bus");
+  let connected = true;
+  logConnectionStatus(nc, "event-bus", options.logger, (type) => {
+    if (type === "disconnect" || type === "reconnecting" || type === "staleConnection" || type === "error") {
+      connected = false;
+    } else if (type === "connect" || type === "reconnect") {
+      connected = true;
+    }
+  });
   const requestConnection: RequestConnection = {
     request: async (subject, payload, opts) => requestReply(nc, subject, payload, opts.timeout),
   };
@@ -223,10 +261,11 @@ export async function createNatsEventBus(
       } catch (error) {
         // `publish()` throws synchronously only when the connection is fully
         // CLOSED (with infinite reconnect, effectively never outside shutdown).
-        console.warn(
-          `[nats:event-bus] dropped live publish for ${workspaceId}/${sessionId}; events are durable in the DB and reconcile on stream replay`,
-          error,
-        );
+        (options.logger?.warn ?? silentLogger.warn)("NATS live publish dropped; events are durable in the DB and reconcile on stream replay", {
+          workspaceId,
+          sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
         return;
       }
       await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
@@ -236,6 +275,7 @@ export async function createNatsEventBus(
     subscribeRequests: (subject, handler) => subscribeRequests(nc, subject, handler),
     subscribeAgentEvents: (subject, handler) => subscribeAgentEvents(nc, subject, handler),
     getRequestConnection: () => requestConnection,
+    isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
     close: async () => {
       await nc.drain();
     },
@@ -280,7 +320,7 @@ export async function createResponderConnection(
   auth: NatsConnectAuth,
   subject: string,
   handler: RequestHandler,
-  options: { name?: string } = {},
+  options: { name?: string; logger?: EventLogger } = {},
 ): Promise<ResponderConnection> {
   const connectOptions: ConnectionOptions = { servers: natsUrl };
   if (options.name) {
@@ -293,7 +333,7 @@ export async function createResponderConnection(
     connectOptions.token = auth.token;
   }
   const nc = await connect(withReconnectDefaults(connectOptions));
-  logConnectionStatus(nc, options.name ? `auth-callout:${options.name}` : "auth-callout");
+  logConnectionStatus(nc, options.name ? `auth-callout:${options.name}` : "auth-callout", options.logger);
   const sub: Subscription = nc.subscribe(subject);
   void (async () => {
     for await (const msg of sub) {

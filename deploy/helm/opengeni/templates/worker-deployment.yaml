@@ -52,13 +52,18 @@ spec:
           command:
             {{- toYaml .Values.worker.command | nindent 12 }}
           {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.worker.containerPort }}
           envFrom:
             - secretRef:
                 name: {{ include "opengeni.secretName" . }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
-          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
+            - name: OPENGENI_WORKER_HTTP_PORT
+              value: {{ .Values.worker.containerPort | quote }}
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
             {{- if .Values.minio.enabled }}
             # Worker-only override: the worker performs SERVER-SIDE object-storage
@@ -73,20 +78,14 @@ spec:
             - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
               value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
             {{- end }}
-          {{- else }}
-          env: []
+            {{- end }}
+          {{- if .Values.worker.probes.readiness.enabled }}
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" .Values.worker.probes.readiness) | nindent 12 }}
           {{- end }}
           {{- if .Values.worker.probes.liveness.enabled }}
           livenessProbe:
-            {{- if .Values.worker.probes.liveness.exec }}
-            exec:
-              command:
-                {{- toYaml .Values.worker.probes.liveness.exec | nindent 16 }}
-            {{- end }}
-            initialDelaySeconds: {{ .Values.worker.probes.liveness.initialDelaySeconds }}
-            periodSeconds: {{ .Values.worker.probes.liveness.periodSeconds }}
-            timeoutSeconds: {{ .Values.worker.probes.liveness.timeoutSeconds }}
-            failureThreshold: {{ .Values.worker.probes.liveness.failureThreshold }}
+            {{- include "opengeni.httpProbe" (dict "probe" .Values.worker.probes.liveness) | nindent 12 }}
           {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}

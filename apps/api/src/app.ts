@@ -5,6 +5,7 @@ import {
 } from "@opengeni/config";
 import { ClientConfig } from "@opengeni/contracts";
 import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@opengeni/documents";
+import { dbSql } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -169,7 +170,12 @@ export function createApp(deps: AppDependencies): Hono {
     ok: true,
   }));
 
-  app.get("/metrics", (c) => c.text(observability.prometheusMetrics(), 200, {
+  app.get("/readyz", async (c) => {
+    const result = await runReadinessChecks(readinessChecks(deps), 2_000);
+    return c.json(result, result.ok ? 200 : 503);
+  });
+
+  app.get("/metrics", async (c) => c.text(await observability.prometheusMetrics(), 200, {
     "content-type": "text/plain; version=0.0.4; charset=utf-8",
   }));
 
@@ -265,8 +271,66 @@ export function httpStatusForError(error: unknown): number {
   return 500;
 }
 
+type ReadinessCheckName = "db" | "nats" | "temporal";
+type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | void>;
+
+function readinessChecks(deps: AppDependencies): ReadinessChecks {
+  return {
+    db: deps.readinessChecks?.db ?? (async () => {
+      await deps.db.execute(dbSql`select 1`);
+    }),
+    nats: deps.readinessChecks?.nats ?? (() => {
+      if (deps.bus.isConnected && !deps.bus.isConnected()) {
+        throw new Error("NATS is not connected");
+      }
+    }),
+    temporal: deps.readinessChecks?.temporal ?? deps.workflowClient.check ?? (() => {
+      throw new Error("Temporal readiness check unavailable");
+    }),
+  };
+}
+
+async function runReadinessChecks(checks: ReadinessChecks, timeoutMs: number): Promise<{
+  ok: boolean;
+  checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+}> {
+  const entries = await Promise.all(
+    (Object.entries(checks) as Array<[ReadinessCheckName, () => Promise<void> | void]>)
+      .map(async ([name, check]) => {
+        try {
+          await withTimeout(Promise.resolve().then(check), timeoutMs);
+          return [name, { ok: true }] as const;
+        } catch (error) {
+          return [name, { ok: false, error: error instanceof Error ? error.message : String(error) }] as const;
+        }
+      }),
+  );
+  const result = Object.fromEntries(entries) as Record<ReadinessCheckName, { ok: boolean; error?: string }>;
+  return {
+    ok: Object.values(result).every((check) => check.ok),
+    checks: result,
+  };
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`readiness check timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/healthz$/, label: "/healthz" },
+  { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/, label: "/v1/workspaces/:workspaceId/codex/connect/start" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/poll$/, label: "/v1/workspaces/:workspaceId/codex/connect/poll" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/codex\/status$/, label: "/v1/workspaces/:workspaceId/codex/status" },

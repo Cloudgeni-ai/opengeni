@@ -181,11 +181,36 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/social/posts`)).toBe("/v1/workspaces/:workspaceId/social/posts");
     expect(routeLabel(legacyRoute("sessions", "session-1", "events", "stream"))).toBe("/v1/unknown");
     expect(routeLabel("/v1/unregistered/resource-1")).toBe("/v1/unknown");
+    expect(routeLabel("/readyz")).toBe("/readyz");
   });
 
   test("preserves HTTPException status codes in error metrics", () => {
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
+  });
+
+  test("readyz reports a failing dependency", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: { isConnected: () => true } as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {},
+        nats: () => {
+          throw new Error("nats down");
+        },
+        temporal: async () => {},
+      },
+    });
+
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(503);
+    const body = await response.json() as { ok: boolean; checks: { nats: { ok: boolean; error?: string } } };
+    expect(body.ok).toBe(false);
+    expect(body.checks.nats.ok).toBe(false);
+    expect(body.checks.nats.error).toContain("nats down");
   });
 
   test("builds Stripe Checkout sessions that can collect tax addresses for existing customers", () => {
