@@ -77,6 +77,12 @@ function assertPublishableMetadata(pkg: WorkspacePackage): void {
   if (json.publishConfig?.provenance !== true) {
     failures.push(`${pkg.name} is publishable but missing publishConfig.provenance=true.`);
   }
+  if (json.license !== "Apache-2.0") {
+    failures.push(`${pkg.name} is publishable but missing license="Apache-2.0".`);
+  }
+  if (!existsSync(join(repoRoot, pkg.dir, "LICENSE"))) {
+    failures.push(`${pkg.name} is publishable but missing a package-local LICENSE file.`);
+  }
   if (!Array.isArray(json.files) || !json.files.includes("dist") || !json.files.includes("src")) {
     failures.push(`${pkg.name} is publishable but its files list must include "dist" and "src".`);
   }

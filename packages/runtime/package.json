@@ -2,6 +2,7 @@
   "name": "@opengeni/runtime",
   "version": "0.3.1",
   "type": "module",
+  "license": "Apache-2.0",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
   "types": "./src/index.ts",
