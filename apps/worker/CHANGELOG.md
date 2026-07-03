@@ -1,5 +1,24 @@
 # @opengeni/worker-bundle
 
+## 0.4.0
+
+### Minor Changes
+
+- e513236: Add an optional per-session `instructions` field to `CreateSessionRequest`: a first-class, system-level agent persona lever composed AFTER the per-workspace `agentInstructions` (session-specific last, non-bypassable CORE preserved). It is org-visible session metadata (returned on the session record) but is never emitted as a timeline event, so hosts can deliver per-agent-type prompts without leaking prompt content into the user-visible timeline or weakening instruction authority. Absent ⇒ byte-identical to today's composition.
+
+### Patch Changes
+
+- Updated dependencies [dbe3a19]
+- Updated dependencies [3c223ca]
+- Updated dependencies [e513236]
+  - @opengeni/config@0.2.4
+  - @opengeni/runtime@0.3.0
+  - @opengeni/contracts@0.6.0
+  - @opengeni/db@0.4.0
+  - @opengeni/documents@0.2.4
+  - @opengeni/storage@0.2.4
+  - @opengeni/events@0.2.4
+
 ## 0.3.0
 
 ### Minor Changes

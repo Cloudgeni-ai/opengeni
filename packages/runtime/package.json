@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",

@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.2.4
+
+### Patch Changes
+
+- dbe3a19: Keep the stock `.env.example` shell-sourceable and aligned with boot-time settings validation.
+- Updated dependencies [e513236]
+  - @opengeni/contracts@0.6.0
+
 ## 0.2.3
 
 ### Patch Changes

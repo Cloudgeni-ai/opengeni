@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.9.0
+
+### Patch Changes
+
+- 445fb78: First paint of a session is now a single compact fetch (deeper history loads via the scroll sentinel), and the hook exposes `initialLoading` so hosts can suppress genesis fallbacks while the tail window is still fetching — on large sessions the web console painted the session's initial message at the top for the whole fetch.
+- Updated dependencies [e513236]
+  - @opengeni/sdk@0.9.0
+
 ## 0.8.0
 
 ### Patch Changes
