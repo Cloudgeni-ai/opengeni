@@ -70,6 +70,18 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = UpdateConnectionRequest.parse(await c.req.json());
+    // Status is not a free-form field: revocation goes through DELETE, and the
+    // broker owns needs_reauth/error. Reactivating a connection is only
+    // meaningful together with a fresh credential bundle — otherwise a PATCH
+    // could clear the broker's re-auth signal while stale tokens stay in place.
+    if (payload.status !== undefined) {
+      if (payload.status !== "active") {
+        throw new HTTPException(400, { message: "status can only be set to \"active\"; use DELETE to revoke" });
+      }
+      if (payload.credential === undefined) {
+        throw new HTTPException(400, { message: "reactivating a connection requires a new credential" });
+      }
+    }
     const key = payload.credential === undefined ? null : requireEnvironmentEncryption(settings);
     const subjectId = payload.subjectId === undefined ? undefined : writableSubjectId(payload.subjectId, grant.subjectId);
     const connection = await updateConnection(db, {

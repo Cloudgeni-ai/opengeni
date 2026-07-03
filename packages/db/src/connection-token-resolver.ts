@@ -212,10 +212,13 @@ export class ConnectionRefreshHttpError extends Error {
   }
 }
 
-// The token endpoint rejecting the grant itself (4xx) means re-auth is the only
-// way forward; anything else — network failure, AS 5xx — is retryable.
+// The token endpoint rejecting the grant itself means re-auth is the only way
+// forward. 429 (throttling) and 408 are transient despite being 4xx; network
+// failures and AS 5xx are likewise retryable.
 function isPermanentRefreshError(error: unknown): boolean {
-  return error instanceof ConnectionRefreshHttpError && error.httpStatus >= 400 && error.httpStatus < 500;
+  return error instanceof ConnectionRefreshHttpError
+    && error.httpStatus >= 400 && error.httpStatus < 500
+    && error.httpStatus !== 408 && error.httpStatus !== 429;
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
@@ -290,6 +293,16 @@ export async function refreshOAuthConnectionCredential(
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");
   body.set("refresh_token", refreshToken);
+  // Public clients (token_endpoint_auth_method "none") must identify themselves
+  // in the token request body (RFC 6749 §3.2.1); grant flows persist the
+  // client_id they authorized with into the bundle/metadata.
+  const clientId =
+    stringValue((cred.credential as { client_id?: unknown }).client_id)
+    ?? stringValue((cred.metadata as { clientId?: unknown }).clientId)
+    ?? stringValue((cred.metadata as { client_id?: unknown }).client_id);
+  if (clientId) {
+    body.set("client_id", clientId);
+  }
   const resource = ref.resource ?? stringValue((cred.credential as { resource?: unknown }).resource);
   if (resource) {
     body.set("resource", resource);

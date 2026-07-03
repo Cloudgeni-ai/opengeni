@@ -1925,9 +1925,11 @@ export async function loadConnectionCredentialForBroker(db: Database, settings: 
     }
   }
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // Prefer active rows: a revoke bumps updatedAt, so recency alone would let a
+    // freshly revoked connection shadow an active replacement for the provider.
     const [row] = await scopedDb.select().from(schema.connections)
       .where(and(...conditions))
-      .orderBy(desc(schema.connections.updatedAt))
+      .orderBy(desc(sql`(${schema.connections.status} = 'active')`), desc(schema.connections.updatedAt))
       .limit(1);
     if (!row) {
       return null;

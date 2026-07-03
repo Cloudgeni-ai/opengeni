@@ -171,6 +171,46 @@ describe("connections routes", () => {
     expect((await revoked.json() as { connection: { status: string } }).connection.status).toBe("revoked");
   });
 
+  test("PATCH cannot clear a re-auth signal without a fresh credential", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", ["connections:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    const created = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "api.example.com",
+        kind: "api_key",
+        credential: { headers: { authorization: "Bearer X" } },
+      }),
+    });
+    const { connection } = await created.json() as { connection: { id: string } };
+
+    const bareActivate = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status: "active" }),
+    });
+    expect(bareActivate.status).toBe(400);
+
+    const patchRevoke = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status: "revoked" }),
+    });
+    expect(patchRevoke.status).toBe(400);
+
+    const reactivate = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ status: "active", credential: { headers: { authorization: "Bearer Y" } } }),
+    });
+    expect(reactivate.status).toBe(200);
+  });
+
   test("subject-owned connections are only visible to that subject", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

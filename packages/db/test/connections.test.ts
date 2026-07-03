@@ -13,6 +13,7 @@ import {
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordConnectionTokenRefresh,
+  refreshOAuthConnectionCredential,
   revokeConnection,
   setConnectionStatus,
   type ConnectionBrokerDeps,
@@ -319,6 +320,32 @@ describe("connections table and helpers", () => {
     const ownRevoke = await revokeConnection(db, ws.workspaceId, subjectConnection.id, "subject-a");
     expect(ownRevoke?.status).toBe("revoked");
   });
+
+  test("provider-domain lookup prefers an active row over a freshly revoked one", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const active = await createConnection(db, {
+      ...ws,
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer active" } }),
+    });
+    const doomed = await createConnection(db, {
+      ...ws,
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      credentialEncrypted: enc({ headers: { authorization: "Bearer doomed" } }),
+    });
+    // The revoke bumps updatedAt, making the dead row the NEWEST for the provider.
+    await revokeConnection(db, ws.workspaceId, doomed.id);
+
+    const loaded = await loadConnectionCredentialForBroker(db, settings, {
+      workspaceId: ws.workspaceId,
+      providerDomain: "api.example.com",
+    });
+    expect(loaded?.id).toBe(active.id);
+    expect(loaded?.status).toBe("active");
+  });
 });
 
 describe("buildConnectionTokenResolver", () => {
@@ -434,6 +461,60 @@ describe("buildConnectionTokenResolver", () => {
     });
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
     expect(counts.status).toBe(0);
+  });
+
+  test("a 429 from the token endpoint is transient — no needs_reauth", async () => {
+    const stale = brokerCredential({
+      id: "conn_oauth",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(Date.now() - 1_000),
+      version: 3,
+    });
+    const { deps, counts } = resolverDeps({
+      loadCredential: async () => stale,
+      refresh: async () => {
+        counts.refresh += 1;
+        throw new ConnectionRefreshHttpError(429);
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+    });
+    expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
+    expect(counts.status).toBe(0);
+  });
+
+  test("public-client refresh sends client_id from the credential bundle", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: URLSearchParams | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = new URLSearchParams(String(init?.body));
+      return new Response(JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(brokerCredential({
+        kind: "oauth2",
+        credential: {
+          access_token: "AC",
+          refresh_token: "RF",
+          token_type: "Bearer",
+          token_endpoint: "https://as.example.com/token",
+          client_id: "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
+        },
+      }), { providerDomain: "oauth.example.com", kind: "oauth2" });
+      expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
+      expect(capturedBody!.get("client_id")).toBe("https://opengeni.example.com/v1/integrations/oauth/client-metadata.json");
+      expect(capturedBody!.get("grant_type")).toBe("refresh_token");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
