@@ -44,11 +44,11 @@ describe("contracts", () => {
   test("accepts per-session MCP servers and credential rotations without response value echo", () => {
     const payload = CreateSessionRequest.parse({
       initialMessage: "inspect repo",
-      tools: [{ kind: "mcp", id: "peloton" }],
+      tools: [{ kind: "mcp", id: "crm" }],
       mcpServers: [{
-        id: "peloton",
-        name: "Peloton MCP",
-        url: "https://peloton.example/mcp",
+        id: "crm",
+        name: "CRM MCP",
+        url: "https://crm.example/mcp",
         allowedTools: ["workouts.list"],
         timeoutMs: 1500,
         cacheToolsList: false,
@@ -65,7 +65,7 @@ describe("contracts", () => {
       type: "user.message",
       payload: {
         text: "rotate",
-        mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer rotated-secret" } }],
+        mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer rotated-secret" } }],
       },
     });
     expect(event.type).toBe("user.message");
@@ -75,16 +75,16 @@ describe("contracts", () => {
     expect(event.payload.mcpCredentialUpdates?.[0]?.headers.Authorization).toBe("Bearer rotated-secret");
 
     const metadata = SessionMcpServerMetadata.parse({
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 2,
     });
     expect(metadata).toEqual({
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 2,
     });

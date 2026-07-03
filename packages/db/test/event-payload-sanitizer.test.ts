@@ -116,12 +116,12 @@ describe("sanitizeEventPayload (deep walk)", () => {
   test("redacts session MCP credential header values to names", () => {
     const cleaned = sanitizeEventPayload({
       mcpServers: [{
-        id: "peloton",
-        url: "https://peloton.example/mcp",
+        id: "crm",
+        url: "https://crm.example/mcp",
         headers: { Authorization: "Bearer create-secret" },
       }],
       mcpCredentialUpdates: [{
-        id: "peloton",
+        id: "crm",
         headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
       }],
     }) as unknown as {
@@ -133,12 +133,12 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(serialized).not.toContain("create-secret");
     expect(serialized).not.toContain("rotated-secret");
     expect(cleaned.mcpServers[0]).toEqual({
-      id: "peloton",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
     });
     expect(cleaned.mcpCredentialUpdates[0]).toEqual({
-      id: "peloton",
+      id: "crm",
       headerNames: ["Authorization", "X-Session"],
     });
   });

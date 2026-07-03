@@ -3902,13 +3902,13 @@ describe("API component integration", () => {
     const created = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
-        initialMessage: "use the peloton server",
+        initialMessage: "use the crm server",
         model: "scripted-model",
-        tools: [{ kind: "mcp", id: "peloton" }],
+        tools: [{ kind: "mcp", id: "crm" }],
         mcpServers: [{
-          id: "peloton",
-          name: "Peloton MCP",
-          url: "https://peloton.example/mcp",
+          id: "crm",
+          name: "CRM MCP",
+          url: "https://crm.example/mcp",
           allowedTools: ["workouts.list"],
           timeoutMs: 2500,
           cacheToolsList: false,
@@ -3925,11 +3925,11 @@ describe("API component integration", () => {
       tools: Array<{ kind: string; id: string }>;
       mcpServers: Array<{ id: string; name: string | null; url: string; headerNames: string[]; credentialVersion: number; headers?: unknown }>;
     };
-    expect(session.tools).toContainEqual({ kind: "mcp", id: "peloton" });
+    expect(session.tools).toContainEqual({ kind: "mcp", id: "crm" });
     expect(session.mcpServers).toEqual([{
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 1,
     }]);
@@ -3958,7 +3958,7 @@ describe("API component integration", () => {
         type: "user.message",
         payload: {
           text: "rotate then continue",
-          mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: rotatedSecret, "X-Turn": "2" } }],
+          mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: rotatedSecret, "X-Turn": "2" } }],
         },
       }),
       headers: { "content-type": "application/json", authorization: attachAuth },
@@ -3968,9 +3968,9 @@ describe("API component integration", () => {
     expect(rotatedText).not.toContain(rotatedSecret);
     const accepted = JSON.parse(rotatedText) as { payload: { mcpCredentialUpdates?: Array<{ id: string; headerNames: string[]; credentialVersion: number; headers?: unknown }> } };
     expect(accepted.payload.mcpCredentialUpdates).toEqual([{
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization", "X-Turn"],
       credentialVersion: 2,
     }]);
@@ -4002,7 +4002,7 @@ describe("API component integration", () => {
       method: "POST",
       body: JSON.stringify({
         type: "user.message",
-        payload: { text: "denied rotate", mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer denied" } }] },
+        payload: { text: "denied rotate", mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer denied" } }] },
       }),
       headers: { "content-type": "application/json", authorization: limitedAuth },
     });
@@ -4083,13 +4083,13 @@ describe("API component integration", () => {
     const created = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
-        initialMessage: "use the peloton server",
+        initialMessage: "use the crm server",
         model: "scripted-model",
-        tools: [{ kind: "mcp", id: "peloton" }],
+        tools: [{ kind: "mcp", id: "crm" }],
         mcpServers: [{
-          id: "peloton",
-          name: "Peloton MCP",
-          url: "https://peloton.example/mcp",
+          id: "crm",
+          name: "CRM MCP",
+          url: "https://crm.example/mcp",
           headers: { Authorization: createSecret, "X-Initial": "1" },
         }],
       }),
@@ -4114,7 +4114,7 @@ describe("API component integration", () => {
         type: "user.message",
         payload: {
           text: "rotate after cancellation",
-          mcpCredentialUpdates: [{ id: "peloton", headers: { Authorization: "Bearer rejected", "X-Initial": "2" } }],
+          mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "Bearer rejected", "X-Initial": "2" } }],
         },
       }),
       headers: { "content-type": "application/json", authorization: attachAuth },

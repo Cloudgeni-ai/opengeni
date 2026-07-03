@@ -54,7 +54,7 @@ Credentials rotate through a `user.message` payload:
   "payload": {
     "text": "continue",
     "mcpCredentialUpdates": [
-      { "id": "peloton", "headers": { "Authorization": "Bearer ..." } }
+      { "id": "crm", "headers": { "Authorization": "Bearer ..." } }
     ]
   }
 }

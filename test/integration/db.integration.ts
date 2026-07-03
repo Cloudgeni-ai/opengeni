@@ -107,9 +107,9 @@ describe("DB integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
       mcpServers: [{
-        id: "peloton",
-        name: "Peloton MCP",
-        url: "https://peloton.example/mcp",
+        id: "crm",
+        name: "CRM MCP",
+        url: "https://crm.example/mcp",
         allowedTools: ["workouts.list"],
         timeoutMs: 2500,
         cacheToolsList: true,
@@ -120,9 +120,9 @@ describe("DB integration", () => {
     });
 
     expect(session.mcpServers).toEqual([{
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 1,
     }]);
@@ -139,9 +139,9 @@ describe("DB integration", () => {
 
     const forRun = await listSessionMcpServersForRun(dbClient.db, grant.workspaceId, session.id, encryptionKey);
     expect(forRun).toEqual([{
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       allowedTools: ["workouts.list"],
       timeoutMs: 2500,
       cacheToolsList: true,
@@ -154,7 +154,7 @@ describe("DB integration", () => {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
       updates: [{
-        id: "peloton",
+        id: "crm",
         headersEncrypted: {
           Authorization: encryptEnvironmentValue(encryptionKey, "Bearer rotated-secret"),
           "X-Session": encryptEnvironmentValue(encryptionKey, "turn-2"),
@@ -163,9 +163,9 @@ describe("DB integration", () => {
     });
     expect(rotated.missingIds).toEqual([]);
     expect(rotated.servers).toEqual([{
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       headerNames: ["Authorization", "X-Session"],
       credentialVersion: 2,
     }]);

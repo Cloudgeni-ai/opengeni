@@ -122,14 +122,14 @@ describe("worker activities integration", () => {
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "use session mcp",
       resources: [],
-      tools: [{ kind: "mcp", id: "peloton" }],
+      tools: [{ kind: "mcp", id: "crm" }],
       metadata: {},
       model: "scripted-model",
       sandboxBackend: "none",
       mcpServers: [{
-        id: "peloton",
-        name: "Peloton MCP",
-        url: "https://peloton.example/mcp",
+        id: "crm",
+        name: "CRM MCP",
+        url: "https://crm.example/mcp",
         allowedTools: ["workouts.list"],
         timeoutMs: 3000,
         cacheToolsList: false,
@@ -157,10 +157,10 @@ describe("worker activities integration", () => {
 
     await runtime.prepareTools(runSettings);
 
-    expect(preparedSettings?.mcpServers.find((server) => server.id === "peloton")).toEqual({
-      id: "peloton",
-      name: "Peloton MCP",
-      url: "https://peloton.example/mcp",
+    expect(preparedSettings?.mcpServers.find((server) => server.id === "crm")).toEqual({
+      id: "crm",
+      name: "CRM MCP",
+      url: "https://crm.example/mcp",
       allowedTools: ["workouts.list"],
       timeoutMs: 3000,
       cacheToolsList: false,
