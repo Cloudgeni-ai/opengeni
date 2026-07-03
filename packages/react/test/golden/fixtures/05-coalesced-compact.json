@@ -1,0 +1,102 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000501",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Stream a compactable response."
+    },
+    "occurredAt": "2026-01-02T14:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000502",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 2,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "triggerEventId": "00000000-0000-4000-8000-000000000501",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T14:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000503",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 3,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000501"
+    },
+    "occurredAt": "2026-01-02T14:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000504",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 4,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "hello world",
+      "coalescedUntil": 6
+    },
+    "occurredAt": "2026-01-02T14:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000507",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 7,
+    "type": "sandbox.operation.started",
+    "payload": {
+      "name": "build",
+      "command": "bun run build"
+    },
+    "occurredAt": "2026-01-02T14:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000508",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 8,
+    "type": "sandbox.command.output.delta",
+    "payload": {
+      "name": "build",
+      "text": "Step 1\nStep 2\n",
+      "coalescedUntil": 9
+    },
+    "occurredAt": "2026-01-02T14:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000510",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 10,
+    "type": "sandbox.operation.completed",
+    "payload": {
+      "name": "build"
+    },
+    "occurredAt": "2026-01-02T14:00:10.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000511",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666670",
+    "sequence": 11,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T14:00:11.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  }
+]

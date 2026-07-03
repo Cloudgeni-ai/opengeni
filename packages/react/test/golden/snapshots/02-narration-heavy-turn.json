@@ -1,0 +1,311 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000202",
+      "occurredAt": "2026-01-02T11:00:02.000Z",
+      "text": "Patch the login helper and prove the page still renders.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "reasoning",
+      "id": "00000000-0000-4000-8000-000000000205",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:05.000Z",
+      "text": "I need to inspect the helper, patch the import, then use the browser screenshot.",
+      "streaming": false
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000206",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:06.000Z",
+      "text": "First I will inspect the helper.",
+      "streaming": false
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000208",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "callId": "call-heavy-read",
+      "occurredAt": "2026-01-02T11:00:08.000Z",
+      "name": "exec_command",
+      "status": "complete",
+      "arguments": {
+        "cmd": "sed -n '1,80p' src/auth/login-helper.ts",
+        "workdir": "/workspace"
+      },
+      "output": "Chunk ID: heavy-read\nWall time: 0.0100 seconds\nProcess exited with code 0\nOutput:\nimport { oldSession } from './legacy';\nexport function login() { return oldSession(); }\n",
+      "raw": {
+        "arguments": "{\"cmd\":\"sed -n '1,80p' src/auth/login-helper.ts\",\"workdir\":\"/workspace\"}",
+        "callId": "call-heavy-read",
+        "name": "exec_command",
+        "type": "function_call"
+      }
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000210",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:10.000Z",
+      "text": "The helper still imports the legacy session.",
+      "streaming": false
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000212",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "callId": "call-heavy-patch",
+      "occurredAt": "2026-01-02T11:00:12.000Z",
+      "name": "apply_patch_call",
+      "status": "complete",
+      "arguments": null,
+      "output": "Patch applied.",
+      "raw": {
+        "operation": {
+          "diff": "@@ -1,2 +1,2 @@\n-import { oldSession } from './legacy';\n+import { sessionApi } from './session-api';\n-export function login() { return oldSession(); }\n+export function login() { return sessionApi.resolve(); }\n",
+          "path": "src/auth/login-helper.ts",
+          "type": "update_file"
+        },
+        "type": "apply_patch_call"
+      }
+    },
+    {
+      "kind": "reasoning",
+      "id": "00000000-0000-4000-8000-000000000214",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:14.000Z",
+      "text": "Now I need visual proof after the patch.",
+      "streaming": false
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000215",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "callId": "call-heavy-shot",
+      "occurredAt": "2026-01-02T11:00:15.000Z",
+      "name": "computer_call",
+      "status": "complete",
+      "arguments": null,
+      "output": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+      "raw": {
+        "action": {
+          "type": "screenshot"
+        },
+        "actions": [
+          {
+            "type": "screenshot"
+          }
+        ],
+        "type": "computer_call"
+      }
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000217",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:17.000Z",
+      "text": "The login page renders after the patch.",
+      "streaming": false
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000219-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "occurredAt": "2026-01-02T11:00:19.000Z",
+      "outcome": "complete",
+      "failureText": null
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000202",
+        "occurredAt": "2026-01-02T11:00:02.000Z",
+        "text": "Patch the login helper and prove the page still renders.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000002",
+      "outcome": "complete",
+      "startedAt": "2026-01-02T11:00:05.000Z",
+      "endedAt": "2026-01-02T11:00:19.000Z",
+      "groupCount": 5,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000205",
+          "itemCount": 1,
+          "itemKinds": {
+            "reasoning": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "reasoning",
+              "id": "00000000-0000-4000-8000-000000000205",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "occurredAt": "2026-01-02T11:00:05.000Z",
+              "text": "I need to inspect the helper, patch the import, then use the browser screenshot.",
+              "streaming": false
+            }
+          ]
+        },
+        {
+          "kind": "item",
+          "item": {
+            "kind": "agent-message",
+            "id": "00000000-0000-4000-8000-000000000206",
+            "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+            "occurredAt": "2026-01-02T11:00:06.000Z",
+            "text": "First I will inspect the helper.",
+            "streaming": false
+          }
+        },
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000208",
+          "itemCount": 1,
+          "itemKinds": {
+            "tool-call": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000208",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "callId": "call-heavy-read",
+              "occurredAt": "2026-01-02T11:00:08.000Z",
+              "name": "exec_command",
+              "status": "complete",
+              "arguments": {
+                "cmd": "sed -n '1,80p' src/auth/login-helper.ts",
+                "workdir": "/workspace"
+              },
+              "output": "Chunk ID: heavy-read\nWall time: 0.0100 seconds\nProcess exited with code 0\nOutput:\nimport { oldSession } from './legacy';\nexport function login() { return oldSession(); }\n",
+              "raw": {
+                "arguments": "{\"cmd\":\"sed -n '1,80p' src/auth/login-helper.ts\",\"workdir\":\"/workspace\"}",
+                "callId": "call-heavy-read",
+                "name": "exec_command",
+                "type": "function_call"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "item",
+          "item": {
+            "kind": "agent-message",
+            "id": "00000000-0000-4000-8000-000000000210",
+            "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+            "occurredAt": "2026-01-02T11:00:10.000Z",
+            "text": "The helper still imports the legacy session.",
+            "streaming": false
+          }
+        },
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000212",
+          "itemCount": 3,
+          "itemKinds": {
+            "reasoning": 1,
+            "tool-call": 2
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000212",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "callId": "call-heavy-patch",
+              "occurredAt": "2026-01-02T11:00:12.000Z",
+              "name": "apply_patch_call",
+              "status": "complete",
+              "arguments": null,
+              "output": "Patch applied.",
+              "raw": {
+                "operation": {
+                  "diff": "@@ -1,2 +1,2 @@\n-import { oldSession } from './legacy';\n+import { sessionApi } from './session-api';\n-export function login() { return oldSession(); }\n+export function login() { return sessionApi.resolve(); }\n",
+                  "path": "src/auth/login-helper.ts",
+                  "type": "update_file"
+                },
+                "type": "apply_patch_call"
+              }
+            },
+            {
+              "kind": "reasoning",
+              "id": "00000000-0000-4000-8000-000000000214",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "occurredAt": "2026-01-02T11:00:14.000Z",
+              "text": "Now I need visual proof after the patch.",
+              "streaming": false
+            },
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000215",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+              "callId": "call-heavy-shot",
+              "occurredAt": "2026-01-02T11:00:15.000Z",
+              "name": "computer_call",
+              "status": "complete",
+              "arguments": null,
+              "output": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+              "raw": {
+                "action": {
+                  "type": "screenshot"
+                },
+                "actions": [
+                  {
+                    "type": "screenshot"
+                  }
+                ],
+                "type": "computer_call"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "agent-message",
+        "id": "00000000-0000-4000-8000-000000000217",
+        "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+        "occurredAt": "2026-01-02T11:00:17.000Z",
+        "text": "The login page renders after the patch.",
+        "streaming": false
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "agent-message": 3,
+      "reasoning": 2,
+      "tool-call": 3,
+      "turn-end": 1,
+      "user-message": 1
+    },
+    "groupKinds": {
+      "activity": 3,
+      "item": 4,
+      "turn": 1
+    },
+    "activityItemKinds": {
+      "reasoning": 2,
+      "tool-call": 3
+    },
+    "turnOutcomes": {
+      "complete": 1
+    }
+  }
+}

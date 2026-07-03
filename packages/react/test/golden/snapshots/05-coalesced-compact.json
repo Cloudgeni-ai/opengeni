@@ -1,0 +1,114 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000501",
+      "occurredAt": "2026-01-02T14:00:01.000Z",
+      "text": "Stream a compactable response.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000504",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T14:00:04.000Z",
+      "text": "hello world",
+      "streaming": false
+    },
+    {
+      "kind": "sandbox",
+      "id": "00000000-0000-4000-8000-000000000507",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T14:00:07.000Z",
+      "name": "build",
+      "command": "bun run build",
+      "status": "complete",
+      "output": "Step 1\nStep 2\n"
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000511-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+      "occurredAt": "2026-01-02T14:00:11.000Z",
+      "outcome": "complete",
+      "failureText": null
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000501",
+        "occurredAt": "2026-01-02T14:00:01.000Z",
+        "text": "Stream a compactable response.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000010",
+      "outcome": "complete",
+      "startedAt": "2026-01-02T14:00:04.000Z",
+      "endedAt": "2026-01-02T14:00:11.000Z",
+      "groupCount": 2,
+      "groups": [
+        {
+          "kind": "item",
+          "item": {
+            "kind": "agent-message",
+            "id": "00000000-0000-4000-8000-000000000504",
+            "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+            "occurredAt": "2026-01-02T14:00:04.000Z",
+            "text": "hello world",
+            "streaming": false
+          }
+        },
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000507",
+          "itemCount": 1,
+          "itemKinds": {
+            "sandbox": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "sandbox",
+              "id": "00000000-0000-4000-8000-000000000507",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000010",
+              "occurredAt": "2026-01-02T14:00:07.000Z",
+              "name": "build",
+              "command": "bun run build",
+              "status": "complete",
+              "output": "Step 1\nStep 2\n"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "agent-message": 1,
+      "sandbox": 1,
+      "turn-end": 1,
+      "user-message": 1
+    },
+    "groupKinds": {
+      "activity": 1,
+      "item": 2,
+      "turn": 1
+    },
+    "activityItemKinds": {
+      "sandbox": 1
+    },
+    "turnOutcomes": {
+      "complete": 1
+    }
+  }
+}

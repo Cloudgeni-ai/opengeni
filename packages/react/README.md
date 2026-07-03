@@ -149,6 +149,14 @@ so consumers can render attachment chips. `groupTimeline` clusters consecutive
 activity for collapsed display. Use them directly if you want custom rendering
 with the same semantics.
 
+### Compatibility
+
+The projection is a tolerant reader over `SessionEvent.payload` because the wire
+contract intentionally keeps payloads open. Unknown event types and unknown or
+malformed fields are ignored, never fatal. The golden event-grammar suite in
+`test/golden` is the compatibility contract for how existing durable logs render;
+intentional changes should regenerate those snapshots and review the diff.
+
 ## Components
 
 - `ChatComposer` — auto-growing textarea, Enter-to-send (IME-safe), stop

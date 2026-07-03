@@ -1,0 +1,136 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000702",
+      "occurredAt": "2026-01-02T16:00:02.000Z",
+      "text": "",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000706",
+      "turnId": null,
+      "callId": null,
+      "occurredAt": "2026-01-02T16:00:06.000Z",
+      "name": "tool",
+      "status": "complete",
+      "arguments": null,
+      "output": null,
+      "raw": null
+    },
+    {
+      "kind": "sandbox",
+      "id": "00000000-0000-4000-8000-000000000708",
+      "turnId": null,
+      "occurredAt": "2026-01-02T16:00:08.000Z",
+      "name": "sandbox",
+      "command": null,
+      "status": "failed",
+      "output": "legacy-output\n\ndisk full"
+    },
+    {
+      "kind": "session-status",
+      "id": "00000000-0000-4000-8000-000000000712",
+      "occurredAt": "2026-01-02T16:00:12.000Z",
+      "status": "failed"
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000713-turn-end",
+      "turnId": null,
+      "occurredAt": "2026-01-02T16:00:13.000Z",
+      "outcome": "failed",
+      "failureText": null
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000702",
+        "occurredAt": "2026-01-02T16:00:02.000Z",
+        "text": "",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-00000000-0000-4000-8000-000000000713-turn-end",
+      "outcome": "failed",
+      "startedAt": "2026-01-02T16:00:06.000Z",
+      "endedAt": "2026-01-02T16:00:13.000Z",
+      "groupCount": 2,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000706",
+          "itemCount": 2,
+          "itemKinds": {
+            "sandbox": 1,
+            "tool-call": 1
+          },
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000706",
+              "turnId": null,
+              "callId": null,
+              "occurredAt": "2026-01-02T16:00:06.000Z",
+              "name": "tool",
+              "status": "complete",
+              "arguments": null,
+              "output": null,
+              "raw": null
+            },
+            {
+              "kind": "sandbox",
+              "id": "00000000-0000-4000-8000-000000000708",
+              "turnId": null,
+              "occurredAt": "2026-01-02T16:00:08.000Z",
+              "name": "sandbox",
+              "command": null,
+              "status": "failed",
+              "output": "legacy-output\n\ndisk full"
+            }
+          ]
+        },
+        {
+          "kind": "item",
+          "item": {
+            "kind": "session-status",
+            "id": "00000000-0000-4000-8000-000000000712",
+            "occurredAt": "2026-01-02T16:00:12.000Z",
+            "status": "failed"
+          }
+        }
+      ]
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "sandbox": 1,
+      "session-status": 1,
+      "tool-call": 1,
+      "turn-end": 1,
+      "user-message": 1
+    },
+    "groupKinds": {
+      "activity": 1,
+      "item": 2,
+      "turn": 1
+    },
+    "activityItemKinds": {
+      "sandbox": 1,
+      "tool-call": 1
+    },
+    "turnOutcomes": {
+      "failed": 1
+    }
+  }
+}

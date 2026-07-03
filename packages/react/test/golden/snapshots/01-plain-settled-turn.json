@@ -1,0 +1,175 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000102",
+      "occurredAt": "2026-01-02T10:00:02.000Z",
+      "text": "Run the tests and report the result.",
+      "pending": false,
+      "resources": [
+        {
+          "kind": "repository",
+          "ref": "main",
+          "uri": "https://github.com/cloudgeni-ai/opengeni.git"
+        }
+      ],
+      "tools": [
+        {
+          "id": "opengeni",
+          "kind": "mcp"
+        }
+      ]
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000106",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "occurredAt": "2026-01-02T10:00:06.000Z",
+      "text": "I will run the package tests now.",
+      "streaming": false
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000109",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "callId": "call-exec-plain",
+      "occurredAt": "2026-01-02T10:00:09.000Z",
+      "name": "exec_command",
+      "status": "complete",
+      "arguments": {
+        "cmd": "bun test packages/react/test",
+        "workdir": "/workspace"
+      },
+      "output": "Chunk ID: plain\nWall time: 1.2040 seconds\nProcess exited with code 0\nOutput:\n42 pass\n",
+      "raw": {
+        "arguments": "{\"cmd\":\"bun test packages/react/test\",\"workdir\":\"/workspace\"}",
+        "callId": "call-exec-plain",
+        "name": "exec_command",
+        "type": "function_call"
+      }
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000111",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "occurredAt": "2026-01-02T10:00:11.000Z",
+      "text": "Tests passed: 42 pass.",
+      "streaming": false
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000112-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "occurredAt": "2026-01-02T10:00:12.000Z",
+      "outcome": "complete",
+      "failureText": null
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000102",
+        "occurredAt": "2026-01-02T10:00:02.000Z",
+        "text": "Run the tests and report the result.",
+        "pending": false,
+        "resources": [
+          {
+            "kind": "repository",
+            "ref": "main",
+            "uri": "https://github.com/cloudgeni-ai/opengeni.git"
+          }
+        ],
+        "tools": [
+          {
+            "id": "opengeni",
+            "kind": "mcp"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000001",
+      "outcome": "complete",
+      "startedAt": "2026-01-02T10:00:06.000Z",
+      "endedAt": "2026-01-02T10:00:12.000Z",
+      "groupCount": 2,
+      "groups": [
+        {
+          "kind": "item",
+          "item": {
+            "kind": "agent-message",
+            "id": "00000000-0000-4000-8000-000000000106",
+            "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+            "occurredAt": "2026-01-02T10:00:06.000Z",
+            "text": "I will run the package tests now.",
+            "streaming": false
+          }
+        },
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000109",
+          "itemCount": 1,
+          "itemKinds": {
+            "tool-call": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000109",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+              "callId": "call-exec-plain",
+              "occurredAt": "2026-01-02T10:00:09.000Z",
+              "name": "exec_command",
+              "status": "complete",
+              "arguments": {
+                "cmd": "bun test packages/react/test",
+                "workdir": "/workspace"
+              },
+              "output": "Chunk ID: plain\nWall time: 1.2040 seconds\nProcess exited with code 0\nOutput:\n42 pass\n",
+              "raw": {
+                "arguments": "{\"cmd\":\"bun test packages/react/test\",\"workdir\":\"/workspace\"}",
+                "callId": "call-exec-plain",
+                "name": "exec_command",
+                "type": "function_call"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "agent-message",
+        "id": "00000000-0000-4000-8000-000000000111",
+        "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+        "occurredAt": "2026-01-02T10:00:11.000Z",
+        "text": "Tests passed: 42 pass.",
+        "streaming": false
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "agent-message": 2,
+      "tool-call": 1,
+      "turn-end": 1,
+      "user-message": 1
+    },
+    "groupKinds": {
+      "activity": 1,
+      "item": 3,
+      "turn": 1
+    },
+    "activityItemKinds": {
+      "tool-call": 1
+    },
+    "turnOutcomes": {
+      "complete": 1
+    }
+  }
+}

@@ -8,6 +8,7 @@ import { settingsWithEnabledCapabilityMcpServers } from "../../apps/worker/src/a
 import { MemoryEventBus, parseSseBlock, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
+import { buildTimeline } from "../../packages/react/src/timeline";
 
 describe("API component integration", () => {
   let services: TestServices;
@@ -53,6 +54,7 @@ describe("API component integration", () => {
     expect(workflow.wakeups).toHaveLength(1);
     const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
     expect(events.map((event) => event.type)).toEqual(["session.created", "user.message", "session.status.changed", "turn.queued"]);
+    expect(buildTimeline(events).map((item) => item.kind)).toEqual(["user-message"]);
 
     const listed = await app.request(workspacePath(workspaceId, "/sessions?limit=10"));
     expect(listed.status).toBe(200);

@@ -1,0 +1,172 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000601",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Spawn a browser worker, send it a follow-up, then steer it."
+    },
+    "occurredAt": "2026-01-02T15:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000602",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 2,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000011",
+      "triggerEventId": "00000000-0000-4000-8000-000000000601",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T15:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000603",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 3,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000601"
+    },
+    "occurredAt": "2026-01-02T15:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000604",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 4,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-worker-spawn",
+      "name": "session_create",
+      "arguments": "{\"initialMessage\":\"verify login flow end-to-end\",\"model\":\"scripted-model\"}"
+    },
+    "occurredAt": "2026-01-02T15:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000605",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 5,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-worker-spawn",
+      "output": {
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"id\":\"33333333-4444-4555-9666-777777777777\",\"workspaceId\":\"11111111-2222-4333-9444-555555555555\",\"status\":\"queued\"}"
+          }
+        ],
+        "structuredContent": {
+          "session": {
+            "id": "33333333-4444-4555-9666-777777777777",
+            "workspaceId": "11111111-2222-4333-9444-555555555555",
+            "status": "queued"
+          }
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T15:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000606",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 6,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-worker-message",
+      "name": "session_send_message",
+      "arguments": {
+        "sessionId": "33333333-4444-4555-9666-777777777777",
+        "message": "Capture the final dashboard screenshot."
+      }
+    },
+    "occurredAt": "2026-01-02T15:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000607",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 7,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-worker-message",
+      "output": {
+        "structuredContent": {
+          "sessionId": "33333333-4444-4555-9666-777777777777",
+          "event": {
+            "type": "user.message"
+          }
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "queued"
+          }
+        ]
+      }
+    },
+    "occurredAt": "2026-01-02T15:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000608",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 8,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-worker-interrupt",
+      "name": "session_interrupt",
+      "arguments": "{\"sessionId\":\"33333333-4444-4555-9666-777777777777\",\"mode\":\"steer\"}"
+    },
+    "occurredAt": "2026-01-02T15:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000609",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 9,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-worker-interrupt",
+      "output": {
+        "structuredContent": {
+          "sessionId": "33333333-4444-4555-9666-777777777777",
+          "status": "cancelled"
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "{\"sessionId\":\"33333333-4444-4555-9666-777777777777\"}"
+          }
+        ]
+      }
+    },
+    "occurredAt": "2026-01-02T15:00:09.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000610",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 10,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T15:00:10.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
+  }
+]

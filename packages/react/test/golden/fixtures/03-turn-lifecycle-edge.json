@@ -1,0 +1,158 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000301",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Run a build that will fail after starting activity."
+    },
+    "occurredAt": "2026-01-02T12:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000302",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 2,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+      "triggerEventId": "00000000-0000-4000-8000-000000000301",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T12:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000003"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000303",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 3,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000301"
+    },
+    "occurredAt": "2026-01-02T12:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000003"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000304",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 4,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-lifecycle-build",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "bun run build",
+        "workdir": "/workspace"
+      }
+    },
+    "occurredAt": "2026-01-02T12:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000003"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000305",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 5,
+    "type": "turn.failed",
+    "payload": {
+      "error": "model provider unavailable"
+    },
+    "occurredAt": "2026-01-02T12:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000003"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000306",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 6,
+    "type": "user.message",
+    "payload": {
+      "text": "Fail before doing any activity."
+    },
+    "occurredAt": "2026-01-02T12:00:06.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000307",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 7,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
+      "triggerEventId": "00000000-0000-4000-8000-000000000306",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T12:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000004"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000308",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 8,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000306"
+    },
+    "occurredAt": "2026-01-02T12:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000004"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000309",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 9,
+    "type": "turn.failed",
+    "payload": {
+      "error": "provider context window exceeded"
+    },
+    "occurredAt": "2026-01-02T12:00:09.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000004"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000310",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 10,
+    "type": "user.message",
+    "payload": {
+      "text": "Queued message that gets retracted."
+    },
+    "occurredAt": "2026-01-02T12:00:10.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000311",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 11,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000005",
+      "triggerEventId": "00000000-0000-4000-8000-000000000310",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T12:00:11.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000005"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000312",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666668",
+    "sequence": 12,
+    "type": "turn.cancelled",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000005",
+      "triggerEventId": "00000000-0000-4000-8000-000000000310"
+    },
+    "occurredAt": "2026-01-02T12:00:12.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000005"
+  }
+]

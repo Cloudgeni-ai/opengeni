@@ -1,0 +1,152 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000301",
+      "occurredAt": "2026-01-02T12:00:01.000Z",
+      "text": "Run a build that will fail after starting activity.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000304",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+      "callId": "call-lifecycle-build",
+      "occurredAt": "2026-01-02T12:00:04.000Z",
+      "name": "exec_command",
+      "status": "cancelled",
+      "arguments": {
+        "cmd": "bun run build",
+        "workdir": "/workspace"
+      },
+      "output": null,
+      "raw": null
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000305-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+      "occurredAt": "2026-01-02T12:00:05.000Z",
+      "outcome": "failed",
+      "failureText": "model provider unavailable"
+    },
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000306",
+      "occurredAt": "2026-01-02T12:00:06.000Z",
+      "text": "Fail before doing any activity.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000309-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000004",
+      "occurredAt": "2026-01-02T12:00:09.000Z",
+      "outcome": "failed",
+      "failureText": "provider context window exceeded"
+    },
+    {
+      "kind": "notice",
+      "id": "00000000-0000-4000-8000-000000000309",
+      "occurredAt": "2026-01-02T12:00:09.000Z",
+      "tone": "failed",
+      "text": "provider context window exceeded"
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000301",
+        "occurredAt": "2026-01-02T12:00:01.000Z",
+        "text": "Run a build that will fail after starting activity.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000003",
+      "outcome": "failed",
+      "failureText": "model provider unavailable",
+      "startedAt": "2026-01-02T12:00:04.000Z",
+      "endedAt": "2026-01-02T12:00:05.000Z",
+      "groupCount": 1,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000304",
+          "itemCount": 1,
+          "itemKinds": {
+            "tool-call": 1
+          },
+          "outcome": "cancelled",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000304",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000003",
+              "callId": "call-lifecycle-build",
+              "occurredAt": "2026-01-02T12:00:04.000Z",
+              "name": "exec_command",
+              "status": "cancelled",
+              "arguments": {
+                "cmd": "bun run build",
+                "workdir": "/workspace"
+              },
+              "output": null,
+              "raw": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000306",
+        "occurredAt": "2026-01-02T12:00:06.000Z",
+        "text": "Fail before doing any activity.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "notice",
+        "id": "00000000-0000-4000-8000-000000000309",
+        "occurredAt": "2026-01-02T12:00:09.000Z",
+        "tone": "failed",
+        "text": "provider context window exceeded"
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "notice": 1,
+      "tool-call": 1,
+      "turn-end": 2,
+      "user-message": 2
+    },
+    "groupKinds": {
+      "activity": 1,
+      "item": 3,
+      "turn": 1
+    },
+    "activityItemKinds": {
+      "tool-call": 1
+    },
+    "turnOutcomes": {
+      "failed": 1
+    }
+  }
+}

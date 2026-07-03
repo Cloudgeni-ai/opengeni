@@ -1,0 +1,299 @@
+{
+  "items": [
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000401",
+      "occurredAt": "2026-01-02T13:00:01.000Z",
+      "text": "Start with the setup.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000404",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+      "callId": "call-anchor-a",
+      "occurredAt": "2026-01-02T13:00:04.000Z",
+      "name": "exec_command",
+      "status": "complete",
+      "arguments": {
+        "cmd": "make setup"
+      },
+      "output": "setup ok",
+      "raw": null
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000413",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+      "occurredAt": "2026-01-02T13:00:13.000Z",
+      "text": "Setup is complete.",
+      "streaming": false
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000414-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+      "occurredAt": "2026-01-02T13:00:14.000Z",
+      "outcome": "complete",
+      "failureText": null
+    },
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000407",
+      "occurredAt": "2026-01-02T13:00:07.000Z",
+      "text": "Actually lint before deploy.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000416",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "callId": "call-anchor-c",
+      "occurredAt": "2026-01-02T13:00:16.000Z",
+      "name": "exec_command",
+      "status": "complete",
+      "arguments": {
+        "cmd": "bun run lint"
+      },
+      "output": null,
+      "raw": null
+    },
+    {
+      "kind": "agent-message",
+      "id": "00000000-0000-4000-8000-000000000417",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "occurredAt": "2026-01-02T13:00:17.000Z",
+      "text": "Lint is complete.",
+      "streaming": false
+    },
+    {
+      "kind": "turn-end",
+      "id": "00000000-0000-4000-8000-000000000418-turn-end",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "occurredAt": "2026-01-02T13:00:18.000Z",
+      "outcome": "complete",
+      "failureText": null
+    },
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000405",
+      "occurredAt": "2026-01-02T13:00:05.000Z",
+      "text": "Queue the deploy after setup.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    },
+    {
+      "kind": "tool-call",
+      "id": "00000000-0000-4000-8000-000000000420",
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
+      "callId": "call-anchor-b",
+      "occurredAt": "2026-01-02T13:00:20.000Z",
+      "name": "exec_command",
+      "status": "running",
+      "arguments": {
+        "cmd": "make deploy"
+      },
+      "output": null,
+      "raw": null
+    },
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000410",
+      "occurredAt": "2026-01-02T13:00:10.000Z",
+      "text": "Pending follow-up that has not started yet.",
+      "pending": true,
+      "resources": [],
+      "tools": []
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000401",
+        "occurredAt": "2026-01-02T13:00:01.000Z",
+        "text": "Start with the setup.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000006",
+      "outcome": "complete",
+      "startedAt": "2026-01-02T13:00:04.000Z",
+      "endedAt": "2026-01-02T13:00:14.000Z",
+      "groupCount": 1,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000404",
+          "itemCount": 1,
+          "itemKinds": {
+            "tool-call": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000404",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+              "callId": "call-anchor-a",
+              "occurredAt": "2026-01-02T13:00:04.000Z",
+              "name": "exec_command",
+              "status": "complete",
+              "arguments": {
+                "cmd": "make setup"
+              },
+              "output": "setup ok",
+              "raw": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "agent-message",
+        "id": "00000000-0000-4000-8000-000000000413",
+        "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+        "occurredAt": "2026-01-02T13:00:13.000Z",
+        "text": "Setup is complete.",
+        "streaming": false
+      }
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000407",
+        "occurredAt": "2026-01-02T13:00:07.000Z",
+        "text": "Actually lint before deploy.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "turn",
+      "id": "turn-aaaaaaaa-0000-4000-8000-000000000008",
+      "outcome": "complete",
+      "startedAt": "2026-01-02T13:00:16.000Z",
+      "endedAt": "2026-01-02T13:00:18.000Z",
+      "groupCount": 1,
+      "groups": [
+        {
+          "kind": "activity",
+          "id": "activity-00000000-0000-4000-8000-000000000416",
+          "itemCount": 1,
+          "itemKinds": {
+            "tool-call": 1
+          },
+          "outcome": "complete",
+          "items": [
+            {
+              "kind": "tool-call",
+              "id": "00000000-0000-4000-8000-000000000416",
+              "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+              "callId": "call-anchor-c",
+              "occurredAt": "2026-01-02T13:00:16.000Z",
+              "name": "exec_command",
+              "status": "complete",
+              "arguments": {
+                "cmd": "bun run lint"
+              },
+              "output": null,
+              "raw": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "agent-message",
+        "id": "00000000-0000-4000-8000-000000000417",
+        "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+        "occurredAt": "2026-01-02T13:00:17.000Z",
+        "text": "Lint is complete.",
+        "streaming": false
+      }
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000405",
+        "occurredAt": "2026-01-02T13:00:05.000Z",
+        "text": "Queue the deploy after setup.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    },
+    {
+      "kind": "activity",
+      "id": "activity-00000000-0000-4000-8000-000000000420",
+      "itemCount": 1,
+      "itemKinds": {
+        "tool-call": 1
+      },
+      "items": [
+        {
+          "kind": "tool-call",
+          "id": "00000000-0000-4000-8000-000000000420",
+          "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
+          "callId": "call-anchor-b",
+          "occurredAt": "2026-01-02T13:00:20.000Z",
+          "name": "exec_command",
+          "status": "running",
+          "arguments": {
+            "cmd": "make deploy"
+          },
+          "output": null,
+          "raw": null
+        }
+      ]
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000410",
+        "occurredAt": "2026-01-02T13:00:10.000Z",
+        "text": "Pending follow-up that has not started yet.",
+        "pending": true,
+        "resources": [],
+        "tools": []
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "agent-message": 2,
+      "tool-call": 3,
+      "turn-end": 2,
+      "user-message": 4
+    },
+    "groupKinds": {
+      "activity": 3,
+      "item": 6,
+      "turn": 2
+    },
+    "activityItemKinds": {
+      "tool-call": 3
+    },
+    "turnOutcomes": {
+      "complete": 2
+    }
+  }
+}

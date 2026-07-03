@@ -1,0 +1,161 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000701",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 1,
+    "type": "billing.snapshot.created",
+    "payload": {
+      "amount": 100
+    },
+    "occurredAt": "2026-01-02T16:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000702",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 2,
+    "type": "user.message",
+    "payload": "legacy text without an object wrapper",
+    "occurredAt": "2026-01-02T16:00:02.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000703",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 3,
+    "type": "agent.message.delta",
+    "payload": 42,
+    "occurredAt": "2026-01-02T16:00:03.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000704",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 4,
+    "type": "agent.message.completed",
+    "payload": {
+      "body": "missing text field"
+    },
+    "occurredAt": "2026-01-02T16:00:04.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000705",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 5,
+    "type": "agent.reasoning.delta",
+    "payload": {
+      "item": {
+        "rawItem": {
+          "content": [
+            {
+              "type": "summary_text",
+              "notText": "ignored"
+            }
+          ]
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T16:00:05.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000706",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 6,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": 123,
+      "arguments": null
+    },
+    "occurredAt": "2026-01-02T16:00:06.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000707",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 7,
+    "type": "agent.toolCall.output",
+    "payload": "malformed output payload",
+    "occurredAt": "2026-01-02T16:00:07.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000708",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 8,
+    "type": "sandbox.operation.started",
+    "payload": null,
+    "occurredAt": "2026-01-02T16:00:08.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000709",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 9,
+    "type": "sandbox.command.output.delta",
+    "payload": {
+      "chunk": "ignored chunk field",
+      "output": "legacy-output\n"
+    },
+    "occurredAt": "2026-01-02T16:00:09.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000710",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 10,
+    "type": "sandbox.operation.failed",
+    "payload": {
+      "message": "disk full"
+    },
+    "occurredAt": "2026-01-02T16:00:10.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000711",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 11,
+    "type": "session.status.changed",
+    "payload": {
+      "status": "not-a-status"
+    },
+    "occurredAt": "2026-01-02T16:00:11.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000712",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 12,
+    "type": "session.status.changed",
+    "payload": {
+      "status": "failed"
+    },
+    "occurredAt": "2026-01-02T16:00:12.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000713",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666672",
+    "sequence": 13,
+    "type": "turn.failed",
+    "payload": {
+      "message": ""
+    },
+    "occurredAt": "2026-01-02T16:00:13.000Z",
+    "turnId": null
+  }
+]

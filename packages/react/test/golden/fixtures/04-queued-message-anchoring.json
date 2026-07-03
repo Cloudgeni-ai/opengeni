@@ -1,0 +1,260 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000401",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Start with the setup."
+    },
+    "occurredAt": "2026-01-02T13:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000402",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 2,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000006",
+      "triggerEventId": "00000000-0000-4000-8000-000000000401",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T13:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000403",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 3,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000401"
+    },
+    "occurredAt": "2026-01-02T13:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000404",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 4,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-anchor-a",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "make setup"
+      }
+    },
+    "occurredAt": "2026-01-02T13:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000405",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 5,
+    "type": "user.message",
+    "payload": {
+      "text": "Queue the deploy after setup."
+    },
+    "occurredAt": "2026-01-02T13:00:05.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000406",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 6,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000007",
+      "triggerEventId": "00000000-0000-4000-8000-000000000405",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T13:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000007"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000407",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 7,
+    "type": "user.message",
+    "payload": {
+      "text": "Actually lint before deploy."
+    },
+    "occurredAt": "2026-01-02T13:00:07.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000408",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 8,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "triggerEventId": "00000000-0000-4000-8000-000000000407",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T13:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000409",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 9,
+    "type": "turn.updated",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000008",
+      "position": 1
+    },
+    "occurredAt": "2026-01-02T13:00:09.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000410",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 10,
+    "type": "user.message",
+    "payload": {
+      "text": "Pending follow-up that has not started yet."
+    },
+    "occurredAt": "2026-01-02T13:00:10.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000411",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 11,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000009",
+      "triggerEventId": "00000000-0000-4000-8000-000000000410",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T13:00:11.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000009"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000412",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 12,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-anchor-a",
+      "output": "setup ok"
+    },
+    "occurredAt": "2026-01-02T13:00:12.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000413",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 13,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "Setup is complete."
+    },
+    "occurredAt": "2026-01-02T13:00:13.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000414",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 14,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T13:00:14.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000006"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000415",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 15,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000407"
+    },
+    "occurredAt": "2026-01-02T13:00:15.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000416",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 16,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-anchor-c",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "bun run lint"
+      }
+    },
+    "occurredAt": "2026-01-02T13:00:16.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000417",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 17,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "Lint is complete."
+    },
+    "occurredAt": "2026-01-02T13:00:17.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000418",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 18,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T13:00:18.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000008"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000419",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 19,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000405"
+    },
+    "occurredAt": "2026-01-02T13:00:19.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000007"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000420",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666669",
+    "sequence": 20,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-anchor-b",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "make deploy"
+      }
+    },
+    "occurredAt": "2026-01-02T13:00:20.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000007"
+  }
+]
