@@ -27,6 +27,8 @@
  * filtered, keeping the persisted audit trail intact.
  */
 
+import { SCREENSHOT_FAILURE_CARD_IMAGE_URL } from "./screenshot-error-card";
+
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
 
@@ -594,42 +596,35 @@ export function rewriteComputerCallsToActionsOnly(body: unknown): boolean {
 }
 
 /**
- * The 1×1 transparent PNG placeholder used by the SDK for tool-approval-rejection
- * screenshots (`TOOL_APPROVAL_REJECTION_SCREENSHOT_DATA_URL` in agents-core
- * `toolExecution.mjs`). We reuse the exact same constant as a backstop for the
- * action-timeout 400: when an action times out the SDK's catch sets output='' and
- * builds `{type:"computer_call_output",output:{type:"computer_screenshot",image_url:""}}`.
- * Azure rejects `image_url:""` with "400 Invalid input[N].output.image_url". This
- * placeholder is a valid data URI the provider accepts, so the turn continues and
- * the model receives the next real screenshot on its following step.
- */
-const EMPTY_IMAGE_URL_PLACEHOLDER =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
-
-/**
- * Backstop for the action-timeout 400: walk the `input` array of a serialized
- * Responses request body and replace any `computer_call_output` item whose
- * `output.image_url` is an empty string, null, undefined, or otherwise not a
- * non-empty string with the 1×1 transparent PNG placeholder data URI.
+ * Backstop for the empty `computer_call_output` image_url: walk the `input` array of
+ * a serialized Responses request body and replace any `computer_call_output` item
+ * whose `output.image_url` is empty/missing with a LEGIBLE "screen capture failed"
+ * error card ({@link SCREENSHOT_FAILURE_CARD_IMAGE_URL}).
  *
- * WHY THIS IS NEEDED. When a computer ACTION (click/type/scroll/drag) times out
- * at the 15-second yield window `SandboxComputer.x()` throws `ComputerActionError`.
- * The agents-core SDK `toolExecution.mjs` catch block sets `output = ''` and then
- * builds the wire item:
+ * WHY A CARD, NOT A BLANK. An empty `image_url` reaches this seam ONLY when the
+ * computer op genuinely FAILED to produce a screen: agents-core's `toolExecution.mjs`
+ * catch sets `output = ''` when the action OR the follow-up `computer.screenshot()`
+ * throws, building `{type:"computer_call_output",output:{type:"computer_screenshot",
+ * image_url:""}}`. Azure then rejects the whole request with
+ * `400 Invalid 'input[N].output.image_url'`. The previous fix substituted a 1×1
+ * TRANSPARENT placeholder to dodge the 400 — but that reaches the model as a
+ * plausible BLANK DESKTOP it confidently reports ("the screen appears blank/empty"),
+ * turning a hard capture FAILURE into a silent, wrong observation. That is the worst
+ * failure mode for computer use, and it is exactly what the 0.1.3 TCC-denied incident
+ * produced. Substituting a legible error card instead makes the failure REACH THE
+ * MODEL as an error (the only channel the hosted `computer_use_preview` protocol has
+ * is the image), so the model stops and tells the user rather than hallucinating.
  *
- *   `{type:"computer_call_output", output:{type:"computer_screenshot", image_url:""}}`
+ * WHY THIS IS SAFE (empty = failure, never an intentional blank). Post-af289e3 the
+ * intentional-blank cases carry a NON-empty data URI already: agents-core's
+ * tool-approval-rejection screenshot is its own non-empty 1×1 placeholder, and the
+ * SandboxComputer action-timeout now warn+returns to a REAL screenshot rather than an
+ * empty output. So an EMPTY image_url at this seam is unambiguously a capture/interact
+ * FAILURE — the error card is the correct substitution for every empty case, and this
+ * function never touches a non-empty (real screenshot OR intentional blank) output.
  *
- * Azure rejects the whole request with:
- *
- *   `400 Invalid 'input[N].output.image_url'. Expected a valid URL, but got a
- *    value with an invalid format.`
- *
- * Our screenshot() fail-loud guard (which throws on empty frames) only runs when
- * the SDK calls screenshot() on a SUCCESS path — not on this action-error catch
- * path that sets output='' directly. This wire-level rewrite is the only seam that
- * catches both paths regardless of how the empty image_url was produced. It runs
- * in the same `computerCallNormalizingFetch` wrapper, so a single parse/rewrite
- * pass covers both the action/actions-only rewrite and this placeholder injection.
+ * The failure REASON (permission denied / null image / timeout / display down) is not
+ * on the card; it is logged worker-side by `NativeDesktopComputer.screenshot()`.
  *
  * Mutates `body` in place (the caller has already JSON.parsed a private copy).
  * Returns `true` iff at least one image_url was replaced.
@@ -657,9 +652,11 @@ export function rewriteEmptyComputerCallOutputImageUrls(body: unknown): boolean 
     }
     const out = output as Record<string, unknown>;
     const imageUrl = out.image_url;
-    // Replace the image_url when it is not a non-empty string (covers: "", null, undefined, missing).
+    // Replace the image_url when it is not a non-empty string (covers: "", null,
+    // undefined, missing) — an empty output is always a genuine capture failure, so
+    // it becomes the legible error card, never a silent blank.
     if (typeof imageUrl !== "string" || imageUrl.length === 0) {
-      out.image_url = EMPTY_IMAGE_URL_PLACEHOLDER;
+      out.image_url = SCREENSHOT_FAILURE_CARD_IMAGE_URL;
       changed = true;
     }
   }

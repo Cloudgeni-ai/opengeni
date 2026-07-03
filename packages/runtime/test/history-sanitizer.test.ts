@@ -9,10 +9,10 @@ import {
   stripReasoningIdentityFromSerializedRunState,
 } from "../src/history-sanitizer";
 
-// The exact 1×1 transparent PNG placeholder used by the SDK (agents-core
-// toolExecution.mjs) and now also by our wire-level backstop.
-const PLACEHOLDER =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+// The legible "screen capture failed" error card the wire-level backstop now
+// substitutes for an EMPTY computer_call_output image_url (replacing the old 1×1
+// transparent blank the model misread as a real empty desktop).
+import { SCREENSHOT_FAILURE_CARD_IMAGE_URL as FAILURE_CARD } from "../src/screenshot-error-card";
 
 // Item shapes mirror the SDK's canonical history representation
 // (`type` discriminator, camelCase `callId`) that is persisted verbatim into
@@ -344,7 +344,7 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     const changed = rewriteEmptyComputerCallOutputImageUrls(body);
     expect(changed).toBe(true);
     const out = (body.input[1] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
     // Sibling fields and non-computer items are untouched.
     expect(out.type).toBe("computer_screenshot");
     expect((body.input[1] as Record<string, unknown>).call_id).toBe("cu_1");
@@ -368,7 +368,7 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     const changed = rewriteEmptyComputerCallOutputImageUrls(body);
     expect(changed).toBe(true);
     const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
   });
 
   test("replaces a null image_url with the placeholder", () => {
@@ -384,7 +384,7 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     const changed = rewriteEmptyComputerCallOutputImageUrls(body);
     expect(changed).toBe(true);
     const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
   });
 
   test("leaves a valid non-empty data-URI image_url untouched (no change)", () => {
@@ -413,14 +413,14 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
         {
           type: "computer_call_output",
           call_id: "cu_5",
-          output: { type: "computer_screenshot", image_url: PLACEHOLDER },
+          output: { type: "computer_screenshot", image_url: FAILURE_CARD },
         },
       ],
     };
     const changed = rewriteEmptyComputerCallOutputImageUrls(body);
     expect(changed).toBe(false);
     const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
   });
 
   test("handles multiple items: patches empty, leaves valid, skips non-computer items", () => {
@@ -438,7 +438,7 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     expect(changed).toBe(true);
     // cu_a (empty "")  → replaced
     const outA = (body.input[1] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(outA.image_url).toBe(PLACEHOLDER);
+    expect(outA.image_url).toBe(FAILURE_CARD);
     // function_call_result → untouched
     expect((body.input[2] as Record<string, unknown>).call_id).toBe("fn_1");
     // cu_b (valid) → untouched
@@ -446,7 +446,7 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     expect(outB.image_url).toBe(realDataUri);
     // cu_c (null) → replaced
     const outC = (body.input[4] as Record<string, unknown>).output as Record<string, unknown>;
-    expect(outC.image_url).toBe(PLACEHOLDER);
+    expect(outC.image_url).toBe(FAILURE_CARD);
   });
 
   test("returns false and is a no-op for non-array input, null, and non-object bodies", () => {
@@ -454,6 +454,28 @@ describe("rewriteEmptyComputerCallOutputImageUrls", () => {
     expect(rewriteEmptyComputerCallOutputImageUrls({ input: "nope" })).toBe(false);
     expect(rewriteEmptyComputerCallOutputImageUrls(null)).toBe(false);
     expect(rewriteEmptyComputerCallOutputImageUrls("string")).toBe(false);
+  });
+
+  test("BLANK-MASQUERADE FIX: the substitute is a LEGIBLE PNG card, NOT the old 1×1 transparent blank", () => {
+    // Regression guard for the 0.1.3 incident: a hard capture failure must reach the
+    // model as a legible error image, never a tiny transparent blank it reads as a
+    // real empty desktop.
+    const OLD_BLANK_1x1 =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+    const body = {
+      input: [{ type: "computer_call_output", call_id: "cu_x", output: { type: "computer_screenshot", image_url: "" } }],
+    };
+    rewriteEmptyComputerCallOutputImageUrls(body);
+    const out = (body.input[0] as Record<string, unknown>).output as Record<string, unknown>;
+    const url = out.image_url as string;
+    // A real PNG data URI...
+    expect(url.startsWith("data:image/png;base64,")).toBe(true);
+    // ...that is NOT the old blank, and is substantial enough to carry rendered text.
+    expect(url).not.toBe(OLD_BLANK_1x1);
+    expect(url.length).toBeGreaterThan(2000);
+    // The decoded bytes are a valid PNG (signature) — a malformed image would 400.
+    const png = Buffer.from(url.slice("data:image/png;base64,".length), "base64");
+    expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   });
 });
 
@@ -482,7 +504,7 @@ describe("computerCallNormalizingFetch — empty image_url backstop (action-time
     expect(seenBody).toBeDefined();
     const sent = JSON.parse(seenBody as string);
     const out = sent.input[0].output;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
     // The type field is preserved.
     expect(out.type).toBe("computer_screenshot");
   });
@@ -522,7 +544,7 @@ describe("computerCallNormalizingFetch — empty image_url backstop (action-time
     expect(cc.actions).toEqual([{ type: "click", x: 10, y: 20 }]);
     // computer_call_output → placeholder
     const out = sent.input[1].output;
-    expect(out.image_url).toBe(PLACEHOLDER);
+    expect(out.image_url).toBe(FAILURE_CARD);
   });
 });
 
