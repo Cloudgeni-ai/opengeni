@@ -103,15 +103,20 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(cmd).toContain("DESKTOP_W=1920 DESKTOP_H=1080 DESKTOP_DPI=120 STREAM_PORT=7090");
   });
 
-  test("(2a) PAINTABLE-FRAME GATE: the script scrot-probes for a non-empty frame and exits 14 when it never paints", () => {
+  test("(2a) PAINTABLE-FRAME GATE: the script scrot-probes for a PAINTED (size-floor) frame and exits 14 when it never paints", () => {
     const cmd = buildDisplayStackScript({ port: 6080 });
-    // The completion criterion is a REAL scrot (not just ports listening). It must
-    // appear AFTER the bring-up (the up-script/precheck), chained with && so a failed
-    // bring-up short-circuits it, and it must exit 14 (the "paint" stage) on failure.
+    // The completion criterion is a REAL PAINTED scrot (not just ports listening, and not
+    // merely NON-EMPTY). It must appear AFTER the bring-up (the up-script/precheck), chained
+    // with && so a failed bring-up short-circuits it, and it must exit 14 (the "paint" stage)
+    // on failure. The gate is a byte-size FLOOR (`wc -c` >= threshold), NOT the old `[ -s ]`
+    // non-emptiness check — an unpainted root is small-but-non-empty and would falsely pass.
     const scrotIdx = cmd.indexOf("scrot -o");
     const upIdx = cmd.indexOf("opengeni-desktop-up");
     expect(scrotIdx).toBeGreaterThan(upIdx);
-    expect(cmd).toContain("[ -s ");
+    // byte-size floor, not non-emptiness:
+    expect(cmd).toContain("wc -c < ");
+    expect(cmd).toContain("-ge 60000");
+    expect(cmd).not.toContain("[ -s ");
     expect(cmd).toContain("exit 14");
     expect(cmd).toContain("OPENGENI_DESKTOP_NOT_PAINTING");
     // chained so a failed bring-up never reaches the paint probe.

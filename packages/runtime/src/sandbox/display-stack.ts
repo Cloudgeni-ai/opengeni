@@ -32,9 +32,33 @@ export const STREAM_PORT = DESKTOP_STREAM_PORT;
 export const DISPLAY_STACK_TIMEOUT_MS = 90_000;
 
 // PAINTABLE-FRAME gate: poll scrot up to this many times, this many seconds apart,
-// waiting for a non-empty frame before declaring the stack "up" (~30s worst case).
+// waiting for an actually-PAINTED frame before declaring the stack "up" (~30s worst case).
 const PAINT_PROBE_ATTEMPTS = 150;
 const PAINT_PROBE_INTERVAL_S = 0.2;
+
+// The paint FLOOR (bytes): a scrot at/above this size is a real painted desktop; below
+// it, the root is still unpainted and the frame would read as "blank" to the model.
+//
+// WHY A SIZE FLOOR, NOT NON-EMPTINESS (the bug this fixes): the old gate only checked
+// `[ -s frame.png ]` (non-empty). But an UNPAINTED root is never zero-byte — a fresh
+// Xvfb draws either the `-retro` weave stipple or (with `-retro` dropped) solid black,
+// and scrot happily encodes that as a small-but-non-empty PNG. So the old gate passed
+// the instant the VNC ports bound — MEASURED at ~1.4s (fast runc host) to several
+// seconds (cold gVisor) BEFORE xfdesktop finishes its first wallpaper paint — handing
+// the model the pre-paint frame. That pre-paint frame is exactly the "blank/black"
+// screenshot that 400s the model and blanks the human viewer.
+//
+// The sizes are unambiguous and were measured on the canonical desktop image (1280x800)
+// under runc — both the current staging image and a fresh local build:
+//   painted XFCE desktop (blue-gradient wallpaper + panel + icons): ~210-222 KB
+//   `-retro` stipple root (unpainted, current image):                ~17 KB
+//   solid-black root (unpainted, after we drop `-retro`):            ~13.5 KB
+// 60 KB sits ~3.5x above every unpainted state and ~3.5x below a real paint — a wide,
+// unambiguous margin. It holds against BOTH the currently-deployed `-retro` image and
+// the `-retro`-dropped image this change ships, so the runtime gate is correct before
+// AND after the image rebuild lands. (Assumes the default ~1280x800 geometry; a larger
+// framebuffer only scales the painted frame further above the floor.)
+const PAINT_MIN_BYTES = 60_000;
 
 /** Desktop geometry for the framebuffer. v1 has no live RANDR: a resolution
  *  change is a full down -> up restart (a separate op). */
@@ -145,18 +169,25 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
   // PAINTABLE-FRAME GATE (the completion criterion): the up-script's readiness gates
   // only assert that Xvfb answers xdpyinfo and that x11vnc:5900 + websockify:PORT are
   // LISTENING — NOT that the display actually PAINTS. On a stone-cold gVisor box (the
-  // machine→sandbox swap-recovery turn always hits one), Xvfb can answer and the VNC
-  // ports can bind seconds BEFORE the root window / XFCE compositor is drawable, so a
-  // scrot right after the `OPENGENI_DESKTOP_UP` marker yields a ZERO-BYTE frame — which
-  // is exactly the empty screenshot that 400s the model and blanks the human viewer.
+  // machine→sandbox swap-recovery turn always hits one), Xvfb answers and the VNC ports
+  // bind ~1.4s (fast host) to several seconds BEFORE xfdesktop finishes its first
+  // wallpaper paint. In that window a scrot yields a small UNPAINTED frame (the -retro
+  // stipple or a solid-black root) — never zero-byte — which is exactly the "blank/black"
+  // screenshot that 400s the model and blanks the human viewer. (VERIFIED locally: the
+  // real xfdesktop backdrop window maps at full 1280x800 the whole time; the render is
+  // never structurally broken — it is purely this pre-paint capture race.)
+  //
   // We therefore chain a real scrot probe as the completion gate: after the up-script
-  // reports success, poll scrot until it produces a NON-EMPTY frame (bounded ~30s), and
-  // only THEN let the command exit 0. If it never paints we exit 14 so the caller sees a
-  // typed DisplayStackError("paint") — an HONEST failure the worker can degrade + log,
-  // rather than a false "up" that hands the model an empty image. `-ac` on Xvfb disables
+  // reports success, poll scrot until it produces an actually-PAINTED frame — a PNG at or
+  // above PAINT_MIN_BYTES, not merely NON-EMPTY (the old `[ -s ]` check passed on the
+  // ~17 KB pre-paint stipple immediately; that WAS the bug) — bounded ~30s, and only THEN
+  // let the command exit 0. If it never paints we exit 14 so the caller sees a typed
+  // DisplayStackError("paint") — an HONEST failure the worker can degrade + log, rather
+  // than a false "up" that hands the model an unpainted image. `-ac` on Xvfb disables
   // access control so this root-side scrot reaches :0. Runs on a pre-check hit too (cheap
   // — an already-up display paints on the first probe). Lives in the runtime-built script
-  // (not the baked image up-script) so it ships with the worker/api, no image rebuild.
+  // (not the baked image up-script) so it ships with the worker/api, no image rebuild —
+  // and its size floor holds against the currently-deployed image too.
   const bringUp =
     `if nc -z 127.0.0.1 ${port} >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then ` +
     `echo "OPENGENI_DESKTOP_UP port=${port} geometry=${geometry.width}x${geometry.height} dpi=${geometry.dpi} (precheck)"; ` +
@@ -168,11 +199,15 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
   const paintProbe =
     `p=/tmp/opengeni-desktop/paint-probe.png; ` +
     `for i in $(seq 1 ${PAINT_PROBE_ATTEMPTS}); do ` +
-    `if DISPLAY=:0 scrot -o "$p" >/dev/null 2>&1 && [ -s "$p" ]; then rm -f "$p"; break; fi; ` +
+    // Capture, then measure the PNG byte-size. `wc -c < "$p"` yields a bare integer; a
+    // failed scrot leaves sz=0. A frame at/above PAINT_MIN_BYTES is a real painted desktop.
+    `if DISPLAY=:0 scrot -o "$p" >/dev/null 2>&1; then sz=$(wc -c < "$p" 2>/dev/null || echo 0); else sz=0; fi; ` +
     `rm -f "$p"; ` +
+    `if [ "$sz" -ge ${PAINT_MIN_BYTES} ]; then break; fi; ` +
     // NOTE: NOT_PAINTING goes to STDOUT (not stderr): Modal is execCommand-only, so the
     // caller infers the outcome by string-matching the output — stdout is always captured.
-    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot empty after warmup"; exit 14; fi; ` +
+    // ($sz is bare shell here — no ${} braces — so JS leaves it for bash to expand.)
+    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot below ${PAINT_MIN_BYTES}B after warmup (last=$sz)"; exit 14; fi; ` +
     `sleep ${PAINT_PROBE_INTERVAL_S}; ` +
     `done`;
   return `mkdir -p /tmp/opengeni-desktop; { ${bringUp} ; } && { ${paintProbe} ; }`;

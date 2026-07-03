@@ -83,7 +83,13 @@ start() { # name, cmd...
 }
 
 # 1. Xvfb :0  (RAM framebuffer; 24-bit mandatory for Chrome; no live RANDR -> geometry fixed here)
-start xvfb Xvfb :0 -ac -screen 0 "${W}x${H}x24" -dpi "$DPI" -retro -nolisten tcp -nolisten unix
+# NO -retro: -retro paints the classic weave STIPPLE onto the unpainted root, which (a) any
+# viewer/model that catches a frame BEFORE xfdesktop's first wallpaper paint reads as noisy
+# junk rather than an honest "loading" black, and (b) encodes to a ~17 KB PNG that is close
+# enough to a painted frame to muddy a size-based paint gate. Dropping it makes the pre-paint
+# root solid BLACK (~13.5 KB PNG) — a clean, unambiguous "not painted yet" the PAINTABLE-FRAME
+# gate (ensureDisplayStack, byte-size floor) distinguishes from a real ~210 KB painted desktop.
+start xvfb Xvfb :0 -ac -screen 0 "${W}x${H}x24" -dpi "$DPI" -nolisten tcp -nolisten unix
 # readiness gate: block until the display answers. 100*0.1s=10s (was 50/5s) — on a
 # STONE-COLD gVisor box (the machine->sandbox swap-recovery turn always hits one) Xvfb's
 # first xdpyinfo answer can exceed 5s under runsc syscall overhead + cold page cache, and
