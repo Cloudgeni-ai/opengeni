@@ -32,7 +32,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsup"
+    "build": "tsup",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

@@ -34,7 +34,8 @@
     "dev:watch": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsup"
+    "build": "tsup",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@opengeni/codex": "workspace:*",

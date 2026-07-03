@@ -31,7 +31,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsup"
+    "build": "tsup",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "zod": "^4.2.1"

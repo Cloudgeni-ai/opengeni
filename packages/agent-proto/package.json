@@ -34,7 +34,8 @@
     "typecheck": "tsc --noEmit",
     "build": "tsup",
     "codegen": "bash scripts/codegen.sh",
-    "test": "bun test ./test"
+    "test": "bun test ./test",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0"

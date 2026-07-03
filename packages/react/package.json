@@ -41,7 +41,8 @@
     "typecheck": "tsc --noEmit",
     "build": "tsup",
     "demo": "vite dev demo --port 3100",
-    "demo:build": "vite build demo"
+    "demo:build": "vite build demo",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.2.0",

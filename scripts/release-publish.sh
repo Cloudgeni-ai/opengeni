@@ -18,6 +18,8 @@ if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
   exit 0
 fi
 
+export OPENGENI_RELEASE=1
+
 # Ensure fresh dist/ + .d.ts for the tarballs and re-assert the closure guard
 # right before bytes leave the building.
 bun run build:packages
@@ -30,8 +32,9 @@ bun scripts/publish-closure-guard.ts
 # does NOT strip the workspace: protocol, so without this the published
 # any published @opengeni/* dependency would carry `"workspace:*"` and be
 # uninstallable. The edit is confined to the ephemeral CI checkout and is never
-# committed; run with `--restore` locally to undo it.
-bun scripts/rewrite-workspace-deps.ts
+# committed; run without `--strip-dev-dependencies` and then with `--restore`
+# locally to prove only the workspace range rewrite.
+bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
 
 # Rewrite the entry-point fields (main/module/types/exports) of the publishable
 # packages from their committed `src` form to the compiled `dist` form. The

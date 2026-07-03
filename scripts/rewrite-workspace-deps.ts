@@ -17,7 +17,9 @@
  * `workspace:*` / `workspace:^x` / `workspace:~x` / `workspace:1.2.3` in the
  * publishable packages' published dependency maps (dependencies,
  * peerDependencies, optionalDependencies) with a concrete range resolved from
- * the depended workspace package's CURRENT version.
+ * the depended workspace package's CURRENT version. The release path also
+ * passes `--strip-dev-dependencies` so published package.json files do not
+ * advertise dev-only private/workspace dependencies.
  *
  * Translation rules (matching pnpm/bun behavior):
  *   workspace:*        -> ^<version>   (caret, the common case)
@@ -41,6 +43,7 @@
  *
  * Usage:
  *   bun scripts/rewrite-workspace-deps.ts            # rewrite -> concrete
+ *   bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
  *   bun scripts/rewrite-workspace-deps.ts --restore  # concrete -> workspace:*
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -55,8 +58,13 @@ import {
 } from "./publishable-workspaces";
 
 const restore = process.argv.includes("--restore");
+const stripDevDependencies = process.argv.includes("--strip-dev-dependencies");
 const versions = workspaceVersionMap();
 const workspaceNames = workspacePackageByName();
+
+if (restore && stripDevDependencies) {
+  throw new Error("--restore cannot be combined with --strip-dev-dependencies.");
+}
 
 /**
  * Translate a single `workspace:` spec to a concrete range using pnpm/bun rules.
@@ -117,6 +125,13 @@ for (const { dir: pkgDir } of publishableWorkspacePackages()) {
     }
   }
 
+  if (stripDevDependencies && pkg.devDependencies) {
+    delete pkg.devDependencies;
+    pkgChanged = true;
+    changed += 1;
+    process.stdout.write(`  ${pkg.name ?? pkgDir}: removed devDependencies from publish manifest\n`);
+  }
+
   if (pkgChanged) {
     // Preserve trailing newline if the file had one.
     const trailing = raw.endsWith("\n") ? "\n" : "";
@@ -129,5 +144,5 @@ if (restore) {
 } else if (changed === 0) {
   process.stdout.write("rewrite-workspace-deps: no workspace: specs found in publishable packages (already concrete).\n");
 } else {
-  process.stdout.write(`rewrite-workspace-deps: rewrote ${changed} workspace: spec(s) to concrete ranges.\n`);
+  process.stdout.write(`rewrite-workspace-deps: applied ${changed} publish manifest rewrite(s).\n`);
 }

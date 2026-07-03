@@ -22,7 +22,8 @@
   },
   "scripts": {
     "build": "tsup",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun ../../scripts/prepublish-guard"
   },
   "devDependencies": {
     "tsup": "^8.5.0",
