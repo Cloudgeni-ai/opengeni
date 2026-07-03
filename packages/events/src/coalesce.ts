@@ -11,6 +11,8 @@ type DeltaRun = {
   lastSequence: number;
   text: string;
   sandboxName: string | undefined;
+  sandboxStream: string | undefined;
+  sandboxCommandId: string | undefined;
 };
 
 export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent[] {
@@ -23,13 +25,20 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
     }
     coalesced.push({
       ...run.first,
-      payload: {
-        text: run.text,
-        coalescedUntil: run.lastSequence,
-        ...(run.first.type === "sandbox.command.output.delta" && run.sandboxName !== undefined
-          ? { name: run.sandboxName }
-          : {}),
-      },
+      payload: run.first.type === "sandbox.command.output.delta"
+        // Sandbox output keeps its CANONICAL field (`chunk` — the terminal and
+        // projection read it) plus the stream/commandId identity of the run.
+        ? {
+            chunk: run.text,
+            coalescedUntil: run.lastSequence,
+            ...(run.sandboxStream !== undefined ? { stream: run.sandboxStream } : {}),
+            ...(run.sandboxCommandId !== undefined ? { commandId: run.sandboxCommandId } : {}),
+            ...(run.sandboxName !== undefined ? { name: run.sandboxName } : {}),
+          }
+        : {
+            text: run.text,
+            coalescedUntil: run.lastSequence,
+          },
     });
     run = null;
   };
@@ -41,8 +50,16 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
       continue;
     }
 
-    const sandboxName = event.type === "sandbox.command.output.delta" ? sandboxDeltaName(event.payload) : undefined;
-    if (run && sameDeltaRun(run.first, event, run.sandboxName, sandboxName)) {
+    const isSandbox = event.type === "sandbox.command.output.delta";
+    const sandboxName = isSandbox ? sandboxDeltaName(event.payload) : undefined;
+    const sandboxStream = isSandbox ? sandboxDeltaString(event.payload, "stream") : undefined;
+    const sandboxCommandId = isSandbox ? sandboxDeltaString(event.payload, "commandId") : undefined;
+    if (
+      run
+      && sameDeltaRun(run.first, event, run.sandboxName, sandboxName)
+      && run.sandboxStream === sandboxStream
+      && run.sandboxCommandId === sandboxCommandId
+    ) {
       run.text += deltaText(event);
       run.lastSequence = event.sequence;
       continue;
@@ -54,6 +71,8 @@ export function coalesceSessionEventDeltas(events: SessionEvent[]): SessionEvent
       lastSequence: event.sequence,
       text: deltaText(event),
       sandboxName,
+      sandboxStream,
+      sandboxCommandId,
     };
   }
 
@@ -86,7 +105,14 @@ function deltaText(event: SessionEvent): string {
   }
   const payload = asRecord(event.payload);
   if (event.type === "sandbox.command.output.delta") {
-    return typeof payload.text === "string" ? payload.text : typeof payload.output === "string" ? payload.output : "";
+    // `chunk` is the canonical wire field (contracts SandboxCommandOutputDeltaPayload);
+    // text/output are tolerated legacy shapes.
+    for (const key of ["chunk", "text", "output"] as const) {
+      if (typeof payload[key] === "string") {
+        return payload[key] as string;
+      }
+    }
+    return "";
   }
   return typeof payload.text === "string" ? payload.text : "";
 }
@@ -111,6 +137,11 @@ function reasoningText(payload: unknown): string {
 function sandboxDeltaName(payload: unknown): string | undefined {
   const name = asRecord(payload).name;
   return typeof name === "string" ? name : undefined;
+}
+
+function sandboxDeltaString(payload: unknown, key: "stream" | "commandId"): string | undefined {
+  const value = asRecord(payload)[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

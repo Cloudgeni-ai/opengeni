@@ -83,18 +83,26 @@ describe("coalesceSessionEventDeltas", () => {
     ]);
   });
 
-  test("starts a new sandbox output run when the command name changes", () => {
+  test("coalesces sandbox chunk runs and breaks on name, stream, and commandId", () => {
+    // The CANONICAL wire shape (contracts SandboxCommandOutputDeltaPayload):
+    // { stream, chunk, commandId?, seq? }. text/output are legacy-tolerated.
     const result = coalesceSessionEventDeltas([
-      event(1, "sandbox.command.output.delta", { name: "build", text: "one\n" }),
-      event(2, "sandbox.command.output.delta", { name: "build", output: "two\n" }),
-      event(3, "sandbox.command.output.delta", { name: "test", text: "ok\n" }),
-      event(4, "sandbox.command.output.delta", { text: "unnamed\n" }),
+      event(1, "sandbox.command.output.delta", { stream: "stdout", chunk: "one\n", commandId: "cmd-1" }),
+      event(2, "sandbox.command.output.delta", { stream: "stdout", chunk: "two\n", commandId: "cmd-1" }),
+      // stderr of the SAME command must not merge into the stdout run.
+      event(3, "sandbox.command.output.delta", { stream: "stderr", chunk: "warn\n", commandId: "cmd-1" }),
+      // A new command starts a new run even on the same stream.
+      event(4, "sandbox.command.output.delta", { stream: "stdout", chunk: "next\n", commandId: "cmd-2" }),
+      // Legacy shapes still coalesce (text/output fallbacks).
+      event(5, "sandbox.command.output.delta", { name: "build", text: "legacy\n" }),
+      event(6, "sandbox.command.output.delta", { name: "build", output: "older\n" }),
     ]);
 
     expect(result.map((item) => item.payload)).toEqual([
-      { text: "one\ntwo\n", coalescedUntil: 2, name: "build" },
-      { text: "ok\n", coalescedUntil: 3, name: "test" },
-      { text: "unnamed\n", coalescedUntil: 4 },
+      { chunk: "one\ntwo\n", coalescedUntil: 2, stream: "stdout", commandId: "cmd-1" },
+      { chunk: "warn\n", coalescedUntil: 3, stream: "stderr", commandId: "cmd-1" },
+      { chunk: "next\n", coalescedUntil: 4, stream: "stdout", commandId: "cmd-2" },
+      { chunk: "legacy\nolder\n", coalescedUntil: 6, name: "build" },
     ]);
   });
 

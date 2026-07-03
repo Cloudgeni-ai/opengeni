@@ -71,8 +71,9 @@
     "type": "sandbox.command.output.delta",
     "payload": {
       "name": "build",
-      "text": "Step 1\nStep 2\n",
-      "coalescedUntil": 9
+      "coalescedUntil": 9,
+      "chunk": "Step 1\nStep 2\n",
+      "stream": "stdout"
     },
     "occurredAt": "2026-01-02T14:00:08.000Z",
     "turnId": "aaaaaaaa-0000-4000-8000-000000000010"

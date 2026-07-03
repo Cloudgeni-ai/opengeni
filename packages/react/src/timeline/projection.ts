@@ -262,7 +262,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "sandbox.command.output.delta": {
-        const text = typeof payload.text === "string" ? payload.text : typeof payload.output === "string" ? payload.output : "";
+        // `chunk` is the canonical wire field; text/output are legacy shapes.
+        const text = typeof payload.chunk === "string"
+          ? payload.chunk
+          : typeof payload.text === "string" ? payload.text : typeof payload.output === "string" ? payload.output : "";
         if (!text) {
           break;
         }

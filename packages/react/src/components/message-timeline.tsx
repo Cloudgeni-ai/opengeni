@@ -286,7 +286,7 @@ export function MessageTimeline({
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
               toolRegistry={toolRegistry}
-              foldLiveCluster={index < groups.length - 1}
+              foldLiveCluster={isAgentProgress(groups[index + 1])}
             />
           ))}
           {working ? (
@@ -421,6 +421,18 @@ function timelineGroupKey(group: TimelineGroup): string {
     case "turn":
       return group.id;
   }
+}
+
+/** The agent has moved PAST a cluster only when what follows is more agent
+    progress — new activity, a settled turn, or narration. A waiting notice
+    (approval pause), a pending queued message, a goal pill, or nothing at all
+    do NOT advance the story, and folding on them would hide exactly the work
+    the reader needs in view. */
+function isAgentProgress(next: TimelineGroup | undefined): boolean {
+  if (!next) {
+    return false;
+  }
+  return next.kind === "activity" || next.kind === "turn" || (next.kind === "item" && next.item.kind === "agent-message");
 }
 
 /** No item still running or streaming — the only state safe to fold live.

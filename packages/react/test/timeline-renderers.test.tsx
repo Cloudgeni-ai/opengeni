@@ -231,6 +231,25 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("a cluster paused for approval does NOT fold — the reader needs the context in view", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy it" }),
+      timelineEvent("agent.toolCall.created", { id: "call-1", name: "exec_command", arguments: { cmd: "terraform apply" } }),
+      timelineEvent("session.requiresAction", {}),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} status="requires_action" />);
+    await flush();
+
+    // The waiting notice follows the cluster, but a notice is not agent
+    // PROGRESS — the paused work stays expanded next to the approval ask.
+    expect(turnSummaryTriggers(r.container)).toHaveLength(0);
+    expect(r.container.textContent).toContain("terraform apply");
+    expect(r.container.textContent).toContain("Approval needed");
+
+    await r.unmount();
+  });
+
   test("a STREAMING cluster never folds, even when a pending queued message sits after it", async () => {
     resetTimelineEvents();
     const events = [

@@ -29,7 +29,7 @@
       "name": "sandbox",
       "command": null,
       "status": "failed",
-      "output": "legacy-output\n\ndisk full"
+      "output": "ignored chunk field\ndisk full"
     },
     {
       "kind": "session-status",
@@ -96,7 +96,7 @@
               "name": "sandbox",
               "command": null,
               "status": "failed",
-              "output": "legacy-output\n\ndisk full"
+              "output": "ignored chunk field\ndisk full"
             }
           ]
         },

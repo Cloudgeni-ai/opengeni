@@ -1,5 +1,6 @@
 ---
 "@opengeni/react": patch
+"@opengeni/events": patch
 ---
 
-A cluster containing a running or streaming item can never fold — the live-cluster fold rule was position-based ("not the last group"), which wrongly folded the actively-streaming cluster when a pending queued message rendered at the timeline tail.
+Fresh-eyes review fixes: sandbox command output uses its canonical `chunk` wire field end-to-end — the projection and the compact coalescer previously read only legacy `text`/`output`, so compact history windows dropped terminal output entirely (and the resume cursor skipped the raw events that carried it); coalesced sandbox runs now also break on stream and commandId so stdout/stderr never merge. Live-cluster folding is re-based on the true invariants: a cluster with running/streaming items never folds, and folding happens only when the NEXT group is agent progress (activity/turn/narration) — so a pending queued message or an approval pause no longer folds the work the reader needs in view.
