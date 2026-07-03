@@ -3344,6 +3344,11 @@ export const EnrollmentSummary = z.object({
   pubkey: z.string(),
   exposure: z.literal("whole-machine"),
   hasDisplay: z.boolean(),
+  // Present (non-null) only when a display EXISTS but capture is blocked (macOS
+  // Screen Recording / TCC not granted): a human, actionable reason so the UI can
+  // show "display: capture not granted" instead of a bare "headless". null == capture
+  // permitted OR genuinely headless.
+  desktopUnavailableReason: z.string().nullish(),
   allowScreenControl: z.boolean(),
   status: z.enum(["active", "revoked"]),
   os: EnrollmentOs,
@@ -3524,6 +3529,10 @@ export const MachineView = z.object({
   os: z.string(),
   arch: z.string(),
   hasDisplay: z.boolean(),
+  // Non-null only when a display exists but capture is blocked (macOS Screen
+  // Recording / TCC not granted) — the UI can surface "display: capture not granted".
+  // null == capture permitted OR headless.
+  desktopUnavailableReason: z.string().nullish(),
   allowScreenControl: z.boolean(),
   sharedSessionCount: z.number().int(),
   lastSeenAt: z.string().nullable(),

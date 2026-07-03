@@ -768,6 +768,14 @@ export const enrollments = pgTable("enrollments", {
   pubkey: text("pubkey").notNull(),
   exposure: text("exposure", { enum: enrollmentExposureValues }).notNull().default("whole-machine"),
   hasDisplay: boolean("has_display").notNull().default(false),
+  // When the machine has a display it CANNOT capture (macOS Screen Recording / TCC
+  // not granted), the agent reports has_display=false AND a human, actionable reason
+  // here (e.g. "grant Screen Recording in System Settings"). NULL means capture is
+  // permitted (has_display=true) or the machine is genuinely headless — the reason
+  // distinguishes "display present but capture not granted" from plain "no display"
+  // so the Machines dashboard / VM picker can surface the specific hint. Refreshed
+  // from every connect Hello alongside has_display.
+  desktopUnavailableReason: text("desktop_unavailable_reason"),
   allowScreenControl: boolean("allow_screen_control").notNull().default(false),
   status: text("status", { enum: enrollmentStatusValues }).notNull().default("active"),
   os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),

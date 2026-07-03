@@ -1805,6 +1805,10 @@ export type MachineView = {
   os: string;
   arch: string;
   hasDisplay: boolean;
+  /** Non-null only when a display exists but capture is blocked (macOS Screen
+   *  Recording / TCC not granted) — the UI can surface "display: capture not
+   *  granted". null == capture permitted OR headless. */
+  desktopUnavailableReason?: string | null | undefined;
   allowScreenControl: boolean;
   sharedSessionCount: number;
   lastSeenAt: string | null;

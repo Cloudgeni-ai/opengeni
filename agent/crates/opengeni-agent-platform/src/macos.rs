@@ -121,6 +121,18 @@ pub fn request_desktop_grants() {
     macffi::request_grants();
 }
 
+/// How many times [`MacosDesktop::capture`] retries a TRANSIENT capture miss (a
+/// null image / timeout on a warming ScreenCaptureKit stream) before giving up.
+/// Small: a real capture lands on the first or second frame; more attempts just
+/// add latency to a genuinely dead stream.
+#[cfg(feature = "macos-desktop")]
+const CAPTURE_MAX_ATTEMPTS: u32 = 3;
+
+/// The backoff between capture retries — long enough for the stream to hand back
+/// its next frame, short enough to stay well inside the RPC deadline.
+#[cfg(feature = "macos-desktop")]
+const CAPTURE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
@@ -140,13 +152,37 @@ impl DesktopBackend for MacosDesktop {
         // The leaf capture blocks on a ScreenCaptureKit completion handler; keep
         // it (and the PNG encode) off the async runtime like the Linux path does.
         tokio::task::spawn_blocking(|| {
-            let frame = macffi::capture_rgba().map_err(map_ffi_err)?;
-            let png = encode_png(&frame.rgba, frame.width, frame.height)?;
-            Ok(CapturedFrame {
-                png,
-                width: frame.width,
-                height: frame.height,
-            })
+            // A ScreenCaptureKit stream can hand back a null image / time out on the
+            // FIRST frame right after the display wakes or the stream warms up — a
+            // transient miss, not a real failure. Retry a bounded few times with a
+            // short backoff so a warm-up flake doesn't surface to the model as a
+            // blank/error. A MISSING GRANT is terminal (retrying can't fix it): skip
+            // the retries in that case so the loop doesn't burn its whole budget
+            // re-hitting the same denial before returning the permission error.
+            let mut last_err: Option<PlatformError> = None;
+            for attempt in 0..CAPTURE_MAX_ATTEMPTS {
+                match macffi::capture_rgba() {
+                    Ok(frame) => {
+                        let png = encode_png(&frame.rgba, frame.width, frame.height)?;
+                        return Ok(CapturedFrame {
+                            png,
+                            width: frame.width,
+                            height: frame.height,
+                        });
+                    }
+                    Err(err) => {
+                        let terminal = !macffi::screen_capture_granted();
+                        last_err = Some(map_ffi_err(err));
+                        if terminal || attempt + 1 >= CAPTURE_MAX_ATTEMPTS {
+                            break;
+                        }
+                        std::thread::sleep(CAPTURE_RETRY_DELAY);
+                    }
+                }
+            }
+            Err(last_err.unwrap_or_else(|| {
+                PlatformError::os("macOS capture produced no frame and no error")
+            }))
         })
         .await
         .map_err(|e| PlatformError::os(format!("macOS capture task join: {e}")))?

@@ -286,6 +286,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         pubkey: row.pubkey,
         exposure: row.exposure,
         hasDisplay: row.hasDisplay,
+        desktopUnavailableReason: row.desktopUnavailableReason,
         allowScreenControl: row.allowScreenControl,
         status: row.status,
         os: row.os,

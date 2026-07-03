@@ -12,6 +12,7 @@ import {
 import {
   AGENT_HELLO_SUBJECT,
   handleHelloPayload,
+  helloDesktopUnavailableReason,
   helloReportsDisplay,
   parseAgentHelloSubject,
   refreshEnrollmentDisplay,
@@ -81,6 +82,22 @@ describe("helloReportsDisplay", () => {
   });
 });
 
+describe("helloDesktopUnavailableReason", () => {
+  test("a set reason is returned verbatim", () => {
+    expect(
+      helloDesktopUnavailableReason(
+        Hello.fromPartial({ capabilities: { desktopUnavailableReason: "Screen Recording not granted" } }),
+      ),
+    ).toBe("Screen Recording not granted");
+  });
+  test("the proto's non-optional empty string normalizes to null (capture permitted / headless)", () => {
+    expect(helloDesktopUnavailableReason(Hello.fromPartial({ capabilities: { desktop: true } }))).toBeNull();
+  });
+  test("absent Capabilities → null", () => {
+    expect(helloDesktopUnavailableReason(Hello.fromPartial({}))).toBeNull();
+  });
+});
+
 // ── DB round-trip: the Hello refreshes has_display (both directions, no churn) ──
 
 let available = true;
@@ -104,9 +121,21 @@ async function seedEnrollment(hasDisplay: boolean) {
   return { accountId, workspaceId, enrollment };
 }
 
-function helloPayload(agentId: string, workspaceId: string, opts: { desktop: boolean }): Uint8Array {
+function helloPayload(
+  agentId: string,
+  workspaceId: string,
+  opts: { desktop: boolean; desktopUnavailableReason?: string; display?: { id: string; width: number; height: number; virtual: boolean } },
+): Uint8Array {
   return Hello.encode(
-    Hello.fromPartial({ agentId, workspaceId, capabilities: { desktop: opts.desktop } }),
+    Hello.fromPartial({
+      agentId,
+      workspaceId,
+      capabilities: {
+        desktop: opts.desktop,
+        ...(opts.desktopUnavailableReason ? { desktopUnavailableReason: opts.desktopUnavailableReason } : {}),
+        ...(opts.display ? { display: opts.display } : {}),
+      },
+    }),
   ).finish();
 }
 
@@ -170,6 +199,59 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     const { workspaceId } = await seedEnrollment(false);
     const result = await refreshEnrollmentDisplay(db, { workspaceId, agentId: crypto.randomUUID(), hasDisplay: true });
     expect(result.updated).toBe(false);
+  });
+
+  test("a CAPTURE-BLOCKED Hello persists the reason (server-visible) with has_display=false", async () => {
+    if (!available) return;
+    // A Mac reports a display it cannot capture (Screen Recording not granted). The
+    // reason must land ON THE ROW so the Machines dashboard can show "display: capture
+    // not granted" — the state must be visible server-side, not just an agent log line.
+    const { workspaceId, enrollment } = await seedEnrollment(true);
+    const reason = "Screen Recording permission not granted — enable it in System Settings.";
+
+    await handleHelloPayload(
+      db,
+      undefined,
+      helloPayload(enrollment.id, workspaceId, {
+        desktop: false,
+        desktopUnavailableReason: reason,
+        display: { id: "0", width: 2560, height: 1440, virtual: false },
+      }),
+      `agent.${workspaceId}.${enrollment.id}.hello`,
+    );
+
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.hasDisplay).toBe(false); // a capture-blocked display is not usable
+    expect(after?.desktopUnavailableReason).toBe(reason);
+  });
+
+  test("granting capture (a later reason-less Hello) CLEARS the persisted reason back to null", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment } = await seedEnrollment(true);
+    const reason = "Screen Recording permission not granted.";
+    // First, the blocked state.
+    await refreshEnrollmentDisplay(db, { workspaceId, agentId: enrollment.id, hasDisplay: false, desktopUnavailableReason: reason });
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe(reason);
+
+    // Then the user grants it: has_display true again, reason cleared.
+    const result = await refreshEnrollmentDisplay(db, { workspaceId, agentId: enrollment.id, hasDisplay: true, desktopUnavailableReason: null });
+    expect(result.updated).toBe(true);
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.hasDisplay).toBe(true);
+    expect(after?.desktopUnavailableReason ?? null).toBeNull();
+  });
+
+  test("a reason-ONLY change (has_display steady) still writes (the reason is not lost)", async () => {
+    if (!available) return;
+    // has_display is already false; a NEW capture-blocked reason arriving must still
+    // persist even though has_display doesn't move — the change-guard keys on BOTH fields.
+    const { workspaceId, enrollment } = await seedEnrollment(false);
+    const result = await refreshEnrollmentDisplay(db, {
+      workspaceId, agentId: enrollment.id, hasDisplay: false,
+      desktopUnavailableReason: "Screen Recording not granted.",
+    });
+    expect(result.updated).toBe(true);
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.desktopUnavailableReason).toBe("Screen Recording not granted.");
   });
 
   test("the live consumer wiring: a Hello on agent.*.*.hello flips has_display via startHelloIngestion", async () => {
