@@ -1557,18 +1557,35 @@ function fetchInputForAttempt(input: string | URL | Request): string | URL | Req
   return input instanceof Request ? input.clone() : input;
 }
 
+// Application-defined JSON-RPC error code marking "this tool call needs a
+// connection". A RESULT carrying inline `isError: true` cannot be used here:
+// the agents SDK's streamable-http shim strips `isError` and returns only the
+// content, erasing the failure. A JSON-RPC error survives the shim as a thrown
+// McpError, which PrefixedMcpServer.callTool converts back into an MCP-shaped
+// `{ isError: true }` output for the model.
+const MCP_AUTH_NEEDED_ERROR_CODE = -32001;
+const MCP_AUTH_NEEDED_MESSAGE = "Authentication required - a connection link was posted to the session.";
+
 function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
   return new Response(JSON.stringify({
     jsonrpc: "2.0",
     id: id ?? null,
-    result: {
-      content: [{ type: "text", text: "Authentication required - a connection link was posted to the session." }],
-      isError: true,
+    error: {
+      code: MCP_AUTH_NEEDED_ERROR_CODE,
+      message: MCP_AUTH_NEEDED_MESSAGE,
     },
   }), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+function isAuthNeededMcpError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return code === MCP_AUTH_NEEDED_ERROR_CODE || error.message.includes(MCP_AUTH_NEEDED_MESSAGE);
 }
 
 async function mcpServerRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {
@@ -1796,7 +1813,18 @@ class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
     }
-    return await this.inner.callTool(unprefixed, args, meta);
+    try {
+      return await this.inner.callTool(unprefixed, args, meta);
+    } catch (error) {
+      // The connection broker's auth-needed short-circuit arrives as a thrown
+      // JSON-RPC error (an inline isError result would be stripped by the SDK
+      // shim). Surface it to the model as a failed-but-recoverable tool result
+      // instead of failing the turn; the timeline chip was already published.
+      if (isAuthNeededMcpError(error)) {
+        return { isError: true, content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }] };
+      }
+      throw error;
+    }
   }
 
   invalidateToolsCache(): Promise<void> {
