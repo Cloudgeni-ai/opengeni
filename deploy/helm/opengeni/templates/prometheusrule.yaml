@@ -1,14 +1,14 @@
-{{- if and .Values.observability.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ include "opengeni.fullname" . }}
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
-    {{- with .Values.observability.prometheusRule.labels }}
+    {{- with ((.Values.observability).prometheusRule).labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.observability.prometheusRule.annotations }}
+  {{- with ((.Values.observability).prometheusRule).annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -16,8 +16,8 @@ spec:
   groups:
     - name: opengeni.rules
       rules:
-        {{- if .Values.observability.prometheusRule.rules }}
-        {{- toYaml .Values.observability.prometheusRule.rules | nindent 8 }}
+        {{- if ((.Values.observability).prometheusRule).rules }}
+        {{- toYaml ((.Values.observability).prometheusRule).rules | nindent 8 }}
         {{- else }}
         - alert: OpenGeniTurnStuck
           expr: opengeni_turn_oldest_inflight_age_seconds > 900

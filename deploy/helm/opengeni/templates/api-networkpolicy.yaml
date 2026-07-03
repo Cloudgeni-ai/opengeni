@@ -22,7 +22,7 @@ spec:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: web
-        {{- if and .Values.observability.collector.enabled .Values.observability.metrics.enabled }}
+        {{- if and ((.Values.observability).collector).enabled ((.Values.observability).metrics).enabled }}
         - podSelector:
             matchLabels:
               {{- include "opengeni.selectorLabels" . | nindent 14 }}

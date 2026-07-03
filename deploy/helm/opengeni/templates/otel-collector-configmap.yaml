@@ -1,4 +1,4 @@
-{{- if .Values.observability.collector.enabled }}
+{{- if ((.Values.observability).collector).enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,8 +8,8 @@ metadata:
     app.kubernetes.io/component: otel-collector
 data:
   collector.yaml: |
-    {{- if .Values.observability.collector.config }}
-    {{- tpl .Values.observability.collector.config . | nindent 4 }}
+    {{- if ((.Values.observability).collector).config }}
+    {{- tpl ((.Values.observability).collector).config . | nindent 4 }}
     {{- else }}
     receivers:
       otlp:
@@ -20,7 +20,7 @@ data:
         config:
           scrape_configs:
             - job_name: opengeni-api
-              metrics_path: {{ .Values.observability.metrics.path }}
+              metrics_path: {{ ((.Values.observability).metrics).path }}
               static_configs:
                 - targets:
                     - {{ include "opengeni.fullname" . }}-api:{{ .Values.api.service.port }}

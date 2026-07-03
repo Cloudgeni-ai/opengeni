@@ -45,7 +45,7 @@ spec:
       containers:
         - name: worker
           image: {{ include "opengeni.image" (dict "root" . "image" .Values.worker.image) | quote }}
-          imagePullPolicy: {{ .Values.worker.image.pullPolicy }}
+          imagePullPolicy: {{ ((.Values.worker).image).pullPolicy }}
           securityContext:
             {{- toYaml .Values.worker.securityContext | nindent 12 }}
           {{- if .Values.worker.command }}
@@ -79,17 +79,17 @@ spec:
               value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
             {{- end }}
             {{- end }}
-          {{- if .Values.worker.probes.readiness.enabled }}
+          {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
-            {{- include "opengeni.httpProbe" (dict "probe" .Values.worker.probes.readiness) | nindent 12 }}
+            {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).readiness) | nindent 12 }}
           {{- end }}
-          {{- if .Values.worker.probes.liveness.enabled }}
+          {{- if (((.Values.worker).probes).liveness).enabled }}
           livenessProbe:
-            {{- include "opengeni.httpProbe" (dict "probe" .Values.worker.probes.liveness) | nindent 12 }}
+            {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
           {{- end }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
-      {{- if .Values.worker.topologySpreadConstraints.enabled }}
+      {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker" "values" .Values.worker) | nindent 8 }}
       {{- end }}

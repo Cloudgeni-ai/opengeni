@@ -1,4 +1,4 @@
-{{- if .Values.observability.collector.enabled }}
+{{- if ((.Values.observability).collector).enabled }}
 apiVersion: v1
 kind: Service
 metadata:

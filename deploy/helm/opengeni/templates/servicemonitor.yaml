@@ -1,4 +1,4 @@
-{{- if and .Values.api.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- if and .Values.api.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -6,10 +6,10 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
-    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- with ((.Values.observability).serviceMonitor).labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.observability.serviceMonitor.annotations }}
+  {{- with ((.Values.observability).serviceMonitor).annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -20,11 +20,11 @@ spec:
       app.kubernetes.io/component: api
   endpoints:
     - port: http
-      path: {{ .Values.observability.metrics.path | quote }}
-      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
-      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+      path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
+      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
 {{- end }}
-{{- if and .Values.worker.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- if and .Values.worker.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -33,10 +33,10 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
-    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- with ((.Values.observability).serviceMonitor).labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.observability.serviceMonitor.annotations }}
+  {{- with ((.Values.observability).serviceMonitor).annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -47,11 +47,11 @@ spec:
       app.kubernetes.io/component: worker
   endpoints:
     - port: http
-      path: {{ .Values.observability.metrics.path | quote }}
-      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
-      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+      path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
+      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
 {{- end }}
-{{- if and .Values.relay.enabled .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- if and .Values.relay.enabled ((.Values.observability).serviceMonitor).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -60,10 +60,10 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay
-    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- with ((.Values.observability).serviceMonitor).labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.observability.serviceMonitor.annotations }}
+  {{- with ((.Values.observability).serviceMonitor).annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -76,6 +76,6 @@ spec:
     # The relay exposes a Prometheus exposition at GET /metrics on the wss port.
     - port: wss
       path: /metrics
-      interval: {{ .Values.observability.serviceMonitor.interval | quote }}
-      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout | quote }}
+      interval: {{ ((.Values.observability).serviceMonitor).interval | default "30s" | quote }}
+      scrapeTimeout: {{ ((.Values.observability).serviceMonitor).scrapeTimeout | default "10s" | quote }}
 {{- end }}

@@ -6,10 +6,10 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
-  {{- if .Values.observability.metrics.enabled }}
+  {{- if ((.Values.observability).metrics).enabled }}
   annotations:
     prometheus.io/scrape: "true"
-    prometheus.io/path: {{ .Values.observability.metrics.path | quote }}
+    prometheus.io/path: {{ ((.Values.observability).metrics).path | default "/metrics" | quote }}
     prometheus.io/port: {{ .Values.api.service.port | quote }}
   {{- end }}
 spec:

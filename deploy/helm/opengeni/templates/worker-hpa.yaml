@@ -1,4 +1,4 @@
-{{- if and .Values.worker.enabled .Values.worker.autoscaling.enabled }}
+{{- if and .Values.worker.enabled ((.Values.worker).autoscaling).enabled }}
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -11,13 +11,13 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: {{ include "opengeni.fullname" . }}-worker
-  minReplicas: {{ .Values.worker.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.worker.autoscaling.maxReplicas }}
+  minReplicas: {{ ((.Values.worker).autoscaling).minReplicas }}
+  maxReplicas: {{ ((.Values.worker).autoscaling).maxReplicas }}
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.worker.autoscaling.targetCPUUtilizationPercentage }}
+          averageUtilization: {{ ((.Values.worker).autoscaling).targetCPUUtilizationPercentage }}
 {{- end }}

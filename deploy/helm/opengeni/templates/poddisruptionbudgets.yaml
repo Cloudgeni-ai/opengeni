@@ -13,7 +13,7 @@ spec:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
 {{- end }}
-{{- if and .Values.worker.enabled .Values.worker.podDisruptionBudget.enabled }}
+{{- if and .Values.worker.enabled ((.Values.worker).podDisruptionBudget).enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -23,7 +23,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker
 spec:
-  minAvailable: {{ .Values.worker.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ ((.Values.worker).podDisruptionBudget).minAvailable }}
   selector:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}

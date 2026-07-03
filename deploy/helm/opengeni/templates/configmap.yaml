@@ -16,8 +16,8 @@ data:
   {{- else if .Values.nats.url }}
   OPENGENI_NATS_URL: {{ .Values.nats.url | quote }}
   {{- end }}
-  {{- if .Values.observability.otel.enabled }}
-  OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) .Values.observability.otel.endpoint | quote }}
+  {{- if ((.Values.observability).otel).enabled }}
+  OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT: {{ default (printf "http://%s-otel-collector:4318" (include "opengeni.fullname" .)) ((.Values.observability).otel).endpoint | quote }}
   {{- end }}
   {{- if .Values.selfhosted.enabled }}
   # Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring. The
@@ -46,4 +46,4 @@ data:
   {{- end }}
   {{- end }}
   OPENGENI_OBSERVABILITY_STRUCTURED_LOGS: {{ .Values.observability.structuredLogs | quote }}
-  OPENGENI_OBSERVABILITY_METRICS_ENABLED: {{ .Values.observability.metrics.enabled | quote }}
+  OPENGENI_OBSERVABILITY_METRICS_ENABLED: {{ ((.Values.observability).metrics).enabled | quote }}

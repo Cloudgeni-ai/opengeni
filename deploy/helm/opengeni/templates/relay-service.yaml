@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay
-  {{- if .Values.observability.metrics.enabled }}
+  {{- if ((.Values.observability).metrics).enabled }}
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/path: "/metrics"
