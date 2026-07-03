@@ -78,6 +78,10 @@ function makeMockSession(opts: {
   // Simulate the Modal exec-output cap truncating EACH `dd … | base64` chunk to at most
   // this many decoded bytes — the read then reconstructs short and must fail LOUD.
   truncateChunkBytes?: number;
+  // Model the RoutingSandboxSession fronting a Modal box: it EXPOSES an `exec` method
+  // (so typeof session.exec === "function"), but for a Modal backend that method falls
+  // back to execCommand and returns the formatted banner STRING — NOT a {output} object.
+  proxyExecString?: boolean;
 } = {}) {
   const execCalls: string[] = [];
   // The execCommand contract: a FORMATTED STRING with a metadata preamble (F2).
@@ -127,7 +131,12 @@ function makeMockSession(opts: {
   const session: Record<string, unknown> = {
     execCommand: async (args: { cmd: string }) => run(args.cmd),
   };
-  if (opts.withExec) {
+  if (opts.proxyExecString) {
+    // The routing proxy's exec() resolves to the execCommand banner STRING (Modal has
+    // no native exec). readCmdRaw must banner-strip it, NOT feed it to
+    // sandboxCommandOutput (which returns "" for a string).
+    session.exec = async (args: { cmd: string }) => run(args.cmd);
+  } else if (opts.withExec) {
     session.exec = async (args: { cmd: string }) => {
       execCalls.push(args.cmd);
       const body = readBody(args.cmd);
@@ -191,6 +200,23 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     expect(shot).toBe(Buffer.from(png).toString("base64"));
     expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
     expect(execCalls.some((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd))).toBe(true);
+  });
+
+  test("ROUTING-PROXY-FIX: a proxy exec() that returns the execCommand banner STRING is banner-stripped, not dropped to ''", async () => {
+    // The RoutingSandboxSession (selfhosted enabled) fronting a Modal box exposes `exec`,
+    // but it resolves to the formatted execCommand STRING. A naive
+    // sandboxCommandOutput(string) === "" made `wc -c` read as 0 → empty frame → the
+    // "display not up" error card on EVERY Modal computer-use turn. Multi-chunk so the
+    // chunked dd|base64 reads also flow through the string path.
+    const png = new Uint8Array(250_000);
+    for (let i = 0; i < png.length; i++) png[i] = (i * 2654435761) & 0xff;
+    const { session, execCalls } = makeMockSession({ proxyExecString: true, pngBytes: png });
+    const c = new SandboxComputer(session as never);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(png).toString("base64")); // full frame, byte-exact — NOT empty
+    // Drove the read through the exec() (proxy string) path, not execCommand directly.
+    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
+    expect(execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd)).length).toBeGreaterThanOrEqual(3);
   });
 
   // ── The exec-output-cap fix: a fully-painted 1280x800 desktop PNG (~222 KB) base64s

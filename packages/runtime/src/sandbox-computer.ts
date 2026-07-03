@@ -129,7 +129,9 @@ const BUTTON_NUM: Record<ComputerButton, number> = { left: 1, wheel: 2, right: 3
 // exec/execCommand (readFile path-validates against /workspace and rejects /tmp).
 type ExecResultLike = { output?: string; stdout?: string; stderr?: string; exitCode?: number | null; sessionId?: number };
 type ComputerSession = {
-  exec?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike>;
+  // A native provider exec returns a structured `ExecResultLike`; the routing proxy
+  // fronting a Modal box returns the execCommand banner STRING. Both are handled.
+  exec?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<ExecResultLike | string>;
   execCommand?: (args: { cmd: string; runAs?: string; yieldTimeMs?: number; maxOutputTokens?: number }) => Promise<string>;
 };
 
@@ -320,6 +322,16 @@ export class SandboxComputer implements Computer {
   // `sandboxCommandOutput` parser drops the execCommand STRING body). exec exposes a
   // structured stdout; execCommand returns the formatted STRING, so we strip its banner
   // ("…Output:\n<body>") to recover the body.
+  //
+  // ROUTING-PROXY SEAM: when the selfhosted feature is on, the turn's box is wrapped in a
+  // `RoutingSandboxSession`, which ALWAYS exposes an `exec` method — but for a Modal-backed
+  // box (no native `exec`) that method internally falls back to `execCommand` and returns
+  // the formatted STRING, not a `{output}` object. `sandboxCommandOutput` returns "" for a
+  // string, so a naive `sandboxCommandOutput(await session.exec())` silently dropped the
+  // whole screenshot body → empty read → "display not up" error card on EVERY Modal
+  // computer-use turn once routing was enabled. So a STRING exec result is banner-stripped
+  // exactly like the direct execCommand path; only a structured object goes to
+  // sandboxCommandOutput.
   private async readCmdRaw(cmd: string): Promise<string> {
     const args = {
       cmd,
@@ -330,7 +342,11 @@ export class SandboxComputer implements Computer {
       maxOutputTokens: null as unknown as number,
     };
     if (typeof this.session.exec === "function") {
-      return sandboxCommandOutput(await this.session.exec(args));
+      const result = await this.session.exec(args);
+      // A routing proxy fronting a Modal box returns the execCommand banner STRING;
+      // a native structured exec returns an object. Handle both so neither silently
+      // yields an empty body.
+      return typeof result === "string" ? stripExecBanner(result) : sandboxCommandOutput(result);
     }
     if (typeof this.session.execCommand === "function") {
       return stripExecBanner(await this.session.execCommand(args));
