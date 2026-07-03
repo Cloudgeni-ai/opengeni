@@ -370,21 +370,34 @@ impl<P: Platform + 'static> Supervisor<P> {
         // a wedged X server cannot stall this async connect task (mirrors
         // `Platform::desktop_ensure`).
         let desktop = self.platform.desktop();
-        let display = tokio::task::spawn_blocking(move || desktop.probe())
-            .await
-            .unwrap_or(None);
+        // Probe the display AND the CAPTURE PREFLIGHT together on the blocking pool
+        // (both are synchronous OS calls): a display can physically exist while the OS
+        // withholds the screen-capture grant (macOS Screen Recording / TCC), in which
+        // case capture would yield nothing and the model would see a blank.
+        let (display, capture_blocked) = tokio::task::spawn_blocking(move || {
+            (desktop.probe(), desktop.capture_blocked_reason())
+        })
+        .await
+        .unwrap_or((None, None));
         let has_relay = self.platform.stream_registry().is_some();
+        // A desktop is available only when a display probes, we can stream it, AND the
+        // OS actually permits capture. Advertising `desktop: true` on a machine that
+        // cannot capture is exactly how the 0.1.3 incident hid — the capability was
+        // claimed, the capture then failed, and the model saw a blank. When capture is
+        // blocked we report `desktop: false` and carry the actionable reason so the
+        // control plane degrades the cell with a legible hint.
+        let can_capture = display.is_some() && capture_blocked.is_none();
         v1::Capabilities {
             exec: true,
             filesystem: true,
             git: true,
             // A PTY can be opened whenever the relay registrar is wired.
             pty: has_relay,
-            // A desktop is available when a display probes AND we can stream it.
-            desktop: has_relay && display.is_some(),
+            desktop: has_relay && can_capture,
             consented_whole_machine: self.creds.consented_whole_machine,
             consented_screen_control: self.creds.consented_screen_control,
             display,
+            desktop_unavailable_reason: capture_blocked.unwrap_or_default(),
         }
     }
 

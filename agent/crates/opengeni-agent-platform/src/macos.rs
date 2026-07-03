@@ -166,6 +166,24 @@ impl DesktopBackend for MacosDesktop {
             .await
             .map_err(|e| PlatformError::os(format!("macOS inject task join: {e}")))?
     }
+
+    fn capture_blocked_reason(&self) -> Option<String> {
+        // A Mac always has a display, but ScreenCaptureKit yields nothing without the
+        // Screen Recording (TCC) grant — capture then errors and the model would see a
+        // blank. Report the actionable reason at Hello (non-prompting preflight) so the
+        // control plane withholds the desktop cell instead of advertising a capture it
+        // cannot perform.
+        if macffi::screen_capture_granted() {
+            None
+        } else {
+            Some(
+                "Screen Recording permission not granted — enable it for OpenGeni in \
+                 System Settings → Privacy & Security → Screen & System Audio Recording, \
+                 then reconnect the machine."
+                    .to_string(),
+            )
+        }
+    }
 }
 
 /// Maps a leaf [`MacFfiError`](macffi::MacFfiError) onto a [`PlatformError`].

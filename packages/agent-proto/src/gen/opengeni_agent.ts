@@ -755,7 +755,19 @@ export interface Capabilities {
   /** The user consented to screen capture + synthetic input (computer-use). */
   consentedScreenControl: boolean;
   /** Display detail (absent => headless / no display). */
-  display: Display | undefined;
+  display:
+    | Display
+    | undefined;
+  /**
+   * When a display physically EXISTS but the OS withholds the screen-CAPTURE grant
+   * (macOS Screen Recording / TCC), `desktop` is reported false and this carries a
+   * human, actionable reason (e.g. "grant Screen Recording in System Settings").
+   * Empty when capture is permitted or the platform has no separate capture grant
+   * (Linux/x11). Advertised at Hello so the control plane degrades the desktop cell
+   * with a legible hint instead of offering a desktop it cannot capture — the
+   * machine that "claims a display it can't capture" bug the 0.1.3 incident exposed.
+   */
+  desktopUnavailableReason: string;
 }
 
 /** Detail about the agent's graphical display, when one is present. */
@@ -1969,6 +1981,7 @@ function createBaseCapabilities(): Capabilities {
     consentedWholeMachine: false,
     consentedScreenControl: false,
     display: undefined,
+    desktopUnavailableReason: "",
   };
 }
 
@@ -1997,6 +2010,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     }
     if (message.display !== undefined) {
       Display.encode(message.display, writer.uint32(66).fork()).join();
+    }
+    if (message.desktopUnavailableReason !== "") {
+      writer.uint32(74).string(message.desktopUnavailableReason);
     }
     return writer;
   },
@@ -2072,6 +2088,14 @@ export const Capabilities: MessageFns<Capabilities> = {
           message.display = Display.decode(reader, reader.uint32());
           continue;
         }
+        case 9: {
+          if (tag !== 74) {
+            break;
+          }
+
+          message.desktopUnavailableReason = reader.string();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2099,6 +2123,11 @@ export const Capabilities: MessageFns<Capabilities> = {
         ? globalThis.Boolean(object.consented_screen_control)
         : false,
       display: isSet(object.display) ? Display.fromJSON(object.display) : undefined,
+      desktopUnavailableReason: isSet(object.desktopUnavailableReason)
+        ? globalThis.String(object.desktopUnavailableReason)
+        : isSet(object.desktop_unavailable_reason)
+        ? globalThis.String(object.desktop_unavailable_reason)
+        : "",
     };
   },
 
@@ -2128,6 +2157,9 @@ export const Capabilities: MessageFns<Capabilities> = {
     if (message.display !== undefined) {
       obj.display = Display.toJSON(message.display);
     }
+    if (message.desktopUnavailableReason !== "") {
+      obj.desktopUnavailableReason = message.desktopUnavailableReason;
+    }
     return obj;
   },
 
@@ -2146,6 +2178,7 @@ export const Capabilities: MessageFns<Capabilities> = {
     message.display = (object.display !== undefined && object.display !== null)
       ? Display.fromPartial(object.display)
       : undefined;
+    message.desktopUnavailableReason = object.desktopUnavailableReason ?? "";
     return message;
   },
 };

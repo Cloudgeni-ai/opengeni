@@ -203,6 +203,17 @@ export function helloReportsDisplay(hello: Hello): boolean {
   if (!caps) {
     return false;
   }
+  // A CAPTURE-BLOCKED display is NOT a usable display: a Mac reports a display but
+  // withholds `desktop` and sets `desktopUnavailableReason` when Screen Recording
+  // (TCC) is not granted. Treating it as "has display" is exactly how the 0.1.3
+  // incident hid — the machine claimed a desktop it could not capture, so it was
+  // offered for computer-use and the model saw a blank. Gate it out here (the single
+  // source of truth for `has_display`, consumed by both the machine state and the
+  // capability negotiation). The `display`-present fallback is preserved for every
+  // other case (e.g. a relay-less agent that reports a display but not `desktop`).
+  if (caps.desktopUnavailableReason) {
+    return false;
+  }
   return caps.desktop === true || caps.display != null;
 }
 

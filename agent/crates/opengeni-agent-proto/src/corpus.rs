@@ -98,6 +98,9 @@ pub fn canonical_hello() -> v1::Hello {
                 height: 1080,
                 r#virtual: true,
             }),
+            // desktop:false + a display present + a reason mirrors the capture-blocked
+            // case; a non-empty value here exercises the field's cross-stack round-trip.
+            desktop_unavailable_reason: "screen recording not granted".to_string(),
         }),
         update_channel: "stable".to_string(),
         resume_token: "resume-token-1".to_string(),

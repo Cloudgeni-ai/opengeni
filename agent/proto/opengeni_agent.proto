@@ -153,6 +153,14 @@ message Capabilities {
   bool consented_screen_control = 7;
   // Display detail (absent => headless / no display).
   Display display = 8;
+  // When a display physically EXISTS but the OS withholds the screen-CAPTURE grant
+  // (macOS Screen Recording / TCC), `desktop` is reported false and this carries a
+  // human, actionable reason (e.g. "grant Screen Recording in System Settings").
+  // Empty when capture is permitted or the platform has no separate capture grant
+  // (Linux/x11). Advertised at Hello so the control plane degrades the desktop cell
+  // with a legible hint instead of offering a desktop it cannot capture — the
+  // machine that "claims a display it can't capture" bug the 0.1.3 incident exposed.
+  string desktop_unavailable_reason = 9;
 }
 
 // Detail about the agent's graphical display, when one is present.

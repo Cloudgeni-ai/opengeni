@@ -54,6 +54,31 @@ describe("helloReportsDisplay", () => {
   test("absent Capabilities → no display", () => {
     expect(helloReportsDisplay(Hello.fromPartial({}))).toBe(false);
   });
+  test("CAPTURE-BLOCKED (display present but desktopUnavailableReason set) → NO display", () => {
+    // The 0.1.3 incident: a Mac reports a display but withholds `desktop` and sets
+    // the reason when Screen Recording (TCC) is not granted. It must NOT count as a
+    // usable display, so the machine is not offered a desktop it cannot capture.
+    expect(
+      helloReportsDisplay(
+        Hello.fromPartial({
+          capabilities: {
+            desktop: false,
+            display: { id: "0", width: 2560, height: 1440, virtual: false },
+            desktopUnavailableReason: "Screen Recording permission not granted — enable it …",
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+  test("a capture-GRANTED desktop (reason empty) → has display", () => {
+    expect(
+      helloReportsDisplay(
+        Hello.fromPartial({
+          capabilities: { desktop: true, display: { id: "0", width: 2560, height: 1440, virtual: false }, desktopUnavailableReason: "" },
+        }),
+      ),
+    ).toBe(true);
+  });
 });
 
 // ── DB round-trip: the Hello refreshes has_display (both directions, no churn) ──

@@ -196,6 +196,21 @@ pub trait DesktopBackend: Send + Sync {
     /// Returns [`PlatformError::Unsupported`] when the backend cannot inject, or
     /// [`PlatformError::Os`] if the synthetic-input call fails.
     async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()>;
+
+    /// A CAPABILITY PREFLIGHT: when a display physically exists but the OS withholds
+    /// the screen-CAPTURE grant (macOS Screen Recording / TCC), returns a human,
+    /// actionable reason. `None` when capture is permitted OR the platform has no
+    /// separate capture grant (Linux/x11 capture works whenever the display does).
+    ///
+    /// This is a NON-PROMPTING, cheap check (macOS `CGPreflightScreenCaptureAccess`).
+    /// The supervisor calls it at Hello/reconnect so the control plane can degrade the
+    /// desktop cell with a legible hint instead of advertising a desktop the agent
+    /// cannot actually capture (which surfaces to the model as a blank screen — the
+    /// 0.1.3 TCC-denied incident). Default `None` keeps every non-macOS backend
+    /// unchanged.
+    fn capture_blocked_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 /// The headless / unsupported-platform desktop backend: no display, no capture, no
@@ -261,6 +276,14 @@ pub fn resolve_desktop() -> Box<dyn DesktopBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn no_desktop_has_no_capture_grant_concept() {
+        // The capture-preflight default is None on every non-macOS backend (Linux/x11
+        // capture works whenever the display does — there is no separate grant), so the
+        // supervisor never withholds `desktop` for a phantom grant reason off macOS.
+        assert!(NoDesktop.capture_blocked_reason().is_none());
+    }
 
     #[tokio::test]
     async fn no_desktop_probes_none_and_refuses_capture_and_input() {

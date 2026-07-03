@@ -103,6 +103,9 @@ export function canonicalHello(): Hello {
         height: 1080,
         virtual: true,
       },
+      // Lock-step with the Rust corpus: exercises the desktopUnavailableReason field
+      // (desktop:false + display present + reason = the capture-blocked case).
+      desktopUnavailableReason: "screen recording not granted",
     },
     updateChannel: "stable",
     resumeToken: "resume-token-1",
