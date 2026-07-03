@@ -5,7 +5,9 @@
 // from the brand, switcher, workspace nav, session list, and footer sections.
 import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon, SparkleIcon } from "lucide-react";
+import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon } from "lucide-react";
+
+import { BrandMark } from "@/components/brand-mark";
 import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 
 import { ConnectionPill } from "@/components/common";
@@ -38,7 +40,7 @@ function RailBody() {
           aria-label="OpenGeni home"
         >
           <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <SparkleIcon className="size-3.5" />
+            <BrandMark className="size-4" />
           </span>
           {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
         </Link>
@@ -226,7 +228,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
           className="flex items-center gap-2 text-sm font-semibold"
         >
           <span className="flex size-5 items-center justify-center rounded bg-brand-strong/20 text-brand">
-            <SparkleIcon className="size-3" />
+            <BrandMark className="size-3.5" />
           </span>
           OpenGeni
         </Link>
