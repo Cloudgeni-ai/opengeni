@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
+import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
@@ -296,6 +296,56 @@ describe("runtime event normalization", () => {
       const payload = event?.payload as { id: string; output: { isError?: unknown } };
       expect(payload.id).toBe("call-err");
       expect(payload.output.isError).toBe(true);
+    });
+  });
+
+  describe("per-MCP-server tool approval policy", () => {
+    // Builds an agent with a real test MCP server ("docs": search_documents +
+    // fetch_document) under the given requireApproval policy, then resolves the
+    // agent's MCP tools and reports which prefixed tool names need approval.
+    async function mcpToolApprovalMap(requireApproval: boolean | string[] | undefined): Promise<Record<string, boolean>> {
+      const mcp = startTestMcpServer();
+      const serverConfig = {
+        id: "docs",
+        name: "Document Search",
+        url: mcp.url,
+        cacheToolsList: false,
+        ...(requireApproval !== undefined ? { requireApproval } : {}),
+      };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [{ kind: "mcp", id: "docs" }]);
+      try {
+        const agent = buildOpenGeniAgent(
+          testSettings({ sandboxBackend: "none", mcpServers: [serverConfig] }),
+          [],
+          { mcpServers: prepared.mcpServers },
+        );
+        const tools = await agent.getMcpTools(new RunContext());
+        const entries = await Promise.all(tools.map(async (tool) => {
+          const needs = tool.type === "function"
+            ? Boolean(await (tool.needsApproval as (rc: unknown, input: unknown, details: unknown) => boolean | Promise<boolean>)(new RunContext(), "{}", {}))
+            : false;
+          return [tool.name, needs] as const;
+        }));
+        return Object.fromEntries(entries);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    }
+
+    test("requireApproval: true → every tool of the server needs approval", async () => {
+      const map = await mcpToolApprovalMap(true);
+      expect(map).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+    });
+
+    test("requireApproval: string[] → only the listed unprefixed tool needs approval", async () => {
+      const map = await mcpToolApprovalMap(["fetch_document"]);
+      expect(map).toEqual({ docs__search_documents: false, docs__fetch_document: true });
+    });
+
+    test("requireApproval absent → nothing needs approval (historical default)", async () => {
+      const map = await mcpToolApprovalMap(undefined);
+      expect(map).toEqual({ docs__search_documents: false, docs__fetch_document: false });
     });
   });
 

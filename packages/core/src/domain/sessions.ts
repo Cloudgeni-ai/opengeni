@@ -105,6 +105,7 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
     ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
     ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     cacheToolsList: server.cacheToolsList ?? false,
+    ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
   };
 }
 
@@ -170,6 +171,7 @@ function validateSessionMcpServersForCreate(
       allowedTools: server.allowedTools ?? null,
       timeoutMs: server.timeoutMs ?? null,
       cacheToolsList: server.cacheToolsList ?? false,
+      requireApproval: server.requireApproval ?? null,
       headersEncrypted,
     });
     metadata.push({

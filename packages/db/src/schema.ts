@@ -301,6 +301,9 @@ export const sessionMcpServers = pgTable("session_mcp_servers", {
   allowedTools: jsonb("allowed_tools").$type<string[]>(),
   timeoutMs: integer("timeout_ms"),
   cacheToolsList: boolean("cache_tools_list").notNull().default(false),
+  // Human-approval policy: `true` = every tool requires approval, a string[] of
+  // UNPREFIXED tool names = only those require it, null/absent = auto-run.
+  requireApproval: jsonb("require_approval").$type<boolean | string[]>(),
   // Map of header name -> AES-GCM ciphertext. Values are decrypted only by the
   // worker's run-preparation path and never returned by API helpers.
   headersEncrypted: jsonb("headers_encrypted").$type<Record<string, string>>().notNull().default({}),

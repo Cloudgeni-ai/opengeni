@@ -1367,6 +1367,12 @@ export const SessionMcpServerInput = z.object({
   allowedTools: z.array(z.string().min(1)).optional(),
   timeoutMs: z.number().int().positive().optional(),
   cacheToolsList: z.boolean().optional(),
+  // Human-approval policy for this server's tools. `true` = every tool of this
+  // server requires approval before it runs (a `session.requiresAction` pause
+  // the caller resolves with `user.approvalDecision`); a string[] = ONLY the
+  // listed UNPREFIXED tool names require approval (e.g. reads auto-run, writes
+  // ask); absent / `false` = auto-run everything (the historical default).
+  requireApproval: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),

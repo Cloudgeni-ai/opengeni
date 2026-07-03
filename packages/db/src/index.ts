@@ -1209,6 +1209,7 @@ export type CreateSessionMcpServerInput = {
   allowedTools?: string[] | null;
   timeoutMs?: number | null;
   cacheToolsList?: boolean | null;
+  requireApproval?: boolean | string[] | null;
   headersEncrypted?: Record<string, string>;
 };
 
@@ -1226,6 +1227,7 @@ export type SessionMcpServerForRun = SessionMcpServerMetadata & {
   allowedTools?: string[];
   timeoutMs?: number;
   cacheToolsList?: boolean;
+  requireApproval?: boolean | string[];
   headers: Record<string, string>;
 };
 
@@ -3166,6 +3168,7 @@ async function insertSessionMcpServers(db: Database, input: {
     allowedTools: server.allowedTools ?? null,
     timeoutMs: server.timeoutMs ?? null,
     cacheToolsList: server.cacheToolsList ?? false,
+    requireApproval: server.requireApproval ?? null,
     headersEncrypted: server.headersEncrypted ?? {},
   }))).returning();
   return rows.map(mapSessionMcpServerMetadata);
@@ -3257,6 +3260,7 @@ export async function listSessionMcpServersForRun(
         ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
         ...(row.timeoutMs ? { timeoutMs: row.timeoutMs } : {}),
         ...(row.cacheToolsList ? { cacheToolsList: row.cacheToolsList } : {}),
+        ...(row.requireApproval != null ? { requireApproval: row.requireApproval } : {}),
         headers,
       };
     });

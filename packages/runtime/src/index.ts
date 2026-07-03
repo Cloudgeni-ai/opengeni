@@ -1042,6 +1042,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
     maybeInstallCodexToolSearch(agent, settings, options);
+    applyMcpApprovalPolicy(agent, settings);
     return agent;
   }
 
@@ -1073,6 +1074,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     agentGitTokenSeed.set(agent, options.gitTokenSeed);
   }
   maybeInstallCodexToolSearch(agent, settings, options);
+  applyMcpApprovalPolicy(agent, settings);
   return agent;
 }
 
@@ -1092,6 +1094,51 @@ function maybeInstallCodexToolSearch(agent: Agent<any, any>, settings: Settings,
       options.codexConnectorNamespaces ?? new Set<string>(),
     );
   }
+}
+
+/** True when the unprefixed tool `name` requires approval under `policy`. */
+function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: string): boolean {
+  return policy === true || (Array.isArray(policy) && policy.includes(unprefixedName));
+}
+
+/**
+ * Enforce per-MCP-server human approval. `settings.mcpServers[].requireApproval`
+ * is `true` (every tool of that server requires approval) or a string[] of
+ * UNPREFIXED tool names (only those do); absent = auto-run. The SDK converts MCP
+ * tools to function tools with `needsApproval` unset (defaults false) and exposes
+ * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
+ * attach a `needsApproval: () => true` predicate to the matching tools — matched
+ * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
+ * needs approval raises a run INTERRUPTION, which the worker turns into
+ * `session.requiresAction` and resolves via `user.approvalDecision`
+ * (resumeApproval) — the same generic path shell/computer-use approvals use, so
+ * no extra plumbing. No-op when no server requests approval, so the default
+ * (auto-run everything) is byte-for-byte unchanged.
+ */
+function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
+  const policies = settings.mcpServers
+    .filter((server) => server.requireApproval === true || (Array.isArray(server.requireApproval) && server.requireApproval.length > 0))
+    .map((server) => ({ prefix: prefixedMcpToolName(server.id, ""), requireApproval: server.requireApproval as boolean | string[] }));
+  if (policies.length === 0) {
+    return;
+  }
+  const listMcpTools = agent.getMcpTools.bind(agent);
+  agent.getMcpTools = async (runContext) => {
+    const tools = await listMcpTools(runContext);
+    return tools.map((tool) => {
+      if (tool.type !== "function") {
+        return tool;
+      }
+      const policy = policies.find((entry) => tool.name.startsWith(entry.prefix));
+      if (!policy) {
+        return tool;
+      }
+      const unprefixed = tool.name.slice(policy.prefix.length);
+      return mcpToolRequiresApproval(policy.requireApproval, unprefixed)
+        ? { ...tool, needsApproval: async () => true }
+        : tool;
+    });
+  };
 }
 
 /**

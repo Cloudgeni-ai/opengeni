@@ -58,6 +58,7 @@ export function settingsWithSessionMcpServers(settings: Settings, servers: Sessi
         ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
         ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
         cacheToolsList: server.cacheToolsList ?? false,
+        ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
         headers: server.headers,
       })),
     ],

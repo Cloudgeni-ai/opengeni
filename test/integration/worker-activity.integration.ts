@@ -168,6 +168,94 @@ describe("worker activities integration", () => {
     });
   });
 
+  test("a requireApproval session MCP tool pauses for approval and resumes on approve", async () => {
+    // End-to-end through the GENERIC interruption loop: a session MCP server with
+    // requireApproval:true makes its tool raise a run interruption, which the
+    // worker turns into session.requiresAction (tool NOT yet executed); a
+    // user.approvalDecision:approve then resumes the saved run state and the tool
+    // finally runs.
+    const encryptionKey = Buffer.alloc(32, 5);
+    const mcp = startTestMcpServer();
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      environmentsEncryptionKey: encryptionKey.toString("base64"),
+    });
+    try {
+      const grant = await testGrant(dbClient.db);
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "search please",
+        resources: [],
+        tools: [{ kind: "mcp", id: "crm" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        mcpServers: [{
+          id: "crm",
+          name: "CRM",
+          url: mcp.url,
+          cacheToolsList: false,
+          requireApproval: true,
+          headersEncrypted: {},
+        }],
+      });
+      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "search please" } },
+      ]);
+      const model = new ScriptedModel([
+        { id: "approval-call-1", output: [functionCall("crm__search_documents", { query: "network policy" }, "call-appr-1")] },
+        { id: "approval-call-2", outputText: "found it", chunks: ["found ", "it"] },
+      ]);
+      const activities = createActivities({
+        settings,
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+
+      // Turn 1: the tool call is gated — the turn pauses instead of running it.
+      const first = await activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: trigger!.id,
+        workflowId: "workflow-mcp-approval",
+      });
+      expect(first.status).toBe("requires_action");
+      const afterFirst = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(afterFirst.some((event) => event.type === "session.requiresAction")).toBe(true);
+      expect(latestStatus(afterFirst)).toBe("requires_action");
+      // The MCP tool did NOT execute while approval is pending.
+      expect(mcp.calls).toEqual([]);
+
+      const activeTurnId = (await getSession(dbClient.db, grant.workspaceId, session.id))?.activeTurnId;
+      expect(activeTurnId).toBeTruthy();
+
+      // Turn 2: approve → the saved run resumes and the tool finally runs.
+      const [approvalTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.approvalDecision", payload: { approvalId: "call-appr-1", decision: "approve" } },
+      ]);
+      const second = await activities.runAgentTurn({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        triggerEventId: approvalTrigger!.id,
+        // Distinct workflowId so the resume's event producerId
+        // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
+        // system disambiguates via the Temporal activityId, which is absent here.
+        workflowId: "workflow-mcp-approval-resume",
+        turnId: activeTurnId!,
+      });
+      expect(second.status).toBe("idle");
+      expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
+      const afterSecond = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(afterSecond.some((event) => event.type === "turn.completed")).toBe(true);
+      expect(latestStatus(afterSecond)).toBe("idle");
+    } finally {
+      mcp.close();
+    }
+  });
+
   test("manager session's first-party MCP token carries its granted permissions end to end", async () => {
     // A manager-style session (created with firstPartyMcpPermissions) calls
     // the workspace-orchestration tools through its own first-party MCP
