@@ -77,6 +77,19 @@ const SCROLL_MAX_CLICKS = 15;
 // short to ride out a cold gVisor XFCE boot, so the turn failed loud on a transient.
 const SCREENSHOT_WARMUP_BUDGET_MS = 30_000;
 const SCREENSHOT_RETRY_DELAY_MS = 750;
+// The screenshot PNG is read back off the box by base64-ing it over the provider's exec
+// channel. Modal's exec collects stdout into a BOUNDED buffer that silently EMPTIES a
+// single oversized read: a fully-painted 1280x800 desktop PNG (~222 KB) base64s to
+// ~296 KB, which trips the cap and returns "" — the blank-frame incident. A partly-
+// painted frame (~200 KB base64) slipped under it, which is why this only surfaced once
+// the paint gate began delivering FULLY-painted frames. (Channel-A's file read already
+// caps its own base64-over-exec output for the same reason; the screenshot read was the
+// one large read that didn't bound itself.) We therefore read the file in 3-byte-aligned
+// CHUNKS whose per-read base64 (~131 KB) stays well under the cap, then VALIDATE the
+// reconstructed byte count against the on-box file size. 98304 = 96 KiB, divisible by 3
+// so each chunk's base64 is self-contained (no cross-chunk padding) and concatenating the
+// decoded chunks reconstructs the PNG byte-exactly.
+const SCREENSHOT_READ_CHUNK_BYTES = 98_304;
 
 export type SandboxComputerOptions = {
   display?: string; // ":0"
@@ -123,6 +136,13 @@ type ComputerSession = {
 /** No exec/execCommand on the session, or the display is not up. */
 export class ComputerUnavailableError extends Error {
   constructor(message: string) { super(message); this.name = "ComputerUnavailableError"; }
+}
+/** The screenshot file read back SHORT of its on-box byte size — a chunk was truncated
+ *  by the provider's exec-output cap. This is deterministic, NOT a warm-up transient, so
+ *  it fails LOUD immediately with the byte counts (never a silent blank the model would
+ *  read as a real empty screen) and is not retried. */
+export class ScreenshotReadError extends Error {
+  constructor(message: string) { super(message); this.name = "ScreenshotReadError"; }
 }
 /** A write action attempted while readOnly. */
 export class ComputerReadOnlyError extends Error {
@@ -268,6 +288,12 @@ export class SandboxComputer implements Computer {
         return Buffer.from(bytes).toString("base64");
       } catch (error) {
         lastError = error;
+        // A short/truncated read is deterministic (the exec-output cap), not a warm-up
+        // transient — retrying only burns the budget and delays a legible failure. Fail
+        // loud NOW (the `finally` still cleans up the temp file).
+        if (error instanceof ScreenshotReadError) {
+          throw error;
+        }
       } finally {
         // Best-effort cleanup on every attempt (success OR failure); never mask the
         // screenshot result.
@@ -288,37 +314,61 @@ export class SandboxComputer implements Computer {
     throw new ComputerUnavailableError("scrot produced an empty screenshot (display not up?)");
   }
 
-  // Read the screenshot PNG bytes by base64-ing the absolute /tmp path through the
-  // SAME command primitive (exec ?? execCommand) — NOT `session.readFile` (Modal
+  // Run a read-only command over the SAME command primitive computer actions use
+  // (exec ?? execCommand) and return its RAW stdout body — NOT `session.readFile` (Modal
   // path-validates against /workspace and rejects /tmp) and NOT `this.x()` (its
-  // `sandboxCommandOutput` parser drops the execCommand STRING body, returning ""
-  // — only the exec-object path has a structured body). We capture the RAW result,
-  // strip the execCommand banner ("…Output:\n<base64>"), strip whitespace, and
-  // decode. Binary-safe: base64 of the scrot is plain ASCII over stdout, no
-  // truncation (maxOutputTokens:null), mirroring recording.ts readRecordingBytes.
-  private async readScreenshotBytes(path: string): Promise<Uint8Array> {
+  // `sandboxCommandOutput` parser drops the execCommand STRING body). exec exposes a
+  // structured stdout; execCommand returns the formatted STRING, so we strip its banner
+  // ("…Output:\n<body>") to recover the body.
+  private async readCmdRaw(cmd: string): Promise<string> {
     const args = {
-      cmd: `DISPLAY=${this.display} base64 ${path}`,
+      cmd,
       ...(this.runAs ? { runAs: this.runAs } : {}),
       yieldTimeMs: ACTION_YIELD_MS,
-      // null disables the provider's output truncation so a full-screen PNG's
-      // base64 is never clipped (the SDK's truncateOutput passes through on null).
+      // null disables the provider's TOKEN truncation; the byte cap this method chunks
+      // around is a separate, lower-level exec-stdout buffer limit.
       maxOutputTokens: null as unknown as number,
     };
-    let raw: string;
     if (typeof this.session.exec === "function") {
-      // The exec-object path exposes a structured stdout/output body.
-      raw = sandboxCommandOutput(await this.session.exec(args));
-    } else if (typeof this.session.execCommand === "function") {
-      // execCommand returns the formatted STRING — strip the banner to recover the
-      // base64 body (sandboxCommandOutput would drop it for the string form).
-      raw = stripExecBanner(await this.session.execCommand(args));
-    } else {
-      throw new ComputerUnavailableError("session cannot run commands (no exec/execCommand) — screenshots unavailable");
+      return sandboxCommandOutput(await this.session.exec(args));
     }
-    const b64 = raw.replace(/\s+/g, "");
-    if (b64.length === 0) return new Uint8Array();
-    return Uint8Array.from(Buffer.from(b64, "base64"));
+    if (typeof this.session.execCommand === "function") {
+      return stripExecBanner(await this.session.execCommand(args));
+    }
+    throw new ComputerUnavailableError("session cannot run commands (no exec/execCommand) — screenshots unavailable");
+  }
+
+  // Read the screenshot PNG bytes off the box. A SINGLE `base64 <file>` over Modal's
+  // exec silently returns "" once the base64 exceeds the exec-stdout buffer cap (a full
+  // desktop ~296 KB base64 trips it — the blank-frame incident). So we size the file
+  // first, then base64 it in SCREENSHOT_READ_CHUNK_BYTES-sized, 3-byte-aligned chunks
+  // (each read's base64 stays well under the cap) and reconstruct — validating the total
+  // against the on-box size and failing LOUD on any short read rather than handing back a
+  // truncated/blank frame. Binary-safe: base64 is plain ASCII over stdout.
+  private async readScreenshotBytes(path: string): Promise<Uint8Array> {
+    // On-box byte size (tiny output — always safe). A still-warming :0 can yield a
+    // zero-byte scrot file; report empty so the caller retries within its warm-up budget.
+    const sizeRaw = (await this.readCmdRaw(`wc -c < ${path} 2>/dev/null`)).replace(/[^0-9]/g, "");
+    const fileSize = Number.parseInt(sizeRaw, 10);
+    if (!Number.isFinite(fileSize) || fileSize <= 0) return new Uint8Array();
+
+    const chunks: Buffer[] = [];
+    const nChunks = Math.ceil(fileSize / SCREENSHOT_READ_CHUNK_BYTES);
+    for (let i = 0; i < nChunks; i++) {
+      // `dd bs=CHUNK skip=i count=1` reads bytes [i*CHUNK, (i+1)*CHUNK); CHUNK % 3 == 0
+      // so each chunk's base64 is self-contained and decoded chunks concatenate exactly.
+      const raw = await this.readCmdRaw(
+        `dd if=${path} bs=${SCREENSHOT_READ_CHUNK_BYTES} skip=${i} count=1 2>/dev/null | base64`,
+      );
+      chunks.push(Buffer.from(raw.replace(/\s+/g, ""), "base64"));
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length !== fileSize) {
+      throw new ScreenshotReadError(
+        `screenshot read reconstructed ${bytes.length}B of ${fileSize}B (${nChunks} chunk(s), path=${path}) — a chunk was truncated by the exec-output cap; frame incomplete`,
+      );
+    }
+    return new Uint8Array(bytes);
   }
 
   async click(xp: number, yp: number, button: ComputerButton) {

@@ -13,6 +13,7 @@ import {
   ComputerReadOnlyError,
   ComputerUnavailableError,
   ComputerActionError,
+  ScreenshotReadError,
   type NativeDesktopSession,
 } from "../src/sandbox-computer";
 import { KeyAction, PointerAction, PointerButton, type DesktopInputRequest } from "@opengeni/agent-proto";
@@ -74,6 +75,9 @@ function makeMockSession(opts: {
   // PNG bytes PER scrot attempt — models a cold :0 that paints on a later
   // retry (e.g. [empty, empty, valid] self-heals on attempt 3). Overrides pngBytes.
   pngBytesPerAttempt?: Uint8Array[];
+  // Simulate the Modal exec-output cap truncating EACH `dd … | base64` chunk to at most
+  // this many decoded bytes — the read then reconstructs short and must fail LOUD.
+  truncateChunkBytes?: number;
 } = {}) {
   const execCalls: string[] = [];
   // The execCommand contract: a FORMATTED STRING with a metadata preamble (F2).
@@ -81,9 +85,9 @@ function makeMockSession(opts: {
     `Chunk ID: abc123\nWall time: 0.01 seconds\nProcess exited with code ${exit}\nOutput:\n${body}`;
   const stillRunningStr = `Chunk ID: abc\nProcess running with session ID 7`;
 
-  // The bytes the NEXT `base64 <path>` screenshot read should yield, per attempt.
+  // The PNG bytes for each scrot attempt.
   let readN = 0;
-  const screenshotBytes = (): Uint8Array => {
+  const nextAttemptBytes = (): Uint8Array => {
     if (opts.pngBytesPerAttempt) {
       const i = Math.min(readN, opts.pngBytesPerAttempt.length - 1);
       readN++;
@@ -91,16 +95,31 @@ function makeMockSession(opts: {
     }
     return opts.pngBytes ?? new Uint8Array([0x89, 0x50, 0x4e, 0x47]); // PNG magic
   };
-  // `true` once a command is the screenshot byte-read (`base64 <abs-path>`, no pipe)
-  // rather than an xdotool/scrot/rm action.
-  const isScreenshotRead = (cmd: string): boolean => /\bbase64 \/tmp\/og-shot-/.test(cmd);
+  // The screenshot read is now two-phase: `wc -c < <path>` sizes the file (latching THIS
+  // attempt's bytes), then `dd if=<path> bs=B skip=i count=1 | base64` reads each 3-byte-
+  // aligned chunk. The mock models the box filesystem: wc -c advances to the next attempt
+  // and returns its length; each dd returns the base64 of that byte-range.
+  let attemptBytes: Uint8Array = new Uint8Array();
+  const readBody = (cmd: string): string | null => {
+    const sm = cmd.match(/wc -c < (\/tmp\/og-shot-\S+?\.png)/);
+    if (sm) {
+      attemptBytes = nextAttemptBytes();
+      return String(attemptBytes.length);
+    }
+    const cm = cmd.match(/dd if=(\/tmp\/og-shot-\S+?\.png) bs=(\d+) skip=(\d+)/);
+    if (cm) {
+      const bs = Number(cm[2]!), skip = Number(cm[3]!);
+      let slice = attemptBytes.slice(skip * bs, (skip + 1) * bs);
+      if (opts.truncateChunkBytes !== undefined) slice = slice.slice(0, opts.truncateChunkBytes);
+      return Buffer.from(slice).toString("base64");
+    }
+    return null;
+  };
 
   const run = (cmd: string): string => {
     execCalls.push(cmd);
-    if (isScreenshotRead(cmd)) {
-      // The screenshot read returns the PNG bytes base64'd in the banner BODY.
-      return formatted(Buffer.from(screenshotBytes()).toString("base64"));
-    }
+    const body = readBody(cmd);
+    if (body !== null) return formatted(body);
     if (opts.stillRunning) return stillRunningStr;
     return formatted("", opts.failExit ?? 0);
   };
@@ -111,9 +130,10 @@ function makeMockSession(opts: {
   if (opts.withExec) {
     session.exec = async (args: { cmd: string }) => {
       execCalls.push(args.cmd);
-      if (isScreenshotRead(args.cmd)) {
+      const body = readBody(args.cmd);
+      if (body !== null) {
         // The exec-object path exposes a structured stdout body (no banner).
-        return { output: Buffer.from(screenshotBytes()).toString("base64"), stdout: "", stderr: "", exitCode: 0 };
+        return { output: body, stdout: "", stderr: "", exitCode: 0 };
       }
       if (opts.stillRunning) return { output: "", stdout: "", stderr: "", sessionId: 7 };
       return { output: "", stdout: "", stderr: "", exitCode: opts.failExit ?? 0, wallTimeSeconds: 0.01 };
@@ -150,25 +170,58 @@ describe("SandboxComputer (P4.3 computer-use)", () => {
     // The screenshot bytes round-trip through base64-over-exec, decoded then
     // re-encoded in JS — clean, no banner.
     expect(shot).toBe(Buffer.from(png).toString("base64"));
-    // scrot wrote the /tmp file, then the read was a `base64 <abs /tmp path>` over
-    // the command primitive — the path that ISN'T workspace-root-validated.
+    // scrot wrote the /tmp file, then the read was size-then-chunk over the command
+    // primitive — the /tmp path that ISN'T workspace-root-validated, NOT readFile.
     expect(execCalls.some((cmd) => cmd.includes("scrot --pointer --overwrite"))).toBe(true);
-    const reads = execCalls.filter((cmd) => /\bbase64 \/tmp\/og-shot-.*\.png\b/.test(cmd));
-    expect(reads.length).toBe(1);
-    // Defensive: the read is base64-direct, NOT a `base64 -w0 | …` piped form (a
-    // pipe would risk a banner-corrupted body) and NOT readFile.
-    expect(reads[0]).not.toContain("|");
+    // The read sizes the file (`wc -c`) then base64s it in `dd … | base64` chunks — the
+    // chunked form that stays under Modal's exec-output cap (a single `base64 <file>`
+    // silently empties a full-frame read).
+    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
+    const chunkReads = execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd));
+    expect(chunkReads.length).toBe(1); // a 6-byte PNG is a single chunk
     // The temp file is cleaned up.
     expect(execCalls.some((cmd) => cmd.includes("rm -f /tmp/og-shot-"))).toBe(true);
   });
 
-  test("400-FIX: the exec-object provider path also reads the PNG via base64 (structured stdout body)", async () => {
+  test("400-FIX: the exec-object provider path also reads the PNG via the chunked read (structured stdout body)", async () => {
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const { session, execCalls } = makeMockSession({ withExec: true, pngBytes: png });
     const c = new SandboxComputer(session as never);
     const shot = await c.screenshot();
     expect(shot).toBe(Buffer.from(png).toString("base64"));
-    expect(execCalls.some((cmd) => /\bbase64 \/tmp\/og-shot-.*\.png\b/.test(cmd))).toBe(true);
+    expect(execCalls.some((cmd) => /wc -c < \/tmp\/og-shot-.*\.png/.test(cmd))).toBe(true);
+    expect(execCalls.some((cmd) => /dd if=\/tmp\/og-shot-.*\.png .*\| base64/.test(cmd))).toBe(true);
+  });
+
+  // ── The exec-output-cap fix: a fully-painted 1280x800 desktop PNG (~222 KB) base64s
+  // to ~296 KB, which trips Modal's exec-stdout buffer cap and silently returns "" from a
+  // single `base64 <file>` — the blank-frame incident. The chunked read reconstructs the
+  // FULL frame from cap-safe pieces, and a truncated chunk fails LOUD (never a blank). ──
+  test("CAP-FIX: a large multi-chunk PNG reconstructs byte-exactly from `dd … | base64` chunks", async () => {
+    // 250 KB — larger than one 96 KiB chunk (3 chunks), and past the ~256 KB cap for a
+    // single read. Deterministic pseudo-random bytes so a mis-sliced chunk would corrupt.
+    const png = new Uint8Array(250_000);
+    for (let i = 0; i < png.length; i++) png[i] = (i * 31 + 7) & 0xff;
+    const { session, execCalls } = makeMockSession({ pngBytes: png });
+    const c = new SandboxComputer(session as never);
+    const shot = await c.screenshot();
+    expect(shot).toBe(Buffer.from(png).toString("base64"));
+    // 250000 / 98304 = 3 chunks.
+    const chunkReads = execCalls.filter((cmd) => /dd if=\/tmp\/og-shot-.*\| base64/.test(cmd));
+    expect(chunkReads.length).toBe(3);
+  });
+
+  test("CAP-FIX: a chunk truncated by the exec cap FAILS LOUD (ScreenshotReadError), never a silent blank", async () => {
+    const png = new Uint8Array(250_000).fill(0x42);
+    // Every chunk comes back truncated to 1000 bytes → the reconstruction is short.
+    const { session } = makeMockSession({ pngBytes: png, truncateChunkBytes: 1000 });
+    const c = new SandboxComputer(session as never, { screenshotWarmupBudgetMs: 30, screenshotRetryDelayMs: 5 });
+    const result = await c.screenshot().then((s) => ({ ok: true as const, s }), (e) => ({ ok: false as const, e }));
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("screenshot() resolved on a truncated read — a short frame must fail loud");
+    expect(result.e).toBeInstanceOf(ScreenshotReadError);
+    // The message carries BOTH byte counts for diagnosis.
+    expect(String((result.e as Error).message)).toMatch(/of 250000B/);
   });
 
   // ── Regression: the "400 Invalid input[N].output.image_url" turn-killer ──────
