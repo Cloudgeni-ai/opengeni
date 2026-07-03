@@ -300,6 +300,21 @@ describe("runtime event normalization", () => {
   });
 
   describe("per-MCP-server tool approval policy", () => {
+    type ApprovalAgent = { getMcpTools: (runContext: RunContext) => Promise<Awaited<ReturnType<typeof getAllMcpTools>>> };
+
+    // Resolves an agent's MCP tools and reports which prefixed tool names need
+    // approval (invoking each tool's needsApproval predicate).
+    async function approvalMapForAgent(agent: ApprovalAgent): Promise<Record<string, boolean>> {
+      const tools = await agent.getMcpTools(new RunContext());
+      const entries = await Promise.all(tools.map(async (tool) => {
+        const needs = tool.type === "function"
+          ? Boolean(await (tool.needsApproval as (rc: unknown, input: unknown, details: unknown) => boolean | Promise<boolean>)(new RunContext(), "{}", {}))
+          : false;
+        return [tool.name, needs] as const;
+      }));
+      return Object.fromEntries(entries);
+    }
+
     // Builds an agent with a real test MCP server ("docs": search_documents +
     // fetch_document) under the given requireApproval policy, then resolves the
     // agent's MCP tools and reports which prefixed tool names need approval.
@@ -319,14 +334,7 @@ describe("runtime event normalization", () => {
           [],
           { mcpServers: prepared.mcpServers },
         );
-        const tools = await agent.getMcpTools(new RunContext());
-        const entries = await Promise.all(tools.map(async (tool) => {
-          const needs = tool.type === "function"
-            ? Boolean(await (tool.needsApproval as (rc: unknown, input: unknown, details: unknown) => boolean | Promise<boolean>)(new RunContext(), "{}", {}))
-            : false;
-          return [tool.name, needs] as const;
-        }));
-        return Object.fromEntries(entries);
+        return await approvalMapForAgent(agent);
       } finally {
         await prepared.close();
         mcp.close();
@@ -346,6 +354,64 @@ describe("runtime event normalization", () => {
     test("requireApproval absent → nothing needs approval (historical default)", async () => {
       const map = await mcpToolApprovalMap(undefined);
       expect(map).toEqual({ docs__search_documents: false, docs__fetch_document: false });
+    });
+
+    test("requireApproval survives the sandbox clone() tool-resolution path", async () => {
+      const mcp = startTestMcpServer();
+      const serverConfig = { id: "docs", name: "Document Search", url: mcp.url, cacheToolsList: false, requireApproval: true as const };
+      const prepared = await prepareAgentTools(testSettings({ mcpServers: [serverConfig] }), [{ kind: "mcp", id: "docs" }]);
+      try {
+        const agent = buildOpenGeniAgent(
+          // Sandbox backend → a SandboxAgent, whose tools are resolved on a fresh
+          // clone (prepareSandboxAgent), NOT on this instance.
+          testSettings({ sandboxBackend: "modal", mcpServers: [serverConfig] }),
+          [],
+          { mcpServers: prepared.mcpServers },
+        );
+        // Mirror the sandbox runtime: it calls agent.clone(...) and resolves tools
+        // on the CLONE. SandboxAgent.clone reconstructs from a fixed field list, so
+        // an instance-own getMcpTools override is dropped — approval must be
+        // re-installed onto the clone or it silently bypasses on every sandbox turn.
+        const clone = (agent as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        expect(await approvalMapForAgent(clone)).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+        // clone-of-clone (resume paths) must keep the policy too.
+        const grandchild = (clone as unknown as { clone: (config: unknown) => ApprovalAgent }).clone({});
+        expect(await approvalMapForAgent(grandchild)).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("prefix-colliding server ids resolve each tool to ITS OWN server's policy", async () => {
+      const outer = startTestMcpServer();
+      const inner = startTestMcpServer();
+      // Server ids where one is a prefix of the other, so their tool prefixes
+      // collide: `my__` (outer) is a prefix of `my___` (inner). A tool like
+      // `my___fetch_document` (inner) also startsWith `my__` (outer).
+      const outerConfig = { id: "my", name: "Outer", url: outer.url, cacheToolsList: false, requireApproval: ["search_documents"] };
+      const innerConfig = { id: "my_", name: "Inner", url: inner.url, cacheToolsList: false, requireApproval: true as const };
+      // Order [outer, inner] puts the SHORTER (colliding) prefix first, so a
+      // first-match find over UNSORTED policies would mis-bind inner's tools to
+      // outer's narrower policy and bypass gating on my___fetch_document.
+      const settings = testSettings({ sandboxBackend: "none", mcpServers: [outerConfig, innerConfig] });
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "my" }, { kind: "mcp", id: "my_" }]);
+      try {
+        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        expect(await approvalMapForAgent(agent)).toEqual({
+          // outer ("my"): only search_documents is gated.
+          my__search_documents: true,
+          my__fetch_document: false,
+          // inner ("my_"): ALL tools gated — must NOT inherit outer's narrower
+          // policy via the colliding prefix.
+          my___search_documents: true,
+          my___fetch_document: true,
+        });
+      } finally {
+        await prepared.close();
+        outer.close();
+        inner.close();
+      }
     });
   });
 

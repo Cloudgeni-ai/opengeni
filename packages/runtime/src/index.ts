@@ -47,6 +47,7 @@ import {
   type Model,
   type ModelProvider,
   type RunStreamEvent,
+  type Tool,
 } from "@openai/agents";
 import {
   localDirLazySkillSource,
@@ -1101,29 +1102,35 @@ function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: str
   return policy === true || (Array.isArray(policy) && policy.includes(unprefixedName));
 }
 
+/** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
+type McpApprovalPolicy = { prefix: string; requireApproval: boolean | string[] };
+
+/** The subset of the agent surface the approval wrap needs — including `clone`. */
+type ApprovalCapableAgent = {
+  getMcpTools: (runContext: unknown) => Promise<Tool<any>[]>;
+  clone?: (config: unknown) => ApprovalCapableAgent;
+};
+
 /**
- * Enforce per-MCP-server human approval. `settings.mcpServers[].requireApproval`
- * is `true` (every tool of that server requires approval) or a string[] of
- * UNPREFIXED tool names (only those do); absent = auto-run. The SDK converts MCP
- * tools to function tools with `needsApproval` unset (defaults false) and exposes
- * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
- * attach a `needsApproval: () => true` predicate to the matching tools — matched
- * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
- * needs approval raises a run INTERRUPTION, which the worker turns into
- * `session.requiresAction` and resolves via `user.approvalDecision`
- * (resumeApproval) — the same generic path shell/computer-use approvals use, so
- * no extra plumbing. No-op when no server requests approval, so the default
- * (auto-run everything) is byte-for-byte unchanged.
+ * Install the approval wrap on a single agent instance: replace `getMcpTools`
+ * with one that stamps `needsApproval: () => true` on every MCP tool whose
+ * server policy demands it. Tools are matched by the server's `<id>__` prefix
+ * (LONGEST prefix first — see {@link applyMcpApprovalPolicy}), then the
+ * unprefixed tool name.
+ *
+ * CLONE SURVIVAL (mirrors {@link installCodexToolSearch}): the sandbox runtime
+ * resolves tools not on the agent we build here but on a FRESH clone —
+ * `prepareSandboxAgent` calls `agent.clone(...)`, and `SandboxAgent.clone`
+ * reconstructs from a FIXED field list (name/tools/mcpServers/…), so an
+ * instance-own `getMcpTools` override is dropped and approval would silently
+ * bypass on every sandbox turn. We therefore also wrap `clone` to RE-INSTALL the
+ * policy onto every clone, recursively — covering clone-of-clone and the resume
+ * paths. The base (non-sandbox) `Agent.clone` spreads `...this` and would carry
+ * the override, but re-installing is idempotent there and keeps one code path.
  */
-function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
-  const policies = settings.mcpServers
-    .filter((server) => server.requireApproval === true || (Array.isArray(server.requireApproval) && server.requireApproval.length > 0))
-    .map((server) => ({ prefix: prefixedMcpToolName(server.id, ""), requireApproval: server.requireApproval as boolean | string[] }));
-  if (policies.length === 0) {
-    return;
-  }
+function installMcpApprovalPolicy(agent: ApprovalCapableAgent, policies: McpApprovalPolicy[]): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
-  agent.getMcpTools = async (runContext) => {
+  agent.getMcpTools = async (runContext: unknown) => {
     const tools = await listMcpTools(runContext);
     return tools.map((tool) => {
       if (tool.type !== "function") {
@@ -1139,6 +1146,50 @@ function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): voi
         : tool;
     });
   };
+  const originalClone = agent.clone?.bind(agent);
+  if (originalClone) {
+    agent.clone = (config: unknown) => {
+      const cloned = originalClone(config);
+      installMcpApprovalPolicy(cloned, policies);
+      return cloned;
+    };
+  }
+}
+
+/**
+ * Enforce per-MCP-server human approval. `settings.mcpServers[].requireApproval`
+ * is `true` (every tool of that server requires approval) or a string[] of
+ * UNPREFIXED tool names (only those do); absent = auto-run. The SDK converts MCP
+ * tools to function tools with `needsApproval` unset (defaults false) and exposes
+ * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
+ * attach a `needsApproval: () => true` predicate to the matching tools — matched
+ * by the server's `<id>__` prefix, then the unprefixed tool name. A tool that
+ * needs approval raises a run INTERRUPTION, which the worker turns into
+ * `session.requiresAction` and resolves via `user.approvalDecision`
+ * (resumeApproval) — the same generic path shell/computer-use approvals use, so
+ * no extra plumbing. No-op when no server requests approval, so the default
+ * (auto-run everything) is byte-for-byte unchanged.
+ *
+ * Two robustness properties the wrap must hold:
+ *  - LONGEST-PREFIX-FIRST. Server ids can be prefixes of one another (`my` vs
+ *    `my_`), so their tool prefixes collide (`my__` vs `my___`): a tool like
+ *    `my___run` (from server `my_`) also `startsWith` `my__` (server `my`). A
+ *    first-match `find` over unsorted policies could bind it to the WRONG
+ *    server's policy and bypass gating. Sorting policies by DESCENDING prefix
+ *    length makes the most-specific (longest) prefix win, so each tool resolves
+ *    to its own server.
+ *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
+ *    {@link installMcpApprovalPolicy}.
+ */
+function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): void {
+  const policies: McpApprovalPolicy[] = settings.mcpServers
+    .filter((server) => server.requireApproval === true || (Array.isArray(server.requireApproval) && server.requireApproval.length > 0))
+    .map((server) => ({ prefix: prefixedMcpToolName(server.id, ""), requireApproval: server.requireApproval as boolean | string[] }))
+    .sort((a, b) => b.prefix.length - a.prefix.length);
+  if (policies.length === 0) {
+    return;
+  }
+  installMcpApprovalPolicy(agent as unknown as ApprovalCapableAgent, policies);
 }
 
 /**
