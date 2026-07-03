@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.9.1
+
+### Patch Changes
+
+- ea8757a: The timeline projection's event-grammar contract is now pinned by a golden fixture suite (8 realistic event-log fixtures → committed projection snapshots, including compact/raw equivalence and legacy/malformed tolerance). Intentional grammar changes regenerate snapshots so the diff is reviewed; unintentional ones fail CI.
+  - @opengeni/sdk@0.9.0
+
 ## 0.9.0
 
 ### Patch Changes

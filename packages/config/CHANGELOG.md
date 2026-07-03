@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.2.5
+
+### Patch Changes
+
+- 5ca067f: ClientConfig gains optional `serverVersion` (the release-train version baked into official server images, surfaced on /healthz and /v1/config/client); the unused `PageInfo`/`paginated()` exports are removed — list endpoints deliberately return bare arrays, and the events route's cursor scheme is the documented exception.
+- Updated dependencies [5ca067f]
+  - @opengeni/contracts@0.7.0
+
 ## 0.2.4
 
 ### Patch Changes
