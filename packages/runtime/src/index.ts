@@ -1,6 +1,6 @@
 import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextInputBudgetTokens, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
-import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -197,6 +197,29 @@ export type ModelResponseUsage = {
 };
 
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number];
+
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export type ResolveConnectionCredentialInput = {
+  workspaceId: string;
+  subjectId?: string;
+  serverId: string;
+  toolName?: string;
+  connectionRef: McpServerConnectionRef;
+  forceRefresh?: boolean;
+};
+
+export type ResolveConnectionCredentialResult =
+  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+    status: "auth_needed";
+    reason: ToolAuthNeededPayload["reason"];
+    providerDomain: string;
+    connectionId?: string;
+    scopes?: string[];
+    resource?: string;
+    authorizationUrl?: string;
+  };
 
 export function ensureReadableStreamFrom(): void {
   const ctor = globalThis.ReadableStream as (typeof ReadableStream & {
@@ -1262,6 +1285,8 @@ export type PrepareToolsOptions = {
   // delegated token (manager-style sessions). The caller is responsible for
   // having validated the set against the session creator's grant.
   firstPartyPermissions?: Permission[];
+  resolveCredential?: (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult>;
+  onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
 };
 
 export async function prepareAgentTools(settings: Settings, tools: ToolRef[], options: PrepareToolsOptions = {}): Promise<PreparedAgentTools> {
@@ -1279,6 +1304,12 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       throw new Error(`Unknown MCP server id: ${tool.id}`);
     }
     const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
+    const baseFetch = isCodexAppsMcpServer(config)
+      ? codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces)
+      : globalThis.fetch;
+    const fetchImpl = config.connectionRef
+      ? connectionBrokerFetch(baseFetch, config, options)
+      : baseFetch;
     const server = new PrefixedMcpServer(new MCPServerStreamableHttp({
       url,
       name: config.name ?? config.id,
@@ -1287,7 +1318,7 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
       // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
       // sanitize the response on the wire before validation. The namespace Set
       // also captures each tool's original connector namespace (P4 Part B.1).
-      ...(isCodexAppsMcpServer(config) ? { fetch: codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces) } : {}),
+      ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
       ...await mcpServerRequestInit(settings, config, options),
       ...(config.timeoutMs ? {
         timeout: config.timeoutMs,
@@ -1306,7 +1337,7 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
     //    with a warning, never killing the turn before the model runs. Bare
     //    refs stay strict (below), preserving the fail-loud default.
     const optional = tool.optional === true;
-    return { server, bestEffort: isCodexAppsMcpServer(config) || optional, optional };
+    return { server, bestEffort: isCodexAppsMcpServer(config) || optional || !!config.connectionRef, optional };
   }));
   const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
   const bestEffortServers = servers.filter((entry) => entry.bestEffort).map((entry) => entry.server);
@@ -1348,6 +1379,196 @@ export async function prepareAgentTools(settings: Settings, tools: ToolRef[], op
     },
     codexConnectorNamespaces,
   };
+}
+
+function connectionBrokerFetch(
+  baseFetch: FetchLike,
+  config: Settings["mcpServers"][number],
+  options: PrepareToolsOptions,
+): FetchLike {
+  const connectionRef = config.connectionRef;
+  if (!connectionRef) {
+    return baseFetch;
+  }
+  return async (input, init) => {
+    const request = await mcpRequestInfo(input, init);
+    const first = await resolveConnectionForRequest(options, config.id, connectionRef, request.toolName, false);
+    if (first.status === "auth_needed") {
+      return await authNeededFetchResponse(options, config.id, request, first, connectionRef);
+    }
+    const response = await baseFetch(fetchInputForAttempt(input), withConnectionHeaders(input, init, first.headers));
+    if (response.status === 401) {
+      const refreshed = await resolveConnectionForRequest(options, config.id, connectionRef, request.toolName, true);
+      if (refreshed.status === "auth_needed") {
+        return await authNeededFetchResponse(options, config.id, request, refreshed, connectionRef);
+      }
+      const retry = await baseFetch(fetchInputForAttempt(input), withConnectionHeaders(input, init, refreshed.headers));
+      if (retry.status === 403) {
+        return await insufficientScopeResponse(options, config.id, request, connectionRef, refreshed.connectionId);
+      }
+      if (retry.status === 401) {
+        return await authNeededFetchResponse(options, config.id, request, {
+          status: "auth_needed",
+          reason: "expired",
+          providerDomain: connectionRef.providerDomain,
+          connectionId: refreshed.connectionId,
+          ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+          ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+        }, connectionRef);
+      }
+      return retry;
+    }
+    if (response.status === 403) {
+      return await insufficientScopeResponse(options, config.id, request, connectionRef, first.connectionId);
+    }
+    return response;
+  };
+}
+
+async function resolveConnectionForRequest(
+  options: PrepareToolsOptions,
+  serverId: string,
+  connectionRef: McpServerConnectionRef,
+  toolName: string | undefined,
+  forceRefresh: boolean,
+): Promise<ResolveConnectionCredentialResult> {
+  if (!options.workspaceId || !options.resolveCredential) {
+    return {
+      status: "auth_needed",
+      reason: "missing_connection",
+      providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
+      ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+      ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    };
+  }
+  const request: ResolveConnectionCredentialInput = {
+    workspaceId: options.workspaceId,
+    serverId,
+    connectionRef,
+    forceRefresh,
+    ...(toolName ? { toolName } : {}),
+    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+  };
+  try {
+    return await options.resolveCredential(request);
+  } catch {
+    return {
+      status: "auth_needed",
+      reason: "refresh_failed",
+      providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
+      ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+      ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    };
+  }
+}
+
+async function insufficientScopeResponse(
+  options: PrepareToolsOptions,
+  serverId: string,
+  request: McpRequestInfo,
+  connectionRef: McpServerConnectionRef,
+  connectionId: string,
+): Promise<Response> {
+  return await authNeededFetchResponse(options, serverId, request, {
+    status: "auth_needed",
+    reason: "insufficient_scope",
+    providerDomain: connectionRef.providerDomain,
+    connectionId,
+    ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+    ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+  }, connectionRef);
+}
+
+async function authNeededFetchResponse(
+  options: PrepareToolsOptions,
+  serverId: string,
+  request: McpRequestInfo,
+  auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  connectionRef: McpServerConnectionRef,
+): Promise<Response> {
+  const connectionId = auth.connectionId ?? connectionRef.connectionId;
+  await publishAuthNeeded(options, {
+    serverId,
+    toolName: request.toolName ?? null,
+    providerDomain: auth.providerDomain,
+    reason: auth.reason,
+    ...(connectionId ? { connectionId } : {}),
+    ...(auth.scopes ? { scopes: auth.scopes } : connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+    ...(auth.resource ? { resource: auth.resource } : connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
+    ...(options.subjectId ? { subjectId: options.subjectId } : {}),
+  });
+  if (request.method === "tools/call") {
+    return mcpToolAuthNeededResponse(request.id);
+  }
+  return new Response("Authentication required for MCP server connection", { status: 401 });
+}
+
+async function publishAuthNeeded(options: PrepareToolsOptions, payload: ToolAuthNeededPayload): Promise<void> {
+  try {
+    await options.onAuthNeeded?.(payload);
+  } catch {
+    // Auth-needed events are advisory UI/audit signals; a publisher failure must
+    // not turn an auth-recoverable tool condition into a failed agent turn.
+  }
+}
+
+type McpRequestInfo = {
+  method?: string;
+  id?: string | number | null;
+  toolName?: string;
+};
+
+async function mcpRequestInfo(input: string | URL | Request, init?: RequestInit): Promise<McpRequestInfo> {
+  const body = typeof init?.body === "string"
+    ? init.body
+    : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
+      ? await input.clone().text().catch(() => "")
+      : "";
+  if (!body) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(body) as { id?: unknown; method?: unknown; params?: { name?: unknown } };
+    const method = typeof parsed.method === "string" ? parsed.method : undefined;
+    const id = typeof parsed.id === "string" || typeof parsed.id === "number" || parsed.id === null ? parsed.id : undefined;
+    const toolName = method === "tools/call" && typeof parsed.params?.name === "string" ? parsed.params.name : undefined;
+    return {
+      ...(method ? { method } : {}),
+      ...(id !== undefined ? { id } : {}),
+      ...(toolName ? { toolName } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function withConnectionHeaders(input: string | URL | Request, init: RequestInit | undefined, authHeaders: Record<string, string>): RequestInit {
+  const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+  for (const [name, value] of Object.entries(authHeaders)) {
+    headers.set(name, value);
+  }
+  return { ...init, headers };
+}
+
+function fetchInputForAttempt(input: string | URL | Request): string | URL | Request {
+  return input instanceof Request ? input.clone() : input;
+}
+
+function mcpToolAuthNeededResponse(id: string | number | null | undefined): Response {
+  return new Response(JSON.stringify({
+    jsonrpc: "2.0",
+    id: id ?? null,
+    result: {
+      content: [{ type: "text", text: "Authentication required - a connection link was posted to the session." }],
+      isError: true,
+    },
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 async function mcpServerRequestInit(settings: Settings, config: Settings["mcpServers"][number], options: PrepareToolsOptions): Promise<{ requestInit: { headers: Record<string, string> } } | {}> {

@@ -609,6 +609,25 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "notice", tone: "waiting" });
   });
 
+  test("tool.auth_needed becomes a waiting notice with a connect action", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        providerDomain: "linear.app",
+        reason: "insufficient_scope",
+        scopes: ["issues:write"],
+        authorizationUrl: "https://linear.app/oauth/authorize",
+      }),
+    ]);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "linear.app needs additional access (issues:write).",
+      action: { label: "Connect", url: "https://linear.app/oauth/authorize" },
+    });
+  });
+
   test("unknown event types are ignored, keeping the projection forward-compatible", () => {
     reset();
     const items = buildTimeline([

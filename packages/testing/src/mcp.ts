@@ -21,6 +21,7 @@ export function startTestMcpServer(options: {
   // always-present base tools. Mirrors the production first-party MCP server,
   // whose tools/list response varies by the delegated token's grant.
   toolsForAuthorization?: (authorization: string | null) => string[];
+  forbiddenTools?: string[];
 } = {}): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
@@ -45,6 +46,13 @@ export function startTestMcpServer(options: {
           });
         }
       }
+      const forbiddenTool = await forbiddenToolName(request, options.forbiddenTools ?? []);
+      if (forbiddenTool) {
+        return new Response(JSON.stringify({ error: "insufficient_scope", tool: forbiddenTool }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      }
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
@@ -61,6 +69,19 @@ export function startTestMcpServer(options: {
     calls,
     close: () => server.stop(true),
   };
+}
+
+async function forbiddenToolName(request: Request, forbiddenTools: string[]): Promise<string | null> {
+  if (forbiddenTools.length === 0 || request.method !== "POST") {
+    return null;
+  }
+  try {
+    const body = await request.clone().json() as { method?: unknown; params?: { name?: unknown } };
+    const name = body.method === "tools/call" && typeof body.params?.name === "string" ? body.params.name : null;
+    return name && forbiddenTools.includes(name) ? name : null;
+  } catch {
+    return null;
+  }
 }
 
 function buildServer(calls: TestMcpToolCall[], scopedTools?: string[]): McpServer {

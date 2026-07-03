@@ -11,6 +11,7 @@ import {
   type CapabilityKind,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
+  type McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
   decryptEnvironmentValue,
@@ -21,6 +22,7 @@ import {
   encryptEnvironmentValue,
   getCapabilityCatalogItem,
   getCapabilityInstallation,
+  getConnectionMetadata,
   getPackInstallation,
   getStoredCapabilityHeaderCiphertext,
   getWorkspaceEnvironment,
@@ -141,13 +143,22 @@ export async function enableCapability(input: {
   delete installationConfig.headers;
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
+  delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
     const headers = await resolveMcpCredentialHeaders(input, item);
-    assertRequiredMcpCredentialHeaders(item, headers);
+    const connectionRef = input.payload.connectionRef
+      ? await validateMcpCapabilityConnectionRef(input, item, input.payload.connectionRef)
+      : null;
+    assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
     installationMetadata = {
       ...installationMetadata,
-      ...await validateMcpCapabilityConnection(item, input.probeMcpServer, headers ?? undefined),
+      ...(connectionRef && !headers
+        ? authDeferredMcpConnectivity()
+        : await validateMcpCapabilityConnection(item, input.probeMcpServer, headers ?? undefined)),
     };
+    if (connectionRef) {
+      installationConfig.connectionRef = connectionRef;
+    }
     if (headers) {
       const key = requireCapabilityHeaderEncryption(input.settings);
       installationConfig.headersEncrypted = Object.fromEntries(
@@ -291,7 +302,67 @@ function normalizedMcpCredentialHeaders(headers: Record<string, string>): Record
   return Object.fromEntries(entries);
 }
 
-function assertRequiredMcpCredentialHeaders(item: CapabilityCatalogItem, headers: Record<string, string> | null): void {
+async function validateMcpCapabilityConnectionRef(
+  input: { db: Database; grant: AccessGrant; workspaceId: string },
+  item: CapabilityCatalogItem,
+  ref: McpServerConnectionRef,
+): Promise<McpServerConnectionRef> {
+  if (ref.subjectScope === "subject") {
+    throw new HTTPException(422, { message: "subject-owned connection refs are not supported for agent runtime use yet" });
+  }
+  const normalized: McpServerConnectionRef = {
+    providerDomain: ref.providerDomain.trim(),
+    subjectScope: "workspace",
+    ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.kind ? { kind: ref.kind } : {}),
+    ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
+    ...(ref.resource ? { resource: ref.resource } : {}),
+  };
+  if (!normalized.providerDomain) {
+    throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });
+  }
+  if (!item.endpointUrl || !item.runtime.mcpServerId) {
+    throw new HTTPException(422, { message: "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef" });
+  }
+  if (!normalized.connectionId) {
+    return normalized;
+  }
+  const connection = await getConnectionMetadata(input.db, input.workspaceId, normalized.connectionId, input.grant.subjectId);
+  if (!connection) {
+    throw new HTTPException(422, { message: "connectionRef.connectionId does not reference a visible connection" });
+  }
+  if (connection.subjectId !== null) {
+    throw new HTTPException(422, { message: "agent runtime connection refs must reference workspace-shared connections in I1" });
+  }
+  if (connection.status !== "active") {
+    throw new HTTPException(422, { message: `connectionRef.connectionId is not active (${connection.status})` });
+  }
+  if (connection.providerDomain !== normalized.providerDomain) {
+    throw new HTTPException(422, { message: "connectionRef.providerDomain does not match the referenced connection" });
+  }
+  if (normalized.kind && connection.kind !== normalized.kind) {
+    throw new HTTPException(422, { message: "connectionRef.kind does not match the referenced connection" });
+  }
+  return normalized;
+}
+
+function authDeferredMcpConnectivity(): Record<string, unknown> {
+  return {
+    mcpConnectivity: {
+      status: "auth_deferred",
+      checkedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function assertRequiredMcpCredentialHeaders(
+  item: CapabilityCatalogItem,
+  headers: Record<string, string> | null,
+  connectionRef: McpServerConnectionRef | null,
+): void {
+  if (connectionRef) {
+    return;
+  }
   const required = requiredCapabilityHeaders(item.metadata);
   const names = new Set(Object.keys(headers ?? {}).map((name) => name.toLowerCase()));
   const missing = required.filter((name) => !names.has(name.toLowerCase()));
@@ -439,7 +510,7 @@ export function settingsWithMcpCapabilityServers(settings: Settings, enabled: En
     .filter((server) => !existingIds.has(server.id))
     .flatMap((server) => {
       const headers = decryptedCapabilityHeaders(server, encryptionKey);
-      if (headers === "unavailable") {
+      if (headers === "unavailable" && !server.connectionRef) {
         // Without its credential headers this server can only fail auth at
         // connect time and break agent turns; leave it out of the run.
         return [];
@@ -451,7 +522,8 @@ export function settingsWithMcpCapabilityServers(settings: Settings, enabled: En
         ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
         ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
         cacheToolsList: server.cacheToolsList ?? false,
-        ...(headers ? { headers } : {}),
+        ...(headers && headers !== "unavailable" ? { headers } : {}),
+        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
       }];
     });
   return dynamicServers.length ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] } : settings;
@@ -786,6 +858,10 @@ function uniqueTags(tags: string[]): string[] {
   return [...new Set(tags.map((tag) => tag.trim()).filter(Boolean))];
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "capability";
 }
@@ -938,7 +1014,10 @@ function capabilityInstallationRuntimeReady(
     return false;
   }
   const connectivity = installation.metadata.mcpConnectivity;
-  return !!connectivity && typeof connectivity === "object" && "status" in connectivity && connectivity.status === "ok";
+  return !!connectivity
+    && typeof connectivity === "object"
+    && "status" in connectivity
+    && (connectivity.status === "ok" || connectivity.status === "auth_deferred");
 }
 
 /**
@@ -946,6 +1025,9 @@ function capabilityInstallationRuntimeReady(
  * capability's declared credential requirements.
  */
 function storedCredentialHeadersSatisfy(item: CapabilityCatalogItem, installation: CapabilityInstallation): boolean {
+  if (storedConnectionRef(installation.config)) {
+    return true;
+  }
   const storedNames = new Set(
     (Array.isArray(installation.config.headerNames) ? installation.config.headerNames : [])
       .filter((name): name is string => typeof name === "string")
@@ -956,4 +1038,10 @@ function storedCredentialHeadersSatisfy(item: CapabilityCatalogItem, installatio
     return false;
   }
   return !item.authModel || storedNames.size > 0;
+}
+
+function storedConnectionRef(config: Record<string, unknown>): boolean {
+  const ref = config.connectionRef;
+  return !!ref && typeof ref === "object" && !Array.isArray(ref)
+    && typeof (ref as { providerDomain?: unknown }).providerDomain === "string";
 }

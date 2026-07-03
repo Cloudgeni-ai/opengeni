@@ -596,7 +596,17 @@ function NoticeRow({ item }: { item: NoticeItem }) {
   return (
     <div className={cn(enter && "animate-og-enter", "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-sm", tone)} role="status">
       <TriangleAlertIcon className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")} />
-      <span className="min-w-0 whitespace-pre-wrap break-words">{item.text}</span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{item.text}</span>
+      {item.action ? (
+        <a
+          className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-xs font-medium hover:bg-current/10"
+          href={item.action.url}
+          rel="noreferrer"
+          target="_blank"
+        >
+          {item.action.label}
+        </a>
+      ) : null}
     </div>
   );
 }

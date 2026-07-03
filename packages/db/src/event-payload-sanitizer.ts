@@ -17,6 +17,22 @@
  */
 
 const REPLACEMENT = "�";
+const REDACTED = "[redacted]";
+const SENSITIVE_FIELD_NAMES = new Set([
+  "authorization",
+  "headers",
+  "accesstoken",
+  "refreshtoken",
+  "idtoken",
+  "token",
+  "apikey",
+  "secret",
+  "clientsecret",
+  "credential",
+  "credentialencrypted",
+  "encryptedpkceverifier",
+  "codeverifier",
+]);
 
 /**
  * Strip NUL and repair invalid/lone UTF-16 surrogates in a single string.
@@ -95,6 +111,9 @@ function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
   if (key === "mcpCredentialUpdates") {
     return sanitizeMcpCredentialUpdateList(value);
   }
+  if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
+    return REDACTED;
+  }
   return sanitizeEventPayload(value);
 }
 
@@ -143,4 +162,8 @@ function safeHeaderNames(value: unknown): string[] | null {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeFieldName(key: string): string {
+  return key.toLowerCase().replace(/[-_]/g, "");
 }

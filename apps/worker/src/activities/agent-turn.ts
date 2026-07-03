@@ -38,6 +38,7 @@ import {
   heartbeatLeaseHolder,
   accrueWarmSeconds,
   SandboxLeaseSupersededError,
+  buildConnectionTokenResolver,
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
@@ -1251,12 +1252,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
+      const resolveCredential = buildConnectionTokenResolver(db, runSettings);
       preparedTools = await withCodex(() => runtime.prepareTools(runSettings, turnTools, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
         subjectId: "worker:first-party-mcp",
         subjectLabel: "OpenGeni worker",
+        resolveCredential,
+        onAuthNeeded: async (payload) => {
+          await publish!([{ type: "tool.auth_needed", payload }], true);
+        },
         // Manager-style sessions carry a creation-validated permission set
         // for their first-party MCP token; null keeps the fixed default.
         ...(session.firstPartyMcpPermissions?.length ? { firstPartyPermissions: session.firstPartyMcpPermissions } : {}),

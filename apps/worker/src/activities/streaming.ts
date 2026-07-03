@@ -15,6 +15,7 @@ export function createRuntimeBatcher(flushEvents: (events: AppendEventInput[]) =
     "agent.toolCall.created",
     "agent.toolCall.output",
     "agent.message.completed",
+    "tool.auth_needed",
     "session.requiresAction",
     "turn.completed",
     "turn.failed",

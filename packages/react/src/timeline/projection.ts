@@ -310,6 +310,20 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "tool.auth_needed": {
+        closeStreamingTail();
+        const authorizationUrl = typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null;
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text: authNeededNoticeText(payload),
+          ...(authorizationUrl ? { action: { label: "Connect", url: authorizationUrl } } : {}),
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "turn.completed": {
         finalizeOpen(turnId);
         items.push(turnEndItem(event, "complete", null));
@@ -810,6 +824,22 @@ function goalText(payload: Record<string, unknown>): string | null {
     return payload.prompt;
   }
   return null;
+}
+
+function authNeededNoticeText(payload: Record<string, unknown>): string {
+  const provider =
+    typeof payload.providerDomain === "string" && payload.providerDomain.trim().length > 0 ? payload.providerDomain.trim() : "This service";
+  const scopes = Array.isArray(payload.scopes)
+    ? payload.scopes.filter((scope): scope is string => typeof scope === "string" && scope.trim().length > 0)
+    : [];
+
+  if (payload.reason === "insufficient_scope") {
+    return scopes.length > 0 ? `${provider} needs additional access (${scopes.join(", ")}).` : `${provider} needs additional access.`;
+  }
+  if (payload.reason === "expired" || payload.reason === "refresh_failed") {
+    return `${provider} needs to be reconnected.`;
+  }
+  return `${provider} needs a connection.`;
 }
 
 function reasoningText(payload: unknown): string {

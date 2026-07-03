@@ -116,6 +116,7 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed";
   text: string;
+  action?: { label: string; url: string };
   occurredAt: string;
 };
 

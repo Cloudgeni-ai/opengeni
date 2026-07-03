@@ -142,6 +142,34 @@ describe("sanitizeEventPayload (deep walk)", () => {
       headerNames: ["Authorization", "X-Session"],
     });
   });
+
+  test("redacts secret-shaped fields from tool auth-needed payloads", () => {
+    const cleaned = sanitizeEventPayload({
+      serverId: "cap-linear",
+      toolName: "linear__create_issue",
+      providerDomain: "linear.app",
+      reason: "missing_connection",
+      scopes: ["issues:write"],
+      authorizationUrl: "https://linear.app/oauth/authorize?client_id=public-client",
+      access_token: "raw-access-token",
+      refreshToken: "raw-refresh-token",
+      encryptedPkceVerifier: "v1:secret-verifier",
+      headers: { authorization: "Bearer raw-token" },
+      nested: { credentialEncrypted: "v1:secret-bundle" },
+    }) as Record<string, unknown>;
+
+    const serialized = JSON.stringify(cleaned);
+    expect(serialized).not.toContain("raw-access-token");
+    expect(serialized).not.toContain("raw-refresh-token");
+    expect(serialized).not.toContain("secret-verifier");
+    expect(serialized).not.toContain("secret-bundle");
+    expect(cleaned.authorizationUrl).toBe("https://linear.app/oauth/authorize?client_id=public-client");
+    expect(cleaned.access_token).toBe("[redacted]");
+    expect(cleaned.refreshToken).toBe("[redacted]");
+    expect(cleaned.encryptedPkceVerifier).toBe("[redacted]");
+    expect(cleaned.headers).toBe("[redacted]");
+    expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
+  });
 });
 
 describe("session_history_items jsonb safety (durable SDK item)", () => {

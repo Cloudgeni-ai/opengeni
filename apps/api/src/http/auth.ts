@@ -46,6 +46,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   ) {
     return true;
   }
+  if (
+    path === "/v1/integrations/oauth/callback" ||
+    path === "/v1/integrations/oauth/client-metadata.json"
+  ) {
+    return true;
+  }
   // Browser entry for MCP-issued GitHub install links: opened in a browser
   // that holds no API credentials, like the callbacks above. The route itself
   // verifies the signed workspace-bound state before doing anything.

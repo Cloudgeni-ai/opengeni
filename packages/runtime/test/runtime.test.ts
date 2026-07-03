@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -1371,6 +1371,218 @@ describe("runtime event normalization", () => {
     } finally {
       await prepared.close();
       mcp.close();
+    }
+  });
+
+  test("sends broker-resolved connectionRef headers to third-party MCP servers", async () => {
+    const connectionId = "11111111-1111-4111-8111-111111111111";
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer broker-token" } });
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-broker",
+        name: "Brokered capability MCP",
+        url: mcp.url,
+        connectionRef: {
+          connectionId,
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          subjectScope: "workspace",
+        },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-broker" }], {
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      resolveCredential: async (input) => {
+        resolved.push(input);
+        return { status: "ok", connectionId, headers: { authorization: "Bearer broker-token" } };
+      },
+    });
+    try {
+      const tools = await prepared.mcpServers[0]!.listTools();
+      expect(tools.map((tool) => tool.name)).toContain("cap-broker__search_documents");
+      const result = await prepared.mcpServers[0]!.callTool("cap-broker__search_documents", { query: "broker" });
+      expect(JSON.stringify(result)).toContain("found document for broker");
+      expect(resolved.some((input) => input.connectionRef.connectionId === connectionId && input.serverId === "cap-broker")).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("retries brokered MCP requests once after 401 with a forced credential refresh", async () => {
+    const connectionId = "33333333-3333-4333-8333-333333333333";
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer fresh-token" } });
+    const resolved: ResolveConnectionCredentialInput[] = [];
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-refresh",
+        name: "Refreshable capability MCP",
+        url: mcp.url,
+        connectionRef: {
+          connectionId,
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          subjectScope: "workspace",
+        },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-refresh" }], {
+      workspaceId: "44444444-4444-4444-8444-444444444444",
+      resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+        resolved.push(input);
+        return {
+          status: "ok",
+          connectionId,
+          headers: { authorization: input.forceRefresh ? "Bearer fresh-token" : "Bearer stale-token" },
+        };
+      },
+    });
+    try {
+      const result = await prepared.mcpServers[0]!.callTool("cap-refresh__search_documents", { query: "refresh" });
+      expect(JSON.stringify(result)).toContain("found document for refresh");
+      expect(resolved.some((input) => input.forceRefresh === true)).toBe(true);
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("turns brokered 403 responses into auth-needed MCP tool errors", async () => {
+    const connectionId = "55555555-5555-4555-8555-555555555555";
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer scoped-token" },
+      forbiddenTools: ["search_documents"],
+    });
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-scoped",
+        name: "Scoped capability MCP",
+        url: mcp.url,
+        connectionRef: {
+          connectionId,
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          scopes: ["documents:read"],
+          subjectScope: "workspace",
+        },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-scoped" }], {
+      workspaceId: "66666666-6666-4666-8666-666666666666",
+      resolveCredential: async () => ({ status: "ok", connectionId, headers: { authorization: "Bearer scoped-token" } }),
+      onAuthNeeded: (payload) => { authNeeded.push(payload); },
+    });
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const result = await prepared.mcpServers[0]!.callTool("cap-scoped__search_documents", { query: "scope" });
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toContainEqual(expect.objectContaining({
+        serverId: "cap-scoped",
+        toolName: "search_documents",
+        providerDomain: "api.example.com",
+        connectionId,
+        reason: "insufficient_scope",
+        scopes: ["documents:read"],
+      }));
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("returns MCP isError output when a connectionRef needs auth at tool-call time", async () => {
+    const connectionId = "77777777-7777-4777-8777-777777777777";
+    const mcp = startTestMcpServer();
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-auth-needed",
+        name: "Auth-needed capability MCP",
+        url: mcp.url,
+        connectionRef: {
+          connectionId,
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          subjectScope: "workspace",
+        },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-auth-needed" }], {
+      workspaceId: "88888888-8888-4888-8888-888888888888",
+      resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
+        if (input.toolName) {
+          return {
+            status: "auth_needed",
+            reason: "missing_connection",
+            providerDomain: "api.example.com",
+            connectionId,
+            authorizationUrl: "https://api.example.com/oauth/start",
+          };
+        }
+        return { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } };
+      },
+      onAuthNeeded: (payload) => { authNeeded.push(payload); },
+    });
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const result = await prepared.mcpServers[0]!.callTool("cap-auth-needed__search_documents", { query: "auth" });
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).toContain("Authentication required");
+      expect(mcp.calls).toEqual([]);
+      expect(authNeeded).toContainEqual(expect.objectContaining({
+        serverId: "cap-auth-needed",
+        toolName: "search_documents",
+        reason: "missing_connection",
+        authorizationUrl: "https://api.example.com/oauth/start",
+      }));
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("skips brokered MCP servers at connect time when auth is missing and emits auth-needed", async () => {
+    const authNeeded: unknown[] = [];
+    const originalWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const prepared = await prepareAgentTools(testSettings({
+        mcpServers: [{
+          id: "cap-missing",
+          name: "Missing auth capability MCP",
+          url: "http://127.0.0.1:9/mcp",
+          connectionRef: {
+            providerDomain: "api.example.com",
+            kind: "api_key",
+            subjectScope: "workspace",
+          },
+          cacheToolsList: false,
+        }],
+      }), [{ kind: "mcp", id: "cap-missing" }], {
+        workspaceId: "99999999-9999-4999-8999-999999999999",
+        resolveCredential: async () => ({
+          status: "auth_needed",
+          reason: "missing_connection",
+          providerDomain: "api.example.com",
+          authorizationUrl: "https://api.example.com/oauth/start",
+        }),
+        onAuthNeeded: (payload) => { authNeeded.push(payload); },
+      });
+      try {
+        expect(prepared.mcpServers).toHaveLength(0);
+        expect(authNeeded).toContainEqual(expect.objectContaining({
+          serverId: "cap-missing",
+          reason: "missing_connection",
+          providerDomain: "api.example.com",
+          authorizationUrl: "https://api.example.com/oauth/start",
+        }));
+      } finally {
+        await prepared.close();
+      }
+    } finally {
+      console.warn = originalWarn;
     }
   });
 

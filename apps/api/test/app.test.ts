@@ -402,6 +402,26 @@ describe("API helpers", () => {
     expect(server?.headers).toEqual({ Authorization: "Bearer runtime-token" });
   });
 
+  test("merges enabled capability MCPs with connection refs into runtime settings", () => {
+    const connectionRef = {
+      providerDomain: "api.example.com",
+      kind: "api_key" as const,
+      scopes: ["read"],
+      subjectScope: "workspace" as const,
+    };
+    const merged = settingsWithMcpCapabilityServers(testSettings(), [{
+      capabilityId: "mcp:brokered",
+      id: "cap-brokered",
+      name: "Brokered MCP",
+      url: "https://brokered.example/mcp",
+      connectionRef,
+    }]);
+
+    const server = merged.mcpServers.find((candidate) => candidate.id === "cap-brokered");
+    expect(server?.connectionRef).toEqual(connectionRef);
+    expect(server?.headers).toBeUndefined();
+  });
+
   test("omits credential-header capability MCPs when their headers cannot be decrypted", () => {
     const key = randomBytes(32);
     const otherKey = randomBytes(32);

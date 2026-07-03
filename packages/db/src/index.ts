@@ -12,6 +12,7 @@ import type {
   ConnectionKind,
   ConnectionMetadata,
   ConnectionStatus,
+  McpServerConnectionRef,
   FileAsset,
   FileStatus,
   FileUploadStatus,
@@ -1251,6 +1252,7 @@ export type EnabledMcpCapabilityServer = {
    * capability API surface.
    */
   headersEncrypted?: Record<string, string>;
+  connectionRef?: McpServerConnectionRef;
 };
 
 export type CreateSessionMcpServerInput = {
@@ -1691,9 +1693,11 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
       return [];
     }
     const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
-    if (item.authModel && !headersEncrypted) {
-      // Credential-gated MCPs are runnable only when credential headers were
-      // stored at enable time.
+    const connectionRef = connectionRefConfig(installation.config.connectionRef);
+    if (item.authModel && !headersEncrypted && !connectionRef) {
+      // Credential-gated MCPs are runnable only when either legacy static
+      // credential headers or the connections broker ref were stored at enable
+      // time.
       return [];
     }
     const metadata = item.metadata;
@@ -1710,6 +1714,7 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
       ...(timeoutMs ? { timeoutMs } : {}),
       ...(cacheToolsList !== undefined ? { cacheToolsList } : {}),
       ...(headersEncrypted ? { headersEncrypted } : {}),
+      ...(connectionRef ? { connectionRef } : {}),
     }];
   });
 }
@@ -8480,7 +8485,37 @@ function encryptedHeadersConfig(value: unknown): Record<string, string> | undefi
 
 function mcpConnectivityOk(metadata: Record<string, unknown>): boolean {
   const value = metadata.mcpConnectivity;
-  return !!value && typeof value === "object" && "status" in value && value.status === "ok";
+  return !!value && typeof value === "object" && "status" in value && (value.status === "ok" || value.status === "auth_deferred");
+}
+
+function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.providerDomain !== "string" || record.providerDomain.length === 0) {
+    return undefined;
+  }
+  const ref: McpServerConnectionRef = { providerDomain: record.providerDomain };
+  if (typeof record.connectionId === "string" && record.connectionId.length > 0) {
+    ref.connectionId = record.connectionId;
+  }
+  if (typeof record.kind === "string" && ["oauth2", "api_key", "app_install", "delegated"].includes(record.kind)) {
+    ref.kind = record.kind as ConnectionKind;
+  }
+  if (Array.isArray(record.scopes)) {
+    const scopes = record.scopes.filter((scope): scope is string => typeof scope === "string" && scope.length > 0);
+    if (scopes.length > 0) {
+      ref.scopes = scopes;
+    }
+  }
+  if (typeof record.resource === "string" && record.resource.length > 0) {
+    ref.resource = record.resource;
+  }
+  if (record.subjectScope === "workspace" || record.subjectScope === "subject") {
+    ref.subjectScope = record.subjectScope;
+  }
+  return ref;
 }
 
 function shortHash(value: string): string {

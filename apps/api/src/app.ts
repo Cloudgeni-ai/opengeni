@@ -21,6 +21,7 @@ import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCodexRoutes } from "./routes/codex";
+import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
@@ -232,6 +233,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerInstallRoutes(app, routeDeps);
   registerWorkspaceRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
+  registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
@@ -395,6 +397,11 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/packs\/[^/]+$/, label: "/v1/workspaces/:workspaceId/packs/:id" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/social\/connections$/, label: "/v1/workspaces/:workspaceId/social/connections" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/social\/posts$/, label: "/v1/workspaces/:workspaceId/social/posts" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/connections$/, label: "/v1/workspaces/:workspaceId/connections" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/connections\/oauth\/start$/, label: "/v1/workspaces/:workspaceId/connections/oauth/start" },
+  { pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/, label: "/v1/workspaces/:workspaceId/connections/:connectionId" },
+  { pattern: /^\/v1\/integrations\/oauth\/callback$/, label: "/v1/integrations/oauth/callback" },
+  { pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/, label: "/v1/integrations/oauth/client-metadata.json" },
   { pattern: /^\/v1\/enrollments\/device\/start$/, label: "/v1/enrollments/device/start" },
   { pattern: /^\/v1\/enrollments\/device\/poll$/, label: "/v1/enrollments/device/poll" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/, label: "/v1/workspaces/:workspaceId/enrollments/device/approve" },
