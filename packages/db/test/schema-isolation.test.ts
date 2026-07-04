@@ -21,13 +21,16 @@ import { migrate, runMigrations } from "../src/migrate";
 //      the two paths don't interfere.
 //
 // One throwaway pgvector container, torn down with the test (NEVER a persistent
-// default-port stack). Non-default port. Assertions run as superuser (the
-// opengeni_app GRANTs are IF EXISTS-guarded, so no role provisioning needed).
+// default-port stack). Non-default port. Most assertions run as superuser; the
+// embedded leg also pre-creates opengeni_app so the migration grant blocks run
+// and a non-owner insert can prove dedicated-schema app-role privileges.
 
 const CONTAINER = "ogbuild-pg-schema-iso";
 const PORT = 55471;
 const PASSWORD = "x";
+const APP_PASSWORD = "apppw";
 const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
+const APP_URL = `postgres://opengeni_app:${APP_PASSWORD}@127.0.0.1:${PORT}/postgres`;
 const IMAGE = "pgvector/pgvector:pg17";
 
 function docker(args: string[]): string {
@@ -81,6 +84,14 @@ beforeAll(async () => {
   const admin = postgres(ADMIN_URL, { max: 1 });
   try {
     await admin.unsafe(`CREATE DATABASE standalone_public`);
+    await admin.unsafe(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+          CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+        END IF;
+      END $$;
+    `);
   } finally {
     await admin.end();
   }
@@ -143,6 +154,46 @@ describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productize
         WHERE n.nspname = 'opengeni' AND c.relname = 'sessions'`)[0]!;
       expect(rls.relrowsecurity).toBe(true);
       expect(rls.relforcerowsecurity).toBe(true);
+
+      const [account] = await sql<{ id: string }[]>`
+        INSERT INTO opengeni.managed_accounts (name) VALUES ('grant acct') RETURNING id`;
+      const [workspace] = await sql<{ id: string }[]>`
+        INSERT INTO opengeni.workspaces (account_id, name) VALUES (${account!.id}, 'grant ws') RETURNING id`;
+      const [session] = await sql<{ id: string }[]>`
+        WITH ids AS (SELECT gen_random_uuid() AS id)
+        INSERT INTO opengeni.sessions (
+          id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+        )
+        SELECT id, ${account!.id}, ${workspace!.id}, 'hello', 'gpt-4.1', 'none', id FROM ids
+        RETURNING id`;
+      await sql.unsafe(`
+        CREATE TABLE opengeni.default_privilege_probe (
+          id bigserial PRIMARY KEY,
+          note text NOT NULL
+        )
+      `);
+
+      const app = postgres(APP_URL, { max: 1 });
+      try {
+        await app.unsafe(`SET search_path = "opengeni", "opengeni_private", "public"`);
+        await app`SELECT set_config('opengeni.account_id', ${account!.id}, false)`;
+        await app`SELECT set_config('opengeni.workspace_id', ${workspace!.id}, false)`;
+        const inserted = await app<{ id: string }[]>`
+          INSERT INTO session_mcp_servers (
+            account_id, workspace_id, session_id, server_id, name, url, headers_encrypted
+          )
+          VALUES (
+            ${account!.id}, ${workspace!.id}, ${session!.id}, 'grant-test', 'Grant test',
+            'https://mcp.example.test', '{}'::jsonb
+          )
+          RETURNING id`;
+        expect(inserted).toHaveLength(1);
+        const defaultGrantInserted = await app<{ id: string }[]>`
+          INSERT INTO default_privilege_probe (note) VALUES ('default grants include sequences') RETURNING id`;
+        expect(defaultGrantInserted).toHaveLength(1);
+      } finally {
+        await app.end();
+      }
     } finally {
       await sql.end();
     }

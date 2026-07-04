@@ -64,3 +64,4 @@ Two publish-coherence rules learned the hard way (all versions are 0.x):
 ## Migration Authoring
 
 - Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin OpenGeni tables to `public` or issue `SET search_path` inside a migration.
+- `opengeni_app` grant blocks must also be schema-agnostic: use `current_schema()` with dynamic SQL (`EXECUTE format(... %I ...)`) instead of `IN SCHEMA public`, and include default privileges when future tables or sequences must inherit app-role access.
