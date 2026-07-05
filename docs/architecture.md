@@ -522,7 +522,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | The agent loop / model routing / instructions | `packages/runtime/src/index.ts` | [`model-providers.md`](model-providers.md) |
 | Context compaction | `packages/runtime/src/context-compaction.ts` | [`context-compaction.md`](context-compaction.md) |
 | Secret environments | `apps/api/src/routes` + `packages/db` env-crypto | [`environments.md`](environments.md) |
-| Integrations / connections / token broker | `apps/api/src/routes/connections.ts`, `apps/api/src/integrations/oauth-client.ts`, `packages/db/src/connection-token-resolver.ts`, `packages/runtime/src/index.ts` (`connectionRef`) | [`integrations-design.md`](integrations-design.md) |
+| Integrations / connections / token broker | `apps/api/src/routes/connections.ts`, `apps/api/src/integrations/oauth-client.ts`, `packages/db/src/connection-token-resolver.ts`, `packages/runtime/src/index.ts` (`connectionRef`), `scripts/import-integrations-catalog.ts` (reviewed catalog snapshots) | [`integrations-design.md`](integrations-design.md) |
 | Per-session MCP servers / credential rotation | `packages/contracts/src/index.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Capabilities / packs | `apps/api` capability routes | [`capabilities.md`](capabilities.md), [`packs.md`](packs.md) |
 | NATS / event bus / auth-callout | `packages/events/src/index.ts`, `packages/events/src/nats-jwt.ts` | — |
@@ -547,7 +547,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`goals.md`](goals.md) | Goal-driven long runs: lifecycle, the replay-safe continuation loop, no-progress/budget guards, goal MCP tools, settings. |
 | [`context-compaction.md`](context-compaction.md) | Provider-aware compaction: server-side on the OpenAI platform, client-side on Azure; rendered-transcript summarization, deterministic fallback, and bounded recovery. |
 | [`model-providers.md`](model-providers.md) | Multi-provider model support; per-model routing via `MultiProviderModelProvider`; responses vs chat wire APIs. |
-| [`capabilities.md`](capabilities.md) | The workspace capability catalog; probe-on-enable; encrypted credential headers; default tool attachment. |
+| [`capabilities.md`](capabilities.md) | The workspace/global capability catalog; registry snapshot imports; probe-on-enable; encrypted credential headers; default tool attachment. |
 | [`packs.md`](packs.md) | Capability packs: role bundles, `credentialRef` vs Postgres secrets, pack-scoped `sandboxImage` + skills (no composition). |
 | [`environments.md`](environments.md) | Workspace secret environments: write-only values, no-self-attach invariant, RLS, AES-256-GCM, layering order, `firstPartyMcpPermissions`. |
 | [`session-mcp-servers.md`](session-mcp-servers.md) | Per-session third-party MCP servers: create contract, `mcp_servers:attach`, encrypted headers, rotation semantics, and never-return-values invariant. |

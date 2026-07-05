@@ -7,6 +7,7 @@ The catalog merges:
 - built-in OpenGeni packs, APIs, MCP servers, and bundled sandbox skills
 - MCP servers configured through `OPENGENI_MCP_SERVERS`
 - local catalog items added through the API or web app
+- reviewed integrations.sh snapshot imports stored as global `source: "registry"` catalog rows
 - public remote MCP servers discovered from the official MCP Registry
 
 ## Runtime Behavior
@@ -84,3 +85,19 @@ Open the **Capabilities** view in the web app to:
 - select enabled custom MCPs in the agent composer
 
 The official MCP Registry is public metadata. Evaluate any server and its endpoint before enabling it in a workspace with sensitive data.
+
+## integrations.sh Snapshot Imports
+
+The integrations catalog import pipeline is offline and reviewable. It never
+live-consumes integrations.sh at request time. Operators run
+`bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json>` against a
+reviewed snapshot or precomputed `importRows` file. The importer writes global
+capability rows, records an `import_batches` provenance row with MIT
+attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
+Rows removed from a later snapshot are marked `stale`, not deleted.
+
+Imported logos are fetched during import, validated as images below 512KB, and
+stored through OpenGeni object storage under `catalog-assets/...`; catalog rows
+store only the self-hosted `logoAssetPath`, never the third-party logo URL. The
+known-dead demo domains are skipped and flagged suspicious URLs are quarantined
+in the batch details for manual review.

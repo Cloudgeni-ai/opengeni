@@ -191,6 +191,7 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 
 - Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`. Never live-consume the registry at request time; snapshots are versioned with import provenance.
 - Catalog rows extend `capability_catalog_items` with surface type, MCP URL, transports, credential facts, tier, provenance.
+- Phase I4 imports use `scripts/import-integrations-catalog.ts` against a reviewed snapshot or precomputed `importRows` file. Imported rows are global `source: "registry"` capability rows keyed by `(provider_domain, mcp_url)`, linked to `import_batches`, and stale-marked on removal rather than deleted. Logo URLs are fetched at import time and stored as self-hosted object-storage assets (`logo_asset_path`); third-party logo URLs are not served from the catalog.
 - **Agent registry tool:** a first-party tool letting the agent query the catalog/domain probe for capabilities it lacks; hits yield the `tool.auth_needed`-style elicitation with mandatory human domain confirmation. The agent can never silently add a server.
 
 ## 11. Legacy credential sites — convergence
