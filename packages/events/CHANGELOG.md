@@ -1,5 +1,15 @@
 # @opengeni/events
 
+## 0.2.6
+
+### Patch Changes
+
+- 550b055: Fresh-eyes review fixes: sandbox command output uses its canonical `chunk` wire field end-to-end — the projection and the compact coalescer previously read only legacy `text`/`output`, so compact history windows dropped terminal output entirely (and the resume cursor skipped the raw events that carried it); coalesced sandbox runs now also break on stream and commandId so stdout/stderr never merge. Live-cluster folding is re-based on the true invariants: a cluster with running/streaming items never folds, and folding happens only when the NEXT group is agent progress (activity/turn/narration) — so a pending queued message or an approval pause no longer folds the work the reader needs in view.
+- Updated dependencies [7bfe593]
+- Updated dependencies [db468cc]
+  - @opengeni/contracts@0.8.0
+  - @opengeni/db@0.5.0
+
 ## 0.2.5
 
 ### Patch Changes

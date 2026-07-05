@@ -1,5 +1,24 @@
 # @opengeni/react
 
+## 0.10.0
+
+### Minor Changes
+
+- 7bfe593: Surface the desktop-capture-blocked reason as server-visible enrollment state.
+
+  A machine can have a display it cannot CAPTURE (macOS Screen Recording / TCC not granted). The agent's connect Hello already withholds the desktop cell in that case; this persists a human, actionable reason alongside it so the Machines dashboard / VM picker can render "display: capture not granted" instead of a bare `display_unavailable`.
+
+  - **Contracts / SDK**: `MachineView` (and `EnrollmentSummary`) gain an additive, nullable `desktopUnavailableReason`. Non-null only when a display exists but capture is blocked; `null` == capture permitted OR genuinely headless. Absent/`null` ⇒ byte-identical to today's shape for existing consumers.
+  - **DB**: new nullable `enrollments.desktop_unavailable_reason` column (no backfill — `NULL` preserves the existing "capture-permitted or headless" semantics). The display-cursor writer now persists `has_display` AND the reason together, change-guarded on either field, and self-heals to `null` on the next Hello once the grant is restored.
+
+- 351665b: Completed activity clusters of a still-running turn now fold behind neutral chips (facets + a quiet pulse dot; no verdict glyph — the turn has none yet), keeping only the live tail expanded. This bounds the DOM of very long autonomous turns the same way settled folding bounds history; on settle, everything collapses into the single turn fold as before. TurnSummary's `outcome` prop is now optional (absent = in-progress cluster).
+
+### Patch Changes
+
+- 550b055: Fresh-eyes review fixes: sandbox command output uses its canonical `chunk` wire field end-to-end — the projection and the compact coalescer previously read only legacy `text`/`output`, so compact history windows dropped terminal output entirely (and the resume cursor skipped the raw events that carried it); coalesced sandbox runs now also break on stream and commandId so stdout/stderr never merge. Live-cluster folding is re-based on the true invariants: a cluster with running/streaming items never folds, and folding happens only when the NEXT group is agent progress (activity/turn/narration) — so a pending queued message or an approval pause no longer folds the work the reader needs in view.
+- Updated dependencies [7bfe593]
+  - @opengeni/sdk@0.10.0
+
 ## 0.9.1
 
 ### Patch Changes
