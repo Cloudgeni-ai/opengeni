@@ -125,7 +125,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-    const payload = OAuthStartRequest.parse(await c.req.json());
+    const parsed = OAuthStartRequest.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "invalid OAuth start request" });
+    }
+    const payload = parsed.data;
     const result = await startMcpOAuth({ db, settings }, {
       accountId: grant.accountId,
       workspaceId,

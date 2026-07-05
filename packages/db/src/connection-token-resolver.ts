@@ -409,17 +409,59 @@ async function assertOAuthEndpointAllowed(rawUrl: string, settings: Settings): P
   }
 }
 
-function isPrivateAddress(address: string): boolean {
-  if (address.includes(":")) {
-    const lower = address.toLowerCase();
-    return lower === "::1"
-      || lower === "::"
-      || lower.startsWith("fc")
-      || lower.startsWith("fd")
-      || lower.startsWith("fe8")
-      || lower.startsWith("fe9")
-      || lower.startsWith("fea")
-      || lower.startsWith("feb");
+export function isPrivateAddress(address: string): boolean {
+  const normalized = normalizeAddress(address);
+  const mapped = ipv4FromMappedIpv6(normalized);
+  if (mapped) {
+    return isPrivateIpv4Address(mapped);
+  }
+  if (normalized.includes(":")) {
+    if (isIP(normalized) !== 6) {
+      return true;
+    }
+    return normalized === "::1"
+      || normalized === "::"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || normalized.startsWith("fe8")
+      || normalized.startsWith("fe9")
+      || normalized.startsWith("fea")
+      || normalized.startsWith("feb");
+  }
+  return isPrivateIpv4Address(normalized);
+}
+
+function normalizeAddress(address: string): string {
+  const trimmed = address.trim().toLowerCase();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function ipv4FromMappedIpv6(address: string): string | null {
+  if (!address.startsWith("::ffff:")) {
+    return null;
+  }
+  const embedded = address.slice("::ffff:".length);
+  if (embedded.includes(".")) {
+    return embedded;
+  }
+  const parts = embedded.split(":");
+  if (parts.length !== 2 || parts.some((part) => !/^[0-9a-f]{1,4}$/.test(part))) {
+    return null;
+  }
+  const high = Number.parseInt(parts[0]!, 16);
+  const low = Number.parseInt(parts[1]!, 16);
+  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 0xffff || low < 0 || low > 0xffff) {
+    return null;
+  }
+  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+}
+
+function isPrivateIpv4Address(address: string): boolean {
+  if (isIP(address) !== 4) {
+    return true;
   }
   const parts = address.split(".").map((part) => Number(part));
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {

@@ -11,6 +11,7 @@ import {
   consumeIntegrationOAuthStateNonce,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  isPrivateAddress,
   loadIntegrationOAuthClient,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
@@ -111,6 +112,17 @@ function resolverDeps(overrides: Partial<ConnectionBrokerDeps> = {}): { deps: Co
   };
   return { deps, counts };
 }
+
+describe("OAuth endpoint address classification", () => {
+  test("IPv4-mapped IPv6 addresses are classified through their embedded IPv4 address", () => {
+    expect(isPrivateAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isPrivateAddress("::ffff:10.0.0.1")).toBe(true);
+    expect(isPrivateAddress("::FFFF:192.168.1.1")).toBe(true);
+    expect(isPrivateAddress("::ffff:7f00:0001")).toBe(true);
+    expect(isPrivateAddress("::ffff:1.1.1.1")).toBe(false);
+    expect(isPrivateAddress("not an ip address")).toBe(true);
+  });
+});
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("connections");

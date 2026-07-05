@@ -2235,7 +2235,7 @@ export type ListConnectionsResponse = z.infer<typeof ListConnectionsResponse>;
 export const OAuthStartRequest = z.object({
   providerDomain: z.string().min(1).optional(),
   mcpUrl: z.string().url().optional(),
-  resource: z.string().min(1).optional(),
+  resource: z.string().url().optional(),
   requestedScopes: z.array(z.string().min(1)).default([]),
   returnPath: z.string().min(1).optional(),
   connectionId: z.string().uuid().optional(),

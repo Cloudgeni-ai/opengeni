@@ -61,7 +61,7 @@ function app(overrides: Partial<Settings> = {}) {
   } as never);
 }
 
-function publicApp(dbOverride: unknown = client?.db ?? {}) {
+function publicApp(dbOverride: unknown = client?.db ?? {}, overrides: Partial<Settings> = {}) {
   const publicSettings = testSettings({
     authRequired: true,
     accessKey: "deployment-key",
@@ -71,6 +71,7 @@ function publicApp(dbOverride: unknown = client?.db ?? {}) {
     integrationsEnabled: true,
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "https://api.opengeni.test",
+    ...overrides,
   }) as Settings;
   return createApp({
     settings: publicSettings,
@@ -555,6 +556,69 @@ describe("connections routes", () => {
       mcp.close();
       as.close();
     }
+  });
+
+  test("oauth callback resolves operator clients with normalized issuer keys", async () => {
+    if (!available) return;
+    const cases = [
+      { configuredSuffix: "/", stateSuffix: "" },
+      { configuredSuffix: "", stateSuffix: "/" },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      const workspace = await freshWorkspace();
+      const as = startFakeAuthorizationServer();
+      const mcp = startTestMcpServer({
+        requiredAuthorization: "Bearer mcp-access-token",
+      });
+      const clientId = `operator-client-${index}`;
+      const configuredKey = `${as.url}${entry.configuredSuffix}`;
+      const stateIssuer = `${as.url}${entry.stateSuffix}`;
+      const state = createSignedState(STATE_SECRET, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "subject-a",
+        providerDomain: `operator-${index}.example.com`,
+        resource: mcp.url,
+        requestedScopes: [],
+        authorizeScopes: ["documents:read"],
+        encryptedPkceVerifier: encryptEnvironmentValue(rawKey, `verifier-${index}`),
+        clientId,
+        tokenEndpoint: `${as.url}/token`,
+        authorizationServer: stateIssuer,
+        issuer: stateIssuer,
+        clientRegistrationMethod: "operator",
+        tokenEndpointAuthMethod: "none",
+        returnPath: "/integrations",
+      });
+      try {
+        const callback = await publicApp(client.db, {
+          integrationsOauthClientsJson: JSON.stringify({
+            [configuredKey]: { clientId, tokenEndpointAuthMethod: "none" },
+          }),
+        }).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
+        expect(callback.status).toBe(302);
+        expect(callback.headers.get("location")).toContain("integration_oauth=success");
+        expect(as.tokenRequests.at(-1)?.get("client_id")).toBe(clientId);
+      } finally {
+        mcp.close();
+        as.close();
+      }
+    }
+  });
+
+  test("oauth start rejects invalid resource URLs without a server error", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const response = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ providerDomain: "invalid-resource.example.com", resource: "example.com" }),
+    });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(response.status).toBeLessThan(500);
   });
 
   test("oauth routes are hidden while integrations are disabled and start does not discover", async () => {

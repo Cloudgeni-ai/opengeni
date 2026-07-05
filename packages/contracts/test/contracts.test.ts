@@ -19,6 +19,7 @@ import {
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  OAuthStartRequest,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
@@ -94,6 +95,11 @@ describe("contracts", () => {
       ...metadata,
       headers: { Authorization: "Bearer must-not-echo" },
     })).toThrow();
+  });
+
+  test("OAuth start request rejects non-URL resources", () => {
+    expect(() => OAuthStartRequest.parse({ resource: "example.com" })).toThrow();
+    expect(OAuthStartRequest.parse({ resource: "https://mcp.example.com/mcp" }).resource).toBe("https://mcp.example.com/mcp");
   });
 
   test("accepts repository and file resources on create session", () => {

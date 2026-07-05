@@ -10,6 +10,7 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  isPrivateAddress,
   loadIntegrationOAuthClient,
   storeIntegrationOAuthClient,
   updateConnection,
@@ -438,28 +439,43 @@ function dcrRegistrationFromStored(stored: {
 }
 
 function operatorClientForAs(settings: Settings, as: AuthorizationServerMetadata): OAuthClientRegistration | null {
+  const entry = operatorClientEntryFor(settings, [as.issuer, as.authorizationServer]);
+  if (!entry) {
+    return null;
+  }
+  return {
+    method: "operator",
+    issuer: as.issuer,
+    authorizationServer: as.authorizationServer,
+    clientId: entry.clientId,
+    ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
+    tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
+  };
+}
+
+function operatorClientEntryFor(
+  settings: Settings,
+  candidates: string[],
+): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const keys = uniqueStrings([
-    as.issuer,
-    as.authorizationServer,
-    as.issuer.replace(/\/+$/, ""),
-    as.authorizationServer.replace(/\/+$/, ""),
-  ]);
-  for (const key of keys) {
+  const exactKeys = uniqueStrings(candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]));
+  for (const key of exactKeys) {
     const entry = configured[key];
-    if (!entry) {
-      continue;
+    if (entry) {
+      return entry;
     }
-    return {
-      method: "operator",
-      issuer: as.issuer,
-      authorizationServer: as.authorizationServer,
-      clientId: entry.clientId,
-      ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
-      tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
-    };
+  }
+  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
+  for (const [key, entry] of Object.entries(configured)) {
+    if (normalizedCandidates.has(normalizedIssuerKey(key))) {
+      return entry;
+    }
   }
   return null;
+}
+
+function normalizedIssuerKey(value: string): string {
+  return value.replace(/\/+$/, "");
 }
 
 async function dynamicClientRegistration(
@@ -586,8 +602,7 @@ async function clientForState(db: Database, settings: Settings, state: OAuthStat
       tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
     };
   }
-  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const entry = configured[state.issuer] ?? configured[state.authorizationServer];
+  const entry = operatorClientEntryFor(settings, [state.issuer, state.authorizationServer]);
   if (!entry || entry.clientId !== state.clientId) {
     throw new HTTPException(400, { message: "operator OAuth client credentials are no longer available" });
   }
@@ -692,7 +707,12 @@ function canonicalMcpResource(value: string | undefined): string {
   if (!value) {
     throw new HTTPException(400, { message: "mcpUrl is required" });
   }
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new HTTPException(422, { message: "MCP resource URL is invalid" });
+  }
   url.hash = "";
   return url.toString();
 }
@@ -766,31 +786,6 @@ async function assertOAuthFetchAllowed(rawUrl: string, settings: Settings): Prom
   if (addresses.some(isPrivateAddress)) {
     throw new HTTPException(422, { message: "OAuth discovery may not target private network addresses" });
   }
-}
-
-function isPrivateAddress(address: string): boolean {
-  if (address.includes(":")) {
-    const lower = address.toLowerCase();
-    return lower === "::1"
-      || lower === "::"
-      || lower.startsWith("fc")
-      || lower.startsWith("fd")
-      || lower.startsWith("fe8")
-      || lower.startsWith("fe9")
-      || lower.startsWith("fea")
-      || lower.startsWith("feb");
-  }
-  const parts = address.split(".").map((part) => Number(part));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-    return true;
-  }
-  const [a, b] = parts as [number, number, number, number];
-  return a === 0
-    || a === 10
-    || a === 127
-    || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && b === 168);
 }
 
 function parseWwwAuthenticate(header: string | null): WwwAuthenticateChallenge {
