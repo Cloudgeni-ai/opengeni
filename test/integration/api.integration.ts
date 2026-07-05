@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
-import { settingsWithEnabledCapabilityMcpServers } from "../../apps/worker/src/activities/capabilities";
+import { settingsWithCodexCredential, settingsWithEnabledCapabilityMcpServers, settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
 import { MemoryEventBus, parseSseBlock, startTestMcpServer, startTestServices, testSettings, type TestServices } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -1695,6 +1695,121 @@ describe("API component integration", () => {
       expect(reEnabled.status).toBe(201);
       const reEnabledInstallation = await reEnabled.json() as { config: Record<string, unknown> };
       expect(reEnabledInstallation.config.headerNames).toEqual(["Authorization"]);
+    } finally {
+      mcp.close();
+      await dbClient.db.execute(dbSql`
+        update capability_installations
+        set status = 'disabled', updated_at = now()
+        where workspace_id = ${workspaceId} and capability_id = ${capabilityId}
+      `);
+    }
+  });
+
+  test("broker-authenticates a connectionRef MCP capability through the worker settings overlay", async () => {
+    const encryptionKey = crypto.getRandomValues(new Uint8Array(32));
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      environmentsEncryptionKey: Buffer.from(encryptionKey).toString("base64"),
+    });
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const bearer = `Bearer broker-${crypto.randomUUID()}`;
+    const mcp = startTestMcpServer({ requiredHeaders: { authorization: bearer } });
+    const providerDomain = new URL(mcp.url).host;
+    const capabilityId = `mcp:i1accept-${crypto.randomUUID()}`;
+    const mcpServerId = "i1accept";
+    try {
+      const createdCapability = await app.request(workspacePath(workspaceId, "/capabilities"), {
+        method: "POST",
+        body: JSON.stringify({
+          id: capabilityId,
+          kind: "mcp",
+          source: "manual",
+          name: "I1 Acceptance MCP",
+          endpointUrl: mcp.url,
+          authModel: "api_key",
+          metadata: { mcpServerId },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(createdCapability.status).toBe(201);
+
+      const createdConnection = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        body: JSON.stringify({
+          providerDomain,
+          kind: "api_key",
+          credential: { headers: { authorization: bearer } },
+          metadata: { label: "I1 acceptance key" },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(createdConnection.status).toBe(201);
+      const { connection } = await createdConnection.json() as { connection: { id: string } };
+
+      const enabled = await app.request(workspacePath(workspaceId, `/capabilities/${encodeURIComponent(capabilityId)}/enable`), {
+        method: "POST",
+        body: JSON.stringify({
+          connectionRef: {
+            connectionId: connection.id,
+            providerDomain,
+            kind: "api_key",
+          },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(enabled.status).toBe(201);
+      const installation = await enabled.json() as { config: Record<string, unknown>; metadata: Record<string, unknown> };
+      expect(installation.config.connectionRef).toMatchObject({
+        connectionId: connection.id,
+        providerDomain,
+        kind: "api_key",
+        subjectScope: "workspace",
+      });
+      expect(installation.metadata.mcpConnectivity).toMatchObject({ status: "auth_deferred" });
+
+      const createdSession = await app.request(workspacePath(workspaceId, "/sessions"), {
+        method: "POST",
+        body: JSON.stringify({
+          initialMessage: "use the acceptance MCP",
+          model: "scripted-model",
+          tools: [{ kind: "mcp", id: mcpServerId }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(createdSession.status).toBe(202);
+      const session = await createdSession.json() as { id: string; tools: Array<{ kind: string; id: string }> };
+      expect(session.tools).toContainEqual({ kind: "mcp", id: mcpServerId });
+
+      const mcpSettings = await settingsWithEnabledCapabilityMcpServers(dbClient.db, workspaceId, settings);
+      const capabilitySettings = await settingsWithCodexCredential(dbClient.db, workspaceId, mcpSettings, false);
+      const runSettings = await settingsWithSessionMcpServersForRun(dbClient.db, workspaceId, session.id, capabilitySettings);
+      const resolveCredential = buildConnectionTokenResolver(dbClient.db, runSettings);
+      const prepared = await prepareAgentTools(runSettings, [{ kind: "mcp", id: mcpServerId }], {
+        workspaceId,
+        subjectId: "worker:first-party-mcp",
+        resolveCredential,
+      });
+      try {
+        const merged = runSettings.mcpServers.find((server) => server.id === mcpServerId);
+        expect(merged?.connectionRef).toMatchObject({
+          connectionId: connection.id,
+          providerDomain,
+          kind: "api_key",
+          subjectScope: "workspace",
+        });
+        const tools = await prepared.mcpServers[0]!.listTools();
+        expect(tools.map((tool) => tool.name)).toContain(`${mcpServerId}__search_documents`);
+        const result = await prepared.mcpServers[0]!.callTool(`${mcpServerId}__search_documents`, { query: "broker" });
+        expect(JSON.stringify(result)).toContain("found document for broker");
+      } finally {
+        await prepared.close();
+      }
     } finally {
       mcp.close();
       await dbClient.db.execute(dbSql`

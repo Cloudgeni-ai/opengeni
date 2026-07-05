@@ -155,7 +155,7 @@ function settingsWithMcpCapabilityServers(settings: Settings, enabled: EnabledMc
     .filter((server) => !existingIds.has(server.id))
     .flatMap((server) => {
       const headers = decryptedCapabilityHeaders(server, encryptionKey);
-      if (headers === "unavailable") {
+      if (headers === "unavailable" && !server.connectionRef) {
         // Without its credential headers this server can only fail auth at
         // connect time and break agent turns; leave it out of the run.
         return [];
@@ -167,7 +167,8 @@ function settingsWithMcpCapabilityServers(settings: Settings, enabled: EnabledMc
         ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
         ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
         cacheToolsList: server.cacheToolsList ?? false,
-        ...(headers ? { headers } : {}),
+        ...(headers && headers !== "unavailable" ? { headers } : {}),
+        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
       }];
     });
   return dynamicServers.length ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] } : settings;
