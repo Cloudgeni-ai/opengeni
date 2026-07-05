@@ -6,6 +6,7 @@ import {
   createDb,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  getConnectionMetadata,
   loadConnectionCredentialForBroker,
   type DbClient,
 } from "@opengeni/db";
@@ -398,6 +399,58 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth reconnect preserves a subject-owned connection subject", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", ["connections:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    const seeded = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "subject-oauth.example.com",
+        kind: "api_key",
+        subjectId: "subject-a",
+        credential: { headers: { authorization: "Bearer old" } },
+      }),
+    });
+    expect(seeded.status).toBe(201);
+    const seededBody = await seeded.json() as { connection: { id: string; subjectId: string | null } };
+    expect(seededBody.connection.subjectId).toBe("subject-a");
+
+    const as = startFakeAuthorizationServer({ clientIdMetadataDocumentSupported: true });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const response = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          providerDomain: "subject-oauth.example.com",
+          mcpUrl: mcp.url,
+          connectionId: seededBody.connection.id,
+          returnPath: "/integrations",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { state: string };
+      const callback = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
+      expect(callback.status).toBe(302);
+
+      const updated = await getConnectionMetadata(client.db, workspace.workspaceId, seededBody.connection.id, "subject-a");
+      expect(updated?.subjectId).toBe("subject-a");
+      expect(updated?.kind).toBe("oauth2");
+      expect(updated?.status).toBe("active");
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
   test("oauth start uses DCR fallback when CIMD is unavailable", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -433,6 +486,52 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth discovery validates redirect targets before following metadata redirects", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const originalFetch = globalThis.fetch;
+    const hits: string[] = [];
+    let privateHopHits = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      hits.push(url);
+      expect(init?.redirect).toBe("manual");
+      if (url === "https://1.1.1.1/mcp") {
+        return new Response("", {
+          status: 401,
+          headers: { "www-authenticate": `Bearer resource_metadata="https://1.1.1.1/prm"` },
+        });
+      }
+      if (url === "https://1.1.1.1/prm") {
+        return new Response("", {
+          status: 302,
+          headers: { location: "https://127.0.0.1/private-prm" },
+        });
+      }
+      if (url === "https://127.0.0.1/private-prm") {
+        privateHopHits += 1;
+        return Response.json({ authorization_servers: [] });
+      }
+      return new Response("unexpected fetch", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const response = await app({ environment: "production" }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ providerDomain: "redirect.example.com", mcpUrl: "https://1.1.1.1/mcp" }),
+      });
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("private network");
+      expect(hits).toEqual(["https://1.1.1.1/mcp", "https://1.1.1.1/prm"]);
+      expect(privateHopHits).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("oauth start refuses authorization servers that do not support S256", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -455,6 +554,37 @@ describe("connections routes", () => {
     } finally {
       mcp.close();
       as.close();
+    }
+  });
+
+  test("oauth routes are hidden while integrations are disabled and start does not discover", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response("unexpected discovery", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const start = await app({ integrationsEnabled: false }).request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ providerDomain: "disabled.example.com", mcpUrl: "https://1.1.1.1/mcp" }),
+      });
+      expect(start.status).toBe(404);
+      expect(await start.text()).toContain("integrations are not enabled");
+      expect(fetchCalls).toBe(0);
+
+      const callback = await app({ integrationsEnabled: false }).request("/v1/integrations/oauth/callback?code=abc&state=state");
+      expect(callback.status).toBe(404);
+      expect(await callback.text()).toContain("integrations are not enabled");
+      expect(fetchCalls).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 

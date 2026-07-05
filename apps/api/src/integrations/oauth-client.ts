@@ -220,7 +220,6 @@ export async function completeMcpOAuthCallback(
         visibleToSubjectId: state.subjectId,
         expectedVersion: state.connectionVersion,
         providerDomain: state.providerDomain,
-        subjectId: null,
         kind: "oauth2",
         status: "active",
         credentialEncrypted,
@@ -284,8 +283,7 @@ async function discoverMcpOAuth(resource: string, settings: Settings): Promise<{
 }
 
 async function probeMcpChallenge(resource: string, settings: Settings): Promise<WwwAuthenticateChallenge> {
-  await assertOAuthFetchAllowed(resource, settings);
-  const response = await fetch(resource, {
+  const response = await fetchOAuth(resource, settings, {
     method: "GET",
     headers: { accept: "application/json" },
   });
@@ -305,7 +303,12 @@ async function discoverProtectedResourceMetadata(
     ...wellKnownCandidates(resource, "oauth-protected-resource"),
   ]);
   for (const candidate of candidates) {
-    const payload = await fetchJsonObject(candidate, settings).catch(() => null);
+    const payload = await fetchJsonObject(candidate, settings).catch((error) => {
+      if (error instanceof HTTPException) {
+        throw error;
+      }
+      return null;
+    });
     if (!payload) {
       continue;
     }
@@ -330,7 +333,12 @@ async function discoverAuthorizationServerMetadata(authorizationServer: string, 
     ...wellKnownCandidates(authorizationServer, "openid-configuration"),
   ]);
   for (const candidate of candidates) {
-    const payload = await fetchJsonObject(candidate, settings).catch(() => null);
+    const payload = await fetchJsonObject(candidate, settings).catch((error) => {
+      if (error instanceof HTTPException) {
+        throw error;
+      }
+      return null;
+    });
     if (!payload) {
       continue;
     }
@@ -373,15 +381,15 @@ async function registerOAuthClient(
       tokenEndpointAuthMethod: "none",
     };
   }
-  const stored = await loadIntegrationOAuthClient(db, settings, as.issuer);
-  if (stored) {
+  const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
+  if (storedClient) {
     return {
       method: "dcr",
-      issuer: stored.issuer,
-      authorizationServer: stored.authorizationServer,
-      clientId: stored.clientId,
-      ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
-      tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+      issuer: storedClient.issuer,
+      authorizationServer: storedClient.authorizationServer,
+      clientId: storedClient.clientId,
+      ...(storedClient.clientSecret ? { clientSecret: storedClient.clientSecret } : {}),
+      tokenEndpointAuthMethod: tokenAuthMethod(storedClient.tokenEndpointAuthMethod, Boolean(storedClient.clientSecret)),
     };
   }
   if (!as.registrationEndpoint) {
@@ -391,7 +399,7 @@ async function registerOAuthClient(
   }
   const dcr = await dynamicClientRegistration(settings, as, redirectUri);
   const key = dcr.clientSecret ? requireEnvironmentEncryption(settings) : null;
-  await storeIntegrationOAuthClient(db, {
+  const storedWinner = await storeIntegrationOAuthClient(db, {
     issuer: as.issuer,
     authorizationServer: as.authorizationServer,
     clientId: dcr.clientId,
@@ -402,7 +410,31 @@ async function registerOAuthClient(
       registeredAt: new Date().toISOString(),
     },
   });
+  if (storedWinner.clientId !== dcr.clientId) {
+    const winner = await loadIntegrationOAuthClient(db, settings, as.issuer);
+    if (!winner) {
+      throw new HTTPException(422, { message: "OAuth client registration could not be loaded after a registration race" });
+    }
+    return dcrRegistrationFromStored(winner);
+  }
   return dcr;
+}
+
+function dcrRegistrationFromStored(stored: {
+  issuer: string;
+  authorizationServer: string;
+  clientId: string;
+  clientSecret: string | null;
+  tokenEndpointAuthMethod: string;
+}): OAuthClientRegistration {
+  return {
+    method: "dcr",
+    issuer: stored.issuer,
+    authorizationServer: stored.authorizationServer,
+    clientId: stored.clientId,
+    ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
+    tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+  };
 }
 
 function operatorClientForAs(settings: Settings, as: AuthorizationServerMetadata): OAuthClientRegistration | null {
@@ -439,7 +471,7 @@ async function dynamicClientRegistration(
     throw new HTTPException(422, { message: "authorization server does not support dynamic client registration" });
   }
   await assertOAuthFetchAllowed(as.registrationEndpoint, settings);
-  const response = await fetch(as.registrationEndpoint, {
+  const response = await fetchOAuth(as.registrationEndpoint, settings, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify({
@@ -594,7 +626,7 @@ async function exchangeAuthorizationCode(
   } else if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_basic") {
     headers.authorization = `Basic ${Buffer.from(`${input.client.clientId}:${input.client.clientSecret}`).toString("base64")}`;
   }
-  const response = await fetch(input.tokenEndpoint, { method: "POST", headers, body });
+  const response = await fetchOAuth(input.tokenEndpoint, settings, { method: "POST", headers, body });
   if (!response.ok) {
     throw new Error(`OAuth token endpoint returned HTTP ${response.status}`);
   }
@@ -681,8 +713,7 @@ function safeReturnPath(value: string): string {
 }
 
 async function fetchJsonObject(url: string, settings: Settings): Promise<Record<string, unknown>> {
-  await assertOAuthFetchAllowed(url, settings);
-  const response = await fetch(url, { headers: { accept: "application/json" } });
+  const response = await fetchOAuth(url, settings, { headers: { accept: "application/json" } });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
@@ -691,6 +722,28 @@ async function fetchJsonObject(url: string, settings: Settings): Promise<Record<
     throw new Error("metadata response was not a JSON object");
   }
   return payload as Record<string, unknown>;
+}
+
+async function fetchOAuth(rawUrl: string, settings: Settings, init: RequestInit = {}, hop = 0): Promise<Response> {
+  await assertOAuthFetchAllowed(rawUrl, settings);
+  const response = await fetch(rawUrl, { ...init, redirect: "manual" });
+  if (response.status < 300 || response.status >= 400) {
+    return response;
+  }
+  if (hop >= 3) {
+    throw new HTTPException(422, { message: "OAuth fetch exceeded maximum redirect hops" });
+  }
+  const location = response.headers.get("location");
+  if (!location) {
+    throw new HTTPException(422, { message: "OAuth fetch redirect was missing Location" });
+  }
+  let nextUrl: string;
+  try {
+    nextUrl = new URL(location, rawUrl).toString();
+  } catch {
+    throw new HTTPException(422, { message: "OAuth fetch redirect Location was invalid" });
+  }
+  return await fetchOAuth(nextUrl, settings, init, hop + 1);
 }
 
 async function assertOAuthFetchAllowed(rawUrl: string, settings: Settings): Promise<void> {

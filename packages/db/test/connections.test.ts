@@ -350,31 +350,35 @@ describe("connections table and helpers", () => {
     expect(loaded?.status).toBe("active");
   });
 
-  test("DCR OAuth clients are stored per issuer with encrypted secrets", async () => {
+  test("DCR OAuth client storage returns the first issuer winner without overwriting it", async () => {
     if (!available) return;
-    await storeIntegrationOAuthClient(db, {
+    const first = await storeIntegrationOAuthClient(db, {
       issuer: "https://as.example.com",
       authorizationServer: "https://as.example.com",
       clientId: "client-1",
-      clientSecretEncrypted: enc({ secret: "wrong-shape" }),
+      clientSecretEncrypted: encryptEnvironmentValue(key, "secret-1"),
       tokenEndpointAuthMethod: "client_secret_post",
+      metadata: { registrationEndpoint: "https://as.example.com/register-1" },
     });
-    await storeIntegrationOAuthClient(db, {
+    const second = await storeIntegrationOAuthClient(db, {
       issuer: "https://as.example.com",
-      authorizationServer: "https://as.example.com",
+      authorizationServer: "https://as.example.com/other",
       clientId: "client-2",
       clientSecretEncrypted: encryptEnvironmentValue(key, "secret-2"),
       tokenEndpointAuthMethod: "client_secret_post",
-      metadata: { registrationEndpoint: "https://as.example.com/register" },
+      metadata: { registrationEndpoint: "https://as.example.com/register-2" },
     });
+    expect(first.clientId).toBe("client-1");
+    expect(second.clientId).toBe("client-1");
+
     const loaded = await loadIntegrationOAuthClient(db, settings, "https://as.example.com");
     expect(loaded).toMatchObject({
       issuer: "https://as.example.com",
       authorizationServer: "https://as.example.com",
-      clientId: "client-2",
-      clientSecret: "secret-2",
+      clientId: "client-1",
+      clientSecret: "secret-1",
       tokenEndpointAuthMethod: "client_secret_post",
-      metadata: { registrationEndpoint: "https://as.example.com/register" },
+      metadata: { registrationEndpoint: "https://as.example.com/register-1" },
     });
   });
 

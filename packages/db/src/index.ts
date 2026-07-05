@@ -1260,6 +1260,18 @@ export type IntegrationOAuthClientForUse = {
   updatedAt: Date;
 };
 
+export type StoredIntegrationOAuthClient = {
+  id: string;
+  issuer: string;
+  authorizationServer: string;
+  clientId: string;
+  clientSecretEncrypted: string | null;
+  tokenEndpointAuthMethod: string;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 export type StoreIntegrationOAuthClientInput = {
   issuer: string;
   authorizationServer: string;
@@ -2125,25 +2137,41 @@ export async function loadIntegrationOAuthClient(
 export async function storeIntegrationOAuthClient(
   db: Database,
   input: StoreIntegrationOAuthClientInput,
-): Promise<void> {
-  await db.insert(schema.integrationOauthClients).values({
+): Promise<StoredIntegrationOAuthClient> {
+  const [inserted] = await db.insert(schema.integrationOauthClients).values({
     issuer: input.issuer,
     authorizationServer: input.authorizationServer,
     clientId: input.clientId,
     clientSecretEncrypted: input.clientSecretEncrypted ?? null,
     tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
     metadata: input.metadata ?? {},
-  }).onConflictDoUpdate({
+  }).onConflictDoNothing({
     target: schema.integrationOauthClients.issuer,
-    set: {
-      authorizationServer: input.authorizationServer,
-      clientId: input.clientId,
-      clientSecretEncrypted: input.clientSecretEncrypted ?? null,
-      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
-      metadata: input.metadata ?? {},
-      updatedAt: new Date(),
-    },
-  });
+  }).returning();
+  if (inserted) {
+    return mapStoredIntegrationOAuthClient(inserted);
+  }
+  const [winner] = await db.select().from(schema.integrationOauthClients)
+    .where(eq(schema.integrationOauthClients.issuer, input.issuer))
+    .limit(1);
+  if (!winner) {
+    throw new Error(`OAuth client registration conflict winner not found for issuer ${input.issuer}`);
+  }
+  return mapStoredIntegrationOAuthClient(winner);
+}
+
+function mapStoredIntegrationOAuthClient(row: typeof schema.integrationOauthClients.$inferSelect): StoredIntegrationOAuthClient {
+  return {
+    id: row.id,
+    issuer: row.issuer,
+    authorizationServer: row.authorizationServer,
+    clientId: row.clientId,
+    clientSecretEncrypted: row.clientSecretEncrypted,
+    tokenEndpointAuthMethod: row.tokenEndpointAuthMethod,
+    metadata: row.metadata,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 export async function consumeIntegrationOAuthStateNonce(

@@ -28,6 +28,12 @@ import {
 export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
 
+  function assertIntegrationsEnabled(): void {
+    if (!settings.integrationsEnabled) {
+      throw new HTTPException(404, { message: "integrations are not enabled for this deployment" });
+    }
+  }
+
   app.get("/v1/workspaces/:workspaceId/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
@@ -116,6 +122,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.post("/v1/workspaces/:workspaceId/connections/oauth/start", async (c) => {
+    assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const payload = OAuthStartRequest.parse(await c.req.json());
@@ -130,6 +137,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
+    assertIntegrationsEnabled();
     const result = await completeMcpOAuthCallback({ db, settings }, {
       code: c.req.query("code"),
       state: c.req.query("state"),
