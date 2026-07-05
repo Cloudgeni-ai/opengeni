@@ -1,0 +1,182 @@
+{
+  "generatedAt": "2026-07-03T23:41:44.132Z",
+  "catalogVersion": 1,
+  "importRows": [
+    {
+      "domain": "3minapi.com",
+      "name": "3Min API",
+      "mcpUrl": "https://3minapi.com/api/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "mcp_oauth_account",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 - self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically - no developer-portal app, `client_id`, or `client_secret` to create.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoAsset": "https://integrations.sh/logo/3minapi.com"
+    },
+    {
+      "domain": "accessowl.com",
+      "name": "AccessOwl",
+      "mcpUrl": "https://mcp.accessowl.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "accessowl_oauth",
+          "type": "oauth2",
+          "generateUrl": null,
+          "setup": "## OAuth 2.0 - self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server accepts a Client ID Metadata Document (CIMD), so the client authenticates with its own hosted URL as the `client_id` - nothing to register.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoAsset": "https://integrations.sh/logo/accessowl.com"
+    },
+    {
+      "domain": "acko.com",
+      "name": "ACKO",
+      "mcpUrl": "https://atlas.live.acko.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/acko.com"
+    },
+    {
+      "domain": "accessapproval.googleapis.com",
+      "name": "accessapproval.googleapis.com",
+      "mcpUrl": "https://accessapproval.googleapis.com/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoAsset": "https://integrations.sh/logo/accessapproval.googleapis.com"
+    },
+    {
+      "domain": "activepieces.com",
+      "name": "activepieces.com",
+      "mcpUrl": "https://www.activepieces.com/.well-known/mcp/server-card.json",
+      "transport": "streamable-http",
+      "authKind": "api_key",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "mcp_embed_token",
+          "type": "bearer",
+          "generateUrl": "https://www.activepieces.com/docs/embedding/embeddable-mcp",
+          "setup": "First set up embedding using a signing key and embed JWT per Provision Users. Then, from the embedded frontend SDK, call activepieces.generateMcpToken() to obtain mcpToken and mcpServerUrl. The token is scoped to that user's project and lasts 15 minutes.",
+          "fields": null
+        }
+      ],
+      "tier": "verified",
+      "provenance": "detected",
+      "logoAsset": "https://integrations.sh/logo/activepieces.com"
+    },
+    {
+      "domain": "apify.com",
+      "name": "apify.com",
+      "mcpUrl": "https://mcp.apify.com/",
+      "transport": "streamable-http",
+      "authKind": "api_key",
+      "scopesHint": [],
+      "credentialFacts": [
+        {
+          "id": "apify_api_token",
+          "type": "bearer",
+          "generateUrl": "https://console.apify.com/settings/integrations",
+          "setup": "Sign in to Apify Console and open API & Integrations to copy or create your API token. The docs identify this token as the credential for the REST API and MCP server.",
+          "fields": null
+        }
+      ],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/apify.com"
+    },
+    {
+      "domain": "americanexpress.com",
+      "name": "Resy",
+      "mcpUrl": "https://apigw.americanexpress.com/dining/v1/mcp",
+      "transport": "streamable-http",
+      "authKind": "unknown",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/americanexpress.com"
+    },
+    {
+      "domain": "bump.sh",
+      "name": "bump.sh",
+      "mcpUrl": "https://developers.bump.sh/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/bump.sh"
+    },
+    {
+      "domain": "bump.sh",
+      "name": "bump.sh",
+      "mcpUrl": "https://developers.bump.sh/doc/workspace/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/bump.sh"
+    },
+    {
+      "domain": "bump.sh",
+      "name": "bump.sh",
+      "mcpUrl": "https://developers.bump.sh/doc/portal/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/bump.sh"
+    },
+    {
+      "domain": "adobe.io",
+      "name": "Adobe Acrobat",
+      "mcpUrl": "https://express-mcp-service.adobe.io/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/adobe.io"
+    },
+    {
+      "domain": "adobe.io",
+      "name": "Adobe Acrobat",
+      "mcpUrl": "https://photoshop-mcp-service.adobe.io/mcp",
+      "transport": "streamable-http",
+      "authKind": "none",
+      "scopesHint": [],
+      "credentialFacts": [],
+      "tier": "candidate",
+      "provenance": "discovered",
+      "logoAsset": "https://integrations.sh/logo/adobe.io"
+    }
+  ]
+}

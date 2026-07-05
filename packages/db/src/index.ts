@@ -1773,7 +1773,7 @@ export async function upsertRegistryCapabilityCatalogItem(db: Database, input: R
     credentialFacts: values.credentialFacts,
     tier: values.tier,
     provenance: values.provenance,
-    logoAssetPath: values.logoAssetPath,
+    logoAssetPath: sql`coalesce(excluded.logo_asset_path, ${schema.capabilityCatalogItems.logoAssetPath})`,
     importBatchId: values.importBatchId,
     stale: false,
     staleAt: null,
