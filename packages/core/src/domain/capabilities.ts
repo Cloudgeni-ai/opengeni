@@ -96,7 +96,7 @@ export async function createCatalogItem(input: {
   if (id.startsWith("pack:")) {
     throw new HTTPException(422, { message: "packs are managed by OpenGeni and cannot be manually created" });
   }
-  const source = input.payload.source === "built_in" || input.payload.source === "configured" ? "manual" : input.payload.source;
+  const source = input.payload.source === "built_in" || input.payload.source === "configured" || input.payload.source === "registry" ? "manual" : input.payload.source;
   const metadata = {
     ...input.payload.metadata,
     ...(input.payload.kind === "mcp" && input.payload.endpointUrl && !input.payload.metadata.mcpServerId

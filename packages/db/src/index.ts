@@ -1307,6 +1307,69 @@ export type CreateCapabilityCatalogItemInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type ImportBatch = {
+  id: string;
+  source: string;
+  snapshotDate: string;
+  snapshotRef: string | null;
+  attributionNote: string;
+  importedCount: number;
+  skippedCount: number;
+  quarantinedCount: number;
+  logoFailureCount: number;
+  staleCount: number;
+  details: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateImportBatchInput = {
+  source: string;
+  snapshotDate: Date;
+  snapshotRef?: string | null;
+  attributionNote: string;
+  importedCount?: number;
+  skippedCount?: number;
+  quarantinedCount?: number;
+  logoFailureCount?: number;
+  staleCount?: number;
+  details?: Record<string, unknown>;
+};
+
+export type UpdateImportBatchCountsInput = {
+  importedCount: number;
+  skippedCount: number;
+  quarantinedCount: number;
+  logoFailureCount: number;
+  staleCount: number;
+  details?: Record<string, unknown>;
+};
+
+export type RegistryCapabilityCatalogItemInput = {
+  id: string;
+  providerDomain: string;
+  name: string;
+  description?: string | null;
+  mcpUrl: string;
+  transport: string;
+  authKind: "oauth2" | "api_key" | "none" | "unknown";
+  credentialFacts: Array<Record<string, unknown>>;
+  tier: "verified" | "community";
+  provenance: string;
+  logoAssetPath?: string | null;
+  importBatchId: string;
+  scopesHint?: string[];
+  homepageUrl?: string | null;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+};
+
+export type RegistryCatalogSurfaceKey = {
+  id: string;
+  providerDomain: string;
+  mcpUrl: string;
+};
+
 export type EnableCapabilityInstallationInput = {
   accountId: string;
   workspaceId: string;
@@ -1619,6 +1682,155 @@ export async function deleteWorkspacePack(db: Database, workspaceId: string, pac
   });
 }
 
+const registryCapabilitySource = "registry" as CapabilitySource;
+
+export async function createImportBatch(db: Database, input: CreateImportBatchInput): Promise<ImportBatch> {
+  const [row] = await db.insert(schema.importBatches).values({
+    source: input.source,
+    snapshotDate: input.snapshotDate,
+    snapshotRef: input.snapshotRef ?? null,
+    attributionNote: input.attributionNote,
+    importedCount: input.importedCount ?? 0,
+    skippedCount: input.skippedCount ?? 0,
+    quarantinedCount: input.quarantinedCount ?? 0,
+    logoFailureCount: input.logoFailureCount ?? 0,
+    staleCount: input.staleCount ?? 0,
+    details: input.details ?? {},
+  }).returning();
+  if (!row) {
+    throw new Error("Failed to create import batch");
+  }
+  return mapImportBatch(row);
+}
+
+export async function updateImportBatchCounts(db: Database, id: string, input: UpdateImportBatchCountsInput): Promise<ImportBatch> {
+  const [row] = await db.update(schema.importBatches).set({
+    importedCount: input.importedCount,
+    skippedCount: input.skippedCount,
+    quarantinedCount: input.quarantinedCount,
+    logoFailureCount: input.logoFailureCount,
+    staleCount: input.staleCount,
+    ...(input.details ? { details: input.details } : {}),
+    updatedAt: new Date(),
+  }).where(eq(schema.importBatches.id, id)).returning();
+  if (!row) {
+    throw new Error(`Import batch not found: ${id}`);
+  }
+  return mapImportBatch(row);
+}
+
+export async function upsertRegistryCapabilityCatalogItem(db: Database, input: RegistryCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
+  const now = new Date();
+  const metadata = {
+    registry: "integrations.sh",
+    providerDomain: input.providerDomain,
+    scopesHint: input.scopesHint ?? [],
+    ...input.metadata,
+  };
+  const values = {
+    id: input.id,
+    accountId: null,
+    workspaceId: null,
+    kind: "mcp" as Exclude<CapabilityKind, "pack">,
+    source: registryCapabilitySource,
+    name: input.name,
+    description: input.description ?? null,
+    category: "integrations",
+    tags: input.tags ?? ["mcp", "integration", input.tier],
+    homepageUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
+    endpointUrl: input.mcpUrl,
+    installUrl: input.homepageUrl ?? `https://${input.providerDomain}`,
+    authModel: input.authKind === "none" ? null : "credential_ref",
+    providerDomain: input.providerDomain,
+    surfaceType: "mcp",
+    transport: input.transport,
+    mcpUrl: input.mcpUrl,
+    authKind: input.authKind,
+    credentialFacts: input.credentialFacts,
+    tier: input.tier,
+    provenance: input.provenance,
+    logoAssetPath: input.logoAssetPath ?? null,
+    importBatchId: input.importBatchId,
+    stale: false,
+    staleAt: null,
+    metadata,
+    updatedAt: now,
+  };
+  const updateValues = {
+    id: values.id,
+    kind: values.kind,
+    name: values.name,
+    description: values.description,
+    category: values.category,
+    tags: values.tags,
+    homepageUrl: values.homepageUrl,
+    endpointUrl: values.endpointUrl,
+    installUrl: values.installUrl,
+    authModel: values.authModel,
+    surfaceType: values.surfaceType,
+    transport: values.transport,
+    authKind: values.authKind,
+    credentialFacts: values.credentialFacts,
+    tier: values.tier,
+    provenance: values.provenance,
+    logoAssetPath: values.logoAssetPath,
+    importBatchId: values.importBatchId,
+    stale: false,
+    staleAt: null,
+    metadata: values.metadata,
+    updatedAt: values.updatedAt,
+  };
+  const [row] = await db.insert(schema.capabilityCatalogItems).values(values)
+    .onConflictDoUpdate({
+      target: [
+        schema.capabilityCatalogItems.source,
+        schema.capabilityCatalogItems.providerDomain,
+        schema.capabilityCatalogItems.mcpUrl,
+      ],
+      set: updateValues,
+    })
+    .returning();
+  if (!row) {
+    throw new Error("Failed to upsert registry capability catalog item");
+  }
+  return mapCapabilityCatalogItem(row);
+}
+
+export async function listRegistryCatalogSurfaceKeys(db: Database): Promise<RegistryCatalogSurfaceKey[]> {
+  const rows = await db.select({
+    id: schema.capabilityCatalogItems.id,
+    providerDomain: schema.capabilityCatalogItems.providerDomain,
+    mcpUrl: schema.capabilityCatalogItems.mcpUrl,
+  }).from(schema.capabilityCatalogItems)
+    .where(eq(schema.capabilityCatalogItems.source, registryCapabilitySource));
+  return rows.flatMap((row) => row.providerDomain && row.mcpUrl
+    ? [{ id: row.id, providerDomain: row.providerDomain, mcpUrl: row.mcpUrl }]
+    : []);
+}
+
+export async function markStaleRegistryCatalogItems(db: Database, activeKeys: Iterable<{ providerDomain: string; mcpUrl: string }>, importBatchId: string): Promise<number> {
+  const active = new Set([...activeKeys].map((key) => `${key.providerDomain}\n${key.mcpUrl}`));
+  const existing = await listRegistryCatalogSurfaceKeys(db);
+  const stale = existing.filter((row) => !active.has(`${row.providerDomain}\n${row.mcpUrl}`));
+  if (stale.length === 0) {
+    return 0;
+  }
+  const now = new Date();
+  for (const row of stale) {
+    await db.update(schema.capabilityCatalogItems).set({
+      stale: true,
+      staleAt: now,
+      importBatchId,
+      updatedAt: now,
+    }).where(and(
+      eq(schema.capabilityCatalogItems.source, registryCapabilitySource),
+      eq(schema.capabilityCatalogItems.providerDomain, row.providerDomain),
+      eq(schema.capabilityCatalogItems.mcpUrl, row.mcpUrl),
+    ));
+  }
+  return stale.length;
+}
+
 export async function upsertCapabilityCatalogItem(db: Database, input: CreateCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
     const now = new Date();
@@ -1636,6 +1848,18 @@ export async function upsertCapabilityCatalogItem(db: Database, input: CreateCap
       endpointUrl: input.endpointUrl ?? null,
       installUrl: input.installUrl ?? null,
       authModel: input.authModel ?? null,
+      providerDomain: null,
+      surfaceType: null,
+      transport: null,
+      mcpUrl: null,
+      authKind: null,
+      credentialFacts: [],
+      tier: null,
+      provenance: null,
+      logoAssetPath: null,
+      importBatchId: null,
+      stale: false,
+      staleAt: null,
       metadata: input.metadata ?? {},
       updatedAt: now,
     };
@@ -1650,6 +1874,18 @@ export async function upsertCapabilityCatalogItem(db: Database, input: CreateCap
       endpointUrl: values.endpointUrl,
       installUrl: values.installUrl,
       authModel: values.authModel,
+      providerDomain: values.providerDomain,
+      surfaceType: values.surfaceType,
+      transport: values.transport,
+      mcpUrl: values.mcpUrl,
+      authKind: values.authKind,
+      credentialFacts: values.credentialFacts,
+      tier: values.tier,
+      provenance: values.provenance,
+      logoAssetPath: values.logoAssetPath,
+      importBatchId: values.importBatchId,
+      stale: values.stale,
+      staleAt: values.staleAt,
       metadata: values.metadata,
       updatedAt: values.updatedAt,
     };
@@ -1669,7 +1905,7 @@ export async function upsertCapabilityCatalogItem(db: Database, input: CreateCap
 export async function listCapabilityCatalogItems(db: Database, workspaceId: string): Promise<CapabilityCatalogItem[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.capabilityCatalogItems)
-      .where(eq(schema.capabilityCatalogItems.workspaceId, workspaceId))
+      .where(or(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), isNull(schema.capabilityCatalogItems.workspaceId)))
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
     return rows.map(mapCapabilityCatalogItem);
   });
@@ -1678,7 +1914,10 @@ export async function listCapabilityCatalogItems(db: Database, workspaceId: stri
 export async function getCapabilityCatalogItem(db: Database, workspaceId: string, capabilityId: string): Promise<CapabilityCatalogItem | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.select().from(schema.capabilityCatalogItems)
-      .where(and(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), eq(schema.capabilityCatalogItems.id, capabilityId)))
+      .where(and(
+        eq(schema.capabilityCatalogItems.id, capabilityId),
+        or(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), isNull(schema.capabilityCatalogItems.workspaceId)),
+      ))
       .limit(1);
     return row ? mapCapabilityCatalogItem(row) : null;
   });
@@ -1759,7 +1998,10 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
     installation: schema.capabilityInstallations,
   }).from(schema.capabilityInstallations)
     .innerJoin(schema.capabilityCatalogItems, and(
-      eq(schema.capabilityInstallations.workspaceId, schema.capabilityCatalogItems.workspaceId),
+      or(
+        eq(schema.capabilityInstallations.workspaceId, schema.capabilityCatalogItems.workspaceId),
+        isNull(schema.capabilityCatalogItems.workspaceId),
+      ),
       eq(schema.capabilityInstallations.capabilityId, schema.capabilityCatalogItems.id),
     ))
     .where(and(
@@ -8536,12 +8778,30 @@ function mapWorkspacePack(row: typeof schema.workspacePacks.$inferSelect): Works
   };
 }
 
+function mapImportBatch(row: typeof schema.importBatches.$inferSelect): ImportBatch {
+  return {
+    id: row.id,
+    source: row.source,
+    snapshotDate: row.snapshotDate.toISOString(),
+    snapshotRef: row.snapshotRef,
+    attributionNote: row.attributionNote,
+    importedCount: row.importedCount,
+    skippedCount: row.skippedCount,
+    quarantinedCount: row.quarantinedCount,
+    logoFailureCount: row.logoFailureCount,
+    staleCount: row.staleCount,
+    details: row.details,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
 function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inferSelect): CapabilityCatalogItem {
   const runtime = row.kind === "mcp" && row.endpointUrl
     ? {
       available: true,
       mcpServerId: mcpServerIdForCapability(row.id, row.metadata),
-      transport: "streamable-http",
+      transport: row.transport ?? "streamable-http",
       notes: row.authModel
         ? "Requires credential headers supplied in the enable request."
         : null,
@@ -8554,8 +8814,8 @@ function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inf
     };
   return {
     id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
+    ...(row.accountId ? { accountId: row.accountId } : {}),
+    ...(row.workspaceId ? { workspaceId: row.workspaceId } : {}),
     kind: row.kind as CapabilityKind,
     source: row.source as CapabilitySource,
     name: row.name,
@@ -8566,6 +8826,18 @@ function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inf
     endpointUrl: row.endpointUrl,
     installUrl: row.installUrl,
     authModel: row.authModel,
+    providerDomain: row.providerDomain,
+    surfaceType: row.surfaceType,
+    transport: row.transport,
+    mcpUrl: row.mcpUrl,
+    authKind: row.authKind as CapabilityCatalogItem["authKind"],
+    credentialFacts: row.credentialFacts,
+    tier: row.tier as CapabilityCatalogItem["tier"],
+    provenance: row.provenance,
+    logoAssetPath: row.logoAssetPath,
+    importBatchId: row.importBatchId,
+    stale: row.stale,
+    staleAt: row.staleAt?.toISOString() ?? null,
     tools: [],
     runtime,
     enabled: false,

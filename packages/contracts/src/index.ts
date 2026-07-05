@@ -2279,11 +2279,17 @@ export type MarketingDailyAnalysisTaskRequest = z.infer<typeof MarketingDailyAna
 export const CapabilityKind = z.enum(["pack", "mcp", "api", "skill", "plugin"]);
 export type CapabilityKind = z.infer<typeof CapabilityKind>;
 
-export const CapabilitySource = z.enum(["built_in", "configured", "public_registry", "manual"]);
+export const CapabilitySource = z.enum(["built_in", "configured", "public_registry", "registry", "manual"]);
 export type CapabilitySource = z.infer<typeof CapabilitySource>;
 
 export const CapabilityInstallationStatus = z.enum(["active", "disabled"]);
 export type CapabilityInstallationStatus = z.infer<typeof CapabilityInstallationStatus>;
+
+export const CapabilityCatalogAuthKind = z.enum(["oauth2", "api_key", "none", "unknown"]);
+export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind>;
+
+export const CapabilityCatalogTier = z.enum(["verified", "community"]);
+export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
 
 export const CapabilityRuntime = z.object({
   available: z.boolean().default(false),
@@ -2307,6 +2313,18 @@ export const CapabilityCatalogItem = z.object({
   endpointUrl: z.string().url().nullable().default(null),
   installUrl: z.string().url().nullable().default(null),
   authModel: z.string().min(1).nullable().default(null),
+  providerDomain: z.string().min(1).nullable().default(null),
+  surfaceType: z.string().min(1).nullable().default(null),
+  transport: z.string().min(1).nullable().default(null),
+  mcpUrl: z.string().url().nullable().default(null),
+  authKind: CapabilityCatalogAuthKind.nullable().default(null),
+  credentialFacts: z.array(z.record(z.string(), z.unknown())).default([]),
+  tier: CapabilityCatalogTier.nullable().default(null),
+  provenance: z.string().min(1).nullable().default(null),
+  logoAssetPath: z.string().min(1).nullable().default(null),
+  importBatchId: z.string().uuid().nullable().default(null),
+  stale: z.boolean().default(false),
+  staleAt: z.string().nullable().default(null),
   tools: z.array(ToolRef).default([]),
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),

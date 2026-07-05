@@ -1165,10 +1165,29 @@ export const workspacePacks = pgTable("workspace_packs", {
   workspacePack: uniqueIndex("workspace_packs_workspace_pack_idx").on(table.workspaceId, table.packId),
 }));
 
+export const importBatches = pgTable("import_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  source: text("source").notNull(),
+  snapshotDate: timestamp("snapshot_date", { withTimezone: true }).notNull(),
+  snapshotRef: text("snapshot_ref"),
+  attributionNote: text("attribution_note").notNull(),
+  importedCount: integer("imported_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  quarantinedCount: integer("quarantined_count").notNull().default(0),
+  logoFailureCount: integer("logo_failure_count").notNull().default(0),
+  staleCount: integer("stale_count").notNull().default(0),
+  details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  sourceSnapshot: index("import_batches_source_snapshot_idx").on(table.source, table.snapshotDate),
+  createdAt: index("import_batches_created_at_idx").on(table.createdAt),
+}));
+
 export const capabilityCatalogItems = pgTable("capability_catalog_items", {
   id: text("id").notNull(),
-  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id").references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
   kind: text("kind").notNull(),
   source: text("source").notNull().default("manual"),
   name: text("name").notNull(),
@@ -1179,14 +1198,31 @@ export const capabilityCatalogItems = pgTable("capability_catalog_items", {
   endpointUrl: text("endpoint_url"),
   installUrl: text("install_url"),
   authModel: text("auth_model"),
+  providerDomain: text("provider_domain"),
+  surfaceType: text("surface_type"),
+  transport: text("transport"),
+  mcpUrl: text("mcp_url"),
+  authKind: text("auth_kind"),
+  credentialFacts: jsonb("credential_facts").$type<Array<Record<string, unknown>>>().notNull().default([]),
+  tier: text("tier"),
+  provenance: text("provenance"),
+  logoAssetPath: text("logo_asset_path"),
+  importBatchId: uuid("import_batch_id").references(() => importBatches.id, { onDelete: "set null" }),
+  stale: boolean("stale").notNull().default(false),
+  staleAt: timestamp("stale_at", { withTimezone: true }),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => ({
   workspaceCapability: uniqueIndex("capability_catalog_items_workspace_capability_idx").on(table.workspaceId, table.id),
+  registrySurface: uniqueIndex("capability_catalog_items_registry_surface_idx").on(table.source, table.providerDomain, table.mcpUrl),
+  globalCapability: uniqueIndex("capability_catalog_items_global_capability_idx").on(table.id).where(sql`${table.workspaceId} is null`),
   kind: index("capability_catalog_items_workspace_kind_idx").on(table.workspaceId, table.kind),
   category: index("capability_catalog_items_workspace_category_idx").on(table.workspaceId, table.category),
   source: index("capability_catalog_items_workspace_source_idx").on(table.workspaceId, table.source),
+  providerDomain: index("capability_catalog_items_provider_domain_idx").on(table.providerDomain),
+  importBatch: index("capability_catalog_items_import_batch_idx").on(table.importBatchId),
+  stale: index("capability_catalog_items_source_stale_idx").on(table.source, table.stale),
 }));
 
 export const capabilityInstallations = pgTable("capability_installations", {

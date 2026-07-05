@@ -1605,9 +1605,13 @@ export type GetPackResponse = {
 
 export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
-export type CapabilitySource = "built_in" | "configured" | "public_registry" | "manual";
+export type CapabilitySource = "built_in" | "configured" | "public_registry" | "registry" | "manual";
 
 export type CapabilityInstallationStatus = "active" | "disabled";
+
+export type CapabilityCatalogAuthKind = "oauth2" | "api_key" | "none" | "unknown";
+
+export type CapabilityCatalogTier = "verified" | "community";
 
 export type CapabilityRuntime = {
   available: boolean;
@@ -1630,6 +1634,18 @@ export type CapabilityCatalogItem = {
   endpointUrl: string | null;
   installUrl: string | null;
   authModel: string | null;
+  providerDomain: string | null;
+  surfaceType: string | null;
+  transport: string | null;
+  mcpUrl: string | null;
+  authKind: CapabilityCatalogAuthKind | null;
+  credentialFacts: Record<string, unknown>[];
+  tier: CapabilityCatalogTier | null;
+  provenance: string | null;
+  logoAssetPath: string | null;
+  importBatchId: string | null;
+  stale: boolean;
+  staleAt: string | null;
   tools: ToolRef[];
   runtime: CapabilityRuntime;
   enabled: boolean;
