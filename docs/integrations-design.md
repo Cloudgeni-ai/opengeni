@@ -109,7 +109,8 @@ REGISTER   priority: (1) operator pre-registered creds for this AS
            (4) manual client-credential entry in UI
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
            resource = canonical MCP server URI (RFC 8707, ALWAYS sent),
-           scope = 401-challenge scope if present, else PRM scopes_supported
+           scope = requestedScopes when supplied (step-up), else 401-challenge
+           scope if present, else PRM scopes_supported
            → browser → provider consent → redirect to callback
 CALLBACK   GET /v1/integrations/oauth/callback?code&state
            → verify signed state (single-use nonce, TTL ~10 min)
@@ -122,9 +123,13 @@ STEP-UP    runtime 403 error="insufficient_scope" → tool.auth_needed → re-AU
 
 ### 5.2 Stateless grant state (decision)
 
-No pending-grant table. The `state` parameter is a **signed, time-limited payload** using the established `createSignedState`/`verifySignedState` pattern from `@opengeni/github`, with a dedicated `integrationsStateSecret`: `{ workspaceId, accountId, subjectId, providerDomain, resource, requestedScopes, encryptedPkceVerifier, returnPath, nonce, iat }`. The PKCE verifier is **encrypted** (environments key) inside the signed state — state transits browser URLs and provider logs, and a plaintext verifier there would defeat PKCE's interception protection. Single-use is enforced by a short-TTL nonce cache. This survives multi-instance API deployments (the callback may land on any instance) — which is also why a random per-process fallback secret is forbidden: `integrationsStateSecret` is required whenever integrations are enabled outside local dev.
+No pending-grant table. The `state` parameter is a **signed, time-limited payload** using the established `createSignedState`/`verifySignedState` pattern from `@opengeni/github`, with a dedicated `integrationsStateSecret`: `{ workspaceId, accountId, subjectId, providerDomain, resource, requestedScopes, authorizeScopes, encryptedPkceVerifier, clientId, tokenEndpoint, authorizationServer, issuer, returnPath, nonce, iat }`. The PKCE verifier is **encrypted** (environments key) inside the signed state — state transits browser URLs and provider logs, and a plaintext verifier there would defeat PKCE's interception protection. Single-use is enforced by inserting the consumed nonce into `integration_oauth_state_nonces` with a short TTL; the primary key makes replay fail across API instances. This survives multi-instance API deployments (the callback may land on any instance) — which is also why a random per-process fallback secret is forbidden: `integrationsStateSecret` is required whenever integrations are enabled outside local dev.
 
 The callback route must NOT call `requireAccessGrant` — a browser redirect carries only `code`+`state`. It trusts exclusively the verified, unexpired signed state minted by the authenticated start route.
+
+### 5.2.1 Authorization-server clients
+
+DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the environments key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
 ### 5.3 Our client identity (CIMD)
 
@@ -145,7 +150,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 - `state` signed, single-use, TTL-bound, workspace+subject-bound; callback validates all of it.
 - `resource` (RFC 8707) on both authorize and token requests regardless of AS support.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
-- SSRF guard on PRM/AS-metadata/CIMD-related fetches: no private-range targets unless operator-flagged for self-hosted deployments.
+- SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
 - No token passthrough: tokens minted for an MCP server go only to that server; our own first-party MCP servers keep validating audience on inbound tokens.
 - Token responses stored, never logged.
 
@@ -174,7 +179,7 @@ Route module `registerConnectionRoutes` in a new `apps/api/src/routes/` file, re
 - `POST /v1/workspaces/:workspaceId/connections/oauth/start` — `connections:write`; runs DISCOVER+REGISTER, mints signed state, returns the browser authorize URL.
 - `GET /v1/integrations/oauth/callback` and `GET /v1/integrations/oauth/client-metadata.json` — added to the exact-path public exemptions in `apps/api/src/http/auth.ts` (alongside the GitHub callbacks). Only these two paths; no broad `/v1/integrations/*` exemption.
 
-Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvBoolean.default(false)`, env `OPENGENI_INTEGRATIONS_ENABLED`) and `integrationsStateSecret` (required when enabled outside local dev). Boot validation: enabled + managed mode ⇒ `publicBaseUrl` present and HTTPS.
+Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvBoolean.default(false)`, env `OPENGENI_INTEGRATIONS_ENABLED`), `integrationsStateSecret` (required when enabled outside local dev), `integrationsAllowPrivateNetworkTargets` (`OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS`, default false), and `integrationsOauthClientsJson` (`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON`, operator pre-registered clients keyed by AS issuer/URL). Boot validation: enabled + managed mode ⇒ `publicBaseUrl` present and HTTPS.
 
 ## 9. UX surfaces (built in I3; contract fixed here)
 
