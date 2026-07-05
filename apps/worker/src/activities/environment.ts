@@ -1,9 +1,11 @@
 import {
   applyGitAuthPointerEnvironment,
+  firstPartyMcpWorkspaceUrl,
   stableSandboxEnvironmentForRun,
   type Settings,
 } from "@opengeni/config";
 import {
+  signDelegatedAccessToken,
   type ConnectionCredentialsPort,
   type GitCredentials,
   type ResourceRef,
@@ -104,8 +106,11 @@ export async function sandboxEnvironmentForRun(
     skipGitHubToken?: boolean;
     scope?: ConnectionScope;
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+    sessionId?: string;
+    runId?: string;
+    skipToolspaceToken?: boolean;
   } = {},
-): Promise<{ environment: Record<string, string>; gitToken?: string }> {
+): Promise<{ environment: Record<string, string>; gitToken?: string; toolspaceToken?: string }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
   // paths via stableSandboxEnvironmentForRun) < platform run-scoped GitHub auth
@@ -122,7 +127,28 @@ export async function sandboxEnvironmentForRun(
   // OPENGENI_GIT_TOKEN_FILE), so the token VALUE never rides the manifest and the
   // SDK's per-turn provided-session env delta stays empty even though the token
   // rotates. The agent can refresh the token mid-turn via the `github_token` MCP tool.
-  const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment);
+  const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
+  const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
+  let toolspaceToken: string | undefined;
+  if (
+    settings.toolspaceEnabled
+    && !options.skipToolspaceToken
+    && settings.delegationSecret
+    && options.scope
+    && options.sessionId
+    && options.runId
+  ) {
+    toolspaceToken = await signDelegatedAccessToken(settings.delegationSecret, {
+      accountId: options.scope.accountId,
+      workspaceId: options.scope.workspaceId,
+      subjectId: `sandbox:${options.runId}`,
+      subjectLabel: "sandbox toolspace",
+      permissions: ["toolspace:call"],
+      sessionId: options.sessionId,
+      exp: Math.floor(Date.now() / 1000) + 60 * 60,
+    });
+    environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.scope.workspaceId);
+  }
   const selection = githubRepositorySelection(resources);
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
   // a connected machine (selfhosted), the platform GitHub App installation token is
@@ -134,7 +160,7 @@ export async function sandboxEnvironmentForRun(
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
   if (!selection || options.skipGitHubToken) {
-    return { environment };
+    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
   }
   // Run-scoped sandbox preparation for GitHub App repository resources. When a
   // host binds `gitCredentials`, the HOST mints the installation token (BYO
@@ -173,7 +199,7 @@ export async function sandboxEnvironmentForRun(
   // cold-creates the box for a repo-attached session — an attach-warmed box
   // missing these keys kills the next repo turn on the SDK's manifest-env guard.
   applyGitAuthPointerEnvironment(environment, identity);
-  return { environment, gitToken: token };
+  return { environment, gitToken: token, ...(toolspaceToken ? { toolspaceToken } : {}) };
 }
 
 function githubRepositorySelection(resources: ResourceRef[]): { installationId: number; repositoryIds: number[] } | null {

@@ -77,12 +77,14 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import { capEventPage, capSessionDetail } from "./session-view";
+import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route; last-resort base
   // for links the server mints (github_connect_link) when neither
   // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
   requestOrigin?: string | null;
+  toolspace?: ToolspaceMcpSurface | null;
 };
 
 export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, options: McpServerOptions = {}): McpServer {
@@ -92,6 +94,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   });
   const json = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
   const can = (permission: Permission) => hasPermission(grant.permissions, permission);
+  const toolspaceMode = options.toolspace != null;
 
   // Session-scoped tools key off the worker-asserted sessionId claim (signed
   // into the delegated token by the worker, never agent-controlled).
@@ -99,7 +102,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // set_session_title names the agent's OWN session — pure session metadata,
   // not a goal operation — so it is available on every session, gated only on
   // the signed sessionId (NOT goals:manage, and NOT on a goal existing).
-  if (sessionId !== null) {
+  if (sessionId !== null && (!toolspaceMode || can("sessions:control"))) {
     server.registerTool("set_session_title", {
       description: "Set this session's display title to a concise 3-7 word summary. Call once early to name the session; calling again replaces it unless a human has manually set the title.",
       inputSchema: { title: z4.string().min(1).max(200) },
@@ -119,7 +122,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   // so they register only when the grant carries the worker-signed sessionId claim
   // (never agent-controlled). Gated on the selfhosted feature flag: the active
   // pointer + swap are only meaningful when bring-your-own-compute is enabled.
-  if (sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
+  if (!toolspaceMode && sessionId !== null && deps.settings.sandboxSelfhostedEnabled) {
     registerFleetTools(server, deps, grant, sessionId, json);
   }
 
@@ -144,6 +147,7 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     }
   }
 
+  if (!toolspaceMode || can("files:read")) {
   server.registerTool("files_get_download_url", {
     description: "Create a short-lived download URL for a ready file asset.",
     inputSchema: { fileId: z4.string().uuid() },
@@ -174,7 +178,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       },
     });
   });
+  }
 
+  if (!toolspaceMode || can("github:use")) {
   server.registerTool("github_repositories_list", {
     description: "List GitHub App repositories available as scheduled task repository resources. Use the returned resource object in scheduled task agentConfig.resources.",
     inputSchema: { limit: z4.number().int().positive().optional() },
@@ -191,7 +197,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
       throw error;
     }
   });
+  }
 
+  if (!toolspaceMode || can("connections:read")) {
   server.registerTool("social_connections_list", {
     description: "List connected social media accounts available to social media analysis packs.",
     inputSchema: { limit: z4.number().int().positive().optional() },
@@ -266,6 +274,9 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     });
   });
 
+  }
+
+  if (!toolspaceMode || can("scheduled_tasks:manage") || can("scheduled_tasks:run")) {
   server.registerTool("scheduled_tasks_list", {
     description: "List scheduled tasks.",
     inputSchema: { limit: z4.number().int().positive().optional() },
@@ -379,7 +390,31 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
     inputSchema: { taskId: z4.string().uuid(), limit: z4.number().int().positive().optional() },
   }, async ({ taskId, limit }) => json({ runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100) }));
 
+  }
+
+  registerToolspaceProxyTools(server, options.toolspace ?? null);
+
   return server;
+}
+
+function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSurface | null): void {
+  if (!surface) {
+    return;
+  }
+  for (const tool of surface.tools) {
+    server.registerTool(tool.name, {
+      ...(tool.description ? { description: tool.description } : {}),
+      inputSchema: z4.object({}).passthrough(),
+      _meta: {
+        opengeni: {
+          origin: "toolspace",
+          subjectId: surface.subjectId,
+          sessionId: surface.sessionId,
+          ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
+        },
+      },
+    }, async (args) => await tool.call(args));
+  }
 }
 
 function registerGoalTools(

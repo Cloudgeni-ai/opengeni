@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -4350,6 +4350,204 @@ describe("API component integration", () => {
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
   });
 
+  test("toolspace bearer expands to selected session MCP servers, proxies calls, and cannot escalate", async () => {
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const requiredAuthorization = "Bearer crm-session-secret";
+    const upstream = startTestMcpServer({ requiredHeaders: { authorization: requiredAuthorization } });
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        environmentsEncryptionKey: environmentsTestKey,
+        toolspaceEnabled: true,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    let toolspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
+    let workspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
+    try {
+      const { session, turnId } = await createToolspaceMcpSession(dbClient.db, grant, {
+        url: upstream.url,
+        headers: { authorization: requiredAuthorization },
+      });
+      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
+      const toolspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "sandbox:run-proxy",
+        permissions: ["toolspace:call"],
+        sessionId: session.id,
+      });
+      toolspaceClient = await prepareToolspaceClient(mcpUrl, toolspaceAuth);
+
+      const listed = await toolspaceClient.mcpServers[0]!.listTools();
+      const toolNames = listed.map((tool) => tool.name);
+      expect(toolNames).toContain("toolspace__crm__search_documents");
+      expect(toolNames).not.toContain("session_create");
+      expect(toolNames).not.toContain("mcp_servers_attach");
+      expect(toolNames).not.toContain("environment_set_variable");
+
+      const output = await toolspaceClient.mcpServers[0]!.callTool("toolspace__crm__search_documents", { query: "network policy" });
+      expect(mcpText(output)).toContain("found document for network policy");
+      expect(upstream.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
+
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      const toolspaceEvents = events.filter((event) => event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output");
+      expect(toolspaceEvents.map((event) => event.type)).toEqual(["agent.toolCall.created", "agent.toolCall.output"]);
+      expect(toolspaceEvents.every((event) => event.turnId === turnId)).toBe(true);
+      const producerRows = await dbClient.db.execute(dbSql<{ producer_id: string | null }>`
+        select producer_id from session_events
+        where workspace_id = ${grant.workspaceId}
+          and session_id = ${session.id}
+          and type in ('agent.toolCall.created', 'agent.toolCall.output')
+        order by sequence
+      `);
+      expect(producerRows.map((row) => row.producer_id)).toEqual(["sandbox:run-proxy", "sandbox:run-proxy"]);
+      expect((toolspaceEvents[0]?.payload as { origin?: string; subjectId?: string; raw?: { serverId?: string; toolName?: string } }).origin).toBe("toolspace");
+      expect((toolspaceEvents[0]?.payload as { origin?: string; subjectId?: string; raw?: { serverId?: string; toolName?: string } }).subjectId).toBe("sandbox:run-proxy");
+      expect((toolspaceEvents[0]?.payload as { raw?: { serverId?: string; toolName?: string } }).raw).toEqual({
+        type: "toolspace_call",
+        serverId: "crm",
+        toolName: "search_documents",
+      });
+
+      const workspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "test:workspace-mcp",
+        permissions: ["workspace:read"],
+      });
+      workspaceClient = await prepareToolspaceClient(mcpUrl, workspaceAuth);
+      const workspaceToolNames = (await workspaceClient.mcpServers[0]!.listTools()).map((tool) => tool.name);
+      expect(workspaceToolNames).not.toContain("toolspace__crm__search_documents");
+
+      const missingSessionAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "sandbox:no-session",
+        permissions: ["toolspace:call"],
+      });
+      const missingSession = await app.request(workspacePath(grant.workspaceId, "/mcp"), {
+        headers: { authorization: missingSessionAuth },
+      });
+      expect(missingSession.status).toBe(403);
+
+      const restRead = await app.request(workspacePath(grant.workspaceId, `/sessions/${session.id}`), {
+        headers: { authorization: toolspaceAuth },
+      });
+      expect(restRead.status).toBe(403);
+
+      const attachAttempt = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+        method: "POST",
+        body: JSON.stringify({
+          initialMessage: "try attach",
+          model: "scripted-model",
+          mcpServers: [{ id: "denied", url: upstream.url, headers: { authorization: "Bearer denied" } }],
+        }),
+        headers: { "content-type": "application/json", authorization: toolspaceAuth },
+      });
+      expect(attachAttempt.status).toBe(403);
+    } finally {
+      await toolspaceClient?.close().catch(() => undefined);
+      await workspaceClient?.close().catch(() => undefined);
+      server.stop(true);
+      upstream.close();
+    }
+  });
+
+  test("toolspace excludes approval-required session MCP tool execution", async () => {
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const upstream = startTestMcpServer();
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        environmentsEncryptionKey: environmentsTestKey,
+        toolspaceEnabled: true,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
+    try {
+      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
+        url: upstream.url,
+        requireApproval: ["search_documents"],
+      });
+      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
+      const auth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "sandbox:approval",
+        permissions: ["toolspace:call"],
+        sessionId: session.id,
+      });
+      client = await prepareToolspaceClient(mcpUrl, auth);
+      const listed = await client.mcpServers[0]!.listTools();
+      const search = listed.find((tool) => tool.name === "toolspace__crm__search_documents");
+      expect(search?.description).toContain("unavailable: requires approval - invoke via the agent");
+
+      const denied = await rawMcpRequest(mcpUrl, auth, "tools/call", {
+        name: "crm__search_documents",
+        arguments: { query: "approval path" },
+      });
+      expect((denied.result as { isError?: boolean }).isError).toBe(true);
+      expect(mcpText(denied.result)).toContain("requires approval - invoke via the agent");
+      expect(upstream.calls).toEqual([]);
+    } finally {
+      await client?.close().catch(() => undefined);
+      server.stop(true);
+      upstream.close();
+    }
+  });
+
+  test("toolspace enforces the per-turn call budget before proxying", async () => {
+    const grant = await bootstrapMcpGrant(dbClient.db);
+    const delegationSecret = "test-delegation-secret";
+    const upstream = startTestMcpServer();
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "configured",
+        delegationSecret,
+        environmentsEncryptionKey: environmentsTestKey,
+        toolspaceEnabled: true,
+        toolspaceMaxCallsPerTurn: 1,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: app.fetch });
+    let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
+    try {
+      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
+        url: upstream.url,
+      });
+      const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
+      const auth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "sandbox:budget",
+        permissions: ["toolspace:call"],
+        sessionId: session.id,
+      });
+      client = await prepareToolspaceClient(mcpUrl, auth);
+      expect(mcpText(await client.mcpServers[0]!.callTool("toolspace__crm__search_documents", { query: "first" }))).toContain("found document for first");
+
+      const exhausted = await rawMcpRequest(mcpUrl, auth, "tools/call", {
+        name: "crm__search_documents",
+        arguments: { query: "second" },
+      });
+      expect((exhausted.result as { isError?: boolean }).isError).toBe(true);
+      expect(mcpText(exhausted.result)).toContain("toolspace call budget exhausted (1/turn)");
+      expect(upstream.calls).toEqual([{ tool: "search_documents", args: { query: "first" } }]);
+    } finally {
+      await client?.close().catch(() => undefined);
+      server.stop(true);
+      upstream.close();
+    }
+  });
+
   test("cancelled-session user messages do not rotate per-session MCP credentials", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
@@ -4995,6 +5193,114 @@ async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {
     throw new Error("MCP bootstrap did not create a workspace grant");
   }
   return grant;
+}
+
+type TestWorkspaceGrant = AccessContext["workspaceGrants"][number];
+
+async function signDelegatedBearer(
+  secret: string,
+  grant: TestWorkspaceGrant,
+  input: {
+    subjectId: string;
+    permissions: Permission[];
+    sessionId?: string;
+  },
+): Promise<string> {
+  return `Bearer ${await signDelegatedAccessToken(secret, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: input.subjectId,
+    subjectLabel: input.subjectId,
+    permissions: input.permissions,
+    ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    exp: Math.floor(Date.now() / 1000) + 300,
+  })}`;
+}
+
+async function prepareToolspaceClient(url: string, authorization: string): Promise<Awaited<ReturnType<typeof prepareAgentTools>>> {
+  return await prepareAgentTools(testSettings({
+    mcpServers: [{
+      id: "toolspace",
+      name: "Toolspace",
+      url,
+      headers: { authorization },
+      cacheToolsList: false,
+    }],
+  }), [{ kind: "mcp", id: "toolspace" }]);
+}
+
+async function rawMcpRequest(
+  url: string,
+  authorization: string,
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<{ result?: unknown; error?: unknown }> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method,
+      ...(params ? { params } : {}),
+    }),
+  });
+  const text = await response.text();
+  if (response.status !== 200) {
+    throw new Error(`MCP request failed ${response.status}: ${text}`);
+  }
+  return JSON.parse(text) as { result?: unknown; error?: unknown };
+}
+
+async function createToolspaceMcpSession(
+  db: ReturnType<typeof createDb>["db"],
+  grant: TestWorkspaceGrant,
+  input: {
+    url: string;
+    headers?: Record<string, string>;
+    requireApproval?: boolean | string[];
+  },
+) {
+  const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+  const headersEncrypted = Object.fromEntries(Object.entries(input.headers ?? {})
+    .map(([name, value]) => [name, encryptEnvironmentValue(key, value)]));
+  const session = await createSession(db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "use the crm server from toolspace",
+    resources: [],
+    tools: [{ kind: "mcp", id: "crm" }],
+    metadata: {},
+    model: "scripted-model",
+    sandboxBackend: "none",
+    mcpServers: [{
+      id: "crm",
+      name: "CRM MCP",
+      url: input.url,
+      allowedTools: ["search_documents"],
+      cacheToolsList: false,
+      ...(input.requireApproval !== undefined ? { requireApproval: input.requireApproval } : {}),
+      headersEncrypted,
+    }],
+  });
+  const [trigger] = await appendSessionEvents(db, grant.workspaceId, session.id, [{
+    type: "user.message",
+    payload: { text: "start toolspace turn" },
+  }]);
+  if (!trigger) {
+    throw new Error("failed to create toolspace trigger event");
+  }
+  const turnId = await createTurn(db, {
+    workspaceId: grant.workspaceId,
+    sessionId: session.id,
+    triggerEventId: trigger.id,
+    temporalWorkflowId: `workflow-toolspace-${crypto.randomUUID()}`,
+  });
+  return { session, turnId };
 }
 
 async function readSseEvents(response: Response, count: number, abort: AbortController): Promise<SessionEvent[]> {

@@ -36,7 +36,7 @@ ENV LC_ALL=C.UTF-8
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \
     base_packages=" \
-        bash ca-certificates coreutils curl gpg git jq openssh-client \
+        bash ca-certificates coreutils curl gpg git jq nodejs openssh-client \
         fuse3 rclone ripgrep unzip wget python3 python3-pip software-properties-common \
         apt-transport-https net-tools netcat-openbsd sudo util-linux xxd file \
     "; \
@@ -232,10 +232,13 @@ COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-u
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
 COPY docker/desktop/opengeni-record.sh        /usr/local/bin/opengeni-record
 COPY docker/opengeni-git-askpass              /usr/local/bin/opengeni-git-askpass
+COPY docker/ogtool                            /usr/local/bin/ogtool
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
-               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass; \
+               /usr/local/bin/opengeni-record /usr/local/bin/opengeni-git-askpass \
+               /usr/local/bin/ogtool; \
+    node --check /usr/local/bin/ogtool; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \
     bash -n /usr/local/bin/opengeni-terminal-up; \

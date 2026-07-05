@@ -20,6 +20,7 @@ import {
   SANDBOX_REQUIRED_ENV,
   sandboxEnvironmentVariableNames,
   sandboxLifecycleHookIds,
+  stableSandboxEnvironmentForRun,
   startupRetryOptions,
   streamTokenDegraded,
 } from "../src";
@@ -375,6 +376,32 @@ describe("sandbox preparation profiles", () => {
     }, () => getSettings());
     expect(settings.mcpServers.find((server) => server.id === "opengeni")?.url).toBe("http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp");
     expect(settings.mcpServers.find((server) => server.id === "docs")?.url).toBe("http://opengeni-api.opengeni.svc.cluster.local:8000/v1/workspaces/{workspaceId}/mcp/docs");
+  });
+
+  test("defaults toolspace off and only adds sandbox pointers when enabled", () => {
+    const off = withEnv({}, () => getSettings());
+    expect(off.toolspaceEnabled).toBe(false);
+    expect(off.toolspaceMaxCallsPerTurn).toBe(200);
+    expect(stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_TOKEN_FILE).toBeUndefined();
+    expect(stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" }).OPENGENI_TOOLSPACE_URL).toBeUndefined();
+
+    const on = withEnv({
+      OPENGENI_TOOLSPACE_ENABLED: "true",
+      OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
+      OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    }, () => getSettings());
+    expect(on.toolspaceEnabled).toBe(true);
+    expect(on.toolspaceMaxCallsPerTurn).toBe(17);
+    expect(stableSandboxEnvironmentForRun(on, {}, { workspaceId: "ws-1" })).toMatchObject({
+      OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+      OPENGENI_TOOLSPACE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/mcp",
+    });
+  });
+
+  test("requires a delegation secret when toolspace is enabled", () => {
+    expect(() => withEnv({
+      OPENGENI_TOOLSPACE_ENABLED: "true",
+    }, () => getSettings())).toThrow("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   });
 
   test("does not duplicate a custom files MCP profile", () => {

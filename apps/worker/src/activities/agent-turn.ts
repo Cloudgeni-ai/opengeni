@@ -1017,14 +1017,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // minted, the host `gitCredentials` provider may supply it; unset → self-mint
       // from settings. gitToken is undefined on the selfhosted skip path (the machine
       // uses its own git creds).
-      const { environment: sandboxEnvironment, gitToken: sandboxGitToken } = await sandboxEnvironmentForRun(
+      const {
+        environment: sandboxEnvironment,
+        gitToken: sandboxGitToken,
+        toolspaceToken: sandboxToolspaceToken,
+      } = await sandboxEnvironmentForRun(
         runSettings,
         turnResources,
         workspaceEnvironment?.values ?? {},
         {
           skipGitHubToken: activeSandboxBackend === "selfhosted",
+          skipToolspaceToken: activeSandboxBackend === "selfhosted",
           scope: connectionScope,
           gitCredentials: connectionCredentials?.gitCredentials,
+          sessionId: input.sessionId,
+          runId: turnId,
         },
       );
 
@@ -1305,6 +1312,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // seeds it to the box's token file before the repository-clone runs; it never
         // touches the box/agent manifest env.
         ...(activeSandboxBackend !== "selfhosted" && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,

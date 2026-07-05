@@ -3,7 +3,7 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
 } from "@opengeni/config";
-import { ClientConfig } from "@opengeni/contracts";
+import { ClientConfig, type AccessGrant } from "@opengeni/contracts";
 import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@opengeni/documents";
 import { dbSql } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
@@ -13,11 +13,12 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies, ObjectStorageDependency, SessionWorkflowClient } from "@opengeni/core";
-import { requireAccessGrant } from "@opengeni/core";
+import { hasPermission, requireAccessGrant, requirePermission } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCodexRoutes } from "./routes/codex";
@@ -218,11 +219,25 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId, "workspace:read");
+    const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
+    const toolspace = isToolspaceGrant(routeDeps.settings, grant)
+      ? await prepareToolspaceMcpSurface({
+          deps: routeDeps,
+          grant,
+          authorizationHeader: c.req.header("authorization") ?? null,
+        })
+      : null;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const mcp = buildOpenGeniMcpServer(routeDeps, grant, { requestOrigin: new URL(c.req.url).origin });
-    await mcp.connect(transport);
-    return await transport.handleRequest(c.req.raw);
+    const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
+      requestOrigin: new URL(c.req.url).origin,
+      toolspace,
+    });
+    try {
+      await mcp.connect(transport);
+      return await transport.handleRequest(c.req.raw);
+    } finally {
+      await toolspace?.close().catch(() => undefined);
+    }
   });
 
   registerFileRoutes(app, routeDeps);
@@ -244,6 +259,18 @@ export function createApp(deps: AppDependencies): Hono {
   registerCodexRoutes(app, routeDeps);
 
   return app;
+}
+
+async function requireMcpAccessGrant(c: Parameters<typeof requireAccessGrant>[0], deps: ApiRouteDeps, workspaceId: string): Promise<AccessGrant> {
+  const grant = await requireAccessGrant(c, deps, workspaceId);
+  if (hasPermission(grant.permissions, "workspace:read")) {
+    return grant;
+  }
+  if (isToolspaceGrant(deps.settings, grant)) {
+    return grant;
+  }
+  requirePermission(grant, "workspace:read");
+  return grant;
 }
 
 function clientAuthConfig(settings: AppDependencies["settings"]) {

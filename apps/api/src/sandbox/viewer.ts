@@ -136,7 +136,7 @@ export async function sessionAttachEnvironment(
   const settingsForSession = session.sandboxBackend !== services.settings.sandboxBackend
     ? { ...services.settings, sandboxBackend: session.sandboxBackend }
     : services.settings;
-  const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {});
+  const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
   if (hasGitHubRepositorySelection(session.resources)) {
     applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(services.settings));
   }

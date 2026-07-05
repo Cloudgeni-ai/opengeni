@@ -162,6 +162,8 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
+  toolspaceEnabled: EnvBoolean.default(false),
+  toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
@@ -905,6 +907,8 @@ export function getSettings(): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
+    toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
+    toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
@@ -1480,6 +1484,7 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
   workspaceEnvironment: Record<string, string> = {},
+  options: { workspaceId?: string } = {},
 ): Record<string, string> {
   const environment: Record<string, string> = {
     ...collectSandboxEnvironment(settings),
@@ -1501,6 +1506,12 @@ export function stableSandboxEnvironmentForRun(
   // VALUE lives exclusively in the file (agent-managed, refreshable mid-turn), never
   // the manifest env.
   environment.OPENGENI_GIT_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/git-token`;
+  if (settings.toolspaceEnabled) {
+    environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+    if (options.workspaceId) {
+      environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.workspaceId);
+    }
+  }
   return environment;
 }
 
@@ -1898,6 +1909,18 @@ export function firstPartyMcpBaseUrl(settings: Settings): string {
   return settings.opengeniMcpUrl ?? `http://127.0.0.1:${settings.apiPort}/v1/workspaces/{workspaceId}/mcp`;
 }
 
+export function firstPartyMcpWorkspaceUrl(settings: Settings, workspaceId: string): string {
+  const raw = firstPartyMcpBaseUrl(settings);
+  if (raw.includes("{workspaceId}")) {
+    return raw.replaceAll("{workspaceId}", workspaceId);
+  }
+  const url = new URL(raw);
+  url.pathname = `/v1/workspaces/${workspaceId}/mcp`;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 function firstPartyMcpServerUrl(settings: Settings): string {
   return firstPartyMcpBaseUrl(settings);
 }
@@ -1907,6 +1930,9 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
 }
 
 function validateSettings(settings: Settings): void {
+  if (settings.toolspaceEnabled && !settings.delegationSecret) {
+    throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
+  }
   if (settings.productAccessMode === "managed") {
     if (!settings.publicBaseUrl) {
       throw new Error("OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed");

@@ -1,6 +1,6 @@
 import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextInputBudgetTokens, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
-import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, signDelegatedAccessToken, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, prefixedMcpToolName as sharedPrefixedMcpToolName, signDelegatedAccessToken, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -816,6 +816,11 @@ export type BuildAgentOptions = {
   // seeds it to the box's token FILE before the clone runs. Omitted on the
   // selfhosted path (the machine uses its own git creds) — a NO-OP there.
   gitTokenSeed?: string;
+  // TOOLSPACE: the run-scoped delegated token to seed into
+  // $OPENGENI_TOOLSPACE_TOKEN_FILE. Like gitTokenSeed, this stays off the
+  // manifest/env delta and is written into the sandbox filesystem by a lifecycle
+  // hook before the agent starts.
+  toolspaceTokenSeed?: string;
   // Genesis turn only: append a one-shot instruction to the agent's system
   // prompt telling it to title the session via opengeni__set_session_title
   // before responding. Delivered through the instructions channel (where the
@@ -949,6 +954,7 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // session env; runStream reads it to build the clone hook context. Absent when
 // no repo is attached / on the selfhosted path.
 const agentGitTokenSeed = new WeakMap<object, string>();
+const agentToolspaceTokenSeed = new WeakMap<object, string>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
 // connected machines (a user's real computer).
@@ -1107,6 +1113,9 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   // clone hook without the token ever touching defaultManifest / sandboxEnvironment.
   if (options.gitTokenSeed) {
     agentGitTokenSeed.set(agent, options.gitTokenSeed);
+  }
+  if (options.toolspaceTokenSeed) {
+    agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
   }
   maybeInstallCodexToolSearch(agent, settings, options);
   applyMcpApprovalPolicy(agent, settings);
@@ -1913,7 +1922,7 @@ function normalizeUrl(raw: string): string | null {
 }
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
-  return `${registryId}__${toolName}`;
+  return sharedPrefixedMcpToolName(registryId, toolName);
 }
 
 class PrefixedMcpServer implements MCPServer {
@@ -2348,8 +2357,10 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeed = gitTokenSeedForAgent(agent);
+    const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
     const ownedHooks = [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+      ...sandboxToolspaceTokenHooksForAgent(agent),
       ...sandboxRepositoryCloneHooksForAgent(agent),
     ];
     const ownedHookContext: SandboxLifecycleHookContext = {
@@ -2357,6 +2368,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
+      ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     };
     // OWNED-PATH HOOKS: the SDK NEVER calls client.create/resume when handed a live
     // provided session (SandboxRuntimeManager uses `sandboxConfig.session` directly),
@@ -2431,15 +2443,18 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeed = gitTokenSeedForAgent(agent);
+  const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const client = resourceClient
     ? withSandboxLifecycleHooks(resourceClient, [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+      ...sandboxToolspaceTokenHooksForAgent(agent),
       ...sandboxRepositoryCloneHooksForAgent(agent),
     ], {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(gitTokenSeed ? { gitTokenSeed } : {}),
+      ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
     })
     : undefined;
   const sandboxSessionState = prepared.sandboxSessionState
@@ -3242,6 +3257,7 @@ export type SandboxLifecycleHookContext = {
   // the clone exec's per-call env (OPENGENI_GIT_TOKEN_SEED), NEVER the box/agent
   // manifest env (validateNoEnvironmentDelta must never see a rotating value).
   gitTokenSeed?: string;
+  toolspaceTokenSeed?: string;
 };
 
 export type SandboxLifecycleHook = {
@@ -3340,6 +3356,20 @@ function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLif
 // context at runStream so the token is seeded off-manifest.
 function gitTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentGitTokenSeed.get(agent);
+}
+
+function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
+  return agentToolspaceTokenSeed.get(agent);
+}
+
+function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
+  return toolspaceTokenSeedForAgent(agent)
+    ? [{
+        id: "toolspace-token",
+        phase: "beforeAgentStart",
+        run: runToolspaceTokenSeedHook,
+      }]
+    : [];
 }
 
 function sandboxRepositoryCloneHooks(
@@ -3541,6 +3571,53 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     ].join(" "));
   }
   return commands.join("\n");
+}
+
+export function toolspaceTokenSeedCommand(): string {
+  return [
+    "set -eu",
+    "export HOME=\"${HOME:-/workspace}\"",
+    "if [ -n \"${OPENGENI_TOOLSPACE_TOKEN_SEED:-}\" ]; then",
+    "  seed_umask=\"$(umask)\"",
+    "  umask 077",
+    "  token_file=\"${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}\"",
+    "  mkdir -p \"$(dirname \"$token_file\")\"",
+    "  printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\" > \"$token_file.tmp.$$\"",
+    "  mv -f \"$token_file.tmp.$$\" \"$token_file\"",
+    "  umask \"$seed_umask\"",
+    "fi",
+  ].join("\n");
+}
+
+export async function runToolspaceTokenSeedHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+): Promise<void> {
+  if (!context.toolspaceTokenSeed) {
+    return;
+  }
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
+  if (session.exec) {
+    const result = await session.exec({
+      cmd: command,
+      workdir: "/workspace",
+      ...(context.runAs ? { runAs: context.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    });
+    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+  } else if (session.execCommand) {
+    const result = await session.execCommand({
+      cmd: command,
+      workdir: "/workspace",
+      ...(context.runAs ? { runAs: context.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    });
+    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+  } else {
+    throw new Error("Sandbox session does not support command execution");
+  }
 }
 
 export async function runRepositoryCloneHook(

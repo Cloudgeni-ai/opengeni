@@ -785,6 +785,7 @@ export const KNOWN_PERMISSIONS = [
   "environments:manage",
   "environments:use",
   "mcp_servers:attach",
+  "toolspace:call",
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",

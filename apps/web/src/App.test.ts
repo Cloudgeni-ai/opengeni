@@ -246,7 +246,7 @@ describe("session MCP permission groups", () => {
 
   test("excludes account-only scopes but keeps workspace scopes", () => {
     const offered: string[] = buildSessionMcpPermissionGroups().flatMap((group) => group.permissions);
-    for (const accountScope of ["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create"]) {
+    for (const accountScope of ["account:read", "account:admin", "members:manage", "billing:read", "billing:manage", "workspace:create", "toolspace:call"]) {
       expect(offered).not.toContain(accountScope);
     }
     for (const workspaceScope of ["sessions:create", "goals:manage", "environments:use", "workspace:admin"]) {

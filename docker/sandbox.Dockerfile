@@ -14,6 +14,7 @@ RUN set -eux; \
         gpg \
         git \
         jq \
+        nodejs \
         openssh-client \
         fuse3 \
         rclone \
@@ -82,11 +83,14 @@ ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
+COPY docker/ogtool                 /usr/local/bin/ogtool
 COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
+               /usr/local/bin/ogtool \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down; \
+    node --check /usr/local/bin/ogtool; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
     bash -n /usr/local/bin/opengeni-terminal-down
 

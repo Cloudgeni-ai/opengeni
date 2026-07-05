@@ -140,7 +140,7 @@ export async function withChannelA<T>(
     const settingsForSession = session.sandboxBackend !== settings.sandboxBackend
       ? { ...settings, sandboxBackend: session.sandboxBackend }
       : settings;
-    const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {});
+    const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
     if (hasGitHubRepositorySelection(session.resources)) {
       applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
     }

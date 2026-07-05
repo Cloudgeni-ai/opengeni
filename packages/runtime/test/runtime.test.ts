@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -1218,6 +1218,35 @@ describe("runtime event normalization", () => {
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
     expect(String(calls[0]?.cmd).startsWith("set -eu")).toBe(true);
+  });
+
+  test("TOOLSPACE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
+    const command = toolspaceTokenSeedCommand();
+    expect(command).toContain("if [ -n \"${OPENGENI_TOOLSPACE_TOKEN_SEED:-}\" ]; then");
+    expect(command).toContain("umask 077");
+    expect(command).toContain("token_file=\"${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}\"");
+    expect(command).toContain("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\" > \"$token_file.tmp.$$\"");
+    expect(command).toContain("mv -f \"$token_file.tmp.$$\" \"$token_file\"");
+
+    const calls: Array<Record<string, unknown>> = [];
+    await runToolspaceTokenSeedHook({
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+      },
+    } as any, {
+      environment: { HOME: "/workspace", OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token" },
+      runAs: "sandbox",
+      toolspaceTokenSeed: "ogd_toolspace_live",
+    } as any);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.environment).toBeUndefined();
+    const cmd = String(calls[0]?.cmd);
+    expect(cmd).toContain("export OPENGENI_TOOLSPACE_TOKEN_SEED='ogd_toolspace_live'");
+    expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
+      cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
+    );
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {

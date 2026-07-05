@@ -4116,6 +4116,27 @@ export async function listSessionEvents(
   });
 }
 
+export async function countToolspaceCallsForTurn(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb.select({
+      count: sql<number>`count(*)::int`,
+    }).from(schema.sessionEvents)
+      .where(and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        eq(schema.sessionEvents.turnId, turnId),
+        eq(schema.sessionEvents.type, "agent.toolCall.created"),
+        sql`${schema.sessionEvents.payload} ->> 'origin' = 'toolspace'`,
+      ));
+    return Number(row?.count ?? 0);
+  });
+}
+
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
   if (value === undefined || !Number.isFinite(value)) {
     return fallback;

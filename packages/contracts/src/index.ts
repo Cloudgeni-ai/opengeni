@@ -478,6 +478,10 @@ export const Permission = z.enum([
   // not part of the worker's default first-party MCP permission set: a sandboxed
   // agent must not be able to hand itself new bearer credentials.
   "mcp_servers:attach",
+  // Programmatic sandbox -> tool access through the first-party MCP gate. This is
+  // intentionally narrow and is never part of first-party MCP defaults; callers
+  // must receive it through an explicit delegated `ogd_` mint carrying sessionId.
+  "toolspace:call",
   "goals:manage",
   // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
   // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
@@ -488,6 +492,10 @@ export const Permission = z.enum([
   "enrollments:manage",
 ]);
 export type Permission = z.infer<typeof Permission>;
+
+export function prefixedMcpToolName(registryId: string, toolName: string): string {
+  return `${registryId}__${toolName}`;
+}
 
 export const ProductAccessMode = z.enum(["local", "configured", "managed"]);
 export type ProductAccessMode = z.infer<typeof ProductAccessMode>;
