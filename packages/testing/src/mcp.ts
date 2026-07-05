@@ -22,6 +22,8 @@ export function startTestMcpServer(options: {
   // whose tools/list response varies by the delegated token's grant.
   toolsForAuthorization?: (authorization: string | null) => string[];
   forbiddenTools?: string[];
+  unauthorizedAuthenticateHeader?: string;
+  forbiddenAuthenticateHeader?: string;
 } = {}): TestMcpServer {
   const calls: TestMcpToolCall[] = [];
   const server = Bun.serve({
@@ -35,14 +37,20 @@ export function startTestMcpServer(options: {
       if (options.requiredAuthorization && request.headers.get("authorization") !== options.requiredAuthorization) {
         return new Response(JSON.stringify({ error: "unauthorized" }), {
           status: 401,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...(options.unauthorizedAuthenticateHeader ? { "www-authenticate": options.unauthorizedAuthenticateHeader } : {}),
+          },
         });
       }
       for (const [name, expected] of Object.entries(options.requiredHeaders ?? {})) {
         if (request.headers.get(name) !== expected) {
           return new Response(JSON.stringify({ error: "unauthorized" }), {
             status: 401,
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              ...(options.unauthorizedAuthenticateHeader ? { "www-authenticate": options.unauthorizedAuthenticateHeader } : {}),
+            },
           });
         }
       }
@@ -50,7 +58,10 @@ export function startTestMcpServer(options: {
       if (forbiddenTool) {
         return new Response(JSON.stringify({ error: "insufficient_scope", tool: forbiddenTool }), {
           status: 403,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...(options.forbiddenAuthenticateHeader ? { "www-authenticate": options.forbiddenAuthenticateHeader } : {}),
+          },
         });
       }
       const transport = new WebStandardStreamableHTTPServerTransport({

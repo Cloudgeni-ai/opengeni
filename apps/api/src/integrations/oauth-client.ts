@@ -1,0 +1,850 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
+import { OAuthStartResponse, type OAuthStartRequest } from "@opengeni/contracts";
+import { requireEnvironmentEncryption } from "@opengeni/core";
+import {
+  consumeIntegrationOAuthStateNonce,
+  createConnection,
+  decryptEnvironmentValue,
+  encryptEnvironmentValue,
+  getConnectionMetadata,
+  loadIntegrationOAuthClient,
+  storeIntegrationOAuthClient,
+  updateConnection,
+  type Database,
+} from "@opengeni/db";
+import { createSignedState, readSignedState } from "@opengeni/github";
+import { Buffer } from "node:buffer";
+import { createHash, randomBytes } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { HTTPException } from "hono/http-exception";
+
+export const oauthStateTtlMs = 10 * 60 * 1000;
+
+type OAuthClientDeps = {
+  db: Database;
+  settings: Settings;
+};
+
+export type OAuthStartContext = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  requestUrl: string;
+  payload: OAuthStartRequest;
+};
+
+export type OAuthCallbackResult = {
+  redirectTo: string;
+};
+
+type WwwAuthenticateChallenge = {
+  resourceMetadata?: string;
+  scope?: string[];
+  error?: string;
+};
+
+type ProtectedResourceMetadata = {
+  resource?: string;
+  authorizationServers: string[];
+  scopesSupported: string[];
+  raw: Record<string, unknown>;
+};
+
+type AuthorizationServerMetadata = {
+  issuer: string;
+  authorizationServer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  registrationEndpoint?: string;
+  clientIdMetadataDocumentSupported: boolean;
+  codeChallengeMethodsSupported: string[];
+  raw: Record<string, unknown>;
+};
+
+type OAuthClientRegistration = {
+  method: "operator" | "cimd" | "dcr";
+  issuer: string;
+  authorizationServer: string;
+  clientId: string;
+  clientSecret?: string;
+  tokenEndpointAuthMethod: "none" | "client_secret_post" | "client_secret_basic";
+};
+
+type OAuthStatePayload = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  providerDomain: string;
+  resource: string;
+  requestedScopes: string[];
+  authorizeScopes: string[];
+  encryptedPkceVerifier: string;
+  clientId: string;
+  tokenEndpoint: string;
+  authorizationServer: string;
+  issuer: string;
+  clientRegistrationMethod: OAuthClientRegistration["method"];
+  tokenEndpointAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"];
+  returnPath: string;
+  connectionId?: string;
+  connectionVersion?: number;
+  nonce: string;
+  iat: number;
+};
+
+type TokenResponse = {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType: string;
+  expiresAt: Date | null;
+  scopeText?: string;
+  raw: Record<string, unknown>;
+};
+
+export async function startMcpOAuth(
+  deps: OAuthClientDeps,
+  context: OAuthStartContext,
+): Promise<OAuthStartResponse> {
+  const { db, settings } = deps;
+  const resource = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  const providerDomain = canonicalProviderDomain(context.payload.providerDomain ?? new URL(resource).hostname);
+  const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
+  const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
+  const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
+  const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
+  const existing = context.payload.connectionId
+    ? await getConnectionMetadata(db, context.workspaceId, context.payload.connectionId, context.subjectId)
+    : null;
+  if (context.payload.connectionId && !existing) {
+    throw new HTTPException(404, { message: "connection not found" });
+  }
+
+  const discovery = await discoverMcpOAuth(resource, settings);
+  const client = await registerOAuthClient(db, settings, discovery.as, metadataUrl, redirectUri);
+  const verifier = randomPkceVerifier();
+  const authorizeScopes = chooseAuthorizeScopes(context.payload.requestedScopes, discovery.challenge.scope, discovery.prm.scopesSupported);
+  const key = requireEnvironmentEncryption(settings);
+  const state = createSignedState(requireIntegrationsStateSecret(settings), {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    providerDomain,
+    resource,
+    requestedScopes: uniqueStrings(context.payload.requestedScopes ?? []),
+    authorizeScopes,
+    encryptedPkceVerifier: encryptEnvironmentValue(key, verifier),
+    clientId: client.clientId,
+    tokenEndpoint: discovery.as.tokenEndpoint,
+    authorizationServer: client.authorizationServer,
+    issuer: client.issuer,
+    clientRegistrationMethod: client.method,
+    tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
+    returnPath,
+    ...(existing ? { connectionId: existing.id, connectionVersion: existing.version } : {}),
+  });
+  const authorizationUrl = buildAuthorizationUrl({
+    endpoint: discovery.as.authorizationEndpoint,
+    clientId: client.clientId,
+    redirectUri,
+    state,
+    resource,
+    verifier,
+    scopes: authorizeScopes,
+  });
+  return OAuthStartResponse.parse({
+    state,
+    authorizationUrl,
+    expiresAt: new Date(Date.now() + oauthStateTtlMs).toISOString(),
+  });
+}
+
+export async function completeMcpOAuthCallback(
+  deps: OAuthClientDeps,
+  input: { code?: string | undefined; state?: string | undefined; requestUrl: string },
+): Promise<OAuthCallbackResult> {
+  const { db, settings } = deps;
+  if (!input.state) {
+    throw new HTTPException(400, { message: "missing OAuth state" });
+  }
+  const state = readOAuthState(input.state, settings);
+  if (!input.code) {
+    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }) };
+  }
+  const consumed = await consumeIntegrationOAuthStateNonce(db, {
+    accountId: state.accountId,
+    workspaceId: state.workspaceId,
+    subjectId: state.subjectId,
+    nonce: state.nonce,
+    expiresAt: new Date(state.iat * 1000 + oauthStateTtlMs),
+    now: new Date(),
+  });
+  if (!consumed) {
+    throw new HTTPException(400, { message: "OAuth state has already been used" });
+  }
+
+  try {
+    const baseUrl = integrationBaseUrl(settings.publicBaseUrl, input.requestUrl);
+    const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
+    const key = requireEnvironmentEncryption(settings);
+    const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
+    const client = await clientForState(db, settings, state);
+    const token = await exchangeAuthorizationCode(settings, {
+      code: input.code,
+      verifier,
+      redirectUri,
+      resource: state.resource,
+      tokenEndpoint: state.tokenEndpoint,
+      client,
+    });
+    const tools = await verifyMcpToolsList(settings, state.resource, token);
+    const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
+    const credential = credentialBundle(token, state, client);
+    const metadata = {
+      resource: state.resource,
+      authorizationServer: state.authorizationServer,
+      authorizationServerIssuer: state.issuer,
+      tokenEndpoint: state.tokenEndpoint,
+      clientId: client.clientId,
+      clientRegistrationMethod: state.clientRegistrationMethod,
+      mcpTools: tools,
+    };
+    const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
+    const connection = state.connectionId
+      ? await updateConnection(db, {
+        workspaceId: state.workspaceId,
+        connectionId: state.connectionId,
+        visibleToSubjectId: state.subjectId,
+        expectedVersion: state.connectionVersion,
+        providerDomain: state.providerDomain,
+        subjectId: null,
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted,
+        grantedScopes: scopes,
+        expiresAt: token.expiresAt,
+        metadata,
+        updatedBySubjectId: state.subjectId,
+      })
+      : await createConnection(db, {
+        accountId: state.accountId,
+        workspaceId: state.workspaceId,
+        subjectId: null,
+        providerDomain: state.providerDomain,
+        kind: "oauth2",
+        credentialEncrypted,
+        grantedScopes: scopes,
+        expiresAt: token.expiresAt,
+        metadata,
+        createdBySubjectId: state.subjectId,
+      });
+    if (!connection) {
+      throw new HTTPException(409, { message: "connection changed during OAuth reconnect; start again" });
+    }
+    return { redirectTo: callbackReturnPath(state.returnPath, "success", { connectionId: connection.id }) };
+  } catch (error) {
+    if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
+      throw error;
+    }
+    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "oauth_callback_failed" }) };
+  }
+}
+
+export function integrationBaseUrl(publicBaseUrl: string | undefined, requestUrl: string): string {
+  return (publicBaseUrl ?? new URL(requestUrl).origin).replace(/\/+$/, "");
+}
+
+export function requireIntegrationsStateSecret(settings: Settings): string {
+  const secret = settings.integrationsStateSecret?.trim();
+  if (!secret) {
+    throw new HTTPException(503, { message: "integrations OAuth requires OPENGENI_INTEGRATIONS_STATE_SECRET" });
+  }
+  return secret;
+}
+
+async function discoverMcpOAuth(resource: string, settings: Settings): Promise<{
+  challenge: WwwAuthenticateChallenge;
+  prm: ProtectedResourceMetadata;
+  as: AuthorizationServerMetadata;
+}> {
+  const challenge = await probeMcpChallenge(resource, settings);
+  const prm = await discoverProtectedResourceMetadata(resource, settings, challenge.resourceMetadata);
+  const authorizationServer = prm.authorizationServers[0];
+  if (!authorizationServer) {
+    throw new HTTPException(422, { message: "MCP protected resource metadata did not advertise an authorization server" });
+  }
+  const as = await discoverAuthorizationServerMetadata(authorizationServer, settings);
+  if (!as.codeChallengeMethodsSupported.includes("S256")) {
+    throw new HTTPException(422, { message: "authorization server does not support required PKCE S256" });
+  }
+  return { challenge, prm, as };
+}
+
+async function probeMcpChallenge(resource: string, settings: Settings): Promise<WwwAuthenticateChallenge> {
+  await assertOAuthFetchAllowed(resource, settings);
+  const response = await fetch(resource, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+  if (response.status !== 401) {
+    return {};
+  }
+  return parseWwwAuthenticate(response.headers.get("www-authenticate"));
+}
+
+async function discoverProtectedResourceMetadata(
+  resource: string,
+  settings: Settings,
+  advertisedUrl?: string,
+): Promise<ProtectedResourceMetadata> {
+  const candidates = uniqueStrings([
+    ...(advertisedUrl ? [advertisedUrl] : []),
+    ...wellKnownCandidates(resource, "oauth-protected-resource"),
+  ]);
+  for (const candidate of candidates) {
+    const payload = await fetchJsonObject(candidate, settings).catch(() => null);
+    if (!payload) {
+      continue;
+    }
+    const authorizationServers = stringArray(payload.authorization_servers);
+    if (authorizationServers.length === 0) {
+      continue;
+    }
+    return {
+      authorizationServers,
+      scopesSupported: stringArray(payload.scopes_supported),
+      raw: payload,
+      ...(stringValue(payload.resource) ? { resource: stringValue(payload.resource)! } : {}),
+    };
+  }
+  throw new HTTPException(422, { message: "could not discover MCP protected resource metadata" });
+}
+
+async function discoverAuthorizationServerMetadata(authorizationServer: string, settings: Settings): Promise<AuthorizationServerMetadata> {
+  const candidates = uniqueStrings([
+    authorizationServer,
+    ...wellKnownCandidates(authorizationServer, "oauth-authorization-server"),
+    ...wellKnownCandidates(authorizationServer, "openid-configuration"),
+  ]);
+  for (const candidate of candidates) {
+    const payload = await fetchJsonObject(candidate, settings).catch(() => null);
+    if (!payload) {
+      continue;
+    }
+    const authorizationEndpoint = stringValue(payload.authorization_endpoint);
+    const tokenEndpoint = stringValue(payload.token_endpoint);
+    if (!authorizationEndpoint || !tokenEndpoint) {
+      continue;
+    }
+    return {
+      issuer: stringValue(payload.issuer) ?? authorizationServer.replace(/\/+$/, ""),
+      authorizationServer: authorizationServer.replace(/\/+$/, ""),
+      authorizationEndpoint,
+      tokenEndpoint,
+      clientIdMetadataDocumentSupported: payload.client_id_metadata_document_supported === true,
+      codeChallengeMethodsSupported: stringArray(payload.code_challenge_methods_supported),
+      raw: payload,
+      ...(stringValue(payload.registration_endpoint) ? { registrationEndpoint: stringValue(payload.registration_endpoint)! } : {}),
+    };
+  }
+  throw new HTTPException(422, { message: "could not discover OAuth authorization server metadata" });
+}
+
+async function registerOAuthClient(
+  db: Database,
+  settings: Settings,
+  as: AuthorizationServerMetadata,
+  metadataUrl: string,
+  redirectUri: string,
+): Promise<OAuthClientRegistration> {
+  const operator = operatorClientForAs(settings, as);
+  if (operator) {
+    return operator;
+  }
+  if (as.clientIdMetadataDocumentSupported) {
+    return {
+      method: "cimd",
+      issuer: as.issuer,
+      authorizationServer: as.authorizationServer,
+      clientId: metadataUrl,
+      tokenEndpointAuthMethod: "none",
+    };
+  }
+  const stored = await loadIntegrationOAuthClient(db, settings, as.issuer);
+  if (stored) {
+    return {
+      method: "dcr",
+      issuer: stored.issuer,
+      authorizationServer: stored.authorizationServer,
+      clientId: stored.clientId,
+      ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
+      tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+    };
+  }
+  if (!as.registrationEndpoint) {
+    throw new HTTPException(422, {
+      message: "manual OAuth client credentials are required for this authorization server",
+    });
+  }
+  const dcr = await dynamicClientRegistration(settings, as, redirectUri);
+  const key = dcr.clientSecret ? requireEnvironmentEncryption(settings) : null;
+  await storeIntegrationOAuthClient(db, {
+    issuer: as.issuer,
+    authorizationServer: as.authorizationServer,
+    clientId: dcr.clientId,
+    clientSecretEncrypted: dcr.clientSecret && key ? encryptEnvironmentValue(key, dcr.clientSecret) : null,
+    tokenEndpointAuthMethod: dcr.tokenEndpointAuthMethod,
+    metadata: {
+      registrationEndpoint: as.registrationEndpoint,
+      registeredAt: new Date().toISOString(),
+    },
+  });
+  return dcr;
+}
+
+function operatorClientForAs(settings: Settings, as: AuthorizationServerMetadata): OAuthClientRegistration | null {
+  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  const keys = uniqueStrings([
+    as.issuer,
+    as.authorizationServer,
+    as.issuer.replace(/\/+$/, ""),
+    as.authorizationServer.replace(/\/+$/, ""),
+  ]);
+  for (const key of keys) {
+    const entry = configured[key];
+    if (!entry) {
+      continue;
+    }
+    return {
+      method: "operator",
+      issuer: as.issuer,
+      authorizationServer: as.authorizationServer,
+      clientId: entry.clientId,
+      ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
+      tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
+    };
+  }
+  return null;
+}
+
+async function dynamicClientRegistration(
+  settings: Settings,
+  as: AuthorizationServerMetadata,
+  redirectUri: string,
+): Promise<OAuthClientRegistration> {
+  if (!as.registrationEndpoint) {
+    throw new HTTPException(422, { message: "authorization server does not support dynamic client registration" });
+  }
+  await assertOAuthFetchAllowed(as.registrationEndpoint, settings);
+  const response = await fetch(as.registrationEndpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      client_name: "OpenGeni",
+      redirect_uris: [redirectUri],
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    }),
+  });
+  if (!response.ok) {
+    throw new HTTPException(422, { message: `dynamic client registration failed with HTTP ${response.status}` });
+  }
+  const payload = await response.json() as Record<string, unknown>;
+  const clientId = stringValue(payload.client_id);
+  if (!clientId) {
+    throw new HTTPException(422, { message: "dynamic client registration response did not include client_id" });
+  }
+  const clientSecret = stringValue(payload.client_secret);
+  return {
+    method: "dcr",
+    issuer: as.issuer,
+    authorizationServer: as.authorizationServer,
+    clientId,
+    ...(clientSecret ? { clientSecret } : {}),
+    tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.token_endpoint_auth_method), Boolean(clientSecret)),
+  };
+}
+
+function buildAuthorizationUrl(input: {
+  endpoint: string;
+  clientId: string;
+  redirectUri: string;
+  state: string;
+  resource: string;
+  verifier: string;
+  scopes: string[];
+}): string {
+  const url = new URL(input.endpoint);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", input.clientId);
+  url.searchParams.set("redirect_uri", input.redirectUri);
+  url.searchParams.set("state", input.state);
+  url.searchParams.set("resource", input.resource);
+  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("code_challenge", pkceChallenge(input.verifier));
+  if (input.scopes.length > 0) {
+    url.searchParams.set("scope", input.scopes.join(" "));
+  }
+  return url.toString();
+}
+
+function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
+  const payload = readSignedState(state, requireIntegrationsStateSecret(settings)) as Record<string, unknown> | null;
+  if (!payload) {
+    throw new HTTPException(400, { message: "invalid or expired OAuth state" });
+  }
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const iat = numberValue(payload.iat);
+  if (iat === undefined || nowSeconds - iat > oauthStateTtlMs / 1000 || nowSeconds < iat) {
+    throw new HTTPException(400, { message: "invalid or expired OAuth state" });
+  }
+  const parsed = {
+    accountId: requiredString(payload.accountId, "state.accountId"),
+    workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
+    subjectId: requiredString(payload.subjectId, "state.subjectId"),
+    providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
+    resource: requiredString(payload.resource, "state.resource"),
+    requestedScopes: stringArray(payload.requestedScopes),
+    authorizeScopes: stringArray(payload.authorizeScopes),
+    encryptedPkceVerifier: requiredString(payload.encryptedPkceVerifier, "state.encryptedPkceVerifier"),
+    clientId: requiredString(payload.clientId, "state.clientId"),
+    tokenEndpoint: requiredString(payload.tokenEndpoint, "state.tokenEndpoint"),
+    authorizationServer: requiredString(payload.authorizationServer, "state.authorizationServer"),
+    issuer: requiredString(payload.issuer, "state.issuer"),
+    clientRegistrationMethod: registrationMethod(payload.clientRegistrationMethod),
+    tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.tokenEndpointAuthMethod), false),
+    returnPath: safeReturnPath(stringValue(payload.returnPath) ?? "/integrations"),
+    nonce: requiredString(payload.nonce, "state.nonce"),
+    iat,
+  };
+  const connectionId = stringValue(payload.connectionId);
+  const connectionVersion = numberValue(payload.connectionVersion);
+  return {
+    ...parsed,
+    ...(connectionId ? { connectionId } : {}),
+    ...(connectionVersion !== undefined ? { connectionVersion } : {}),
+  };
+}
+
+async function clientForState(db: Database, settings: Settings, state: OAuthStatePayload): Promise<OAuthClientRegistration> {
+  if (state.clientRegistrationMethod === "cimd") {
+    return {
+      method: "cimd",
+      issuer: state.issuer,
+      authorizationServer: state.authorizationServer,
+      clientId: state.clientId,
+      tokenEndpointAuthMethod: "none",
+    };
+  }
+  if (state.clientRegistrationMethod === "dcr") {
+    const stored = await loadIntegrationOAuthClient(db, settings, state.issuer);
+    if (!stored || stored.clientId !== state.clientId) {
+      throw new HTTPException(400, { message: "OAuth client registration is no longer available" });
+    }
+    return {
+      method: "dcr",
+      issuer: stored.issuer,
+      authorizationServer: stored.authorizationServer,
+      clientId: stored.clientId,
+      ...(stored.clientSecret ? { clientSecret: stored.clientSecret } : {}),
+      tokenEndpointAuthMethod: tokenAuthMethod(stored.tokenEndpointAuthMethod, Boolean(stored.clientSecret)),
+    };
+  }
+  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  const entry = configured[state.issuer] ?? configured[state.authorizationServer];
+  if (!entry || entry.clientId !== state.clientId) {
+    throw new HTTPException(400, { message: "operator OAuth client credentials are no longer available" });
+  }
+  return {
+    method: "operator",
+    issuer: state.issuer,
+    authorizationServer: state.authorizationServer,
+    clientId: entry.clientId,
+    ...(entry.clientSecret ? { clientSecret: entry.clientSecret } : {}),
+    tokenEndpointAuthMethod: tokenAuthMethod(entry.tokenEndpointAuthMethod, Boolean(entry.clientSecret)),
+  };
+}
+
+async function exchangeAuthorizationCode(
+  settings: Settings,
+  input: {
+    code: string;
+    verifier: string;
+    redirectUri: string;
+    resource: string;
+    tokenEndpoint: string;
+    client: OAuthClientRegistration;
+  },
+): Promise<TokenResponse> {
+  await assertOAuthFetchAllowed(input.tokenEndpoint, settings);
+  const body = new URLSearchParams();
+  body.set("grant_type", "authorization_code");
+  body.set("code", input.code);
+  body.set("redirect_uri", input.redirectUri);
+  body.set("code_verifier", input.verifier);
+  body.set("resource", input.resource);
+  body.set("client_id", input.client.clientId);
+  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
+  if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_post") {
+    body.set("client_secret", input.client.clientSecret);
+  } else if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_basic") {
+    headers.authorization = `Basic ${Buffer.from(`${input.client.clientId}:${input.client.clientSecret}`).toString("base64")}`;
+  }
+  const response = await fetch(input.tokenEndpoint, { method: "POST", headers, body });
+  if (!response.ok) {
+    throw new Error(`OAuth token endpoint returned HTTP ${response.status}`);
+  }
+  const payload = await response.json() as Record<string, unknown>;
+  const accessToken = stringValue(payload.access_token);
+  if (!accessToken) {
+    throw new Error("OAuth token response did not include access_token");
+  }
+  return {
+    accessToken,
+    tokenType: stringValue(payload.token_type) ?? "Bearer",
+    expiresAt: expiresAtFromTokenResponse(payload),
+    raw: payload,
+    ...(stringValue(payload.refresh_token) ? { refreshToken: stringValue(payload.refresh_token)! } : {}),
+    ...(stringValue(payload.scope) ? { scopeText: stringValue(payload.scope)! } : {}),
+  };
+}
+
+async function verifyMcpToolsList(settings: Settings, resource: string, token: TokenResponse): Promise<Array<{ name: string; description?: string }>> {
+  await assertOAuthFetchAllowed(resource, settings);
+  const client = new Client({ name: "opengeni-integration-verify", version: "0.1.0" }, { capabilities: {} });
+  try {
+    const transport = new StreamableHTTPClientTransport(new URL(resource), {
+      requestInit: {
+        headers: { authorization: `${token.tokenType} ${token.accessToken}` },
+      },
+    });
+    await client.connect(transport as unknown as Transport, { timeout: 10_000, maxTotalTimeout: 10_000 });
+    const listed = await client.listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 });
+    return listed.tools.map((tool) => ({
+      name: tool.name,
+      ...(tool.description ? { description: tool.description } : {}),
+    }));
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+function credentialBundle(token: TokenResponse, state: OAuthStatePayload, client: OAuthClientRegistration): Record<string, unknown> {
+  return {
+    access_token: token.accessToken,
+    ...(token.refreshToken ? { refresh_token: token.refreshToken } : {}),
+    token_type: token.tokenType,
+    ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
+    resource: state.resource,
+    ...(token.scopeText ? { scope: token.scopeText } : state.authorizeScopes.length ? { scope: state.authorizeScopes.join(" ") } : {}),
+    token_endpoint: state.tokenEndpoint,
+    client_id: client.clientId,
+    ...(client.clientSecret ? { client_secret: client.clientSecret, token_endpoint_auth_method: client.tokenEndpointAuthMethod } : {}),
+  };
+}
+
+function callbackReturnPath(returnPath: string, status: "success" | "error", params: Record<string, string>): string {
+  const url = new URL(returnPath, "https://opengeni.local");
+  url.searchParams.set("integration_oauth", status);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+function canonicalMcpResource(value: string | undefined): string {
+  if (!value) {
+    throw new HTTPException(400, { message: "mcpUrl is required" });
+  }
+  const url = new URL(value);
+  url.hash = "";
+  return url.toString();
+}
+
+function canonicalProviderDomain(value: string): string {
+  return value.trim().toLowerCase().replace(/^www\./, "");
+}
+
+function safeReturnPath(value: string): string {
+  if (!value.startsWith("/") || value.startsWith("//")) {
+    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+  }
+  const parsed = new URL(value, "https://opengeni.local");
+  if (parsed.origin !== "https://opengeni.local") {
+    throw new HTTPException(400, { message: "OAuth returnPath must be a relative path" });
+  }
+  return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+async function fetchJsonObject(url: string, settings: Settings): Promise<Record<string, unknown>> {
+  await assertOAuthFetchAllowed(url, settings);
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("metadata response was not a JSON object");
+  }
+  return payload as Record<string, unknown>;
+}
+
+async function assertOAuthFetchAllowed(rawUrl: string, settings: Settings): Promise<void> {
+  const url = new URL(rawUrl);
+  if (!["https:", "http:"].includes(url.protocol)) {
+    throw new HTTPException(422, { message: "OAuth discovery only supports http and https URLs" });
+  }
+  if (settings.integrationsAllowPrivateNetworkTargets || ["local", "test"].includes(settings.environment)) {
+    return;
+  }
+  if (url.protocol !== "https:") {
+    throw new HTTPException(422, { message: "OAuth discovery targets must use https outside local/test" });
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) {
+    throw new HTTPException(422, { message: "OAuth discovery may not target localhost" });
+  }
+  const literal = isIP(hostname);
+  const addresses = literal ? [hostname] : (await lookup(hostname, { all: true })).map((entry) => entry.address);
+  if (addresses.some(isPrivateAddress)) {
+    throw new HTTPException(422, { message: "OAuth discovery may not target private network addresses" });
+  }
+}
+
+function isPrivateAddress(address: string): boolean {
+  if (address.includes(":")) {
+    const lower = address.toLowerCase();
+    return lower === "::1"
+      || lower === "::"
+      || lower.startsWith("fc")
+      || lower.startsWith("fd")
+      || lower.startsWith("fe8")
+      || lower.startsWith("fe9")
+      || lower.startsWith("fea")
+      || lower.startsWith("feb");
+  }
+  const parts = address.split(".").map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+    return true;
+  }
+  const [a, b] = parts as [number, number, number, number];
+  return a === 0
+    || a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
+}
+
+function parseWwwAuthenticate(header: string | null): WwwAuthenticateChallenge {
+  if (!header) {
+    return {};
+  }
+  const bearerIndex = header.toLowerCase().indexOf("bearer");
+  if (bearerIndex < 0) {
+    return {};
+  }
+  const paramsText = header.slice(bearerIndex + "bearer".length);
+  const params: Record<string, string> = {};
+  const re = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|[^,\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(paramsText)) !== null) {
+    const raw = match[2]!;
+    params[match[1]!.toLowerCase()] = raw.startsWith("\"") ? raw.slice(1, -1).replace(/\\"/g, "\"") : raw;
+  }
+  return {
+    ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata } : {}),
+    ...(params.scope ? { scope: params.scope.split(/\s+/).filter(Boolean) } : {}),
+    ...(params.error ? { error: params.error } : {}),
+  };
+}
+
+function wellKnownCandidates(rawUrl: string, name: string): string[] {
+  const url = new URL(rawUrl);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  return uniqueStrings([
+    `${url.origin}/.well-known/${name}${path ? `/${path}` : ""}`,
+    `${url.origin}${path ? `/${path}` : ""}/.well-known/${name}`,
+    `${url.origin}/.well-known/${name}`,
+  ]);
+}
+
+function chooseAuthorizeScopes(requested: string[] | undefined, challenged: string[] | undefined, supported: string[]): string[] {
+  if (requested?.length) {
+    return uniqueStrings(requested);
+  }
+  if (challenged?.length) {
+    return uniqueStrings(challenged);
+  }
+  return uniqueStrings(supported);
+}
+
+function grantedScopes(scopeText: string | undefined, fallback: string[]): string[] {
+  if (scopeText) {
+    return uniqueStrings(scopeText.split(/\s+/).filter(Boolean));
+  }
+  return fallback;
+}
+
+function tokenAuthMethod(raw: string | undefined, hasSecret: boolean): OAuthClientRegistration["tokenEndpointAuthMethod"] {
+  if (raw === "client_secret_post" || raw === "client_secret_basic") {
+    return raw;
+  }
+  return hasSecret ? "client_secret_post" : "none";
+}
+
+function registrationMethod(value: unknown): OAuthClientRegistration["method"] {
+  if (value === "operator" || value === "cimd" || value === "dcr") {
+    return value;
+  }
+  throw new HTTPException(400, { message: "invalid OAuth state" });
+}
+
+function expiresAtFromTokenResponse(payload: Record<string, unknown>): Date | null {
+  const expiresAt = stringValue(payload.expires_at);
+  if (expiresAt) {
+    const parsed = new Date(expiresAt);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  const expiresIn = typeof payload.expires_in === "number" ? payload.expires_in : Number(payload.expires_in);
+  if (Number.isFinite(expiresIn) && expiresIn > 0) {
+    return new Date(Date.now() + expiresIn * 1000);
+  }
+  return null;
+}
+
+function pkceChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+function randomPkceVerifier(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? uniqueStrings(value.filter((entry): entry is string => typeof entry === "string")) : [];
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function requiredString(value: unknown, field: string): string {
+  const result = stringValue(value);
+  if (!result) {
+    throw new HTTPException(400, { message: `invalid OAuth state: missing ${field}` });
+  }
+  return result;
+}

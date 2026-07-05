@@ -188,6 +188,39 @@ export const connections = pgTable("connections", {
   workspaceExpires: index("connections_workspace_expires_idx").on(table.workspaceId, table.expiresAt),
 }));
 
+// OAuth client registrations minted through MCP DCR, keyed by authorization
+// server issuer. This is deployment-wide client identity, not a workspace
+// credential; per-user/provider tokens still live only in connections.
+export const integrationOauthClients = pgTable("integration_oauth_clients", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  issuer: text("issuer").notNull(),
+  authorizationServer: text("authorization_server").notNull(),
+  clientId: text("client_id").notNull(),
+  clientSecretEncrypted: text("client_secret_encrypted"),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  issuer: uniqueIndex("integration_oauth_clients_issuer_idx").on(table.issuer),
+  authorizationServer: index("integration_oauth_clients_as_idx").on(table.authorizationServer),
+}));
+
+// Consumed OAuth state nonces. Rows are inserted only on callback; the primary
+// key makes a verified state single-use across API instances.
+export const integrationOauthStateNonces = pgTable("integration_oauth_state_nonces", {
+  nonce: text("nonce").primaryKey(),
+  accountId: uuid("account_id").notNull().references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  workspace: index("integration_oauth_state_nonces_workspace_idx").on(table.workspaceId),
+  expires: index("integration_oauth_state_nonces_expires_idx").on(table.expiresAt),
+}));
+
 // Per-workspace Codex account selection (the ACTIVE pointer) + P3 rotation
 // forward-compat. One row per workspace. The only P1-load-bearing column is
 // activeCredentialId — the account a session runs on when it has no pin. NULL ⇒

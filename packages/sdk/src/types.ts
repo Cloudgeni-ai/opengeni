@@ -325,7 +325,8 @@ export type ListConnectionsResponse = {
 };
 
 export type OAuthStartRequest = {
-  providerDomain: string;
+  providerDomain?: string | undefined;
+  mcpUrl?: string | undefined;
   resource?: string | undefined;
   requestedScopes?: string[] | undefined;
   returnPath?: string | undefined;

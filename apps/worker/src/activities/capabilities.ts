@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes, parseModelProvidersJson, type RegistryProvider, type Settings } from "@opengeni/config";
+import { settingsWithMcpCapabilityServers } from "@opengeni/core";
 import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_APPS_MCP_SERVER_NAME,
@@ -10,13 +11,11 @@ import {
   CODEX_PROVIDER_ID,
 } from "@opengeni/codex";
 import {
-  decryptedCapabilityHeaders,
   listEnabledMcpCapabilityServers,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   workspaceCodexSubscriptionActive,
   type Database,
-  type EnabledMcpCapabilityServer,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
 
@@ -143,33 +142,4 @@ export function withCodexProvider(settings: Settings): Settings {
     models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({ id: `${CODEX_MODEL_ID_PREFIX}${slug}`, label: slug, reasoningEffort: true })),
   };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, codexProvider]) };
-}
-
-function settingsWithMcpCapabilityServers(settings: Settings, enabled: EnabledMcpCapabilityServer[]): Settings {
-  if (enabled.length === 0) {
-    return settings;
-  }
-  const encryptionKey = environmentsEncryptionKeyBytes(settings);
-  const existingIds = new Set(settings.mcpServers.map((server) => server.id));
-  const dynamicServers = enabled
-    .filter((server) => !existingIds.has(server.id))
-    .flatMap((server) => {
-      const headers = decryptedCapabilityHeaders(server, encryptionKey);
-      if (headers === "unavailable" && !server.connectionRef) {
-        // Without its credential headers this server can only fail auth at
-        // connect time and break agent turns; leave it out of the run.
-        return [];
-      }
-      return [{
-        id: server.id,
-        name: server.name,
-        url: server.url,
-        ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
-        ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
-        cacheToolsList: server.cacheToolsList ?? false,
-        ...(headers && headers !== "unavailable" ? { headers } : {}),
-        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
-      }];
-    });
-  return dynamicServers.length ? { ...settings, mcpServers: [...settings.mcpServers, ...dynamicServers] } : settings;
 }

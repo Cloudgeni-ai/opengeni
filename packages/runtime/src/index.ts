@@ -1513,7 +1513,8 @@ function connectionBrokerFetch(
       }
       const retry = await baseFetch(fetchInputForAttempt(input), withConnectionHeaders(input, init, refreshed.headers));
       if (retry.status === 403) {
-        return await insufficientScopeResponse(options, config.id, request, connectionRef, refreshed.connectionId);
+        const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
+        return auth ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef) : retry;
       }
       if (retry.status === 401) {
         return await authNeededFetchResponse(options, config.id, request, {
@@ -1528,7 +1529,8 @@ function connectionBrokerFetch(
       return retry;
     }
     if (response.status === 403) {
-      return await insufficientScopeResponse(options, config.id, request, connectionRef, first.connectionId);
+      const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
+      return auth ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef) : response;
     }
     return response;
   };
@@ -1573,21 +1575,23 @@ async function resolveConnectionForRequest(
   }
 }
 
-async function insufficientScopeResponse(
-  options: PrepareToolsOptions,
-  serverId: string,
-  request: McpRequestInfo,
+function insufficientScopeAuth(
+  headers: Headers,
   connectionRef: McpServerConnectionRef,
   connectionId: string,
-): Promise<Response> {
-  return await authNeededFetchResponse(options, serverId, request, {
+): Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }> | null {
+  const challenge = parseWwwAuthenticate(headers.get("www-authenticate"));
+  if (challenge.error !== "insufficient_scope") {
+    return null;
+  }
+  return {
     status: "auth_needed",
     reason: "insufficient_scope",
     providerDomain: connectionRef.providerDomain,
     connectionId,
-    ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-    ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-  }, connectionRef);
+    ...(challenge.scope?.length ? { scopes: challenge.scope } : connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+    ...(challenge.resource ? { resource: challenge.resource } : connectionRef.resource ? { resource: connectionRef.resource } : {}),
+  };
 }
 
 async function authNeededFetchResponse(
@@ -1664,6 +1668,29 @@ function withConnectionHeaders(input: string | URL | Request, init: RequestInit 
 
 function fetchInputForAttempt(input: string | URL | Request): string | URL | Request {
   return input instanceof Request ? input.clone() : input;
+}
+
+function parseWwwAuthenticate(header: string | null): { error?: string; scope?: string[]; resource?: string } {
+  if (!header) {
+    return {};
+  }
+  const bearerIndex = header.toLowerCase().indexOf("bearer");
+  if (bearerIndex < 0) {
+    return {};
+  }
+  const paramsText = header.slice(bearerIndex + "bearer".length);
+  const params: Record<string, string> = {};
+  const re = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|[^,\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(paramsText)) !== null) {
+    const raw = match[2]!;
+    params[match[1]!.toLowerCase()] = raw.startsWith("\"") ? raw.slice(1, -1).replace(/\\"/g, "\"") : raw;
+  }
+  return {
+    ...(params.error ? { error: params.error } : {}),
+    ...(params.scope ? { scope: params.scope.split(/\s+/).filter(Boolean) } : {}),
+    ...(params.resource ? { resource: params.resource } : {}),
+  };
 }
 
 // Application-defined JSON-RPC error code marking "this tool call needs a

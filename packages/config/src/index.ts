@@ -165,6 +165,8 @@ const SettingsSchema = z.object({
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
+  integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  integrationsOauthClientsJson: z.string().default("{}"),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -695,6 +697,13 @@ const RegistryProviderSchema = z.object({
 });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 
+export const IntegrationOAuthClientConfigSchema = z.object({
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1).optional(),
+  tokenEndpointAuthMethod: z.enum(["none", "client_secret_post", "client_secret_basic"]).default("none"),
+});
+export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClientConfigSchema>;
+
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
  * The built-in OpenAI/Azure provider is always present and always "responses";
@@ -899,6 +908,8 @@ export function getSettings(): Settings {
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
+    integrationsAllowPrivateNetworkTargets: optional("OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS"),
+    integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
@@ -1734,6 +1745,34 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
   });
 }
 
+export function parseIntegrationsOauthClientsJson(raw: string | undefined): Record<string, IntegrationOAuthClientConfig> {
+  if (!raw?.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON must be a JSON object keyed by authorization-server issuer or URL");
+  }
+  const out: Record<string, IntegrationOAuthClientConfig> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!key.trim()) {
+      throw new Error("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON contains an empty issuer key");
+    }
+    const result = IntegrationOAuthClientConfigSchema.safeParse(value);
+    if (!result.success) {
+      throw new Error(`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON client for ${key} is invalid: ${result.error.message}`);
+    }
+    out[key] = result.data;
+  }
+  return out;
+}
+
 export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
@@ -1897,6 +1936,7 @@ function validateSettings(settings: Settings): void {
       throw new Error("OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test");
     }
   }
+  parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   if (
     settings.productAccessMode === "configured"
     && !["local", "test"].includes(settings.environment)

@@ -1220,6 +1220,7 @@ export type UpdateConnectionInput = {
   workspaceId: string;
   connectionId: string;
   visibleToSubjectId?: string | null;
+  expectedVersion?: number | undefined;
   subjectId?: string | null;
   providerDomain?: string;
   kind?: ConnectionKind;
@@ -1245,6 +1246,36 @@ export type ConnectionCredentialForBroker = {
   lastRefreshAt: Date | null;
   version: number;
   metadata: Record<string, unknown>;
+};
+
+export type IntegrationOAuthClientForUse = {
+  id: string;
+  issuer: string;
+  authorizationServer: string;
+  clientId: string;
+  clientSecret: string | null;
+  tokenEndpointAuthMethod: string;
+  metadata: Record<string, unknown>;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type StoreIntegrationOAuthClientInput = {
+  issuer: string;
+  authorizationServer: string;
+  clientId: string;
+  clientSecretEncrypted?: string | null;
+  tokenEndpointAuthMethod?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type ConsumeOAuthStateNonceInput = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  nonce: string;
+  expiresAt: Date;
+  now: Date;
 };
 
 export type CreateCapabilityCatalogItemInput = {
@@ -1906,6 +1937,7 @@ export async function updateConnection(db: Database, input: UpdateConnectionInpu
         eq(schema.connections.workspaceId, input.workspaceId),
         eq(schema.connections.id, input.connectionId),
         connectionSubjectVisibility(input.visibleToSubjectId),
+        ...(input.expectedVersion !== undefined ? [eq(schema.connections.version, input.expectedVersion)] : []),
       ))
       .returning(connectionMetadataColumns);
     return row ? mapConnectionMetadata(row) : null;
@@ -2055,6 +2087,85 @@ export async function recordConnectionUsed(db: Database, workspaceId: string, co
       lastUsedAt: new Date(),
       updatedAt: new Date(),
     }).where(and(eq(schema.connections.workspaceId, workspaceId), eq(schema.connections.id, connectionId)));
+  });
+}
+
+export async function loadIntegrationOAuthClient(
+  db: Database,
+  settings: Settings,
+  issuer: string,
+): Promise<IntegrationOAuthClientForUse | null> {
+  const [row] = await db.select().from(schema.integrationOauthClients)
+    .where(eq(schema.integrationOauthClients.issuer, issuer))
+    .limit(1);
+  if (!row) {
+    return null;
+  }
+  let clientSecret: string | null = null;
+  if (row.clientSecretEncrypted) {
+    const key = environmentsEncryptionKeyBytes(settings);
+    if (!key) {
+      throw new Error("OAuth client secret present but OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
+    }
+    clientSecret = decryptEnvironmentValue(key, row.clientSecretEncrypted);
+  }
+  return {
+    id: row.id,
+    issuer: row.issuer,
+    authorizationServer: row.authorizationServer,
+    clientId: row.clientId,
+    clientSecret,
+    tokenEndpointAuthMethod: row.tokenEndpointAuthMethod,
+    metadata: row.metadata,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export async function storeIntegrationOAuthClient(
+  db: Database,
+  input: StoreIntegrationOAuthClientInput,
+): Promise<void> {
+  await db.insert(schema.integrationOauthClients).values({
+    issuer: input.issuer,
+    authorizationServer: input.authorizationServer,
+    clientId: input.clientId,
+    clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+    tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+    metadata: input.metadata ?? {},
+  }).onConflictDoUpdate({
+    target: schema.integrationOauthClients.issuer,
+    set: {
+      authorizationServer: input.authorizationServer,
+      clientId: input.clientId,
+      clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+      metadata: input.metadata ?? {},
+      updatedAt: new Date(),
+    },
+  });
+}
+
+export async function consumeIntegrationOAuthStateNonce(
+  db: Database,
+  input: ConsumeOAuthStateNonceInput,
+): Promise<boolean> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async (scopedDb) => {
+    await scopedDb.delete(schema.integrationOauthStateNonces)
+      .where(and(
+        eq(schema.integrationOauthStateNonces.workspaceId, input.workspaceId),
+        lt(schema.integrationOauthStateNonces.expiresAt, input.now),
+      ));
+    const inserted = await scopedDb.insert(schema.integrationOauthStateNonces).values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      nonce: input.nonce,
+      expiresAt: input.expiresAt,
+      usedAt: input.now,
+    }).onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+      .returning({ nonce: schema.integrationOauthStateNonces.nonce });
+    return inserted.length > 0;
   });
 }
 

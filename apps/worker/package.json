@@ -41,6 +41,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/core": "workspace:*",
     "@opengeni/db": "workspace:*",
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",

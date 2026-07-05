@@ -37,6 +37,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     environmentsEncryptionKey: undefined,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
+    integrationsAllowPrivateNetworkTargets: false,
+    integrationsOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
     goalNoProgressLimit: 3,
     agentMaxModelCallsPerTurn: 40,

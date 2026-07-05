@@ -8,14 +8,17 @@ import {
   ConnectionRefreshHttpError,
   createConnection,
   createDb,
+  consumeIntegrationOAuthStateNonce,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  loadIntegrationOAuthClient,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   recordConnectionTokenRefresh,
   refreshOAuthConnectionCredential,
   revokeConnection,
   setConnectionStatus,
+  storeIntegrationOAuthClient,
   type ConnectionBrokerDeps,
   type ConnectionCredentialForBroker,
   type Database,
@@ -345,6 +348,73 @@ describe("connections table and helpers", () => {
     });
     expect(loaded?.id).toBe(active.id);
     expect(loaded?.status).toBe("active");
+  });
+
+  test("DCR OAuth clients are stored per issuer with encrypted secrets", async () => {
+    if (!available) return;
+    await storeIntegrationOAuthClient(db, {
+      issuer: "https://as.example.com",
+      authorizationServer: "https://as.example.com",
+      clientId: "client-1",
+      clientSecretEncrypted: enc({ secret: "wrong-shape" }),
+      tokenEndpointAuthMethod: "client_secret_post",
+    });
+    await storeIntegrationOAuthClient(db, {
+      issuer: "https://as.example.com",
+      authorizationServer: "https://as.example.com",
+      clientId: "client-2",
+      clientSecretEncrypted: encryptEnvironmentValue(key, "secret-2"),
+      tokenEndpointAuthMethod: "client_secret_post",
+      metadata: { registrationEndpoint: "https://as.example.com/register" },
+    });
+    const loaded = await loadIntegrationOAuthClient(db, settings, "https://as.example.com");
+    expect(loaded).toMatchObject({
+      issuer: "https://as.example.com",
+      authorizationServer: "https://as.example.com",
+      clientId: "client-2",
+      clientSecret: "secret-2",
+      tokenEndpointAuthMethod: "client_secret_post",
+      metadata: { registrationEndpoint: "https://as.example.com/register" },
+    });
+  });
+
+  test("OAuth state nonce consumption is single-use and TTL-cleaned per workspace", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const now = new Date();
+    const first = await consumeIntegrationOAuthStateNonce(db, {
+      ...ws,
+      subjectId: "subject-a",
+      nonce: "nonce-1",
+      expiresAt: new Date(now.getTime() + 60_000),
+      now,
+    });
+    const replay = await consumeIntegrationOAuthStateNonce(db, {
+      ...ws,
+      subjectId: "subject-a",
+      nonce: "nonce-1",
+      expiresAt: new Date(now.getTime() + 60_000),
+      now,
+    });
+    expect(first).toBe(true);
+    expect(replay).toBe(false);
+
+    const expired = await consumeIntegrationOAuthStateNonce(db, {
+      ...ws,
+      subjectId: "subject-a",
+      nonce: "expired",
+      expiresAt: new Date(now.getTime() - 60_000),
+      now: new Date(now.getTime() - 120_000),
+    });
+    expect(expired).toBe(true);
+    const afterCleanup = await consumeIntegrationOAuthStateNonce(db, {
+      ...ws,
+      subjectId: "subject-a",
+      nonce: "expired",
+      expiresAt: new Date(now.getTime() + 60_000),
+      now,
+    });
+    expect(afterCleanup).toBe(true);
   });
 });
 

@@ -2233,11 +2233,15 @@ export const ListConnectionsResponse = z.object({
 export type ListConnectionsResponse = z.infer<typeof ListConnectionsResponse>;
 
 export const OAuthStartRequest = z.object({
-  providerDomain: z.string().min(1),
+  providerDomain: z.string().min(1).optional(),
+  mcpUrl: z.string().url().optional(),
   resource: z.string().min(1).optional(),
   requestedScopes: z.array(z.string().min(1)).default([]),
   returnPath: z.string().min(1).optional(),
   connectionId: z.string().uuid().optional(),
+}).refine((value) => Boolean(value.mcpUrl ?? value.resource), {
+  message: "mcpUrl is required",
+  path: ["mcpUrl"],
 });
 export type OAuthStartRequest = z.infer<typeof OAuthStartRequest>;
 

@@ -1569,6 +1569,7 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer scoped-token" },
       forbiddenTools: ["search_documents"],
+      forbiddenAuthenticateHeader: 'Bearer error="insufficient_scope", scope="documents:read documents:write"',
     });
     const authNeeded: unknown[] = [];
     const prepared = await prepareAgentTools(testSettings({
@@ -1600,8 +1601,45 @@ describe("runtime event normalization", () => {
         providerDomain: "api.example.com",
         connectionId,
         reason: "insufficient_scope",
-        scopes: ["documents:read"],
+        scopes: ["documents:read", "documents:write"],
       }));
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("leaves brokered 403 responses without insufficient_scope challenge as normal tool errors", async () => {
+    const connectionId = "56565656-5656-4565-8565-565656565656";
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer scoped-token" },
+      forbiddenTools: ["search_documents"],
+    });
+    const authNeeded: unknown[] = [];
+    const prepared = await prepareAgentTools(testSettings({
+      mcpServers: [{
+        id: "cap-forbidden",
+        name: "Forbidden capability MCP",
+        url: mcp.url,
+        connectionRef: {
+          connectionId,
+          providerDomain: "api.example.com",
+          kind: "api_key",
+          scopes: ["documents:read"],
+          subjectScope: "workspace",
+        },
+        cacheToolsList: false,
+      }],
+    }), [{ kind: "mcp", id: "cap-forbidden" }], {
+      workspaceId: "67676767-6767-4676-8676-676767676767",
+      resolveCredential: async () => ({ status: "ok", connectionId, headers: { authorization: "Bearer scoped-token" } }),
+      onAuthNeeded: (payload) => { authNeeded.push(payload); },
+    });
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      await expect(prepared.mcpServers[0]!.callTool("cap-forbidden__search_documents", { query: "scope" }))
+        .rejects.toThrow(/403|forbidden|insufficient_scope/i);
+      expect(authNeeded).toEqual([]);
     } finally {
       await prepared.close();
       mcp.close();
