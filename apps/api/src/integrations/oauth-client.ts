@@ -668,6 +668,7 @@ async function verifyMcpToolsList(settings: Settings, resource: string, token: T
       requestInit: {
         headers: { authorization: `${token.tokenType} ${token.accessToken}` },
       },
+      fetch: (url, init) => fetchOAuth(url.toString(), settings, init),
     });
     await client.connect(transport as unknown as Transport, { timeout: 10_000, maxTotalTimeout: 10_000 });
     const listed = await client.listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 });

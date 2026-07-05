@@ -105,6 +105,21 @@ async function bearer(
   return `Bearer ${token}`;
 }
 
+function requestHeaderValue(headers: HeadersInit | undefined, name: string): string | null {
+  if (!headers) {
+    return null;
+  }
+  if (headers instanceof Headers) {
+    return headers.get(name);
+  }
+  const lowerName = name.toLowerCase();
+  if (Array.isArray(headers)) {
+    return headers.find(([key]) => key.toLowerCase() === lowerName)?.[1] ?? null;
+  }
+  const record = headers as Record<string, string>;
+  return record[name] ?? record[lowerName] ?? null;
+}
+
 type FakeAuthorizationServer = {
   url: string;
   tokenRequests: URLSearchParams[];
@@ -527,6 +542,68 @@ describe("connections routes", () => {
       expect(response.status).toBe(422);
       expect(await response.text()).toContain("private network");
       expect(hits).toEqual(["https://1.1.1.1/mcp", "https://1.1.1.1/prm"]);
+      expect(privateHopHits).toBe(0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("oauth callback verifies MCP tools through guarded fetch redirects", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const originalFetch = globalThis.fetch;
+    const hits: string[] = [];
+    let privateHopHits = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      hits.push(url);
+      expect(init?.redirect).toBe("manual");
+      if (url === "https://1.1.1.1/token") {
+        const body = new URLSearchParams(String(init?.body));
+        expect(body.get("resource")).toBe("https://1.1.1.1/mcp");
+        return Response.json({
+          access_token: "mcp-access-token",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "documents:read",
+        });
+      }
+      if (url === "https://1.1.1.1/mcp") {
+        expect(requestHeaderValue(init?.headers, "authorization")).toBe("Bearer mcp-access-token");
+        return new Response("", {
+          status: 302,
+          headers: { location: "https://127.0.0.1/private-mcp" },
+        });
+      }
+      if (url === "https://127.0.0.1/private-mcp") {
+        privateHopHits += 1;
+        return Response.json({ tools: [] });
+      }
+      return new Response("unexpected fetch", { status: 500 });
+    }) as typeof fetch;
+    const state = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      providerDomain: "verify-redirect.example.com",
+      resource: "https://1.1.1.1/mcp",
+      requestedScopes: [],
+      authorizeScopes: ["documents:read"],
+      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "verify-redirect-verifier"),
+      clientId: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
+      tokenEndpoint: "https://1.1.1.1/token",
+      authorizationServer: "https://as.example.com",
+      issuer: "https://as.example.com",
+      clientRegistrationMethod: "cimd",
+      tokenEndpointAuthMethod: "none",
+      returnPath: "/integrations",
+    });
+    try {
+      const response = await publicApp(client.db, { environment: "production" })
+        .request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
+      expect(response.status).toBe(422);
+      expect(await response.text()).toContain("private network");
+      expect(hits).toEqual(["https://1.1.1.1/token", "https://1.1.1.1/mcp"]);
       expect(privateHopHits).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;

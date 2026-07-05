@@ -329,7 +329,11 @@ export async function refreshOAuthConnectionCredential(
     method: "POST",
     headers,
     body,
+    redirect: "manual",
   });
+  if (response.status >= 300 && response.status < 400) {
+    throw new ConnectionRefreshHttpError(response.status);
+  }
   if (!response.ok) {
     throw new ConnectionRefreshHttpError(response.status);
   }

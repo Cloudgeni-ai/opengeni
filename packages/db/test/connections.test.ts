@@ -574,6 +574,77 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.status).toBe(0);
   });
 
+  test("refresh token POST rejects redirects without marking needs_reauth", async () => {
+    let redirectTargetHits = 0;
+    const redirectTarget = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        redirectTargetHits += 1;
+        return Response.json({ access_token: "redirected-token", token_type: "Bearer", expires_in: 3600 });
+      },
+    });
+    let tokenHits = 0;
+    let tokenRequestBody: URLSearchParams | null = null;
+    const tokenEndpoint = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        tokenHits += 1;
+        tokenRequestBody = new URLSearchParams(await request.text());
+        return new Response("", {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${redirectTarget.port}/capture` },
+        });
+      },
+    });
+    try {
+      const stale = brokerCredential({
+        id: "conn_oauth",
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        credential: {
+          access_token: "AC",
+          refresh_token: "RF",
+          token_type: "Bearer",
+          token_endpoint: `http://127.0.0.1:${tokenEndpoint.port}/token`,
+        },
+        expiresAt: new Date(Date.now() - 1_000),
+        version: 3,
+      });
+      let observedError: unknown;
+      const { deps, counts } = resolverDeps({
+        loadCredential: async () => stale,
+        refresh: async (cred, ref) => {
+          counts.refresh += 1;
+          try {
+            return await refreshOAuthConnectionCredential(cred, ref);
+          } catch (error) {
+            observedError = error;
+            throw error;
+          }
+        },
+      });
+      const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+      const result = await resolver({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+      });
+      expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
+      expect(observedError).toBeInstanceOf(ConnectionRefreshHttpError);
+      expect((observedError as ConnectionRefreshHttpError).httpStatus).toBe(302);
+      expect(counts.status).toBe(0);
+      expect(tokenHits).toBe(1);
+      expect(tokenRequestBody!.get("grant_type")).toBe("refresh_token");
+      expect(tokenRequestBody!.get("refresh_token")).toBe("RF");
+      expect(redirectTargetHits).toBe(0);
+    } finally {
+      tokenEndpoint.stop(true);
+      redirectTarget.stop(true);
+    }
+  });
+
   test("public-client refresh sends client_id from the credential bundle", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: URLSearchParams | null = null;
