@@ -143,7 +143,10 @@ function checkMcpDefaults(file: string, text: string, out: Finding[]): void {
   if (!isSourceLike(file)) {
     return;
   }
-  if (text.includes("/v1/mcp") && !text.includes("/v1/workspaces/{workspaceId}/mcp") && !text.includes("/v1/workspaces/${workspaceId}/mcp")) {
+  // Third-party absolute URLs (registry/catalog data) may contain "/v1/mcp" in
+  // their own vendor paths; this guard targets OUR first-party default route.
+  const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) => (url.includes("opengeni") ? url : ""));
+  if (withoutForeignUrls.includes("/v1/mcp") && !text.includes("/v1/workspaces/{workspaceId}/mcp") && !text.includes("/v1/workspaces/${workspaceId}/mcp")) {
     out.push({ file, message: "contains unscoped first-party MCP default; use /v1/workspaces/{workspaceId}/mcp" });
   }
 }
