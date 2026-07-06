@@ -8,13 +8,39 @@ import {
   capabilityKindLabel,
   capabilityMonogram,
   capabilitySourceLabel,
+  connectionForCapability,
   domainFromUrl,
   emptyCapabilityForm,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
+  normalizeProviderDomain,
   oauthResumeAction,
 } from "./capabilities";
-import type { CapabilityCatalogItem, CapabilityKind } from "@/types";
+import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
+
+function connection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+  return {
+    id: "conn-1",
+    accountId: "a",
+    workspaceId: "ws",
+    subjectId: null,
+    providerDomain: "linear.app",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {},
+    createdBySubjectId: null,
+    updatedBySubjectId: null,
+    createdAt: "",
+    updatedAt: "",
+    ...overrides,
+  };
+}
 
 function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalogItem {
   return {
@@ -195,6 +221,36 @@ describe("oauthResumeAction", () => {
 
   test("a fresh connect of a disabled item enables it", () => {
     expect(oauthResumeAction(item({ enabled: false }), "conn-1")).toBe("enable");
+  });
+});
+
+describe("normalizeProviderDomain", () => {
+  test("trims, lowercases, and strips a single leading www.", () => {
+    expect(normalizeProviderDomain("  WWW.Linear.App ")).toBe("linear.app");
+    expect(normalizeProviderDomain("API.Supabase.com")).toBe("api.supabase.com");
+    expect(normalizeProviderDomain("linear.app")).toBe("linear.app");
+    // Only the leading www. is stripped; an inner "www" stays.
+    expect(normalizeProviderDomain("www.www.example.com")).toBe("www.example.com");
+  });
+});
+
+describe("connectionForCapability", () => {
+  test("matches across case and www differences between catalog and connection row", () => {
+    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "WWW.Linear.App" });
+    const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: null })];
+    expect(connectionForCapability(cap, conns)?.id).toBe("c1");
+  });
+
+  test("ignores subject-scoped connections (only workspace-shared)", () => {
+    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "linear.app" });
+    const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: "user-1" })];
+    expect(connectionForCapability(cap, conns)).toBeNull();
+  });
+
+  test("returns null when no domain matches", () => {
+    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "notion.com" });
+    const conns = [connection({ id: "c1", providerDomain: "linear.app" })];
+    expect(connectionForCapability(cap, conns)).toBeNull();
   });
 });
 

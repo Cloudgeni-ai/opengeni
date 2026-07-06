@@ -210,8 +210,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           kind: "api_key",
           credential: { headers: action.headers },
         });
+        // Build the enable ref from the CREATED connection row, never the
+        // catalog domain — the API may canonicalize providerDomain at create,
+        // and the row is the authoritative match the enable path validates against.
         await client.enableCapability(workspaceId, persisted.id, {
-          connectionRef: { connectionId: connection.id, providerDomain: plan.providerDomain, kind: "api_key" },
+          connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
         });
         await refresh();
         onRuntimeChanged();
@@ -270,6 +273,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   async function resumeOAuthConnect(itemId: string | null, connectionId: string | null) {
     setBusyId(itemId ?? "oauth-return");
+    // Hoisted above the try so the catch can reopen the sheet from the freshly
+    // fetched rows (falling back to closure items only if the fetch itself failed).
+    let freshItems: CapabilityCatalogItem[] | null = null;
     try {
       // Resolve the item from a FRESH catalog fetch: a registry item persisted
       // moments before the redirect won't be in the pre-redirect snapshot.
@@ -277,6 +283,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         client.listCapabilities(workspaceId),
         client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]),
       ]);
+      freshItems = catalog.items;
       setItems(catalog.items);
       setConnections(conns);
       const item = (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
@@ -300,10 +307,17 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         return;
       }
 
-      const plan = capabilityConnectPlan(item!);
-      const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item!.providerDomain ?? "";
+      // Enable against the AUTHORITATIVE connection row (matched by the id from
+      // the redirect), never a domain reconstructed from catalog data — the API
+      // canonicalizes providerDomain, and the row is what the enable path
+      // validates against. A missing row means we can't enable safely.
+      const connection = conns.find((candidate) => candidate.id === connectionId) ?? null;
+      if (!connection) {
+        toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
+        return;
+      }
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: { connectionId: connectionId!, providerDomain, kind: "oauth2" },
+        connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "oauth2" },
       });
       await refresh();
       onRuntimeChanged();
@@ -313,7 +327,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
-      const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
+      const item = itemId ? (freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null : null;
       if (item) setSelected({ item, registry: false });
       toast.error(copy.title, { description: copy.description });
     } finally {

@@ -190,7 +190,23 @@ export function connectionForCapability(item: CapabilityCatalogItem, connections
   const plan = capabilityConnectPlan(item);
   const providerDomain = plan.mode === "enable" ? item.providerDomain : plan.providerDomain;
   if (!providerDomain) return null;
-  return connections.find((connection) => connection.subjectId === null && connection.providerDomain === providerDomain) ?? null;
+  // Normalize BOTH sides: the catalog domain is raw while the connection row's
+  // domain is stored canonicalized by the API, so a health lookup must compare
+  // like for like or an enabled item reads as never-connected.
+  const target = normalizeProviderDomain(providerDomain);
+  return connections.find(
+    (connection) => connection.subjectId === null && normalizeProviderDomain(connection.providerDomain) === target,
+  ) ?? null;
+}
+
+/**
+ * Client mirror of the API's `canonicalProviderDomain` (apps/api oauth-client):
+ * trim, lowercase, strip a single leading "www.". Kept only for the health
+ * lookup — connectionRefs sent to the API are always built from the connection
+ * row the API returns, never from a domain the client canonicalized.
+ */
+export function normalizeProviderDomain(domain: string): string {
+  return domain.trim().toLowerCase().replace(/^www\./, "");
 }
 
 /**
