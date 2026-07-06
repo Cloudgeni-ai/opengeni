@@ -32,6 +32,7 @@ import {
   createInputFromCatalogItem,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
+  oauthResumeAction,
   type CapabilityFilter,
   type CapabilityFormState,
 } from "@/lib/capabilities";
@@ -249,20 +250,14 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     oauthHandled.current = true;
 
     const itemId = params.get("connect_item");
-    const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
     // Strip the OAuth params so a refresh doesn't reprocess them.
     window.history.replaceState(null, "", window.location.pathname);
 
     if (outcome === "success") {
-      const connectionId = params.get("connectionId");
-      if (item && connectionId) {
-        void resumeOAuthEnable(item, connectionId);
-      } else {
-        void refresh();
-        toast.success("Connected");
-      }
+      void resumeOAuthConnect(itemId, params.get("connectionId"));
     } else {
       const reason = params.get("reason");
+      const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
       if (item) {
         setSheetError(reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
         setSelected({ item, registry: false });
@@ -273,31 +268,53 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items]);
 
-  async function resumeOAuthEnable(item: CapabilityCatalogItem, connectionId: string) {
-    setBusyId(item.id);
+  async function resumeOAuthConnect(itemId: string | null, connectionId: string | null) {
+    setBusyId(itemId ?? "oauth-return");
     try {
-      // A reconnect returns for an item that is already enabled — the connection
-      // row was refreshed in place, so there's nothing to enable; just confirm.
-      if (item.enabled) {
-        await refresh();
+      // Resolve the item from a FRESH catalog fetch: a registry item persisted
+      // moments before the redirect won't be in the pre-redirect snapshot.
+      const [catalog, conns] = await Promise.all([
+        client.listCapabilities(workspaceId),
+        client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]),
+      ]);
+      setItems(catalog.items);
+      setConnections(conns);
+      const item = (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
+      const action = oauthResumeAction(item, connectionId);
+
+      if (action === "missing") {
+        // Connection was created but the catalog row is gone — never leave the
+        // success half-handled silently; say plainly it wasn't enabled.
+        toast.success("Connected — but this integration is no longer in the catalog, so it wasn't enabled.");
+        return;
+      }
+      if (action === "no_connection") {
+        toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
+        return;
+      }
+      if (action === "reconnect") {
+        // Already enabled: the connection row was refreshed in place.
         onRuntimeChanged();
-        toast.success(`Reconnected ${item.name}`);
+        toast.success(`Reconnected ${item!.name}`);
         setSelected(null);
         return;
       }
-      const plan = capabilityConnectPlan(item);
-      const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item.providerDomain ?? "";
-      await client.enableCapability(workspaceId, item.id, {
-        connectionRef: { connectionId, providerDomain, kind: "oauth2" },
+
+      const plan = capabilityConnectPlan(item!);
+      const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item!.providerDomain ?? "";
+      await client.enableCapability(workspaceId, item!.id, {
+        connectionRef: { connectionId: connectionId!, providerDomain, kind: "oauth2" },
       });
       await refresh();
       onRuntimeChanged();
-      toast.success(`Connected and enabled ${item.name}`);
+      toast.success(`Connected and enabled ${item!.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
       setSheetError(copy.description);
-      setSelected({ item, registry: false });
+      // Reopen the sheet on the item so the failure has a Retry, when resolvable.
+      const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
+      if (item) setSelected({ item, registry: false });
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -709,20 +726,28 @@ function RegistryFallback({
   );
 }
 
-// A sentinel that loads the next window of tiles when scrolled into view.
+// A sentinel that loads the next window of tiles when scrolled into view. The
+// observer is created ONCE per mount and reads the latest callback through a
+// ref — the parent passes a fresh inline onReach every render, and rebuilding
+// the observer each time would re-fire the intersection immediately while the
+// sentinel is still in view, defeating the windowing (a runaway page load).
 function LoadMoreSentinel({ onReach }: { onReach: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  const onReachRef = useRef(onReach);
+  useEffect(() => {
+    onReachRef.current = onReach;
+  }, [onReach]);
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) onReach();
+        if (entries.some((entry) => entry.isIntersecting)) onReachRef.current();
       },
       { rootMargin: "600px" },
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, [onReach]);
+  }, []);
   return <div ref={ref} className="h-1" aria-hidden />;
 }

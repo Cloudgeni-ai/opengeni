@@ -193,6 +193,24 @@ export function connectionForCapability(item: CapabilityCatalogItem, connections
   return connections.find((connection) => connection.subjectId === null && connection.providerDomain === providerDomain) ?? null;
 }
 
+/**
+ * What to do when an OAuth round-trip returns, once the item has been resolved
+ * from a FRESH catalog fetch (a just-created registry item may be absent from
+ * the pre-redirect snapshot). Pure so the decision is unit-testable:
+ * - missing: success but the item is no longer in the catalog → can't enable.
+ * - no_connection: success but no connection id came back → can't enable.
+ * - reconnect: the item was already enabled → the connection was refreshed.
+ * - enable: a fresh connect → enable with the new connection ref.
+ */
+export type OAuthResumeAction = "missing" | "no_connection" | "reconnect" | "enable";
+
+export function oauthResumeAction(item: CapabilityCatalogItem | null, connectionId: string | null): OAuthResumeAction {
+  if (!item) return "missing";
+  if (!connectionId) return "no_connection";
+  if (item.enabled) return "reconnect";
+  return "enable";
+}
+
 /** First one or two initials for the logo monogram fallback. */
 export function capabilityMonogram(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean);

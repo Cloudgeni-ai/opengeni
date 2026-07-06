@@ -12,6 +12,7 @@ import {
   emptyCapabilityForm,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
+  oauthResumeAction,
 } from "./capabilities";
 import type { CapabilityCatalogItem, CapabilityKind } from "@/types";
 
@@ -175,6 +176,25 @@ describe("capabilityFormError", () => {
   test("non-MCP kinds never ask for a URL", () => {
     expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "skill", name: "Summarize", endpointUrl: "" })).toBeNull();
     expect(capabilityFormError({ ...emptyCapabilityForm(), kind: "api", name: "Weather", endpointUrl: "" })).toBeNull();
+  });
+});
+
+describe("oauthResumeAction", () => {
+  test("a missing catalog row can't be enabled", () => {
+    // The item resolved from the fresh post-redirect fetch is null.
+    expect(oauthResumeAction(null, "conn-1")).toBe("missing");
+  });
+
+  test("a success with no connection id can't be enabled", () => {
+    expect(oauthResumeAction(item({ enabled: false }), null)).toBe("no_connection");
+  });
+
+  test("an already-enabled item is a reconnect, not a re-enable", () => {
+    expect(oauthResumeAction(item({ enabled: true }), "conn-1")).toBe("reconnect");
+  });
+
+  test("a fresh connect of a disabled item enables it", () => {
+    expect(oauthResumeAction(item({ enabled: false }), "conn-1")).toBe("enable");
   });
 });
 
