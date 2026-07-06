@@ -23,11 +23,13 @@ import type {
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
+  ConnectionMetadata,
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
+  CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
   CreateFileUploadResponse,
@@ -116,6 +118,7 @@ import type {
   PtyResizeRequest,
   PtyCloseRequest,
   ToolRef,
+  UpdateConnectionRequest,
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
@@ -130,6 +133,10 @@ import type {
   WorkspaceMember,
   WorkspaceRegisteredPack,
   Workspace,
+  ListConnectionsResponse,
+  ConnectionResponse,
+  OAuthStartRequest,
+  OAuthStartResponse,
 } from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -1126,6 +1133,38 @@ export class OpenGeniClient {
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
+  }
+
+  // --- Connections -------------------------------------------------------------------------------
+
+  async listConnections(workspaceId: string): Promise<ConnectionMetadata[]> {
+    const response = await this.requestJson<ListConnectionsResponse>("GET", `/v1/workspaces/${workspaceId}/connections`);
+    return response.connections;
+  }
+
+  async createConnection(workspaceId: string, request: CreateConnectionRequest): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>("POST", `/v1/workspaces/${workspaceId}/connections`, request);
+    return response.connection;
+  }
+
+  async updateConnection(workspaceId: string, connectionId: string, request: UpdateConnectionRequest): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>("PATCH", `/v1/workspaces/${workspaceId}/connections/${connectionId}`, request);
+    return response.connection;
+  }
+
+  async deleteConnection(workspaceId: string, connectionId: string): Promise<ConnectionMetadata> {
+    const response = await this.requestJson<ConnectionResponse>("DELETE", `/v1/workspaces/${workspaceId}/connections/${connectionId}`);
+    return response.connection;
+  }
+
+  /** Start an OAuth connection flow; redirect the user to the returned `authorizationUrl`. */
+  async startConnectionOAuth(workspaceId: string, request: OAuthStartRequest): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>("POST", `/v1/workspaces/${workspaceId}/connections/oauth/start`, request);
+  }
+
+  /** Public, immutably-cached URL for a catalog item's logo, or null when the item has none. */
+  catalogAssetUrl(logoAssetPath: string | null): string | null {
+    return logoAssetPath ? `${this.baseUrl}/v1/${logoAssetPath}` : null;
   }
 
   // --- GitHub ----------------------------------------------------------------------------------

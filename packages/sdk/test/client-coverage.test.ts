@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
-import type { SessionTurn } from "../src/types";
+import type { ConnectionMetadata, SessionTurn } from "../src/types";
 import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const ENVIRONMENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -640,6 +640,78 @@ describe("OpenGeniClient billing", () => {
       "POST /v1/billing/checkout",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
+  });
+});
+
+describe("OpenGeniClient connections", () => {
+  function fakeConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
+    return {
+      id: "conn-1",
+      accountId: "acct-1",
+      workspaceId: WORKSPACE_ID,
+      subjectId: null,
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      status: "active",
+      grantedScopes: [],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: null,
+      version: 1,
+      metadata: {},
+      createdBySubjectId: "subject-a",
+      updatedBySubjectId: "subject-a",
+      createdAt: "2026-06-12T00:00:00.000Z",
+      updatedAt: "2026-06-12T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  test("list/create/update/delete round-trip through their unwrapped connection shape", async () => {
+    const connection = fakeConnection();
+    const { client, requests } = makeClient((request) => {
+      if (request.method === "GET") return jsonResponse({ connections: [connection] });
+      return jsonResponse({ connection });
+    });
+    const listed = await client.listConnections(WORKSPACE_ID);
+    expect(listed).toEqual([connection]);
+    const created = await client.createConnection(WORKSPACE_ID, {
+      providerDomain: "api.example.com",
+      kind: "api_key",
+      credential: { headers: { authorization: "Bearer X" } },
+    });
+    expect(created).toEqual(connection);
+    const updated = await client.updateConnection(WORKSPACE_ID, connection.id, { status: "active", credential: {} });
+    expect(updated).toEqual(connection);
+    const deleted = await client.deleteConnection(WORKSPACE_ID, connection.id);
+    expect(deleted).toEqual(connection);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      `GET /v1/workspaces/${WORKSPACE_ID}/connections`,
+      `POST /v1/workspaces/${WORKSPACE_ID}/connections`,
+      `PATCH /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+      `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+    ]);
+  });
+
+  test("startConnectionOAuth POSTs to the oauth/start route and returns the authorization URL", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({
+      state: "state-token",
+      authorizationUrl: "https://as.example.com/authorize",
+      expiresAt: "2026-06-12T00:10:00.000Z",
+    }));
+    const result = await client.startConnectionOAuth(WORKSPACE_ID, { mcpUrl: "https://mcp.example.com/mcp", returnPath: "/integrations" });
+    expect(result.authorizationUrl).toBe("https://as.example.com/authorize");
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(`https://api.example.test/v1/workspaces/${WORKSPACE_ID}/connections/oauth/start`);
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ mcpUrl: "https://mcp.example.com/mcp", returnPath: "/integrations" });
+  });
+
+  test("catalogAssetUrl builds a public v1 URL and is null-safe", () => {
+    const { client } = makeClient(() => jsonResponse({}));
+    expect(client.catalogAssetUrl("catalog-assets/integrations-sh/logos/example.com/abc123.png"))
+      .toBe("https://api.example.test/v1/catalog-assets/integrations-sh/logos/example.com/abc123.png");
+    expect(client.catalogAssetUrl(null)).toBeNull();
   });
 });
 
