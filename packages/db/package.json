@@ -49,7 +49,7 @@
     "provision-roles": "bun src/provision-roles.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsup",
-    "prepublishOnly": "bun ../../scripts/prepublish-guard"
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "@opengeni/codex": "workspace:*",

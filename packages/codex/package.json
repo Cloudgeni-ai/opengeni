@@ -32,7 +32,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsup",
-    "prepublishOnly": "bun ../../scripts/prepublish-guard"
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
     "zod": "^4.2.1"
