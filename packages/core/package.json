@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/core",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "OpenGeni framework-agnostic core: the domain, access, and billing layers (neutral access, off-HTTP V2 surface). Behavior-preserving extraction from apps/api — keeps Hono's HTTPException for error throwing (typed-errors cleanup deferred).",
   "license": "Apache-2.0",
   "repository": {

@@ -1,5 +1,26 @@
 # @opengeni/api-router
 
+## 0.5.0
+
+### Minor Changes
+
+- 602db89: Add Toolspace programmatic tool access for sandboxes.
+
+  The new `toolspace:call` permission is an explicit, session-bound delegated grant for sandbox code. When `OPENGENI_TOOLSPACE_ENABLED=true`, worker turns mint a narrow `ogd_` token to a sandbox token file and expose `OPENGENI_TOOLSPACE_URL`; the first-party MCP route uses that token to compose the session's safe first-party, capability-backed, and per-session MCP tools, with approval-required tools denied as MCP `isError` results.
+
+### Patch Changes
+
+- Updated dependencies [602db89]
+  - @opengeni/contracts@0.9.0
+  - @opengeni/config@0.3.0
+  - @opengeni/db@0.6.0
+  - @opengeni/runtime@0.4.0
+  - @opengeni/core@0.4.3
+  - @opengeni/documents@0.2.7
+  - @opengeni/events@0.2.7
+  - @opengeni/github@0.2.7
+  - @opengeni/storage@0.2.7
+
 ## 0.4.2
 
 ### Patch Changes
