@@ -59,26 +59,50 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     });
   });
 
-  test("skipToolspaceToken suppresses the credential mint for connected-machine turns", async () => {
-    const result = await sandboxEnvironmentForRun(
-      testSettings({
-        sandboxBackend: "modal",
-        delegationSecret: "toolspace-secret",
-        toolspaceEnabled: true,
-        apiPort: 8000,
-      }),
-      [],
-      {},
-      {
-        scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
-        skipToolspaceToken: true,
-      },
-    );
+  test("connected-machine (selfhosted) turns mint the token too — there is no skip path", async () => {
+    // Selfhosted parity: the toolspace token is minted on every backend. Unlike
+    // the platform GitHub token (inert on a connected machine), the toolspace
+    // token is the machine's only path to programmatic tool calling and grants no
+    // more than the owner's own authority, so the previous skip is gone entirely.
+    // `sandboxEnvironmentForRun` is backend-agnostic; the removed option means a
+    // connected-machine turn mints exactly like a modal turn.
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      delegationSecret: "toolspace-secret",
+      toolspaceEnabled: true,
+      apiPort: 8000,
+    });
+    const result = await sandboxEnvironmentForRun(settings, [], {}, {
+      scope: { accountId, workspaceId },
+      sessionId,
+      runId: "run-1",
+    });
 
-    expect(result.toolspaceToken).toBeUndefined();
+    expect(result.toolspaceToken).toMatch(/^ogd_/);
     expect(result.environment.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
-    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(`http://127.0.0.1:8000/v1/workspaces/${workspaceId}/mcp`);
+    // The token VALUE stays off-manifest (delivered via the exec-channel seed).
+    expect(Object.values(result.environment)).not.toContain(result.toolspaceToken);
+  });
+
+  test("the token targets the PUBLIC, machine-routable API URL, never a cluster-internal one", async () => {
+    // A connected machine enrolled against the public base and reaches OpenGeni
+    // over the internet, so OPENGENI_TOOLSPACE_URL must resolve to the same
+    // sandbox-routable base every remote backend uses (OPENGENI_MCP_URL), not the
+    // loopback default that only works for a co-located box.
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      delegationSecret: "toolspace-secret",
+      toolspaceEnabled: true,
+      apiPort: 8000,
+      opengeniMcpUrl: "https://app.opengeni.example/v1/workspaces/{workspaceId}/mcp",
+    });
+    const result = await sandboxEnvironmentForRun(settings, [], {}, {
+      scope: { accountId, workspaceId },
+      sessionId,
+      runId: "run-1",
+    });
+
+    expect(result.environment.OPENGENI_TOOLSPACE_URL).toBe(`https://app.opengeni.example/v1/workspaces/${workspaceId}/mcp`);
+    expect(result.environment.OPENGENI_TOOLSPACE_URL).not.toContain("127.0.0.1");
   });
 });

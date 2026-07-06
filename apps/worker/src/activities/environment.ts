@@ -108,7 +108,6 @@ export async function sandboxEnvironmentForRun(
     gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
     sessionId?: string;
     runId?: string;
-    skipToolspaceToken?: boolean;
   } = {},
 ): Promise<{ environment: Record<string, string>; gitToken?: string; toolspaceToken?: string }> {
   // Precedence: deployment allowlist < git identity < workspace environment
@@ -129,10 +128,17 @@ export async function sandboxEnvironmentForRun(
   // rotates. The agent can refresh the token mid-turn via the `github_token` MCP tool.
   const stableOptions = options.scope ? { workspaceId: options.scope.workspaceId } : {};
   const environment = stableSandboxEnvironmentForRun(settings, workspaceEnvironment, stableOptions);
+  // TOOLSPACE (selfhosted parity): the toolspace token is minted for EVERY
+  // backend, including a connected machine. Unlike the platform GitHub token
+  // (inert on selfhosted → skipped above), the toolspace token is the machine's
+  // only path to programmatic tool calling, and it grants no more than the
+  // machine owner's own authority (toolspace:call, own-session-bound, turn TTL,
+  // budgeted, approval-tools excluded). Delivery mirrors the docker path: the
+  // caller threads it OFF-MANIFEST as the seed the runtime writes to
+  // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
   let toolspaceToken: string | undefined;
   if (
     settings.toolspaceEnabled
-    && !options.skipToolspaceToken
     && settings.delegationSecret
     && options.scope
     && options.sessionId

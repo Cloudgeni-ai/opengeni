@@ -144,6 +144,28 @@ export interface SelfhostedImageOutput {
  *  (the turn pauses + retries); it is NOT a hard failure. */
 export const SELFHOSTED_DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The ONLY manifest-environment keys exported into a selfhosted machine's exec
+ * shell. The manifest env is otherwise NOT consumed by selfhosted exec — the
+ * machine owns its own environment, and pushing HOME, GIT_ vars, and the like
+ * onto a real computer would clobber it. The toolspace pointers are the exception:
+ * `ogtool` (and the token-seed hook) need the non-secret programmatic-calling URL
+ * and the token-FILE PATH to reach the tool surface. The token VALUE never rides
+ * here — it is seeded to that file off-manifest over the same exec channel.
+ */
+const SELFHOSTED_EXEC_ENV_ALLOWLIST = ["OPENGENI_TOOLSPACE_URL", "OPENGENI_TOOLSPACE_TOKEN_FILE"] as const;
+
+function selfhostedExecEnv(environment: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of SELFHOSTED_EXEC_ENV_ALLOWLIST) {
+    const value = environment[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 /** The relay-URL shape config the session needs to build a stream endpoint. M8b
  *  wires the real relay deployment behind THIS seam so `buildStreamUrl` works
  *  unchanged behind `resolveExposedPort`. */
@@ -181,9 +203,11 @@ export interface SelfhostedSessionDeps {
    * session delta; `validateNoEnvironmentDelta` throws "Live sandbox sessions cannot
    * change manifest environment variables" on ANY env mismatch. So `state.manifest`'s
    * `environment` MUST EQUAL the turn's environment for the delta to be empty. The
-   * selfhosted exec routes over NATS and does NOT consume the env, but the manifest
-   * must carry it for parity. Omitted → `{}` (the negotiation-only / test path,
-   * which never applies a turn manifest, so there is no delta to validate).
+   * selfhosted exec routes over NATS and does NOT consume this env wholesale (the
+   * machine owns its own shell), EXCEPT the allowlisted toolspace pointers it
+   * exports per exec so `ogtool` works — see SELFHOSTED_EXEC_ENV_ALLOWLIST. The
+   * manifest carries the full env for parity. Omitted → `{}` (the negotiation-only
+   * / test path, which never applies a turn manifest, so there is no delta).
    */
   environment?: Record<string, string>;
   /**
@@ -340,7 +364,11 @@ export class SelfhostedSession {
       // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
       // default ⇒ the agent runs in its workspace_root).
       cwd: toMachinePath(args.workdir, this.workingDir),
-      env: {},
+      // The machine owns its own shell environment; the manifest env is NOT
+      // exported here. The ONE exception is the non-secret toolspace pointers
+      // (URL + token-file path), so a programmatic `ogtool` call and the token-
+      // seed hook can find the tool surface. See SELFHOSTED_EXEC_ENV_ALLOWLIST.
+      env: selfhostedExecEnv(this.state.environment),
       stdin: new Uint8Array(0),
       timeoutMs: 0,
     };

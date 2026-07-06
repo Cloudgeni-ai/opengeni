@@ -121,6 +121,37 @@ written into a sandbox file and the environment exposes only
 must not appear in the sandbox manifest, env delta, event log, run state, or
 logs.
 
+### Every backend, including selfhosted
+
+The token is minted and delivered on **every** compute backend, including a
+connected machine (selfhosted). This is a deliberate departure from the platform
+GitHub token, which is skipped on selfhosted because it is inert there — the
+machine uses its own git credentials. That reasoning does not transfer to the
+toolspace token: it is the machine's *only* path to programmatic tool calling,
+and refusing to deliver it would silently downgrade selfhosted agents.
+
+On a selfhosted turn the token seed is written to `OPENGENI_TOOLSPACE_TOKEN_FILE`
+over the machine's existing exec channel (the same NATS-backed `exec` the agent
+runs commands through), reusing the identical off-manifest seed hook the docker
+path uses — the value never rides the manifest. The other platform setup hooks
+(repository clone, `az login`) and file materialization still do **not** run
+against the user's real computer; the toolspace token seed is the single piece of
+per-turn material that crosses to it.
+
+There is one accepted delta from the docker path. On docker the manifest
+environment is exported into the box shell, so `ogtool` reads
+`OPENGENI_TOOLSPACE_URL` / `OPENGENI_TOOLSPACE_TOKEN_FILE` straight from `env`. A
+selfhosted machine owns its own shell and does **not** consume the manifest env
+wholesale (pushing `HOME`, `GIT_*`, etc. onto a real computer would clobber it),
+so selfhosted `exec` exports a strict two-key allowlist — exactly
+`OPENGENI_TOOLSPACE_URL` and `OPENGENI_TOOLSPACE_TOKEN_FILE`, both non-secret
+pointers — into every command's environment. That is enough for `ogtool` (and the
+seed hook) to find the tool surface and the token file; the token VALUE is never
+in that env. `OPENGENI_TOOLSPACE_URL` resolves to the public, sandbox-routable API
+base (`OPENGENI_MCP_URL`) the machine enrolled against — the same URL every remote
+backend uses — never a loopback or cluster-internal address the machine could not
+reach.
+
 When the flag is off, behavior is byte-identical to the current tree: no
 permission is minted, no file path appears, no URL appears, and no toolspace
 surface is added.
@@ -161,6 +192,14 @@ cannot re-enter `/mcp` as a toolspace principal.
 - No credential exposure to the sandbox: third-party MCP headers are decrypted
   or broker-resolved only inside the API proxy path and are never returned to the
   sandbox.
+- No over-authority on a user machine: **no credential crosses to a connected
+  (selfhosted) machine that grants more than the machine owner's own authority.**
+  The toolspace token satisfies this — it carries `toolspace:call` only, is bound
+  to its own session, expires at turn TTL, is per-turn budgeted, and cannot invoke
+  approval-required tools — so it is safe to deliver to the machine, whereas the
+  platform GitHub installation token (which would grant repo access beyond the
+  owner) is not, and stays off it. This invariant, not the git-token precedent, is
+  what decides which per-turn credentials may reach a selfhosted box.
 - SSRF posture: proxy targets come only from validated persisted rows and
   enabled pack/capability refs, not from sandbox-supplied URLs.
 - Human approval is not bypassed: approval-required tools are excluded or return
@@ -182,6 +221,30 @@ The sandbox image carries a small dependency-light CLI, `ogtool`, that reads
 `OPENGENI_TOOLSPACE_TOKEN_FILE` and `OPENGENI_TOOLSPACE_URL` and performs
 `tools/list` and `tools/call` with JSON input/output. It is a convenience shim,
 not a new API surface.
+
+## Agent Awareness
+
+For the capability to be used, the agent has to know it exists. This is done
+with **generic substrate prompting**, not per-host prompt text: a single fixed
+directive (`TOOLSPACE_PROGRAMMATIC_DIRECTIVE` in `packages/runtime`) is appended
+to the composed agent instructions by `appendToolspaceInstructions`. It tells the
+agent that every tool on its MCP surface is also callable programmatically from
+the sandbox (`ogtool list` / `ogtool call <name> '<json>'`, or MCP JSON-RPC to
+`$OPENGENI_TOOLSPACE_URL` with the bearer from `$OPENGENI_TOOLSPACE_TOKEN_FILE`),
+that input schemas come from `tools/list`, that programmatic calls are preferred
+for loops, polling, and bulk filtering because their results do not consume model
+context, and that approval-required tools must still be invoked normally (they
+return a typed error programmatically).
+
+The directive is appended **only when a toolspace token was minted for this turn**
+— the exact condition that gates the sandbox mint (feature enabled), surfaced to
+the runtime as the per-turn toolspace token seed. The mint happens on every
+backend including selfhosted, so the directive appears on a connected machine too;
+a turn with no minted token has no `ogtool`/URL in its sandbox, so it never
+advertises a capability that is not there. In the instruction composition order
+the directive sits **after** the workspace persona + non-bypassable CORE and
+**before** the per-session instructions, so host- and session-specific guidance
+still refines it.
 
 ## Follow-Ups
 

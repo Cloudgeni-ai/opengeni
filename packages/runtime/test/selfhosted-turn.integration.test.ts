@@ -44,7 +44,11 @@ const liveSessions: Array<{ close?: () => Promise<void> }> = [];
  *  a SelfhostedSession pinned active. Returns the serialized RunState string (the
  *  worker's `state.toString()` — the call that triggers the cross-backend serialize
  *  that used to crash). A contract gap or a serialize crash throws before return. */
-async function runPinnedToVmTurn(model: ScriptedModel): Promise<string> {
+async function runPinnedToVmTurn(model: ScriptedModel, opts: {
+  toolspaceTokenSeed?: string;
+  responder?: MockAgentResponder;
+  activeSandboxBackend?: "selfhosted";
+} = {}): Promise<string> {
   const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false, gitAuthorName: "OpenGeni Bot" });
   // A real local session seeds the proxy DEFAULT (group) backend (createEditor /
   // viewImage bearing), but its manifest is forced to the empty-entries shape the
@@ -65,7 +69,7 @@ async function runPinnedToVmTurn(model: ScriptedModel): Promise<string> {
   const self = new SelfhostedSession({
     workspaceId: WS,
     agentId: "enroll-1",
-    controlRpc: new MockAgentResponder({ hostname: "vm2" }),
+    controlRpc: opts.responder ?? new MockAgentResponder({ hostname: "vm2" }),
     relay: RELAY,
     environment: ENV,
   });
@@ -79,7 +83,12 @@ async function runPinnedToVmTurn(model: ScriptedModel): Promise<string> {
     resolveActiveBackend: async () => ({ session: self as never, sandboxId: "sbx-self", kind: "selfhosted" }),
   });
 
-  const agent = buildOpenGeniAgent(settings, [], { model, sandboxEnvironment: ENV });
+  const agent = buildOpenGeniAgent(settings, [], {
+    model,
+    sandboxEnvironment: ENV,
+    ...(opts.toolspaceTokenSeed ? { toolspaceTokenSeed: opts.toolspaceTokenSeed } : {}),
+    ...(opts.activeSandboxBackend ? { activeSandboxBackend: opts.activeSandboxBackend } : {}),
+  });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {
     ownedSandbox: { client: client as never, session: proxy as never },
   });
@@ -114,6 +123,79 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       { output: [assistantMessage("done on vm2")] },
     ]));
     expect(typeof s).toBe("string");
+  });
+
+  test("TOOLSPACE DELIVERY: the token seed is written to the machine over the exec channel, with NO platform setup", async () => {
+    // Selfhosted parity: a connected-machine turn now receives the toolspace token
+    // (activeSandboxBackend "selfhosted" + a per-turn seed). The runtime seeds it
+    // over the SAME exec channel the docker path uses — off-manifest — while the
+    // platform setup hooks (repository clone, az login) stay OFF the user's real
+    // machine. Record every exec the machine received and assert both halves.
+    const execLog: string[] = [];
+    const responder = new MockAgentResponder({
+      hostname: "vm2",
+      exec: (req) => {
+        execLog.push(req.command.join(" "));
+        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+      },
+    });
+    await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
+      toolspaceTokenSeed: "ogd_selfhosted_seed",
+      responder,
+      activeSandboxBackend: "selfhosted",
+    });
+    // The seed hook ran over the machine's exec channel and carried the token value.
+    expect(execLog.some((c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED") && c.includes("ogd_selfhosted_seed"))).toBe(true);
+    // But NO platform setup ran against the user's real computer.
+    expect(execLog.some((c) => c.includes("git clone"))).toBe(false);
+    expect(execLog.some((c) => c.includes("az login") || c.includes("az account"))).toBe(false);
+  });
+
+  test("NO-TOOLSPACE selfhosted turn seeds nothing (the hook list is empty without a token)", async () => {
+    const execLog: string[] = [];
+    const responder = new MockAgentResponder({
+      hostname: "vm2",
+      exec: (req) => {
+        execLog.push(req.command.join(" "));
+        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+      },
+    });
+    await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
+      responder,
+      activeSandboxBackend: "selfhosted",
+    });
+    expect(execLog.some((c) => c.includes("OPENGENI_TOOLSPACE_TOKEN_SEED"))).toBe(false);
+  });
+
+  test("selfhosted exec exports ONLY the allowlisted toolspace pointers to the machine (not HOME/GIT_*)", async () => {
+    // ogtool on the machine reads $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE from its
+    // shell env, but selfhosted exec does not consume the manifest env wholesale
+    // (pushing HOME=/workspace onto a real computer would break it). Prove the
+    // exec carries exactly the two non-secret toolspace pointers and nothing else.
+    let capturedEnv: Record<string, string> = {};
+    const responder = new MockAgentResponder({
+      exec: (req) => {
+        capturedEnv = req.env;
+        return { exitCode: 0, stdout: new TextEncoder().encode(""), stderr: new Uint8Array(0), timedOut: false, durationMs: "1" };
+      },
+    });
+    const self = new SelfhostedSession({
+      workspaceId: WS,
+      agentId: "enroll-1",
+      controlRpc: responder,
+      relay: RELAY,
+      environment: {
+        OPENGENI_TOOLSPACE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",
+        OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+        HOME: "/workspace",
+        GIT_AUTHOR_NAME: "OpenGeni Bot",
+      },
+    });
+    await self.exec({ cmd: "ogtool list" });
+    expect(capturedEnv.OPENGENI_TOOLSPACE_URL).toBe("https://app.opengeni.example/v1/workspaces/ws/mcp");
+    expect(capturedEnv.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
+    expect(capturedEnv.HOME).toBeUndefined();
+    expect(capturedEnv.GIT_AUTHOR_NAME).toBeUndefined();
   });
 
   test("REGRESSION (focused): the selfhosted state carries the `environment` field the GROUP client's serialize reads", () => {

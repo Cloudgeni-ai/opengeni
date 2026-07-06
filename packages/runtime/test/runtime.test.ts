@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -784,6 +784,85 @@ describe("runtime event normalization", () => {
     // Genesis directive is appended after everything, including the session slice.
     expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
     expect(agent.instructions.indexOf("Session-scoped rule.")).toBeLessThan(agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE));
+  });
+
+  // ── generic programmatic-tool-calling (toolspace) substrate directive ──────
+  // The block is GENERIC substrate prompting, gated by the SAME condition that
+  // gates the sandbox token mint: toolspaceEnabled AND a toolspace token minted
+  // for this turn (surfaced to the runtime as options.toolspaceTokenSeed, which
+  // the worker passes only for a non-selfhosted, non-skipped turn).
+  const toolspaceOn = { sandboxBackend: "none", toolspaceEnabled: true } as const;
+
+  test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], { toolspaceTokenSeed: "ogd_seed" });
+    expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    // Default (feature off, no seed) never carries it — the historical preamble.
+    const off = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    expect(off.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+    expect(off.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+  });
+
+  test("NEGATIVE: feature flag off (even with a token seed) omits the directive", () => {
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none", toolspaceEnabled: false }), [], {
+      toolspaceTokenSeed: "ogd_seed",
+    });
+    expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("NEGATIVE: feature on but no token minted for the turn omits the directive", () => {
+    // The block gates on the per-turn seed, not the flag alone: a turn with no
+    // minted toolspace token (the worker passed no seed) has no ogtool/URL in its
+    // sandbox, so the block must not advertise it. The mint now happens on every
+    // backend including selfhosted, so this is the genuine no-token case, not a
+    // backend distinction.
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), []);
+    expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      instructionsTemplate: template,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+      toolspaceTokenSeed: "ogd_seed",
+    });
+    // Exact ordering: workspace persona + CORE, then the toolspace directive,
+    // then the session slice last (host/session specificity wins).
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
+    );
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
+  test("the toolspace directive stays before the genesis directive, which remains LAST", () => {
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      sessionInstructions: "Session-scoped rule.",
+      genesisTitleHint: true,
+      toolspaceTokenSeed: "ogd_seed",
+    });
+    expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
+    expect(agent.instructions.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf("Session-scoped rule."));
+    expect(agent.instructions.indexOf("Session-scoped rule."))
+      .toBeLessThan(agent.instructions.indexOf(GENESIS_TITLE_DIRECTIVE));
+  });
+
+  test("appendToolspaceInstructions joins by space and no-ops when unavailable", () => {
+    expect(appendToolspaceInstructions("BASE", true)).toBe(`BASE ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}`);
+    expect(appendToolspaceInstructions("BASE", false)).toBe("BASE");
+  });
+
+  test("the toolspace directive text is a stable, generic, host-agnostic snapshot", () => {
+    // Pinned verbatim so an unintended edit to the substrate prompt fails here.
+    // It must name only generic substrate handles (ogtool, $OPENGENI_TOOLSPACE_*),
+    // never a host/product name.
+    expect(TOOLSPACE_PROGRAMMATIC_DIRECTIVE).toBe(
+      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
+    );
   });
 
   test("builds native S3 mount entries for file resources", () => {
