@@ -175,7 +175,7 @@ function DetailBody({
                   autoComplete="off"
                   value={headers[field.name] ?? ""}
                   onChange={(event) => setHeaders((current) => ({ ...current, [field.name]: event.target.value }))}
-                  placeholder={`Your ${field.label.toLowerCase()}`}
+                  placeholder={`Paste your ${field.label}`}
                 />
               </div>
             ))}
@@ -186,7 +186,7 @@ function DetailBody({
                 rel="noreferrer noopener"
                 className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
               >
-                Get your {plan.fields[0]?.label.toLowerCase() ?? "credentials"}
+                Get your {plan.fields[0]?.label ?? "credentials"}
                 <ExternalLinkIcon className="size-3" />
               </a>
             ) : (
