@@ -516,6 +516,10 @@ export const sessionTurns = pgTable("session_turns", {
   // constrained to the SandboxOs enum (or NULL) in migration 0018.
   sandboxOs: text("sandbox_os"),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  // Atomic per-turn toolspace call budget counter (migration 0043). Incremented
+  // by a single conditional UPDATE at tools/call time; the row lock serializes
+  // concurrent reservations so exactly `toolspaceMaxCallsPerTurn` succeed.
+  toolspaceCallCount: integer("toolspace_call_count").notNull().default(0),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

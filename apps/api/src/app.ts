@@ -221,11 +221,7 @@ export function createApp(deps: AppDependencies): Hono {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
     const toolspace = isToolspaceGrant(routeDeps.settings, grant)
-      ? await prepareToolspaceMcpSurface({
-          deps: routeDeps,
-          grant,
-          authorizationHeader: c.req.header("authorization") ?? null,
-        })
+      ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
       : null;
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOpenGeniMcpServer(routeDeps, grant, {

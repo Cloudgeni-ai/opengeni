@@ -133,12 +133,24 @@ delegated token. Proxied third-party calls must publish these events even if the
 worker path did not previously emit events for third-party MCP calls.
 
 The API enforces a per-turn toolspace call budget, configured with a sane default
-such as 200 calls per turn. Exhaustion returns an MCP-shaped typed error result
-instead of throwing an HTTP 500 or leaking a partial proxy failure.
+such as 200 calls per turn. Enforcement is a single atomic reservation: at call
+time one conditional statement increments `session_turns.toolspace_call_count`
+only while it is below the limit and returns whether it won a slot
+(`UPDATE ... SET n = n + 1 WHERE n < $limit RETURNING n`). The row lock serializes
+concurrent `tools/call` requests, so exactly `limit` of N simultaneous callers
+succeed — the earlier read-count-then-append approach let concurrent calls all
+observe a stale count and overrun the budget. Exhaustion returns an MCP-shaped
+typed error result instead of throwing an HTTP 500 or leaking a partial proxy
+failure, and the typed error distinguishes "no active turn" from
+"budget exhausted" so a caller can tell why it was refused.
 
 Gateway recursion is structurally impossible in v1: the token does not carry
 token-minting permissions, the toolspace surface never includes token minting,
-and `mcp_servers:attach` is not present.
+and `mcp_servers:attach` is not present. The first-party proxy ids (`files`,
+`docs`) and the `opengeni` tool server — all of which route back through the
+`/mcp` mount — are excluded from the toolspace surface by construction, so a
+future grant that happened to carry `files:read` or `documents:search` still
+cannot re-enter `/mcp` as a toolspace principal.
 
 ## Security Invariants
 
@@ -153,9 +165,16 @@ and `mcp_servers:attach` is not present.
   enabled pack/capability refs, not from sandbox-supplied URLs.
 - Human approval is not bypassed: approval-required tools are excluded or return
   the v1 typed error.
-- Recursion is blocked: the surface does not include token minting, MCP server
-  attachment, or session mutation beyond permissions explicitly held by the
-  bearer.
+- Recursion is blocked by construction: the surface excludes the first-party
+  proxies (`files`, `docs`) and the `opengeni` tool server outright — not merely
+  by permission checks — so it can never re-enter `/mcp`, and it includes no
+  token minting, MCP server attachment, or session mutation.
+- No raw upstream error leaks: a failed proxied `tools/call` returns a generic
+  "upstream tool failed" result naming the tool; the raw error is logged
+  server-side only, so no header or credential material can ride the message
+  back to the sandbox.
+- Budget holds under concurrency: the per-turn call budget is a single atomic
+  DB reservation, not a read-then-append count.
 
 ## `ogtool`
 

@@ -2,15 +2,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { environmentsEncryptionKeyBytes, firstPartyMcpWorkspaceUrl, type McpServerConfig } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
 import { prefixedMcpToolName, type AccessGrant, type ToolRef } from "@opengeni/contracts";
 import { hasPermission, settingsWithEnabledCapabilityMcpServers, type ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
-  countToolspaceCallsForTurn,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   requireSession,
+  reserveToolspaceCallForTurn,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
@@ -46,7 +46,26 @@ type McpTool = {
 const APPROVAL_REQUIRED_MESSAGE = "requires approval - invoke via the agent";
 const TOOLSPACE_AUTH_NEEDED_ERROR_CODE = -32001;
 const TOOLSPACE_AUTH_NEEDED_MESSAGE = "Authentication required - a connection link was posted to the session.";
+const TOOLSPACE_NO_ACTIVE_TURN_MESSAGE = "no active turn - toolspace calls require an in-flight turn";
+// First-party OpenGeni MCP proxies (files/docs) route back through the same
+// /mcp mount. They are excluded from the toolspace surface by construction so a
+// toolspace principal can never re-enter /mcp as a first-party caller, even if
+// a future grant carried files:read / documents:search (see docs invariants).
 const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs"]);
+// In-process cache of the per-session upstream tool listing. Keyed on the set of
+// proxyable server ids + their credential versions, so a credential rotation
+// busts the entry; a short TTL bounds staleness for everything else. This is
+// what keeps list-type /mcp requests (initialize, tools/list) from fanning out
+// to every upstream on every call.
+const TOOLSPACE_TOOL_LIST_TTL_MS = 30_000;
+const TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES = 2_000;
+const toolListCache = new Map<string, { expiresAt: number; entries: ToolListingEntry[] }>();
+
+type ToolListingEntry = {
+  serverId: string;
+  tool: McpTool;
+  requireApproval: McpServerConfig["requireApproval"];
+};
 
 export function isToolspaceGrant(settings: ApiRouteDeps["settings"], grant: AccessGrant): boolean {
   return settings.toolspaceEnabled
@@ -57,7 +76,6 @@ export function isToolspaceGrant(settings: ApiRouteDeps["settings"], grant: Acce
 export async function prepareToolspaceMcpSurface(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
-  authorizationHeader?: string | null;
 }): Promise<ToolspaceMcpSurface | null> {
   const { deps, grant } = input;
   if (!isToolspaceGrant(deps.settings, grant)) {
@@ -66,63 +84,144 @@ export async function prepareToolspaceMcpSurface(input: {
   const sessionId = grant.metadata!.sessionId as string;
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
   const selectedIds = selectedMcpServerIds(session.tools, session.mcpServers.map((server) => server.id));
-  if (selectedIds.size === 0) {
-    return {
-      sessionId,
-      subjectId: grant.subjectId,
-      tools: [],
-      close: async () => {},
-    };
+  // Proxyable ids: everything selected except the first-party OpenGeni tool
+  // server and the first-party MCP proxies, both of which would re-enter /mcp.
+  const proxyableIds = [...selectedIds].filter((id) => toolspaceCanProxyServerId(id));
+  if (proxyableIds.length === 0) {
+    return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
 
-  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(deps.db, grant.workspaceId, deps.settings);
-  const withSessionServers = await settingsWithSessionMcpServersForToolspace(deps, grant.workspaceId, sessionId, runtimeSettings);
-  const registry = new Map(withSessionServers.mcpServers.map((server) => [server.id, server]));
-  const connected: ConnectedToolspaceServer[] = [];
-  const tools: ToolspaceRegisteredTool[] = [];
+  // The registry (decrypted session servers + capability/pack expansion) is a
+  // handful of DB reads with no upstream dials. Build it at most once per
+  // request, and only when we actually need it (a cache-miss listing or a real
+  // tools/call), so a cache-hit request does no registry work.
+  let registryPromise: Promise<Map<string, McpServerConfig>> | null = null;
+  const getRegistry = () => (registryPromise ??= buildToolspaceRegistry(deps, grant.workspaceId, sessionId));
 
-  for (const serverId of selectedIds) {
-    if (serverId === "opengeni") {
-      continue;
-    }
-    const config = registry.get(serverId);
-    if (!config || !toolspaceCanProxyServer(grant, config)) {
-      continue;
-    }
-    const connection = await connectToolspaceServer({
-      deps,
-      grant,
-      config,
-      authorizationHeader: input.authorizationHeader ?? null,
-      sessionId,
-    }).catch(() => null);
-    if (!connection) {
-      continue;
-    }
-    connected.push(connection);
-    const listed = await connection.client.listTools(undefined, toolspaceRequestOptions(config)).catch(() => ({ tools: [] }));
-    for (const tool of listed.tools as McpTool[]) {
-      if (!tool?.name || !allowedByConfig(config, tool.name)) {
-        continue;
-      }
-      tools.push(toolspaceToolFor({
-        deps,
-        grant,
-        sessionId,
-        server: connection,
-        tool,
-      }));
-    }
-  }
+  const listing = await resolveToolListing({
+    deps,
+    grant,
+    sessionId,
+    proxyableIds,
+    activeTurnId: session.activeTurnId ?? null,
+    getRegistry,
+  });
+  const tools = listing.map((entry) => toolspaceToolFor({ deps, grant, sessionId, entry, getRegistry }));
 
   return {
     sessionId,
     subjectId: grant.subjectId,
     tools,
-    close: async () => {
-      await Promise.allSettled(connected.map((server) => server.close()));
-    },
+    // Connections are opened lazily and closed inline (per listing pass, per
+    // call), so there is nothing persistent to tear down here.
+    close: async () => {},
   };
+}
+
+function emptyToolspaceSurface(sessionId: string, subjectId: string): ToolspaceMcpSurface {
+  return { sessionId, subjectId, tools: [], close: async () => {} };
+}
+
+async function buildToolspaceRegistry(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Map<string, McpServerConfig>> {
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(deps.db, workspaceId, deps.settings);
+  const withSessionServers = await settingsWithSessionMcpServersForToolspace(deps, workspaceId, sessionId, runtimeSettings);
+  return new Map(withSessionServers.mcpServers.map((server) => [server.id, server]));
+}
+
+// Resolve the toolspace tool listing for a request. Serves from the in-process
+// cache when warm; otherwise dials the proxyable upstreams ONCE to (re)list, but
+// only while a turn is active — a request with no active turn never dials an
+// upstream (fix: unbudgeted fan-out). tools/call still funnels through here to
+// register its tool, but with the cache warm that costs no upstream dials.
+async function resolveToolListing(input: {
+  deps: ApiRouteDeps;
+  grant: AccessGrant;
+  sessionId: string;
+  proxyableIds: string[];
+  activeTurnId: string | null;
+  getRegistry: () => Promise<Map<string, McpServerConfig>>;
+}): Promise<ToolListingEntry[]> {
+  const { deps, grant, sessionId, proxyableIds, activeTurnId, getRegistry } = input;
+  const cacheKey = await toolListCacheKey(deps, grant.workspaceId, sessionId, proxyableIds);
+  const cached = readToolListCache(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  if (!activeTurnId) {
+    return [];
+  }
+  const registry = await getRegistry();
+  const entries: ToolListingEntry[] = [];
+  for (const serverId of proxyableIds) {
+    const config = registry.get(serverId);
+    if (!config || !toolspaceCanProxyServer(config)) {
+      continue;
+    }
+    const connection = await connectToolspaceServer({ deps, grant, config, sessionId }).catch(() => null);
+    if (!connection) {
+      continue;
+    }
+    try {
+      const listed = await connection.client.listTools(undefined, toolspaceRequestOptions(config)).catch(() => ({ tools: [] }));
+      for (const tool of listed.tools as McpTool[]) {
+        if (!tool?.name || !allowedByConfig(config, tool.name)) {
+          continue;
+        }
+        entries.push({ serverId, tool, requireApproval: config.requireApproval });
+      }
+    } finally {
+      await connection.close();
+    }
+  }
+  writeToolListCache(cacheKey, entries);
+  return entries;
+}
+
+async function toolListCacheKey(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+  proxyableIds: string[],
+): Promise<string> {
+  const metadata = await listSessionMcpServerMetadata(deps.db, workspaceId, sessionId);
+  const versions = new Map(metadata.map((server) => [server.id, server.credentialVersion]));
+  const signature = proxyableIds
+    .slice()
+    .sort()
+    .map((id) => `${id}@${versions.get(id) ?? 0}`)
+    .join(",");
+  return `${workspaceId}:${sessionId}:${signature}`;
+}
+
+function readToolListCache(key: string): ToolListingEntry[] | null {
+  const hit = toolListCache.get(key);
+  if (!hit) {
+    return null;
+  }
+  if (hit.expiresAt <= Date.now()) {
+    toolListCache.delete(key);
+    return null;
+  }
+  return hit.entries;
+}
+
+function writeToolListCache(key: string, entries: ToolListingEntry[]): void {
+  if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
+    const now = Date.now();
+    for (const [existingKey, value] of toolListCache) {
+      if (value.expiresAt <= now) {
+        toolListCache.delete(existingKey);
+      }
+    }
+    if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
+      toolListCache.clear();
+    }
+  }
+  toolListCache.set(key, { expiresAt: Date.now() + TOOLSPACE_TOOL_LIST_TTL_MS, entries });
 }
 
 async function settingsWithSessionMcpServersForToolspace(
@@ -166,18 +265,16 @@ async function connectToolspaceServer(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   config: McpServerConfig;
-  authorizationHeader: string | null;
   sessionId: string;
 }): Promise<ConnectedToolspaceServer> {
-  const url = toolspaceServerUrl(input.deps, input.grant.workspaceId, input.config);
   const baseFetch: FetchLike = input.config.connectionRef
     ? connectionBrokerFetch(globalThis.fetch, input)
     : globalThis.fetch;
   const client = new Client({ name: `opengeni-toolspace-${input.config.id}`, version: "1.0.0" }, { capabilities: {} });
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
+  const transport = new StreamableHTTPClientTransport(new URL(input.config.url), {
     ...(baseFetch !== globalThis.fetch ? { fetch: baseFetch } : {}),
     requestInit: {
-      headers: toolspaceServerHeaders(input),
+      headers: toolspaceServerHeaders(input.config),
     },
   });
   await client.connect(transport as unknown as Transport, toolspaceRequestOptions(input.config));
@@ -194,12 +291,13 @@ function toolspaceToolFor(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   sessionId: string;
-  server: ConnectedToolspaceServer;
-  tool: McpTool;
+  entry: ToolListingEntry;
+  getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): ToolspaceRegisteredTool {
-  const { deps, grant, sessionId, server, tool } = input;
-  const name = prefixedMcpToolName(server.config.id, tool.name);
-  const approvalRequired = mcpToolRequiresApproval(server.config.requireApproval, tool.name);
+  const { deps, grant, sessionId, entry, getRegistry } = input;
+  const { serverId, tool } = entry;
+  const name = prefixedMcpToolName(serverId, tool.name);
+  const approvalRequired = mcpToolRequiresApproval(entry.requireApproval, tool.name);
   const description = approvalRequired
     ? `${tool.description ?? tool.name} (unavailable: ${APPROVAL_REQUIRED_MESSAGE})`
     : tool.description;
@@ -211,46 +309,70 @@ function toolspaceToolFor(input: {
       if (approvalRequired) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
-      const turnId = await activeTurnWithinBudget(deps, grant.workspaceId, sessionId);
-      if (!turnId) {
+      const reservation = await reserveActiveTurnCall(deps, grant.workspaceId, sessionId);
+      if (reservation.status === "no_active_turn") {
+        return mcpError(TOOLSPACE_NO_ACTIVE_TURN_MESSAGE);
+      }
+      if (reservation.status === "budget_exhausted") {
         return mcpError(`toolspace call budget exhausted (${deps.settings.toolspaceMaxCallsPerTurn}/turn)`);
       }
-      const callId = crypto.randomUUID();
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
-        type: "agent.toolCall.created",
-        turnId,
-        producerId: grant.subjectId,
-        payload: {
-          id: callId,
-          name,
-          arguments: args,
-          origin: "toolspace",
-          subjectId: grant.subjectId,
-          raw: {
-            type: "toolspace_call",
-            serverId: server.config.id,
-            toolName: tool.name,
+      const turnId = reservation.turnId;
+      // Dial only the ONE server this tool belongs to, from the freshly-built
+      // registry, and re-check policy against that live config (the listing may
+      // have been served from a slightly stale cache entry).
+      const registry = await getRegistry();
+      const config = registry.get(serverId);
+      if (!config || !toolspaceCanProxyServer(config) || !allowedByConfig(config, tool.name)) {
+        return mcpError(`upstream tool failed: ${name}`);
+      }
+      if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
+        return mcpError(APPROVAL_REQUIRED_MESSAGE);
+      }
+      const connection = await connectToolspaceServer({ deps, grant, config, sessionId }).catch(() => null);
+      if (!connection) {
+        return mcpError(`upstream tool failed: ${name}`);
+      }
+      try {
+        const callId = crypto.randomUUID();
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+          type: "agent.toolCall.created",
+          turnId,
+          producerId: grant.subjectId,
+          payload: {
+            id: callId,
+            name,
+            arguments: args,
+            origin: "toolspace",
+            subjectId: grant.subjectId,
+            raw: {
+              type: "toolspace_call",
+              serverId,
+              toolName: tool.name,
+            },
           },
-        },
-      }]);
-      const output = await callRemoteTool(server, tool.name, args);
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
-        type: "agent.toolCall.output",
-        turnId,
-        producerId: grant.subjectId,
-        payload: {
-          id: callId,
-          output,
-          origin: "toolspace",
-          subjectId: grant.subjectId,
-        },
-      }]);
-      return output;
+        }]);
+        const output = await callRemoteTool(deps, connection, tool.name, args);
+        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [{
+          type: "agent.toolCall.output",
+          turnId,
+          producerId: grant.subjectId,
+          payload: {
+            id: callId,
+            output,
+            origin: "toolspace",
+            subjectId: grant.subjectId,
+          },
+        }]);
+        return output;
+      } finally {
+        await connection.close();
+      }
     },
   };
 }
 
 async function callRemoteTool(
+  deps: ApiRouteDeps,
   server: ConnectedToolspaceServer,
   toolName: string,
   args: Record<string, unknown>,
@@ -264,17 +386,38 @@ async function callRemoteTool(
     if (isToolspaceAuthNeededError(error)) {
       return mcpError(TOOLSPACE_AUTH_NEEDED_MESSAGE);
     }
-    return mcpError(error instanceof Error ? error.message : String(error));
+    // The raw upstream error can carry provider-specific detail; log it
+    // server-side and return only a generic result to the sandbox so no header
+    // or credential material can ride the message back out.
+    deps.observability?.warn("toolspace upstream tool call failed", {
+      serverId: server.config.id,
+      toolName,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return mcpError(`upstream tool failed: ${prefixedMcpToolName(server.config.id, toolName)}`);
   }
 }
 
-async function activeTurnWithinBudget(deps: ApiRouteDeps, workspaceId: string, sessionId: string): Promise<string | null> {
+type ToolspaceReservation =
+  | { status: "ok"; turnId: string }
+  | { status: "no_active_turn" }
+  | { status: "budget_exhausted" };
+
+async function reserveActiveTurnCall(deps: ApiRouteDeps, workspaceId: string, sessionId: string): Promise<ToolspaceReservation> {
   const session = await requireSession(deps.db, workspaceId, sessionId);
   if (!session.activeTurnId) {
-    return null;
+    return { status: "no_active_turn" };
   }
-  const used = await countToolspaceCallsForTurn(deps.db, workspaceId, sessionId, session.activeTurnId);
-  return used < deps.settings.toolspaceMaxCallsPerTurn ? session.activeTurnId : null;
+  const reservation = await reserveToolspaceCallForTurn(
+    deps.db,
+    workspaceId,
+    sessionId,
+    session.activeTurnId,
+    deps.settings.toolspaceMaxCallsPerTurn,
+  );
+  return reservation.reserved
+    ? { status: "ok", turnId: session.activeTurnId }
+    : { status: "budget_exhausted" };
 }
 
 function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set<string> {
@@ -287,47 +430,25 @@ function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set
   return out;
 }
 
-function toolspaceCanProxyServer(grant: AccessGrant, config: McpServerConfig): boolean {
-  if (config.id === "opengeni") {
-    return false;
-  }
-  if (config.id === "docs") {
-    return hasPermission(grant.permissions, "documents:search");
-  }
-  if (config.id === "files") {
-    return hasPermission(grant.permissions, "files:read");
-  }
-  return true;
+// Whether a selected server id may enter the toolspace proxy at all. The
+// first-party OpenGeni tool server and the files/docs proxies are excluded by
+// construction: they route back through /mcp, so admitting them would let a
+// toolspace principal re-enter as a first-party caller (recursion guard).
+export function toolspaceCanProxyServerId(serverId: string): boolean {
+  return serverId !== "opengeni" && !FIRST_PARTY_PROXY_IDS.has(serverId);
 }
 
-function toolspaceServerUrl(deps: ApiRouteDeps, workspaceId: string, config: McpServerConfig): string {
-  if (FIRST_PARTY_PROXY_IDS.has(config.id)) {
-    const base = firstPartyMcpWorkspaceUrl(deps.settings, workspaceId);
-    if (config.id === "docs") {
-      const url = new URL(base);
-      url.pathname = `${url.pathname.replace(/\/+$/, "")}/docs`;
-      return url.toString();
-    }
-    return base;
-  }
-  return config.url;
+function toolspaceCanProxyServer(config: McpServerConfig): boolean {
+  return toolspaceCanProxyServerId(config.id);
 }
 
-function toolspaceServerHeaders(input: {
-  deps: ApiRouteDeps;
-  config: McpServerConfig;
-  authorizationHeader: string | null;
-}): Record<string, string> {
+// Only third-party / session / pack MCP servers reach this path (first-party
+// proxies are excluded above), so headers are just the server's own configured
+// or broker-injected headers. The caller's `ogd_` bearer is deliberately never
+// forwarded upstream.
+function toolspaceServerHeaders(config: McpServerConfig): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (FIRST_PARTY_PROXY_IDS.has(input.config.id)) {
-    if (input.deps.settings.authRequired && input.deps.settings.accessKey) {
-      headers["x-opengeni-access-key"] = input.deps.settings.accessKey;
-    }
-    if (input.authorizationHeader) {
-      headers.authorization = input.authorizationHeader;
-    }
-  }
-  for (const [name, value] of Object.entries(input.config.headers ?? {})) {
+  for (const [name, value] of Object.entries(config.headers ?? {})) {
     headers[name] = value;
   }
   return headers;
