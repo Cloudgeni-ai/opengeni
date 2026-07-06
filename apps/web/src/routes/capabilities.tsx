@@ -118,10 +118,13 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
 
-  // Close the sheet if a non-registry selection vanished from the catalog after a
-  // refresh (deleted/unregistered elsewhere) — never leave a ghost open.
+  // Close the sheet if a live-bound selection vanished from the catalog after a
+  // refresh (deleted/unregistered elsewhere) — never leave a ghost open. A
+  // snapshot-fallback selection (registry result, or a just-created item not yet
+  // in `items`, e.g. after a failed refresh) legitimately isn't in the catalog
+  // yet, so it renders from its snapshot instead of being closed here.
   useEffect(() => {
-    if (selected && !selected.registry && !loading && !items.some((entry) => entry.id === selected.id)) {
+    if (selected && !selected.snapshotFallback && !loading && !items.some((entry) => entry.id === selected.id)) {
       setSelected(null);
       setSheetError(null);
     }
@@ -157,9 +160,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     void packs.refresh();
   }
 
-  function openItem(item: CapabilityCatalogItem, registry = false) {
+  // `snapshotFallback` defaults to `registry` (a registry result renders from its
+  // snapshot until persisted); the add-custom flow passes it explicitly for a
+  // just-created item whose row may not be in `items` yet.
+  function openItem(item: CapabilityCatalogItem, registry = false, snapshotFallback = registry) {
     setSheetError(null);
-    setSelected({ id: item.id, registry, snapshot: item });
+    setSelected({ id: item.id, registry, snapshotFallback, snapshot: item });
   }
 
   // --- Connect flows ---------------------------------------------------------
@@ -335,7 +341,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
       if (item) {
         setSheetError(reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
-        setSelected({ id: item.id, registry: false, snapshot: item });
+        setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       } else {
         toast.error("Connection failed", { description: reason ?? undefined });
       }
@@ -402,7 +408,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
       const item = itemId ? (freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null : null;
-      if (item) setSelected({ id: item.id, registry: false, snapshot: item });
+      if (item) setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -442,7 +448,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           toast.success(created.kind === "mcp" ? `Added and enabled ${created.name}` : `Added and tracking ${created.name}`);
         } else {
           toast.success(`Added ${created.name}`);
-          openItem(created);
+          // Freshly created: the row isn't in `items` until refresh() lands, and
+          // a failed refresh must not drop the connect sheet — render from the
+          // returned snapshot until the live row appears.
+          openItem(created, false, true);
         }
       } else {
         toast.success(`Added ${created.name}`);

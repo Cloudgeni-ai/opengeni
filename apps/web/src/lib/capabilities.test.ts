@@ -320,7 +320,7 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
     // disabled elsewhere (strip disable + refresh) so the catalog row for the same
     // id now reads enabled:false with no ref. The sheet must render THAT row.
     const enabledSnapshot = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
-    const selected = { id: "cap-1", registry: false, snapshot: enabledSnapshot };
+    const selected = { id: "cap-1", registry: false, snapshotFallback: false, snapshot: enabledSnapshot };
     const disabledLive = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: false, connectionRef: null });
 
     const live = resolveSheetItem(selected, [disabledLive]);
@@ -335,12 +335,20 @@ describe("resolveSheetItem (sheet binds to the live catalog row, never a snapsho
 
   test("falls back to the snapshot for a registry item not yet in the catalog", () => {
     const snap = item({ id: "reg-1", source: "public_registry" });
-    expect(resolveSheetItem({ id: "reg-1", registry: true, snapshot: snap }, [])).toBe(snap);
+    expect(resolveSheetItem({ id: "reg-1", registry: true, snapshotFallback: true, snapshot: snap }, [])).toBe(snap);
   });
 
-  test("a non-registry selection absent from the catalog resolves to null (sheet closes)", () => {
+  test("falls back to the snapshot for a just-created item not yet in items (survives a failed refresh)", () => {
+    // add-custom opens the sheet on the created row before refresh(); if refresh
+    // fails the id isn't in `items`, but snapshotFallback keeps the connect sheet
+    // open on the snapshot instead of the ghost-guard closing it.
+    const snap = item({ id: "new-1" });
+    expect(resolveSheetItem({ id: "new-1", registry: false, snapshotFallback: true, snapshot: snap }, [])).toBe(snap);
+  });
+
+  test("a live-bound selection absent from the catalog resolves to null (sheet closes)", () => {
     const snap = item({ id: "gone", enabled: true });
-    expect(resolveSheetItem({ id: "gone", registry: false, snapshot: snap }, [])).toBeNull();
+    expect(resolveSheetItem({ id: "gone", registry: false, snapshotFallback: false, snapshot: snap }, [])).toBeNull();
   });
 
   test("null selection resolves to null", () => {

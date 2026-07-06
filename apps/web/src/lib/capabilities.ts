@@ -192,22 +192,27 @@ export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityC
 
 /**
  * The detail sheet's selection: the id it's bound to, whether it came from the
- * public registry, and a snapshot taken at open time. The snapshot is a fallback
- * for registry items not yet in the catalog — the rendered item is otherwise
- * always the LIVE catalog row.
+ * public registry (drives persist-on-connect), whether the snapshot is an
+ * authoritative fallback, and the snapshot taken at open time.
+ *
+ * `snapshotFallback` is true when the id may legitimately be absent from the live
+ * `items` list even though the row exists — a registry result not yet persisted,
+ * OR a just-created custom item opened before (or across a failed) refresh. For
+ * those the snapshot renders until the live row appears; for a normal catalog
+ * selection it stays false so a vanished row closes the sheet instead of ghosting.
  */
-export type SheetSelection = { id: string; registry: boolean; snapshot: CapabilityCatalogItem };
+export type SheetSelection = { id: string; registry: boolean; snapshotFallback: boolean; snapshot: CapabilityCatalogItem };
 
 /**
  * The item the detail sheet should render, derived from the LIVE catalog by id so
  * a mutation elsewhere (disable, refresh) re-derives it instead of leaving a stale
- * snapshot. Registry items not yet persisted fall back to their snapshot; a
- * non-registry selection absent from the catalog resolves to null so the caller
- * closes the sheet rather than render a ghost.
+ * snapshot. A snapshot-fallback selection (registry result, or freshly created and
+ * not yet in `items`) falls back to its snapshot; any other selection absent from
+ * the catalog resolves to null so the caller closes the sheet rather than ghost.
  */
 export function resolveSheetItem(selected: SheetSelection | null, items: CapabilityCatalogItem[]): CapabilityCatalogItem | null {
   if (!selected) return null;
-  return items.find((entry) => entry.id === selected.id) ?? (selected.registry ? selected.snapshot : null);
+  return items.find((entry) => entry.id === selected.id) ?? (selected.snapshotFallback ? selected.snapshot : null);
 }
 
 export type ConnectionHealth =
