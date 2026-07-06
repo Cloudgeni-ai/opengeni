@@ -52,6 +52,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   ) {
     return true;
   }
+  // Catalog logos are rendered via bare <img> tags, which carry no credentials;
+  // the images are public vendor logos, digest-keyed by content, and the route
+  // itself enforces the catalog-assets/ prefix lock and extension whitelist.
+  if (path.startsWith("/v1/catalog-assets/")) {
+    return true;
+  }
   // Browser entry for MCP-issued GitHub install links: opened in a browser
   // that holds no API credentials, like the callbacks above. The route itself
   // verifies the signed workspace-bound state before doing anything.

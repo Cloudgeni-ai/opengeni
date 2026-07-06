@@ -142,4 +142,19 @@ describe("GET /v1/catalog-assets/*", () => {
       fake.close();
     }
   });
+
+  test("is exempt from the deployment access key while a neighboring route still requires it", async () => {
+    const fake = startFakeS3({ "catalog-assets/integrations-sh/logos/example.com/abc123.png": { body: "logo-bytes", contentType: "image/png" } });
+    try {
+      const app = appWithFakeStorage(fake.url, { authRequired: true, accessKey: "deployment-key" });
+      const asset = await app.request("/v1/catalog-assets/integrations-sh/logos/example.com/abc123.png");
+      expect(asset.status).toBe(200);
+      expect(await asset.text()).toBe("logo-bytes");
+
+      const neighboring = await app.request("/v1/workspaces/ws-1/capabilities");
+      expect(neighboring.status).toBe(401);
+    } finally {
+      fake.close();
+    }
+  });
 });
