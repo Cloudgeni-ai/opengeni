@@ -1027,7 +1027,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceEnvironment?.values ?? {},
         {
           skipGitHubToken: activeSandboxBackend === "selfhosted",
-          skipToolspaceToken: activeSandboxBackend === "selfhosted",
           scope: connectionScope,
           gitCredentials: connectionCredentials?.gitCredentials,
           sessionId: input.sessionId,
@@ -1312,7 +1311,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // seeds it to the box's token file before the repository-clone runs; it never
         // touches the box/agent manifest env.
         ...(activeSandboxBackend !== "selfhosted" && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
-        ...(activeSandboxBackend !== "selfhosted" && sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
+        // Toolspace is delivered on EVERY backend including selfhosted. The git-
+        // token skip does NOT transfer: that token is inert on a connected
+        // machine (it uses its own git creds), but the toolspace token is the
+        // machine's ONLY path to programmatic tool calling and grants no more
+        // than toolspace:call for its own session (own-session-bound, turn TTL,
+        // budgeted, approval-tools excluded). The runtime seeds it to the box's
+        // token file over the same exec channel, off-manifest, on every backend.
+        ...(sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,

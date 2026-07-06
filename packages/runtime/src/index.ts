@@ -938,6 +938,25 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
 }
 
 /**
+ * Appends the generic programmatic-tool-calling (toolspace) directive to the
+ * composed workspace + CORE instructions, joined by " ". This is GENERIC
+ * substrate prompting — the same text for every host, never per-host copy.
+ *
+ * Included ONLY when `toolspaceAvailable` is true, which the caller sets from the
+ * exact condition that gates the sandbox token mint: the toolspace feature is
+ * enabled AND a toolspace token was minted for THIS turn. That mint now happens
+ * on every backend including selfhosted (connected machines get the token too),
+ * so the block appears there as well; a turn with no minted token (feature off)
+ * has no toolspace URL/token in its sandbox and must not advertise a capability
+ * that is not there — the gate is false and this is a no-op. Placed BEFORE the
+ * per-session instructions so host/session specificity still wins over this
+ * substrate note.
+ */
+export function appendToolspaceInstructions(composed: string, toolspaceAvailable: boolean): string {
+  return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
+}
+
+/**
  * Appends the one-shot genesis title directive (genesis turn only), joined by
  * " " and always LAST so a white-label persona template or a per-session
  * instruction can't drop it. A no-op when the hint is absent.
@@ -1030,14 +1049,21 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     // Persona composition order (all one system-level instructions string):
     //   1. workspace instructionsTemplate (or deployment default) with the
     //      non-bypassable CORE substituted at {{core}} — composeAgentInstructions,
-    //   2. + the per-session persona instructions (session-specific, LAST so it
-    //      refines the workspace persona),
-    //   3. + the one-shot genesis title directive (genesis turn only).
-    // With no session instructions and no genesis hint this is byte-identical to
-    // the historical composed instructions.
+    //   2. + the generic programmatic-tool-calling (toolspace) directive, ONLY
+    //      when a toolspace token was minted for this turn (feature enabled + a
+    //      per-turn seed — the mint gate, which includes selfhosted turns since
+    //      they now receive the token too) — appendToolspaceInstructions,
+    //   3. + the per-session persona instructions (session-specific, so it
+    //      refines both the workspace persona and the substrate note),
+    //   4. + the one-shot genesis title directive (genesis turn only).
+    // With no toolspace token, no session instructions, and no genesis hint this
+    // is byte-identical to the historical composed instructions.
     instructions: appendGenesisTitleDirective(
       appendSessionInstructions(
-        composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+        appendToolspaceInstructions(
+          composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+          settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+        ),
         options.sessionInstructions,
       ),
       options.genesisTitleHint,
@@ -2194,6 +2220,13 @@ export type ContextRobustnessFilterOptions = {
 export const GENESIS_TITLE_DIRECTIVE =
   "This is the first turn of a new session. Before responding to the user, call the opengeni__set_session_title tool with a concise 3-7 word title that summarizes what this session is about, then address the user's request normally.";
 
+// Generic substrate prompting for programmatic tool calling (toolspace). Same
+// text for every host; gated per-turn by appendToolspaceInstructions on the
+// presence of a minted toolspace token, so it only appears when the sandbox
+// actually exposes the ogtool CLI + $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE.
+export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
+  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
+
 /**
  * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)
  * from every input item immediately before each model call. Responses-API
@@ -2397,6 +2430,22 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
         });
+      }
+    } else {
+      // SELFHOSTED TOOLSPACE (parity): the platform setup hooks (repository clone,
+      // az login) and file materialization stay OFF the user's real machine — but
+      // the toolspace token seed is the ONE piece of per-turn material that must
+      // reach it. It writes a scoped, own-session-bound token to
+      // $OPENGENI_TOOLSPACE_TOKEN_FILE over the SAME exec channel the clone-seed
+      // uses (off-manifest, value never on the manifest), and it grants no more
+      // than the machine owner's own authority (toolspace:call, this session, turn
+      // TTL, budgeted, approval-tools excluded) — the invariant that makes it safe
+      // to cross to a user machine when the git token is not. It is also the
+      // machine's only path to programmatic tool calling. Seed it (only) here; the
+      // hook list is empty when no toolspace token was minted for this turn.
+      const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
+      if (toolspaceHooks.length > 0) {
+        await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
       }
     }
     // Keep the decoration as a safety net for any session the SDK does create/resume
