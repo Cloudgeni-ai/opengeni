@@ -17,11 +17,11 @@ import {
 import type { AppDependencies } from "../src/app";
 import { shouldCreateScheduleAfterUpdateError, temporalOverlapPolicy, temporalScheduleSpec } from "../src/index";
 import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
-import { discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "@opengeni/core";
+import { applyCapabilityEnablement, discoverMcpRegistryCapabilities, settingsWithMcpCapabilityServers, validateMcpCapabilityConnection } from "@opengeni/core";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
-import { ClientConfig, type CapabilityCatalogItem, type SessionEvent } from "@opengeni/contracts";
+import { ClientConfig, type CapabilityCatalogItem, type CapabilityInstallation, type SessionEvent } from "@opengeni/contracts";
 
 describe("API helpers", () => {
   test("normalizes repository resources into sandbox mount paths", () => {
@@ -502,6 +502,45 @@ describe("API helpers", () => {
       { after: 0, limit: 1000 },
       { after: 1000, limit: 1000 },
     ]);
+  });
+});
+
+describe("catalog connectionRef exposure", () => {
+  function installation(config: Record<string, unknown>): CapabilityInstallation {
+    return {
+      id: "00000000-0000-0000-0000-000000000001",
+      accountId: "00000000-0000-0000-0000-0000000000a1",
+      workspaceId: "00000000-0000-0000-0000-0000000000b1",
+      capabilityId: "mcp:secure",
+      kind: "mcp",
+      status: "active",
+      config,
+      metadata: { mcpConnectivity: { status: "ok", toolCount: 1 } },
+      enabledAt: "2026-07-06T00:00:00.000Z",
+      updatedAt: "2026-07-06T00:00:00.000Z",
+    };
+  }
+
+  const secureMcp = () => capabilityItem({
+    id: "mcp:secure",
+    kind: "mcp",
+    name: "Secure MCP",
+    source: "public_registry",
+    endpointUrl: "https://secure.example/mcp",
+    runtime: { available: true, mcpServerId: "cap-secure", transport: "streamable-http", notes: null },
+  });
+
+  test("an item enabled through a connection lists its connectionRef back", () => {
+    const ref = { connectionId: "conn-42", providerDomain: "secure.example", kind: "api_key" };
+    const listed = applyCapabilityEnablement(secureMcp(), installation({ connectionRef: ref }), new Set());
+    expect(listed.enabled).toBe(true);
+    expect(listed.connectionRef).toEqual(ref);
+  });
+
+  test("an item enabled with credential headers (no connection) lists connectionRef null", () => {
+    const listed = applyCapabilityEnablement(secureMcp(), installation({ headerNames: ["authorization"] }), new Set());
+    expect(listed.enabled).toBe(true);
+    expect(listed.connectionRef).toBeNull();
   });
 });
 

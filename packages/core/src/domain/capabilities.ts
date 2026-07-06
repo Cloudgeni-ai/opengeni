@@ -785,7 +785,7 @@ async function readSkillMetadata(url: URL, fallbackName: string): Promise<{ name
   return { name, description, category };
 }
 
-function applyCapabilityEnablement(
+export function applyCapabilityEnablement(
   item: CapabilityCatalogItem,
   installation: CapabilityInstallation | undefined,
   activePackIds: Set<string>,
