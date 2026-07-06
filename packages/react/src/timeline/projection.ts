@@ -988,7 +988,9 @@ function looksLikeId(value: string): boolean {
  * built-ins like "session_create") are unaffected.
  */
 export function toolDisplayName(name: string): string {
-  const boundary = name.lastIndexOf("__");
+  // The prefix is a single LEFT boundary (`registryId__toolName`), so split on
+  // the FIRST `__` — the tool name itself may contain `__` and must survive whole.
+  const boundary = name.indexOf("__");
   const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
   return toolPart.replace(/[_-]+/g, " ").trim();
 }

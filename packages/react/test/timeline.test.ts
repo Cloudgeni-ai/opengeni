@@ -28,6 +28,10 @@ describe("toolDisplayName", () => {
     expect(toolDisplayName("session_create")).toBe("session create");
     expect(toolDisplayName("bash")).toBe("bash");
   });
+
+  test("splits on the FIRST __ so a tool name containing __ survives whole", () => {
+    expect(toolDisplayName("mcp-supabase-abc123__do__thing")).toBe("do thing");
+  });
 });
 
 let sequence = 0;
