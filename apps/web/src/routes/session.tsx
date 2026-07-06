@@ -3,6 +3,7 @@
 // The composer is queue-by-default with explicit steer; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import {
+  creditExhaustedFromEvents,
   MessageTimeline,
   projectPendingApprovals,
   useComposer,
@@ -106,9 +107,16 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
   const approvals = useMemo(() => projectPendingApprovals(events), [events]);
+  // Credit death is sneaky: the engine can end the turn as a NOMINALLY
+  // completed one (segmentLimit budget_exhausted), leaving the session idle and
+  // healthy-looking. Track the terminal credit state from the last turn-end so
+  // the banner shows for idle-but-broke sessions too, not only failed ones.
+  const creditExhausted = useMemo(() => creditExhaustedFromEvents(events), [events]);
   const failure = useMemo(
-    () => session?.status === "failed" ? summarizeSessionFailure(events, session.status) : null,
-    [events, session?.status],
+    () => session && (session.status === "failed" || creditExhausted)
+      ? summarizeSessionFailure(events, session.status)
+      : null,
+    [events, session?.status, creditExhausted],
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
@@ -159,6 +167,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       initialLoading={initialLoading}
       approvals={approvals}
       failure={failure}
+      creditExhausted={creditExhausted}
       goal={goal}
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
@@ -266,6 +275,8 @@ function SessionChatPane(props: {
   initialLoading: boolean;
   approvals: PendingApproval[];
   failure: ReturnType<typeof summarizeSessionFailure> | null;
+  /** The last turn ended budget_exhausted — the workspace is out of credits. */
+  creditExhausted: boolean;
   goal: ReturnType<typeof useGoal>;
   hasOlder: boolean;
   loadingOlder: boolean;
@@ -379,7 +390,14 @@ function SessionChatPane(props: {
         </div>
       ) : (
         <>
-          {props.session.status === "failed" && props.failure ? <FailedSessionBanner failure={props.failure} /> : null}
+          {/* Credit death also surfaces on an IDLE session: a budget_exhausted
+              turn completes "cleanly", so waiting for status === "failed" would
+              hide the one banner that explains why nothing works anymore. It
+              hides again while a turn is actually running (someone topped up
+              and is trying), so the recovery turn isn't shadowed by it. */}
+          {props.failure && (props.session.status === "failed" || (props.creditExhausted && props.session.status === "idle")) ? (
+            <FailedSessionBanner failure={props.failure} creditExhausted={props.creditExhausted} workspaceId={props.session.workspaceId} />
+          ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
               className="h-full"
@@ -455,9 +473,13 @@ function SessionChatPane(props: {
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder={props.session.status === "cancelled"
               ? "This session was cancelled."
-              : props.session.status === "failed"
-                ? "This session failed — send a message to revive it."
-                : "Send a follow-up…"}
+              : props.creditExhausted && (props.session.status === "failed" || props.session.status === "idle")
+                // "Send a message to revive" is a dead end without credits —
+                // the reply turn dies the same budget death.
+                ? "Out of OpenGeni credits — add credits to continue."
+                : props.session.status === "failed"
+                  ? "This session failed — send a message to revive it."
+                  : "Send a follow-up…"}
             controls={(
               <div className="flex min-w-0 items-center gap-1.5">
                 <ModelPicker

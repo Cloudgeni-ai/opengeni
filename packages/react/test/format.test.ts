@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { formatRelativeTime, stringifyPayload, truncate, tryParseJson } from "../src/lib/format";
+import {
+  CREDIT_EXHAUSTION_MESSAGE,
+  formatRelativeTime,
+  humanizeFailureReason,
+  isCreditExhaustion,
+  stringifyPayload,
+  truncate,
+  tryParseJson,
+} from "../src/lib/format";
 
 describe("formatRelativeTime", () => {
   const now = new Date("2026-06-12T12:00:00Z");
@@ -40,5 +48,41 @@ describe("tryParseJson", () => {
     expect(tryParseJson("[1,2]")).toEqual([1, 2]);
     expect(tryParseJson("nope")).toBeUndefined();
     expect(tryParseJson("{broken")).toBeUndefined();
+  });
+});
+
+describe("isCreditExhaustion", () => {
+  test("matches the engine error text, bare and wrapped, case-insensitively", () => {
+    expect(isCreditExhaustion("insufficient OpenGeni credits")).toBe(true);
+    expect(isCreditExhaustion("Activity task failed: insufficient OpenGeni credits")).toBe(true);
+    expect(isCreditExhaustion("INSUFFICIENT OPENGENI CREDITS")).toBe(true);
+    expect(isCreditExhaustion({ error: "Activity task failed: insufficient OpenGeni credits" })).toBe(true);
+    expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits" })).toBe(true);
+  });
+
+  test("matches the budget_exhausted segment limit on its own", () => {
+    expect(isCreditExhaustion({ segmentLimit: "budget_exhausted" })).toBe(true);
+    expect(isCreditExhaustion({ detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" })).toBe(true);
+  });
+
+  test("rejects unrelated failures and limits", () => {
+    expect(isCreditExhaustion("insufficient_quota")).toBe(false);
+    expect(isCreditExhaustion({ error: "connection reset by peer" })).toBe(false);
+    expect(isCreditExhaustion({ segmentLimit: "max_turns" })).toBe(false);
+    expect(isCreditExhaustion({ error: null, detail: null, segmentLimit: null })).toBe(false);
+  });
+});
+
+describe("humanizeFailureReason", () => {
+  test("maps credit exhaustion to the canonical sentence", () => {
+    expect(humanizeFailureReason("insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
+    expect(humanizeFailureReason("Activity task failed: insufficient OpenGeni credits")).toBe(CREDIT_EXHAUSTION_MESSAGE);
+  });
+
+  test("keeps auth/quota mappings and passes other reasons through", () => {
+    expect(humanizeFailureReason("Incorrect API key provided")).toContain("engine credentials");
+    expect(humanizeFailureReason("insufficient_quota")).toContain("provider quota");
+    expect(humanizeFailureReason("something else broke")).toBe("something else broke");
+    expect(humanizeFailureReason(null)).toBeNull();
   });
 });

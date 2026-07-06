@@ -16,7 +16,7 @@
    -------------------------------------------------------------------------- */
 
 // projection
-export { buildTimeline, extractSessionRef, groupTimeline, sessionStatusFromEvents, toolDisplayName } from "./projection";
+export { buildTimeline, creditExhaustedFromEvents, extractSessionRef, groupTimeline, sessionStatusFromEvents, toolDisplayName } from "./projection";
 
 // item types
 export type {

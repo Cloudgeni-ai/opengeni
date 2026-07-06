@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import {
   buildTimeline,
+  creditExhaustedFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
@@ -965,6 +967,100 @@ describe("cluster outcomes inside a failed turn", () => {
     const outcomes = activity.map((cluster) => cluster.outcome);
     expect(outcomes).toContain("failed");
     expect(outcomes.filter((outcome) => outcome === "failed").length).toBe(1);
+  });
+});
+
+describe("credit exhaustion", () => {
+  // Case (b), the worst one: the engine ends a budget-exhausted turn as a
+  // NOMINALLY completed turn. It must project as a failure, never as a clean
+  // "complete" chip on an otherwise healthy-looking idle session.
+  test("turn.completed with budget_exhausted projects as a failed turn-end plus a failed notice", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", { text: "keep going" }),
+      event("agent.message.delta", { text: "Working…" }),
+      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message", "agent-message", "turn-end", "notice"]);
+    expect(items[2]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items[3]).toMatchObject({ kind: "notice", tone: "failed", text: CREDIT_EXHAUSTION_MESSAGE });
+  });
+
+  test("turn.completed with only the detail text (no segmentLimit) still projects as failed", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.completed", { detail: "insufficient OpenGeni credits" }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items[1]).toMatchObject({ kind: "notice", tone: "failed" });
+  });
+
+  test("ordinary turn.completed is untouched — complete turn-end, no notice", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.completed", { detail: "all good", segmentLimit: "max_turns" }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["turn-end"]);
+    expect(items[0]).toMatchObject({ outcome: "complete", failureText: null });
+  });
+
+  // Case (a): turn.failed carrying the raw engine error (bare or wrapped in
+  // "Activity task failed") maps to the same canonical sentence.
+  test("turn.failed with the credit error renders the canonical message", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
+    ]);
+    expect(items[0]).toMatchObject({ kind: "turn-end", outcome: "failed", failureText: CREDIT_EXHAUSTION_MESSAGE });
+    expect(items[1]).toMatchObject({ kind: "notice", tone: "failed", text: CREDIT_EXHAUSTION_MESSAGE });
+  });
+
+  test("groupTimeline folds a credit-exhausted turn as failed", () => {
+    reset();
+    const groups = groupTimeline(buildTimeline([
+      event("agent.toolCall.created", { id: "c1", name: "exec_command", arguments: { cmd: "ls" } }),
+      event("agent.toolCall.output", { id: "c1", output: "ok" }),
+      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }),
+    ]));
+    const turnGroup = groups.find((group) => group.kind === "turn");
+    expect(turnGroup?.outcome).toBe("failed");
+    expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE);
+  });
+});
+
+describe("creditExhaustedFromEvents", () => {
+  test("true when the LAST turn-end is credit exhaustion (either payload shape)", () => {
+    reset();
+    expect(creditExhaustedFromEvents([
+      event("turn.completed", {}, { turnId: "turn-1" }),
+      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }, { turnId: "turn-2" }),
+    ])).toBe(true);
+    reset();
+    expect(creditExhaustedFromEvents([
+      event("turn.failed", { error: "Activity task failed: insufficient OpenGeni credits" }),
+    ])).toBe(true);
+  });
+
+  test("false when a later turn settles any other way, or with no turn ends", () => {
+    reset();
+    expect(creditExhaustedFromEvents([
+      event("turn.completed", { detail: "insufficient OpenGeni credits", segmentLimit: "budget_exhausted" }, { turnId: "turn-1" }),
+      event("turn.completed", {}, { turnId: "turn-2" }),
+    ])).toBe(false);
+    reset();
+    expect(creditExhaustedFromEvents([
+      event("user.message", { text: "hello" }),
+      event("agent.message.delta", { text: "hi" }),
+    ])).toBe(false);
+    expect(creditExhaustedFromEvents([])).toBe(false);
+  });
+
+  test("orders by sequence, not array order", () => {
+    reset();
+    expect(creditExhaustedFromEvents([
+      eventAt(20, "turn.completed", { segmentLimit: "budget_exhausted" }, { turnId: "turn-2" }),
+      eventAt(10, "turn.completed", {}, { turnId: "turn-1" }),
+    ])).toBe(true);
   });
 });
 

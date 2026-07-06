@@ -91,6 +91,7 @@ export type { PendingApproval } from "./approvals";
 // Timeline projection
 export {
   buildTimeline,
+  creditExhaustedFromEvents,
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
@@ -242,4 +243,4 @@ export { xtermThemeFromTokens } from "./lib/xterm-theme";
 
 // Utilities
 export { cn } from "./lib/cn";
-export { formatBytes, formatRelativeTime, humanizeFailureReason, stringifyPayload, truncate, tryParseJson } from "./lib/format";
+export { CREDIT_EXHAUSTION_MESSAGE, formatBytes, formatRelativeTime, humanizeFailureReason, isCreditExhaustion, stringifyPayload, truncate, tryParseJson } from "./lib/format";

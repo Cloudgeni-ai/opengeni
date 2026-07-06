@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
-import { humanizeFailureReason, tryParseJson } from "../lib/format";
+import { CREDIT_EXHAUSTION_MESSAGE, humanizeFailureReason, isCreditExhaustion, tryParseJson } from "../lib/format";
 import type {
   AgentMessageItem,
   ActivityItem,
@@ -328,6 +328,24 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.completed": {
+        // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
+        // "insufficient OpenGeni credits"`, `segmentLimit: "budget_exhausted"`)
+        // — the engine ended the segment early, it did not finish the work.
+        // Rendering it as a clean "complete" turn is a lie that leaves the
+        // session looking healthy while every future turn silently dies, so it
+        // projects exactly like a failed turn plus an explicit notice.
+        if (isCreditExhaustionPayload(payload)) {
+          finalizeOpen(turnId);
+          items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
+          items.push({
+            kind: "notice",
+            id: event.id,
+            tone: "failed",
+            text: CREDIT_EXHAUSTION_MESSAGE,
+            occurredAt: event.occurredAt,
+          });
+          break;
+        }
         finalizeOpen(turnId);
         items.push(turnEndItem(event, "complete", null));
         break;
@@ -335,7 +353,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "turn.failed": {
         const hadActivity = hasTurnActivity(items, turnId);
-        const failureText = failureMessage(payload);
+        // Credit death can hide behind fields `failureMessage` doesn't read
+        // (detail/segmentLimit), so classify the whole payload before falling
+        // back to the generic error/message extraction.
+        const failureText = isCreditExhaustionPayload(payload) ? CREDIT_EXHAUSTION_MESSAGE : failureMessage(payload);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
@@ -398,6 +419,33 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   }
 
   return items;
+}
+
+/** The turn-end payload shape, as `isCreditExhaustion` wants it. */
+function isCreditExhaustionPayload(payload: Record<string, unknown>): boolean {
+  return isCreditExhaustion({
+    error: typeof payload.error === "string" ? payload.error : null,
+    detail: typeof payload.detail === "string" ? payload.detail : null,
+    segmentLimit: typeof payload.segmentLimit === "string" ? payload.segmentLimit : null,
+  });
+}
+
+/**
+ * Whether the session's most recent turn ended in credit exhaustion — the
+ * terminal credit state apps key their "add credits" affordances on. Derived
+ * from the LAST turn-end event (completed/failed/cancelled): a later turn that
+ * settles any other way (someone topped up and kept working) clears it.
+ */
+export function creditExhaustedFromEvents(events: SessionEvent[]): boolean {
+  const ordered = [...events].sort((a, b) => a.sequence - b.sequence);
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const event = ordered[index];
+    if (event?.type !== "turn.completed" && event?.type !== "turn.failed" && event?.type !== "turn.cancelled") {
+      continue;
+    }
+    return isCreditExhaustionPayload(asRecord(event.payload));
+  }
+  return false;
 }
 
 /** The latest session status carried in the event log, if any. */

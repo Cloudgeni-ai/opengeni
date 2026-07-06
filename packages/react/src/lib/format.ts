@@ -84,17 +84,55 @@ export function tryParseJson(text: string): unknown {
 }
 
 /**
+ * The canonical credit-death sentence. Credit exhaustion is the one failure a
+ * user can fix themselves — the copy must say what happened (empty balance),
+ * what to do (add credits), and what is safe (nothing was lost). Crucially it
+ * must NOT say "send a message to revive": a revive turn burns credits the
+ * workspace no longer has.
+ */
+export const CREDIT_EXHAUSTION_MESSAGE =
+  "Out of OpenGeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+
+/**
+ * Does this failure/completion payload (or raw error string) mean the
+ * workspace ran out of OpenGeni credits? Matches the engine's
+ * "insufficient OpenGeni credits" text (case-insensitive, substring — it
+ * arrives both bare and wrapped in "Activity task failed: …") and the
+ * budget-exhausted segment limit the engine stamps on a turn it ended early.
+ */
+export function isCreditExhaustion(
+  input: { error?: string | null; detail?: string | null; segmentLimit?: string | null } | string,
+): boolean {
+  if (typeof input === "string") {
+    return input.toLowerCase().includes("insufficient opengeni credits");
+  }
+  if (input.segmentLimit === "budget_exhausted") {
+    return true;
+  }
+  for (const text of [input.error, input.detail]) {
+    if (typeof text === "string" && text.toLowerCase().includes("insufficient opengeni credits")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Humanize engine/provider failure text before it reaches the timeline or a
  * failure banner. Raw provider errors leak the wrong audience's instructions —
  * "Incorrect API key … find your API key at platform.openai.com" tells a
  * managed-deployment USER to fix credentials only an OPERATOR controls (and is
- * flatly wrong for Azure or subscription-backed engines). Auth and quota
- * failures collapse to one neutral, honest sentence; every other reason passes
- * through untouched. Raw payloads stay available in the debug surfaces.
+ * flatly wrong for Azure or subscription-backed engines). Auth, quota, and
+ * credit-exhaustion failures collapse to one neutral, honest sentence; every
+ * other reason passes through untouched. Raw payloads stay available in the
+ * debug surfaces.
  */
 export function humanizeFailureReason(reason: string | null): string | null {
   if (!reason) {
     return reason;
+  }
+  if (isCreditExhaustion(reason)) {
+    return CREDIT_EXHAUSTION_MESSAGE;
   }
   const normalized = reason.toLowerCase();
   const authFailure =
