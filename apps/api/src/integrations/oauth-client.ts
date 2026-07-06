@@ -245,7 +245,11 @@ export async function completeMcpOAuthCallback(
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during OAuth reconnect; start again" });
     }
-    return { redirectTo: callbackReturnPath(state.returnPath, "success", { connectionId: connection.id }) };
+    // Carry the canonical providerDomain (not just the id) so the SPA can build
+    // the enable connectionRef straight from the redirect, without a listConnections
+    // round-trip that could fail (transient, or a grant lacking connections:read)
+    // and leave the connection created but the capability un-enabled.
+    return { redirectTo: callbackReturnPath(state.returnPath, "success", { connectionId: connection.id, providerDomain: connection.providerDomain }) };
   } catch (error) {
     if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
       throw error;

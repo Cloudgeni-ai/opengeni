@@ -335,7 +335,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     window.history.replaceState(null, "", window.location.pathname);
 
     if (outcome === "success") {
-      void resumeOAuthConnect(itemId, params.get("connectionId"));
+      void resumeOAuthConnect(itemId, params.get("connectionId"), params.get("providerDomain"));
     } else {
       const reason = params.get("reason");
       const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
@@ -349,7 +349,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items]);
 
-  async function resumeOAuthConnect(itemId: string | null, connectionId: string | null) {
+  async function resumeOAuthConnect(itemId: string | null, connectionId: string | null, providerDomain: string | null) {
     setBusyId(itemId ?? "oauth-return");
     // Hoisted above the try so the catch can reopen the sheet from the freshly
     // fetched rows (falling back to closure items only if the fetch itself failed).
@@ -363,7 +363,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       ]);
       freshItems = catalog.items;
       setItems(catalog.items);
-      setConnections(conns);
+      // Don't clobber previously-loaded connections with null on a failed refetch
+      // (that would flip healthy items to "unverified" until the next reload).
+      if (conns !== null) setConnections(conns);
       const item = (itemId ? catalog.items.find((candidate) => candidate.id === itemId) : undefined) ?? null;
       const action = oauthResumeAction(item, connectionId);
 
@@ -385,17 +387,19 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         return;
       }
 
-      // Enable against the AUTHORITATIVE connection row (matched by the id from
-      // the redirect), never a domain reconstructed from catalog data — the API
-      // canonicalizes providerDomain, and the row is what the enable path
-      // validates against. A missing row means we can't enable safely.
-      const connection = conns?.find((candidate) => candidate.id === connectionId) ?? null;
-      if (!connection) {
+      // Build the enable connectionRef from the redirect's own authoritative
+      // values — the callback carries the canonical providerDomain alongside the
+      // connectionId — so enabling never depends on listConnections succeeding
+      // (a transient failure or a grant without connections:read would otherwise
+      // leave the connection created but the capability un-enabled). Fall back to
+      // the fetched row only for an older callback that omitted providerDomain.
+      const refDomain = providerDomain ?? conns?.find((candidate) => candidate.id === connectionId)?.providerDomain ?? null;
+      if (!refDomain) {
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
         return;
       }
       await client.enableCapability(workspaceId, item!.id, {
-        connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "oauth2" },
+        connectionRef: { connectionId: connectionId!, providerDomain: refDomain, kind: "oauth2" },
       });
       await refresh();
       onRuntimeChanged();

@@ -438,6 +438,10 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       const location = callback.headers.get("location")!;
       expect(location).toContain("integration_oauth=success");
+      // The success redirect carries the canonical providerDomain (not just the
+      // connectionId) so the SPA can build the enable connectionRef straight from
+      // the redirect, without depending on a listConnections round-trip.
+      expect(location).toContain("providerDomain=mcp.example.com");
 
       expect(as.tokenRequests).toHaveLength(1);
       expect(as.tokenRequests[0]!.get("resource")).toBe(mcp.url);
