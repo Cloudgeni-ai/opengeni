@@ -18,6 +18,7 @@ import {
   normalizeProviderDomain,
   oauthResumeAction,
   registryResultsForQuery,
+  resolveSheetItem,
   workspaceConnectionForDomain,
 } from "./capabilities";
 import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
@@ -310,6 +311,40 @@ describe("capabilityReconnectPlan", () => {
     expect(capabilityReconnectPlan(withRef, { state: "connected", connection: connection({ id: "conn-1" }) })).toBeNull();
     expect(capabilityReconnectPlan(withRef, { state: "unverified" })).toBeNull();
     expect(capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted)).toBeNull();
+  });
+});
+
+describe("resolveSheetItem (sheet binds to the live catalog row, never a snapshot)", () => {
+  test("re-derives to the disabled live row after a mutation — no stale Reconnect", () => {
+    // Sheet opened on an enabled, connection-backed item; then the item was
+    // disabled elsewhere (strip disable + refresh) so the catalog row for the same
+    // id now reads enabled:false with no ref. The sheet must render THAT row.
+    const enabledSnapshot = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    const selected = { id: "cap-1", registry: false, snapshot: enabledSnapshot };
+    const disabledLive = item({ id: "cap-1", kind: "mcp", authKind: "oauth2", enabled: false, connectionRef: null });
+
+    const live = resolveSheetItem(selected, [disabledLive]);
+    expect(live).toBe(disabledLive);
+    expect(live!.enabled).toBe(false);
+    // Health has nothing to alarm on and reconnect is NOT offered — the sheet would
+    // show Connect/Enable, never a Reconnect that could re-enable what was disabled.
+    const health = connectionHealth(live!, [], true);
+    expect(health).toEqual({ state: "none" });
+    expect(capabilityReconnectPlan(live!, health)).toBeNull();
+  });
+
+  test("falls back to the snapshot for a registry item not yet in the catalog", () => {
+    const snap = item({ id: "reg-1", source: "public_registry" });
+    expect(resolveSheetItem({ id: "reg-1", registry: true, snapshot: snap }, [])).toBe(snap);
+  });
+
+  test("a non-registry selection absent from the catalog resolves to null (sheet closes)", () => {
+    const snap = item({ id: "gone", enabled: true });
+    expect(resolveSheetItem({ id: "gone", registry: false, snapshot: snap }, [])).toBeNull();
+  });
+
+  test("null selection resolves to null", () => {
+    expect(resolveSheetItem(null, [item({ id: "cap-1" })])).toBeNull();
   });
 });
 

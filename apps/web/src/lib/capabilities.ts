@@ -190,6 +190,26 @@ export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityC
   return item.connectionRef ?? null;
 }
 
+/**
+ * The detail sheet's selection: the id it's bound to, whether it came from the
+ * public registry, and a snapshot taken at open time. The snapshot is a fallback
+ * for registry items not yet in the catalog — the rendered item is otherwise
+ * always the LIVE catalog row.
+ */
+export type SheetSelection = { id: string; registry: boolean; snapshot: CapabilityCatalogItem };
+
+/**
+ * The item the detail sheet should render, derived from the LIVE catalog by id so
+ * a mutation elsewhere (disable, refresh) re-derives it instead of leaving a stale
+ * snapshot. Registry items not yet persisted fall back to their snapshot; a
+ * non-registry selection absent from the catalog resolves to null so the caller
+ * closes the sheet rather than render a ghost.
+ */
+export function resolveSheetItem(selected: SheetSelection | null, items: CapabilityCatalogItem[]): CapabilityCatalogItem | null {
+  if (!selected) return null;
+  return items.find((entry) => entry.id === selected.id) ?? (selected.registry ? selected.snapshot : null);
+}
+
 export type ConnectionHealth =
   | { state: "none" }
   | { state: "unverified" }

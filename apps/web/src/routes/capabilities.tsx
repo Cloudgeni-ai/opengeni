@@ -35,9 +35,11 @@ import {
   isMissingCredentialsError,
   oauthResumeAction,
   registryResultsForQuery,
+  resolveSheetItem,
   type CapabilityFilter,
   type CapabilityFormState,
   type ConnectionHealth,
+  type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
@@ -64,8 +66,12 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const [query, setQuery] = useState("");
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-  // Detail/connect sheet.
-  const [selected, setSelected] = useState<{ item: CapabilityCatalogItem; registry: boolean } | null>(null);
+  // Detail/connect sheet. We store the id (+ registry flag + a snapshot for
+  // registry items not yet in the catalog), NOT the item object: the rendered
+  // item is derived from the LIVE `items` list by id, so any mutation + refresh
+  // (strip disable, pack disable, background reload) re-derives the sheet instead
+  // of leaving it on a stale snapshot that could re-enable what was just disabled.
+  const [selected, setSelected] = useState<SheetSelection | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -95,8 +101,13 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   const logoUrl = useCallback((item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath), [client]);
   const connectionsLoaded = connections !== null;
-  const selectedHealth: ConnectionHealth = selected
-    ? connectionHealth(selected.item, connections ?? [], connectionsLoaded)
+  // The item the sheet renders, always from the live catalog. Registry items
+  // aren't in `items` until persisted, so they fall back to their snapshot; a
+  // non-registry selection with no live row resolves to null and the effect
+  // below closes the sheet rather than render a ghost.
+  const selectedItem: CapabilityCatalogItem | null = useMemo(() => resolveSheetItem(selected, items), [selected, items]);
+  const selectedHealth: ConnectionHealth = selectedItem
+    ? connectionHealth(selectedItem, connections ?? [], connectionsLoaded)
     : { state: "none" };
 
   useEffect(() => {
@@ -106,6 +117,15 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
+
+  // Close the sheet if a non-registry selection vanished from the catalog after a
+  // refresh (deleted/unregistered elsewhere) — never leave a ghost open.
+  useEffect(() => {
+    if (selected && !selected.registry && !loading && !items.some((entry) => entry.id === selected.id)) {
+      setSelected(null);
+      setSheetError(null);
+    }
+  }, [selected, items, loading]);
 
   // Registry hits stay in state after a search; gate them on the searched term
   // still matching the live query so an old search never renders against a new
@@ -139,33 +159,36 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   function openItem(item: CapabilityCatalogItem, registry = false) {
     setSheetError(null);
-    setSelected({ item, registry });
+    setSelected({ id: item.id, registry, snapshot: item });
   }
 
   // --- Connect flows ---------------------------------------------------------
 
   // Registry items aren't persisted; create the catalog row before connecting so
   // enable/OAuth have a real capability id to reference.
-  async function persistIfRegistry(entry: { item: CapabilityCatalogItem; registry: boolean }): Promise<CapabilityCatalogItem> {
-    if (!entry.registry) return entry.item;
-    const created = await client.createCapability(workspaceId, createInputFromCatalogItem(entry.item));
+  async function persistIfRegistry(item: CapabilityCatalogItem, registry: boolean): Promise<CapabilityCatalogItem> {
+    if (!registry) return item;
+    const created = await client.createCapability(workspaceId, createInputFromCatalogItem(item));
     return created;
   }
 
   async function handleAction(action: ConnectAction) {
-    if (!selected) return;
-    setBusyId(selected.item.id);
+    // Act on the LIVE item (derived from the catalog by id), never the stored
+    // snapshot — a mutation elsewhere may have changed it since the sheet opened.
+    if (!selected || !selectedItem) return;
+    const item = selectedItem;
+    setBusyId(item.id);
     setSheetError(null);
     try {
-      // The plan is derived from the original catalog/registry item (it carries
+      // The plan is derived from the current catalog/registry item (it carries
       // authKind/mcpUrl/providerDomain); connect calls use the persisted id.
-      const plan = capabilityConnectPlan(selected.item);
+      const plan = capabilityConnectPlan(item);
 
       if (action.type === "disable") {
-        await client.disableCapability(workspaceId, selected.item.id);
+        await client.disableCapability(workspaceId, item.id);
         await refresh();
         onRuntimeChanged();
-        toast.success(`Disabled ${selected.item.name}`);
+        toast.success(`Disabled ${item.name}`);
         setSelected(null);
         return;
       }
@@ -179,9 +202,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         // Trust the installation's connectionRef.kind (the sheet already chose this
         // branch from it), not the catalog plan — on drift plan.mode can read
         // "enable", so fall back to the ref's domain and the item's own MCP URL.
-        const providerDomain = plan.mode === "oauth" ? plan.providerDomain : selected.item.connectionRef?.providerDomain ?? null;
-        const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : selected.item.mcpUrl ?? selected.item.endpointUrl ?? null;
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(selected.item.id)}`;
+        const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item.connectionRef?.providerDomain ?? null;
+        const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : item.mcpUrl ?? item.endpointUrl ?? null;
+        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
         const response = await client.startConnectionOAuth(workspaceId, {
           ...(mcpUrl ? { mcpUrl } : {}),
           ...(providerDomain ? { providerDomain } : {}),
@@ -210,24 +233,24 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           // The row was deleted — mint a fresh connection and re-enable the
           // installation against it (enable upserts the installation config). Domain
           // comes from the plan, or the installation's ref when the catalog drifted.
-          const providerDomain = plan.mode === "enable" ? selected.item.connectionRef?.providerDomain ?? "" : plan.providerDomain;
+          const providerDomain = plan.mode === "enable" ? item.connectionRef?.providerDomain ?? "" : plan.providerDomain;
           const connection = await client.createConnection(workspaceId, {
             providerDomain,
             kind: "api_key",
             credential: { headers: action.headers },
           });
-          await client.enableCapability(workspaceId, selected.item.id, {
+          await client.enableCapability(workspaceId, item.id, {
             connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
           });
         }
         await refresh();
         onRuntimeChanged();
-        toast.success(`Reconnected ${selected.item.name}`);
+        toast.success(`Reconnected ${item.name}`);
         setSelected(null);
         return;
       }
 
-      const persisted = await persistIfRegistry(selected);
+      const persisted = await persistIfRegistry(item, selected.registry);
 
       if (action.type === "oauth" && plan.mode === "oauth") {
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(persisted.id)}`;
@@ -248,7 +271,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       if (action.type === "api_key" && plan.mode === "api_key") {
         // Reuse an existing workspace connection rather than creating a duplicate
         // on a retry; only mint a new one when none exists.
-        const reuseId = connectionToReuseForApiKey(selected.item, connections ?? [], plan.providerDomain);
+        const reuseId = connectionToReuseForApiKey(item, connections ?? [], plan.providerDomain);
         const connection = reuseId
           ? await client.updateConnection(workspaceId, reuseId, {
               credential: { headers: action.headers },
@@ -312,7 +335,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       const item = itemId ? items.find((candidate) => candidate.id === itemId) ?? null : null;
       if (item) {
         setSheetError(reason ? `Couldn't connect: ${reason}.` : "Couldn't connect. Please try again.");
-        setSelected({ item, registry: false });
+        setSelected({ id: item.id, registry: false, snapshot: item });
       } else {
         toast.error("Connection failed", { description: reason ?? undefined });
       }
@@ -379,7 +402,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       setSheetError(copy.description);
       // Reopen the sheet on the item so the failure has a Retry, when resolvable.
       const item = itemId ? (freshItems ?? items).find((candidate) => candidate.id === itemId) ?? null : null;
-      if (item) setSelected({ item, registry: false });
+      if (item) setSelected({ id: item.id, registry: false, snapshot: item });
       toast.error(copy.title, { description: copy.description });
     } finally {
       setBusyId(null);
@@ -655,17 +678,17 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       </div>
 
       <CapabilityDetailSheet
-        item={selected?.item ?? null}
+        item={selectedItem}
         health={selectedHealth}
-        logoSrc={selected ? logoUrl(selected.item) : null}
-        open={selected !== null}
+        logoSrc={selectedItem ? logoUrl(selectedItem) : null}
+        open={selectedItem !== null}
         onOpenChange={(open) => {
           if (!open) {
             setSelected(null);
             setSheetError(null);
           }
         }}
-        busy={busyId === selected?.item.id}
+        busy={busyId === selectedItem?.id}
         errorMessage={sheetError}
         onAction={handleAction}
       />
