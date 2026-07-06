@@ -1,4 +1,4 @@
-import type { CapabilityCatalogItem, CapabilityKind, CapabilitySource, CreateCapabilityInput } from "@/types";
+import type { CapabilityCatalogItem, CapabilityKind, CapabilitySource, ConnectionMetadata, CreateCapabilityInput } from "@/types";
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -169,6 +169,19 @@ export function domainFromUrl(url: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The workspace-shared connection backing a capability, matched by provider
+ * domain. Used to surface connection health ("Connected" / "Needs attention")
+ * on enabled items. subjectId === null is the workspace-shared connection the
+ * enable path requires.
+ */
+export function connectionForCapability(item: CapabilityCatalogItem, connections: ConnectionMetadata[]): ConnectionMetadata | null {
+  const plan = capabilityConnectPlan(item);
+  const providerDomain = plan.mode === "enable" ? item.providerDomain : plan.providerDomain;
+  if (!providerDomain) return null;
+  return connections.find((connection) => connection.subjectId === null && connection.providerDomain === providerDomain) ?? null;
 }
 
 /** First one or two initials for the logo monogram fallback. */
