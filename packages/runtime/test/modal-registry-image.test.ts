@@ -15,14 +15,16 @@ const SECRET_NAME = "acr-credentials-gecko";
 function fakeModal() {
   const fakeImage = { imageId: "im-fake", objectId: "im-fake" };
   const fromRegistry = mock((_tag: string, _secret: unknown) => fakeImage);
+  // The Secret is resolved via the AUTHENTICATED client (client.secrets.fromName),
+  // never the static modal.Secret.fromName (which uses getDefaultClient).
   const secretFromName = mock(async (_name: string, _params?: unknown) => ({ secretId: "sec-fake" }));
   const loadModal: ModalModuleLoader = async () =>
     ({
       ModalClient: class {
         images = { fromRegistry };
+        secrets = { fromName: secretFromName };
         constructor(_opts: unknown) {}
       },
-      Secret: { fromName: secretFromName },
     }) as unknown as Awaited<ReturnType<ModalModuleLoader>>;
   return { loadModal, fromRegistry, secretFromName, fakeImage };
 }

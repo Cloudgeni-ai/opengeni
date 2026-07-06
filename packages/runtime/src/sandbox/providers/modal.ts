@@ -120,9 +120,7 @@ type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 // built by this module's client is usable by the ModalSandboxClient's own client.
 
 /** Loader seam so unit tests can inject a fake modal module. */
-export type ModalModuleLoader = () => Promise<
-  Pick<ModalModule, "ModalClient" | "Secret">
->;
+export type ModalModuleLoader = () => Promise<Pick<ModalModule, "ModalClient">>;
 
 const defaultModalLoader: ModalModuleLoader = () => import("modal");
 
@@ -162,7 +160,12 @@ export async function ensureModalRegistryImage(
     pending = (async () => {
       const modal = await loadModal();
       const client = new modal.ModalClient(modalClientOptions(settings));
-      const secret = await modal.Secret.fromName(
+      // Resolve the Secret via the AUTHENTICATED client (client.secrets.fromName),
+      // NOT the static `modal.Secret.fromName`, which resolves against
+      // `getDefaultClient()` — i.e. the standard MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env
+      // or ~/.modal.toml — and so would throw "Profile is missing token_id" in any host
+      // that supplies the token only through OpenGeni settings (OPENGENI_MODAL_TOKEN_ID).
+      const secret = await client.secrets.fromName(
         settings.modalImageRegistrySecret!,
         settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
       );
