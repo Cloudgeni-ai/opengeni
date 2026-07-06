@@ -121,6 +121,20 @@ describe("capabilityConnectPlan", () => {
     ]);
   });
 
+  test("all-caps header names are sentence-cased, short acronyms keep caps", () => {
+    const plan = capabilityConnectPlan(item({
+      kind: "mcp",
+      authKind: "api_key",
+      providerDomain: "datadoghq.com",
+      metadata: { requiredHeaders: ["DD-APPLICATION-KEY"] },
+    }));
+    expect(plan.mode).toBe("api_key");
+    if (plan.mode !== "api_key") return;
+    expect(plan.fields).toEqual([
+      { name: "DD-APPLICATION-KEY", label: "DD Application Key" },
+    ]);
+  });
+
   test("MCP with no auth signal just enables", () => {
     expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "none" }))).toEqual({ mode: "enable" });
   });

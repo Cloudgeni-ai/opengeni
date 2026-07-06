@@ -153,12 +153,21 @@ function headerField(name: string): RequiredHeaderField {
   return { name, label: headerFieldLabel(name) };
 }
 
+const headerLabelAcronyms = new Set(["API", "URL", "JWT", "SSO", "OTP", "PAT"]);
+
 function headerFieldLabel(name: string): string {
   if (/api[\s_-]?key/i.test(name) || /^authorization$/i.test(name)) {
     return "API key";
   }
   const cleaned = name.replace(/^x-/i, "").replaceAll(/[-_]+/g, " ").trim();
-  const titled = cleaned.replaceAll(/\b\w/g, (character) => character.toUpperCase());
+  // Sentence-case all-caps words so DD-APPLICATION-KEY reads "DD Application
+  // Key"; two-letter vendor prefixes and real acronyms keep their caps.
+  const titled = cleaned
+    .split(/\s+/)
+    .map((word) => (word === word.toUpperCase() && word.length > 2 && !headerLabelAcronyms.has(word)
+      ? word[0] + word.slice(1).toLowerCase()
+      : word.replace(/^\w/, (character) => character.toUpperCase())))
+    .join(" ");
   return titled || "Credential";
 }
 
