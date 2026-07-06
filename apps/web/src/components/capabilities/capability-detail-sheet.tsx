@@ -18,21 +18,24 @@ import {
   capabilityConnectPlan,
   capabilityKindLabel,
   capabilitySourceLabel,
+  type ConnectionHealth,
 } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
-import type { CapabilityCatalogItem, ConnectionMetadata } from "@/types";
+import type { CapabilityCatalogItem } from "@/types";
 
 export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
   | { type: "oauth"; item: CapabilityCatalogItem }
   | { type: "api_key"; item: CapabilityCatalogItem; headers: Record<string, string> }
-  | { type: "reconnect_oauth"; item: CapabilityCatalogItem; connectionId: string }
-  | { type: "reconnect_api_key"; item: CapabilityCatalogItem; connectionId: string; headers: Record<string, string> }
+  // connectionId is the existing row to reuse, or null when the row was deleted
+  // (reconnect then mints a fresh connection and re-enables with its ref).
+  | { type: "reconnect_oauth"; item: CapabilityCatalogItem; connectionId: string | null }
+  | { type: "reconnect_api_key"; item: CapabilityCatalogItem; connectionId: string | null; headers: Record<string, string> }
   | { type: "disable"; item: CapabilityCatalogItem };
 
 export function CapabilityDetailSheet({
   item,
-  connection,
+  health,
   logoSrc,
   open,
   onOpenChange,
@@ -41,7 +44,7 @@ export function CapabilityDetailSheet({
   onAction,
 }: {
   item: CapabilityCatalogItem | null;
-  connection: ConnectionMetadata | null;
+  health: ConnectionHealth;
   logoSrc: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -55,7 +58,7 @@ export function CapabilityDetailSheet({
         {item ? (
           <DetailBody
             item={item}
-            connection={connection}
+            health={health}
             logoSrc={logoSrc}
             busy={busy}
             errorMessage={errorMessage}
@@ -69,14 +72,14 @@ export function CapabilityDetailSheet({
 
 function DetailBody({
   item,
-  connection,
+  health,
   logoSrc,
   busy,
   errorMessage,
   onAction,
 }: {
   item: CapabilityCatalogItem;
-  connection: ConnectionMetadata | null;
+  health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
   errorMessage: string | null;
@@ -89,9 +92,11 @@ function DetailBody({
 
   const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
-  // An enabled credentialed item whose connection is no longer active can be
-  // repaired in place — otherwise "Needs attention" is a dead end.
-  const needsReconnect = item.enabled && plan.mode !== "enable" && connection !== null && connection.status !== "active";
+  // Health resolves by the installation's connection id; "attention" means the
+  // row is missing or inactive. Reconnect reuses its id when the row still
+  // exists, else mints a new one. Otherwise "Needs attention" is a dead end.
+  const needsReconnect = item.enabled && health.state === "attention" && plan.mode !== "enable";
+  const reconnectConnectionId = health.state === "attention" ? health.connection?.id ?? null : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -147,16 +152,16 @@ function DetailBody({
 
         {item.enabled ? (
           <div className="space-y-3">
-            <ConnectionStatus connection={connection} plan={plan} />
+            <ConnectionStatus health={health} />
             {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
-            {needsReconnect && connection ? (
+            {needsReconnect ? (
               plan.mode === "oauth" ? (
                 <Button
                   type="button"
                   className="w-full"
                   disabled={busy}
-                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: connection.id })}
+                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: reconnectConnectionId })}
                 >
                   {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
                   Reconnect {item.name}
@@ -169,7 +174,7 @@ function DetailBody({
                   submitLabel="Reconnect"
                   submitIcon={<RefreshCwIcon />}
                   busy={busy}
-                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: connection.id, headers: next })}
+                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: reconnectConnectionId, headers: next })}
                 />
               ) : (
                 <Button type="button" className="w-full" disabled={busy} onClick={() => setReconnecting(true)}>
@@ -301,15 +306,10 @@ function CredentialForm({
   );
 }
 
-function ConnectionStatus({
-  connection,
-  plan,
-}: {
-  connection: ConnectionMetadata | null;
-  plan: ReturnType<typeof capabilityConnectPlan>;
-}) {
-  // No credentials means no connection to report on — a bare "Enabled" is honest.
-  if (plan.mode === "enable") {
+function ConnectionStatus({ health }: { health: ConnectionHealth }) {
+  // No connection ref means the item was enabled without one (headers-enabled or
+  // credential-free) — a bare "Enabled" is honest.
+  if (health.state === "none") {
     return (
       <div className="flex items-center gap-2 text-sm text-status-idle">
         <span className="size-2 rounded-full bg-status-idle" />
@@ -317,18 +317,18 @@ function ConnectionStatus({
       </div>
     );
   }
-  const healthy = !connection || connection.status === "active";
+  const attention = health.state === "attention";
   return (
     <div className="space-y-1">
-      <div className={cn("flex items-center gap-2 text-sm", healthy ? "text-status-idle" : "text-status-waiting")}>
-        <span className={cn("size-2 rounded-full", healthy ? "bg-status-idle" : "bg-status-waiting")} />
-        {healthy ? "Connected" : "Needs attention"}
+      <div className={cn("flex items-center gap-2 text-sm", attention ? "text-status-waiting" : "text-status-idle")}>
+        <span className={cn("size-2 rounded-full", attention ? "bg-status-waiting" : "bg-status-idle")} />
+        {attention ? "Needs attention" : "Connected"}
       </div>
-      {connection ? (
-        <p className="text-xs text-fg-subtle">
-          {healthy ? `Connected to ${connection.providerDomain}.` : "Reconnect to restore access."}
-        </p>
-      ) : null}
+      <p className="text-xs text-fg-subtle">
+        {attention
+          ? "Reconnect to restore access."
+          : `Connected to ${health.connection.providerDomain}.`}
+      </p>
     </div>
   );
 }

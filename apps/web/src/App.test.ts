@@ -1026,6 +1026,7 @@ function capabilityItem(patch: Partial<CapabilityCatalogItem> & Pick<CapabilityC
     runtime: { available: false, notes: null },
     enabled: false,
     enabledReason: null,
+    connectionRef: null,
     metadata: {},
     ...patch,
   };

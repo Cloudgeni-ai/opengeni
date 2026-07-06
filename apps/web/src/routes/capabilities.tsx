@@ -28,13 +28,16 @@ import {
   capabilityFilterLabel,
   capabilityInputFromForm,
   capabilityKindLabel,
-  connectionForCapability,
+  connectionHealth,
+  connectionToReuseForApiKey,
   createInputFromCatalogItem,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   oauthResumeAction,
+  registryResultsForQuery,
   type CapabilityFilter,
   type CapabilityFormState,
+  type ConnectionHealth,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
 import { cn } from "@/lib/utils";
@@ -88,7 +91,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const showCatalog = filter !== "pack";
 
   const logoUrl = useCallback((item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath), [client]);
-  const selectedConnection = selected ? connectionForCapability(selected.item, connections) : null;
+  const selectedHealth: ConnectionHealth = selected ? connectionHealth(selected.item, connections) : { state: "none" };
 
   useEffect(() => {
     void refresh();
@@ -97,6 +100,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
   // Reset the incremental window whenever the result set changes.
   useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
+
+  // Registry hits stay in state after a search; gate them on the searched term
+  // still matching the live query so an old search never renders against a new
+  // one (invalidation without a clearing effect that flashes stale tiles first).
+  const visibleRegistry = registryResultsForQuery(query, registrySearched, registryResults);
 
   async function refresh() {
     if (!workspaceId) return;
@@ -155,16 +163,20 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         return;
       }
 
-      // Reconnect an already-enabled item whose credential lapsed. OAuth reuses
-      // the existing connection row (pass connectionId); the return handler sees
-      // item.enabled and toasts "Reconnected" without re-enabling. API-key
-      // rewrites the credential and reactivates the row in place.
+      // Reconnect an already-enabled item whose credential lapsed. When the
+      // connection row survives, OAuth reuses it (pass connectionId) and the
+      // return handler just refreshes; when it was deleted (null id), OAuth
+      // mints a fresh row and the return handler re-enables against it. API-key
+      // reactivates the surviving row in place, or mints + re-enables if gone.
       if (action.type === "reconnect_oauth" && plan.mode === "oauth") {
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(selected.item.id)}`;
         const response = await client.startConnectionOAuth(workspaceId, {
           ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
           ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
-          connectionId: action.connectionId,
+          // Reuse the existing row when it survives; a null id means the row was
+          // deleted, so OAuth mints a fresh connection and the return handler
+          // re-enables against it.
+          ...(action.connectionId ? { connectionId: action.connectionId } : {}),
           returnPath,
         });
         if (!response.authorizationUrl) {
@@ -175,10 +187,25 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       }
 
       if (action.type === "reconnect_api_key") {
-        await client.updateConnection(workspaceId, action.connectionId, {
-          credential: { headers: action.headers },
-          status: "active",
-        });
+        if (action.connectionId) {
+          // The existing row went inactive — rewrite its credential and
+          // reactivate it in place; the installation ref already points at it.
+          await client.updateConnection(workspaceId, action.connectionId, {
+            credential: { headers: action.headers },
+            status: "active",
+          });
+        } else {
+          // The row was deleted — mint a fresh connection and re-enable the
+          // installation against it (enable upserts the installation config).
+          const connection = await client.createConnection(workspaceId, {
+            providerDomain: plan.mode === "enable" ? "" : plan.providerDomain,
+            kind: "api_key",
+            credential: { headers: action.headers },
+          });
+          await client.enableCapability(workspaceId, selected.item.id, {
+            connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
+          });
+        }
         await refresh();
         onRuntimeChanged();
         toast.success(`Reconnected ${selected.item.name}`);
@@ -205,14 +232,22 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       }
 
       if (action.type === "api_key" && plan.mode === "api_key") {
-        const connection = await client.createConnection(workspaceId, {
-          providerDomain: plan.providerDomain,
-          kind: "api_key",
-          credential: { headers: action.headers },
-        });
-        // Build the enable ref from the CREATED connection row, never the
-        // catalog domain — the API may canonicalize providerDomain at create,
-        // and the row is the authoritative match the enable path validates against.
+        // Reuse an existing workspace connection rather than creating a duplicate
+        // on a retry; only mint a new one when none exists.
+        const reuseId = connectionToReuseForApiKey(selected.item, connections, plan.providerDomain);
+        const connection = reuseId
+          ? await client.updateConnection(workspaceId, reuseId, {
+              credential: { headers: action.headers },
+              status: "active",
+            })
+          : await client.createConnection(workspaceId, {
+              providerDomain: plan.providerDomain,
+              kind: "api_key",
+              credential: { headers: action.headers },
+            });
+        // Build the enable ref from the connection row the API returns, never the
+        // catalog domain — the API may canonicalize providerDomain, and the row
+        // is the authoritative match the enable path validates against.
         await client.enableCapability(workspaceId, persisted.id, {
           connectionRef: { connectionId: connection.id, providerDomain: connection.providerDomain, kind: "api_key" },
         });
@@ -321,7 +356,9 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       });
       await refresh();
       onRuntimeChanged();
-      toast.success(`Connected and enabled ${item!.name}`);
+      // An already-enabled item reached here only because its old connection row
+      // was gone and OAuth minted a new one — that's a reconnect, not a first enable.
+      toast.success(item!.enabled ? `Reconnected ${item!.name}` : `Connected and enabled ${item!.name}`);
       setSelected(null);
     } catch (error) {
       const copy = capabilityErrorToast(error, "Couldn't finish connecting");
@@ -532,7 +569,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                 <EnabledCard
                   key={item.id}
                   item={item}
-                  connection={connectionForCapability(item, connections)}
+                  health={connectionHealth(item, connections)}
                   logoSrc={logoUrl(item)}
                   busy={busyId === item.id}
                   onOpen={() => openItem(item)}
@@ -581,7 +618,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                 query={query}
                 busy={registryBusy}
                 searched={registrySearched}
-                results={registryResults}
+                results={visibleRegistry}
                 onSearch={() => void searchRegistry()}
                 logoUrl={logoUrl}
                 onOpen={(item) => openItem(item, true)}
@@ -605,7 +642,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 
       <CapabilityDetailSheet
         item={selected?.item ?? null}
-        connection={selectedConnection}
+        health={selectedHealth}
         logoSrc={selected ? logoUrl(selected.item) : null}
         open={selected !== null}
         onOpenChange={(open) => {
@@ -627,21 +664,22 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
 // A compact managed card in the Enabled strip.
 function EnabledCard({
   item,
-  connection,
+  health,
   logoSrc,
   busy,
   onOpen,
   onDisable,
 }: {
   item: CapabilityCatalogItem;
-  connection: ConnectionMetadata | null;
+  health: ConnectionHealth;
   logoSrc: string | null;
   busy: boolean;
   onOpen: () => void;
   onDisable: () => void;
 }) {
-  const plan = capabilityConnectPlan(item);
-  const needsAttention = plan.mode !== "enable" && connection !== null && connection.status !== "active";
+  // Health is resolved by the installation's connection id: "attention" means
+  // the row is missing or inactive; "none" means no connection is involved.
+  const needsAttention = health.state === "attention";
   const canDisable = item.source !== "built_in" && item.source !== "configured";
   // A broken connection ("Needs attention") is the actionable state, so it wins
   // the single status slot over staleness — which only gates discovery, still
@@ -650,7 +688,7 @@ function EnabledCard({
     ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
     : item.stale
       ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
-      : { label: plan.mode === "enable" ? "Enabled" : "Connected", dot: "bg-status-idle", text: "text-fg-subtle" };
+      : { label: health.state === "none" ? "Enabled" : "Connected", dot: "bg-status-idle", text: "text-fg-subtle" };
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">

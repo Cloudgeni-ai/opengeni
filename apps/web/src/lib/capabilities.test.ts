@@ -8,13 +8,16 @@ import {
   capabilityKindLabel,
   capabilityMonogram,
   capabilitySourceLabel,
-  connectionForCapability,
+  connectionHealth,
+  connectionToReuseForApiKey,
   domainFromUrl,
   emptyCapabilityForm,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
   normalizeProviderDomain,
   oauthResumeAction,
+  registryResultsForQuery,
+  workspaceConnectionForDomain,
 } from "./capabilities";
 import type { CapabilityCatalogItem, CapabilityKind, ConnectionMetadata } from "@/types";
 
@@ -71,6 +74,7 @@ function item(overrides: Partial<CapabilityCatalogItem> = {}): CapabilityCatalog
     runtime: { available: true, notes: null },
     enabled: false,
     enabledReason: null,
+    connectionRef: null,
     metadata: {},
     ...overrides,
   };
@@ -215,8 +219,15 @@ describe("oauthResumeAction", () => {
     expect(oauthResumeAction(item({ enabled: false }), null)).toBe("no_connection");
   });
 
-  test("an already-enabled item is a reconnect, not a re-enable", () => {
-    expect(oauthResumeAction(item({ enabled: true }), "conn-1")).toBe("reconnect");
+  test("an enabled item whose returned connection matches its ref is a reconnect", () => {
+    const enabled = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    expect(oauthResumeAction(enabled, "conn-1")).toBe("reconnect");
+  });
+
+  test("an enabled item whose old row was gone (new connection id) re-enables to repoint it", () => {
+    // The stored ref points at a deleted connection; OAuth minted "conn-2".
+    const enabled = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    expect(oauthResumeAction(enabled, "conn-2")).toBe("enable");
   });
 
   test("a fresh connect of a disabled item enables it", () => {
@@ -234,23 +245,94 @@ describe("normalizeProviderDomain", () => {
   });
 });
 
-describe("connectionForCapability", () => {
-  test("matches across case and www differences between catalog and connection row", () => {
-    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "WWW.Linear.App" });
+describe("connectionHealth", () => {
+  const ref = { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" };
+
+  test("no connection ref (headers-enabled or credential-free) is healthy 'none'", () => {
+    // Headers-enabled and credential-free installations carry connectionRef null;
+    // there is no connection to report on, so this must never read as broken.
+    expect(connectionHealth(item({ enabled: true, connectionRef: null }), [])).toEqual({ state: "none" });
+  });
+
+  test("ref pointing at an active row is connected", () => {
+    const conns = [connection({ id: "conn-1", status: "active" })];
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns);
+    expect(health.state).toBe("connected");
+    if (health.state !== "connected") return;
+    expect(health.connection.id).toBe("conn-1");
+  });
+
+  test("ref whose row is MISSING needs attention (row null)", () => {
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), []);
+    expect(health).toEqual({ state: "attention", connection: null });
+  });
+
+  test("ref pointing at an inactive row needs attention (carries the row)", () => {
+    const conns = [connection({ id: "conn-1", status: "revoked" })];
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns);
+    expect(health.state).toBe("attention");
+    if (health.state !== "attention") return;
+    expect(health.connection?.id).toBe("conn-1");
+  });
+
+  test("matches by id, not domain — a same-domain row with a different id is not a match", () => {
+    const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
+    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns)).toEqual({ state: "attention", connection: null });
+  });
+});
+
+describe("workspaceConnectionForDomain", () => {
+  test("matches a workspace-shared row across case and www differences", () => {
     const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: null })];
-    expect(connectionForCapability(cap, conns)?.id).toBe("c1");
+    expect(workspaceConnectionForDomain(conns, "WWW.Linear.App")?.id).toBe("c1");
   });
 
   test("ignores subject-scoped connections (only workspace-shared)", () => {
-    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "linear.app" });
     const conns = [connection({ id: "c1", providerDomain: "linear.app", subjectId: "user-1" })];
-    expect(connectionForCapability(cap, conns)).toBeNull();
+    expect(workspaceConnectionForDomain(conns, "linear.app")).toBeNull();
   });
 
   test("returns null when no domain matches", () => {
-    const cap = item({ kind: "mcp", authKind: "oauth2", providerDomain: "notion.com" });
     const conns = [connection({ id: "c1", providerDomain: "linear.app" })];
-    expect(connectionForCapability(cap, conns)).toBeNull();
+    expect(workspaceConnectionForDomain(conns, "notion.com")).toBeNull();
+  });
+});
+
+describe("connectionToReuseForApiKey", () => {
+  test("reuses the installation's own connection ref first", () => {
+    const cap = item({ enabled: true, connectionRef: { connectionId: "ref-conn", providerDomain: "api.supabase.com", kind: "api_key" } });
+    const conns = [connection({ id: "other", providerDomain: "api.supabase.com", subjectId: null })];
+    expect(connectionToReuseForApiKey(cap, conns, "api.supabase.com")).toBe("ref-conn");
+  });
+
+  test("falls back to a workspace-shared row for the domain — a retry reuses it, no duplicate", () => {
+    // No ref yet (the enable half of a prior create-then-enable failed), but the
+    // connection created on the first attempt is still on the workspace.
+    const cap = item({ enabled: false, connectionRef: null });
+    const conns = [connection({ id: "existing", providerDomain: "api.supabase.com", subjectId: null })];
+    expect(connectionToReuseForApiKey(cap, conns, "API.Supabase.com")).toBe("existing");
+  });
+
+  test("returns null when nothing exists to reuse (a fresh connection is minted)", () => {
+    expect(connectionToReuseForApiKey(item({ connectionRef: null }), [], "api.supabase.com")).toBeNull();
+  });
+});
+
+describe("registryResultsForQuery", () => {
+  const results = [item({ id: "r1", source: "public_registry" })];
+
+  test("shows results when the searched term matches the live query", () => {
+    expect(registryResultsForQuery("github", "github", results)).toEqual(results);
+    // Live query is compared trimmed, mirroring how the search fires.
+    expect(registryResultsForQuery("  github  ", "github", results)).toEqual(results);
+  });
+
+  test("invalidates results once the query changes away from the searched term", () => {
+    expect(registryResultsForQuery("githubx", "github", results)).toEqual([]);
+  });
+
+  test("shows nothing before any search has run", () => {
+    expect(registryResultsForQuery("github", null, [])).toEqual([]);
   });
 });
 

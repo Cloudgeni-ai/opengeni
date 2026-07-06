@@ -181,18 +181,41 @@ export function domainFromUrl(url: string | null): string | null {
 }
 
 /**
- * The workspace-shared connection backing a capability, matched by provider
- * domain. Used to surface connection health ("Connected" / "Needs attention")
- * on enabled items. subjectId === null is the workspace-shared connection the
- * enable path requires.
+ * The connection ref the API records on an enabled catalog item's installation
+ * — the authoritative link between the installation and its connection row.
+ * `null` means the item was enabled without a connection (headers-enabled or
+ * credential-free), which is healthy.
  */
-export function connectionForCapability(item: CapabilityCatalogItem, connections: ConnectionMetadata[]): ConnectionMetadata | null {
-  const plan = capabilityConnectPlan(item);
-  const providerDomain = plan.mode === "enable" ? item.providerDomain : plan.providerDomain;
-  if (!providerDomain) return null;
-  // Normalize BOTH sides: the catalog domain is raw while the connection row's
-  // domain is stored canonicalized by the API, so a health lookup must compare
-  // like for like or an enabled item reads as never-connected.
+export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityCatalogItem["connectionRef"] {
+  return item.connectionRef ?? null;
+}
+
+export type ConnectionHealth =
+  | { state: "none" }
+  | { state: "connected"; connection: ConnectionMetadata }
+  | { state: "attention"; connection: ConnectionMetadata | null };
+
+/**
+ * Health of an enabled item, resolved BY the installation's connection id (not
+ * by domain): no ref → nothing to worry about; ref present but the row is gone
+ * or inactive → needs attention (the row may be null if it was deleted); active
+ * → connected.
+ */
+export function connectionHealth(item: CapabilityCatalogItem, connections: ConnectionMetadata[]): ConnectionHealth {
+  const ref = installedConnectionRef(item);
+  if (!ref?.connectionId) return { state: "none" };
+  const connection = connections.find((candidate) => candidate.id === ref.connectionId) ?? null;
+  if (!connection || connection.status !== "active") return { state: "attention", connection };
+  return { state: "connected", connection };
+}
+
+/**
+ * The workspace-shared connection (subjectId null) for a provider domain, used
+ * to reuse an existing row on an API-key connect retry instead of creating a
+ * duplicate. Both sides normalized (the catalog domain is raw; the row's is
+ * API-canonicalized) so the match holds.
+ */
+export function workspaceConnectionForDomain(connections: ConnectionMetadata[], providerDomain: string): ConnectionMetadata | null {
   const target = normalizeProviderDomain(providerDomain);
   return connections.find(
     (connection) => connection.subjectId === null && normalizeProviderDomain(connection.providerDomain) === target,
@@ -200,10 +223,38 @@ export function connectionForCapability(item: CapabilityCatalogItem, connections
 }
 
 /**
+ * The existing workspace connection id to reuse on an API-key connect/retry
+ * instead of creating a duplicate: the installation's own ref first, then a
+ * workspace-shared row for the domain. `null` → none exists, so mint a new one.
+ * Keeps a retry after a create-then-enable failure from piling up dead rows.
+ */
+export function connectionToReuseForApiKey(
+  item: CapabilityCatalogItem,
+  connections: ConnectionMetadata[],
+  providerDomain: string,
+): string | null {
+  return item.connectionRef?.connectionId ?? workspaceConnectionForDomain(connections, providerDomain)?.id ?? null;
+}
+
+/**
+ * Public-registry results to show for the CURRENT query. Registry hits are held
+ * in state after an explicit search; once the user edits the query they no
+ * longer describe what's on screen, so gate them on the searched term matching
+ * the live (trimmed) query — otherwise a stale search renders against a new one.
+ */
+export function registryResultsForQuery(
+  query: string,
+  searched: string | null,
+  results: CapabilityCatalogItem[],
+): CapabilityCatalogItem[] {
+  return searched !== null && searched === query.trim() ? results : [];
+}
+
+/**
  * Client mirror of the API's `canonicalProviderDomain` (apps/api oauth-client):
- * trim, lowercase, strip a single leading "www.". Kept only for the health
- * lookup — connectionRefs sent to the API are always built from the connection
- * row the API returns, never from a domain the client canonicalized.
+ * trim, lowercase, strip a single leading "www.". Used only to match/dedup rows
+ * client-side — connectionRefs sent to the API are always built from the
+ * connection row the API returns, never from a domain the client canonicalized.
  */
 export function normalizeProviderDomain(domain: string): string {
   return domain.trim().toLowerCase().replace(/^www\./, "");
@@ -215,15 +266,20 @@ export function normalizeProviderDomain(domain: string): string {
  * the pre-redirect snapshot). Pure so the decision is unit-testable:
  * - missing: success but the item is no longer in the catalog → can't enable.
  * - no_connection: success but no connection id came back → can't enable.
- * - reconnect: the item was already enabled → the connection was refreshed.
- * - enable: a fresh connect → enable with the new connection ref.
+ * - reconnect: already enabled and OAuth refreshed the SAME connection the
+ *   installation already references → nothing to re-enable.
+ * - enable: a fresh connect, OR a reconnect whose old row was gone so OAuth
+ *   minted a new one → (re-)enable to point the installation at it.
  */
 export type OAuthResumeAction = "missing" | "no_connection" | "reconnect" | "enable";
 
 export function oauthResumeAction(item: CapabilityCatalogItem | null, connectionId: string | null): OAuthResumeAction {
   if (!item) return "missing";
   if (!connectionId) return "no_connection";
-  if (item.enabled) return "reconnect";
+  // An enabled item whose stored ref points at the returned connection was
+  // refreshed in place. A different id (or no stored ref) means the row was
+  // recreated, so re-enable to repoint the installation.
+  if (item.enabled && item.connectionRef?.connectionId === connectionId) return "reconnect";
   return "enable";
 }
 
