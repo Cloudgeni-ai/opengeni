@@ -2329,6 +2329,15 @@ export const CapabilityCatalogItem = z.object({
   runtime: CapabilityRuntime.default({ available: false, notes: null }),
   enabled: z.boolean().default(false),
   enabledReason: z.string().nullable().default(null),
+  // The connection backing this enabled installation, when the enable-time
+  // connectionRef resolved to one (null for header/credential-free items —
+  // that means "no connection involved", not "broken"). Lets the UI match
+  // connection health by id instead of guessing from providerDomain alone.
+  connectionRef: z.object({
+    connectionId: z.string().min(1),
+    providerDomain: z.string().min(1),
+    kind: z.string().min(1),
+  }).nullable().default(null),
   metadata: z.record(z.string(), z.unknown()).default({}),
   createdAt: z.string().optional(),
   updatedAt: z.string().optional(),

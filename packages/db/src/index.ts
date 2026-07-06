@@ -8861,6 +8861,9 @@ function mapCapabilityCatalogItem(row: typeof schema.capabilityCatalogItems.$inf
     runtime,
     enabled: false,
     enabledReason: null,
+    // Overwritten by applyCapabilityEnablement in @opengeni/core, which knows
+    // the installation; a freshly-read catalog row carries no connection.
+    connectionRef: null,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

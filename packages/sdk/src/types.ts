@@ -1650,6 +1650,8 @@ export type CapabilityCatalogItem = {
   runtime: CapabilityRuntime;
   enabled: boolean;
   enabledReason: string | null;
+  /** The connection backing this enabled installation, or null when none is involved. */
+  connectionRef: { connectionId: string; providerDomain: string; kind: string } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;

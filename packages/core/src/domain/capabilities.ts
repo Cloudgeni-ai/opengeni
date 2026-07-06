@@ -813,7 +813,26 @@ function applyCapabilityEnablement(
     ...item,
     enabled,
     enabledReason: enabled ? "enabled" : null,
+    connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
   };
+}
+
+/**
+ * The connection an installation was enabled with, when the enable-time
+ * connectionRef fully resolved to one (config.connectionRef is set only by
+ * the enable path — see enableCapability). Headers-enabled and credential-
+ * free installations never set it, so this returns null for them.
+ */
+function installationConnectionRef(config: Record<string, unknown>): CapabilityCatalogItem["connectionRef"] {
+  const ref = config.connectionRef;
+  if (!ref || typeof ref !== "object") {
+    return null;
+  }
+  const { connectionId, providerDomain, kind } = ref as Record<string, unknown>;
+  if (typeof connectionId !== "string" || typeof providerDomain !== "string" || typeof kind !== "string") {
+    return null;
+  }
+  return { connectionId, providerDomain, kind };
 }
 
 function dedupeCatalogItems(items: CapabilityCatalogItem[]): CapabilityCatalogItem[] {
