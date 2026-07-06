@@ -192,22 +192,54 @@ export function installedConnectionRef(item: CapabilityCatalogItem): CapabilityC
 
 export type ConnectionHealth =
   | { state: "none" }
+  | { state: "unverified" }
   | { state: "connected"; connection: ConnectionMetadata }
   | { state: "attention"; connection: ConnectionMetadata | null };
 
 /**
  * Health of an enabled item, resolved BY the installation's connection id (not
- * by domain): no ref → nothing to worry about; ref present but the row is gone
- * or inactive → needs attention (the row may be null if it was deleted); active
- * → connected.
+ * by domain). `loaded` is whether the connections list actually loaded: no ref →
+ * nothing to worry about; ref present but connections did NOT load → unverified
+ * (stay neutral, never alarm); loaded and the row is gone or inactive → needs
+ * attention (the row may be null if it was deleted); loaded and active → connected.
+ *
+ * The `loaded` gate matters because listConnections needs a distinct
+ * `connections:read` scope: a grant with catalog access but not that scope 403s,
+ * and a failed load must not read as "every connection was deleted" and paint
+ * healthy integrations amber.
  */
-export function connectionHealth(item: CapabilityCatalogItem, connections: ConnectionMetadata[]): ConnectionHealth {
+export function connectionHealth(item: CapabilityCatalogItem, connections: ConnectionMetadata[], loaded: boolean): ConnectionHealth {
   const ref = installedConnectionRef(item);
   if (!ref?.connectionId) return { state: "none" };
+  if (!loaded) return { state: "unverified" };
   const connection = connections.find((candidate) => candidate.id === ref.connectionId) ?? null;
   if (!connection || connection.status !== "active") return { state: "attention", connection };
   return { state: "connected", connection };
 }
+
+/**
+ * How to repair an enabled item whose connection needs attention, driven by the
+ * installation's OWN connectionRef.kind — NOT the current catalog plan, which can
+ * drift (an item enabled via a connection may later read as plain "enable" in the
+ * catalog). Returns null when there's nothing to repair. `connectionId` is the
+ * surviving row to reuse, or null when it was deleted (repair mints a fresh one).
+ */
+export type ReconnectPlan =
+  | { kind: "oauth"; connectionId: string | null }
+  | { kind: "api_key"; connectionId: string | null };
+
+export function capabilityReconnectPlan(item: CapabilityCatalogItem, health: ConnectionHealth): ReconnectPlan | null {
+  if (!item.enabled || health.state !== "attention") return null;
+  const ref = item.connectionRef;
+  if (!ref) return null;
+  const connectionId = health.connection?.id ?? null;
+  return ref.kind === "oauth2" ? { kind: "oauth", connectionId } : { kind: "api_key", connectionId };
+}
+
+/** The generic single credential field for an api-key reconnect when the catalog
+ * no longer supplies requiredHeaders (drift). The wire name defaults to the most
+ * common bearer header; the label never leaks the word "headers". */
+export const GENERIC_API_KEY_FIELD: RequiredHeaderField = { name: "Authorization", label: "API key" };
 
 /**
  * The workspace-shared connection (subjectId null) for a provider domain, used

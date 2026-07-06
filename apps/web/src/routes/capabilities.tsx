@@ -52,7 +52,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const onRuntimeChanged = useCallback(() => void context.refreshWorkspaceMcpServers(workspaceId), [context, workspaceId]);
 
   const [items, setItems] = useState<CapabilityCatalogItem[]>([]);
-  const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
+  // null = connections have not loaded (or the load failed, e.g. the grant lacks
+  // connections:read); an array = loaded, even when empty. Health must not treat a
+  // failed load as "every connection was deleted".
+  const [connections, setConnections] = useState<ConnectionMetadata[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -91,7 +94,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const showCatalog = filter !== "pack";
 
   const logoUrl = useCallback((item: CapabilityCatalogItem) => client.catalogAssetUrl(item.logoAssetPath), [client]);
-  const selectedHealth: ConnectionHealth = selected ? connectionHealth(selected.item, connections) : { state: "none" };
+  const connectionsLoaded = connections !== null;
+  const selectedHealth: ConnectionHealth = selected
+    ? connectionHealth(selected.item, connections ?? [], connectionsLoaded)
+    : { state: "none" };
 
   useEffect(() => {
     void refresh();
@@ -112,7 +118,8 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
     try {
       const [catalog, conns] = await Promise.all([
         client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]),
+        // null (not []) on failure so health can tell "didn't load" from "loaded empty".
+        client.listConnections(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
       setConnections(conns);
@@ -168,11 +175,16 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       // return handler just refreshes; when it was deleted (null id), OAuth
       // mints a fresh row and the return handler re-enables against it. API-key
       // reactivates the surviving row in place, or mints + re-enables if gone.
-      if (action.type === "reconnect_oauth" && plan.mode === "oauth") {
+      if (action.type === "reconnect_oauth") {
+        // Trust the installation's connectionRef.kind (the sheet already chose this
+        // branch from it), not the catalog plan — on drift plan.mode can read
+        // "enable", so fall back to the ref's domain and the item's own MCP URL.
+        const providerDomain = plan.mode === "oauth" ? plan.providerDomain : selected.item.connectionRef?.providerDomain ?? null;
+        const mcpUrl = plan.mode === "oauth" ? plan.mcpUrl : selected.item.mcpUrl ?? selected.item.endpointUrl ?? null;
         const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(selected.item.id)}`;
         const response = await client.startConnectionOAuth(workspaceId, {
-          ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
-          ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
+          ...(mcpUrl ? { mcpUrl } : {}),
+          ...(providerDomain ? { providerDomain } : {}),
           // Reuse the existing row when it survives; a null id means the row was
           // deleted, so OAuth mints a fresh connection and the return handler
           // re-enables against it.
@@ -196,9 +208,11 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
           });
         } else {
           // The row was deleted — mint a fresh connection and re-enable the
-          // installation against it (enable upserts the installation config).
+          // installation against it (enable upserts the installation config). Domain
+          // comes from the plan, or the installation's ref when the catalog drifted.
+          const providerDomain = plan.mode === "enable" ? selected.item.connectionRef?.providerDomain ?? "" : plan.providerDomain;
           const connection = await client.createConnection(workspaceId, {
-            providerDomain: plan.mode === "enable" ? "" : plan.providerDomain,
+            providerDomain,
             kind: "api_key",
             credential: { headers: action.headers },
           });
@@ -234,7 +248,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       if (action.type === "api_key" && plan.mode === "api_key") {
         // Reuse an existing workspace connection rather than creating a duplicate
         // on a retry; only mint a new one when none exists.
-        const reuseId = connectionToReuseForApiKey(selected.item, connections, plan.providerDomain);
+        const reuseId = connectionToReuseForApiKey(selected.item, connections ?? [], plan.providerDomain);
         const connection = reuseId
           ? await client.updateConnection(workspaceId, reuseId, {
               credential: { headers: action.headers },
@@ -316,7 +330,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       // moments before the redirect won't be in the pre-redirect snapshot.
       const [catalog, conns] = await Promise.all([
         client.listCapabilities(workspaceId),
-        client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]),
+        client.listConnections(workspaceId).catch(() => null),
       ]);
       freshItems = catalog.items;
       setItems(catalog.items);
@@ -346,7 +360,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       // the redirect), never a domain reconstructed from catalog data — the API
       // canonicalizes providerDomain, and the row is what the enable path
       // validates against. A missing row means we can't enable safely.
-      const connection = conns.find((candidate) => candidate.id === connectionId) ?? null;
+      const connection = conns?.find((candidate) => candidate.id === connectionId) ?? null;
       if (!connection) {
         toast.success(`Connected ${item!.name}. Open it to finish enabling.`);
         return;
@@ -569,7 +583,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
                 <EnabledCard
                   key={item.id}
                   item={item}
-                  health={connectionHealth(item, connections)}
+                  health={connectionHealth(item, connections ?? [], connectionsLoaded)}
                   logoSrc={logoUrl(item)}
                   busy={busyId === item.id}
                   onOpen={() => openItem(item)}
@@ -677,8 +691,9 @@ function EnabledCard({
   onOpen: () => void;
   onDisable: () => void;
 }) {
-  // Health is resolved by the installation's connection id: "attention" means
-  // the row is missing or inactive; "none" means no connection is involved.
+  // Health is resolved by the installation's connection id: "attention" means the
+  // row is missing or inactive; "none" means no connection is involved;
+  // "unverified" means connections didn't load, so stay neutral (never amber).
   const needsAttention = health.state === "attention";
   const canDisable = item.source !== "built_in" && item.source !== "configured";
   // A broken connection ("Needs attention") is the actionable state, so it wins
@@ -688,7 +703,7 @@ function EnabledCard({
     ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
     : item.stale
       ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
-      : { label: health.state === "none" ? "Enabled" : "Connected", dot: "bg-status-idle", text: "text-fg-subtle" };
+      : { label: health.state === "connected" ? "Connected" : "Enabled", dot: "bg-status-idle", text: "text-fg-subtle" };
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">

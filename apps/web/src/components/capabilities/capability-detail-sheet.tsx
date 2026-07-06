@@ -17,7 +17,9 @@ import {
 import {
   capabilityConnectPlan,
   capabilityKindLabel,
+  capabilityReconnectPlan,
   capabilitySourceLabel,
+  GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
 import { cn } from "@/lib/utils";
@@ -92,11 +94,14 @@ function DetailBody({
 
   const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
-  // Health resolves by the installation's connection id; "attention" means the
-  // row is missing or inactive. Reconnect reuses its id when the row still
-  // exists, else mints a new one. Otherwise "Needs attention" is a dead end.
-  const needsReconnect = item.enabled && health.state === "attention" && plan.mode !== "enable";
-  const reconnectConnectionId = health.state === "attention" ? health.connection?.id ?? null : null;
+  // Repair is driven by the installation's OWN connectionRef.kind, not the catalog
+  // plan — on catalog/registry drift an enabled item can carry a live connectionRef
+  // while its current catalog auth fields read as plain "enable", and gating on the
+  // plan would leave "Needs attention" with no Reconnect (the dead end we killed).
+  const reconnect = capabilityReconnectPlan(item, health);
+  // When the catalog no longer supplies requiredHeaders, fall back to one generic
+  // "API key" field so an api-key reconnect still has something to submit.
+  const reconnectFields = plan.mode === "api_key" && plan.fields.length > 0 ? plan.fields : [GENERIC_API_KEY_FIELD];
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -155,26 +160,26 @@ function DetailBody({
             <ConnectionStatus health={health} />
             {/* Reconnect is the primary repair action when the connection broke;
                 Disable drops to secondary. Healthy items show only Disable. */}
-            {needsReconnect ? (
-              plan.mode === "oauth" ? (
+            {reconnect ? (
+              reconnect.kind === "oauth" ? (
                 <Button
                   type="button"
                   className="w-full"
                   disabled={busy}
-                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: reconnectConnectionId })}
+                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: reconnect.connectionId })}
                 >
                   {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
                   Reconnect {item.name}
                 </Button>
-              ) : plan.mode === "api_key" && reconnecting ? (
+              ) : reconnecting ? (
                 <CredentialForm
-                  fields={plan.fields}
+                  fields={reconnectFields}
                   itemName={item.name}
                   keyPageUrl={keyPageUrl}
                   submitLabel="Reconnect"
                   submitIcon={<RefreshCwIcon />}
                   busy={busy}
-                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: reconnectConnectionId, headers: next })}
+                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: reconnect.connectionId, headers: next })}
                 />
               ) : (
                 <Button type="button" className="w-full" disabled={busy} onClick={() => setReconnecting(true)}>
@@ -191,7 +196,7 @@ function DetailBody({
                 disabled={busy}
                 onClick={() => onAction({ type: "disable", item })}
               >
-                {busy && !needsReconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+                {busy && !reconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
                 Disable
               </Button>
             ) : (
@@ -307,9 +312,11 @@ function CredentialForm({
 }
 
 function ConnectionStatus({ health }: { health: ConnectionHealth }) {
-  // No connection ref means the item was enabled without one (headers-enabled or
-  // credential-free) — a bare "Enabled" is honest.
-  if (health.state === "none") {
+  // "none" = enabled without a connection (headers-enabled or credential-free);
+  // "unverified" = it has a connection but the connections list didn't load, so we
+  // can't check it. Both render a neutral "Enabled" — honest, and never a false
+  // "Needs attention".
+  if (health.state === "none" || health.state === "unverified") {
     return (
       <div className="flex items-center gap-2 text-sm text-status-idle">
         <span className="size-2 rounded-full bg-status-idle" />

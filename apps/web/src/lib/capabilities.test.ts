@@ -7,6 +7,7 @@ import {
   capabilityFormError,
   capabilityKindLabel,
   capabilityMonogram,
+  capabilityReconnectPlan,
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
@@ -251,25 +252,31 @@ describe("connectionHealth", () => {
   test("no connection ref (headers-enabled or credential-free) is healthy 'none'", () => {
     // Headers-enabled and credential-free installations carry connectionRef null;
     // there is no connection to report on, so this must never read as broken.
-    expect(connectionHealth(item({ enabled: true, connectionRef: null }), [])).toEqual({ state: "none" });
+    expect(connectionHealth(item({ enabled: true, connectionRef: null }), [], true)).toEqual({ state: "none" });
+  });
+
+  test("ref present but connections NOT loaded is 'unverified', never attention", () => {
+    // A failed listConnections (e.g. the grant lacks connections:read) passes an
+    // empty array with loaded=false — a healthy integration must not go amber.
+    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), [], false)).toEqual({ state: "unverified" });
   });
 
   test("ref pointing at an active row is connected", () => {
     const conns = [connection({ id: "conn-1", status: "active" })];
-    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns);
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true);
     expect(health.state).toBe("connected");
     if (health.state !== "connected") return;
     expect(health.connection.id).toBe("conn-1");
   });
 
-  test("ref whose row is MISSING needs attention (row null)", () => {
-    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), []);
+  test("ref whose row is MISSING (loaded, absent) needs attention (row null)", () => {
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), [], true);
     expect(health).toEqual({ state: "attention", connection: null });
   });
 
   test("ref pointing at an inactive row needs attention (carries the row)", () => {
     const conns = [connection({ id: "conn-1", status: "revoked" })];
-    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns);
+    const health = connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true);
     expect(health.state).toBe("attention");
     if (health.state !== "attention") return;
     expect(health.connection?.id).toBe("conn-1");
@@ -277,7 +284,32 @@ describe("connectionHealth", () => {
 
   test("matches by id, not domain — a same-domain row with a different id is not a match", () => {
     const conns = [connection({ id: "other", providerDomain: "linear.app", status: "active" })];
-    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns)).toEqual({ state: "attention", connection: null });
+    expect(connectionHealth(item({ enabled: true, connectionRef: ref }), conns, true)).toEqual({ state: "attention", connection: null });
+  });
+});
+
+describe("capabilityReconnectPlan", () => {
+  const inactive = { state: "attention", connection: connection({ id: "conn-1", status: "revoked" }) } as const;
+  const deleted = { state: "attention", connection: null } as const;
+
+  test("offers api_key repair from connectionRef.kind even when the catalog plan drifted to 'enable'", () => {
+    // Enabled item, live api_key connectionRef, inactive connection, but the
+    // catalog no longer declares auth (plan would be "enable"). Reconnect must
+    // still be offered, chosen from the ref's kind — not the stale plan.
+    const drifted = item({ enabled: true, kind: "api", authKind: null, connectionRef: { connectionId: "conn-1", providerDomain: "api.supabase.com", kind: "api_key" } });
+    expect(capabilityReconnectPlan(drifted, inactive)).toEqual({ kind: "api_key", connectionId: "conn-1" });
+  });
+
+  test("oauth2 ref → oauth reconnect; a deleted row carries a null connectionId", () => {
+    const oauthItem = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "oauth2" } });
+    expect(capabilityReconnectPlan(oauthItem, deleted)).toEqual({ kind: "oauth", connectionId: null });
+  });
+
+  test("nothing to repair when healthy, unverified, or without a ref", () => {
+    const withRef = item({ enabled: true, connectionRef: { connectionId: "conn-1", providerDomain: "linear.app", kind: "api_key" } });
+    expect(capabilityReconnectPlan(withRef, { state: "connected", connection: connection({ id: "conn-1" }) })).toBeNull();
+    expect(capabilityReconnectPlan(withRef, { state: "unverified" })).toBeNull();
+    expect(capabilityReconnectPlan(item({ enabled: true, connectionRef: null }), deleted)).toBeNull();
   });
 });
 
