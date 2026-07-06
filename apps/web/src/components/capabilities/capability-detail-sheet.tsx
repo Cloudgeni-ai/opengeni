@@ -1,5 +1,5 @@
-import { ExternalLinkIcon, Loader2Icon, PlugIcon, TrashIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ExternalLinkIcon, Loader2Icon, PlugIcon, RefreshCwIcon, TrashIcon } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,8 @@ export type ConnectAction =
   | { type: "enable"; item: CapabilityCatalogItem }
   | { type: "oauth"; item: CapabilityCatalogItem }
   | { type: "api_key"; item: CapabilityCatalogItem; headers: Record<string, string> }
+  | { type: "reconnect_oauth"; item: CapabilityCatalogItem; connectionId: string }
+  | { type: "reconnect_api_key"; item: CapabilityCatalogItem; connectionId: string; headers: Record<string, string> }
   | { type: "disable"; item: CapabilityCatalogItem };
 
 export function CapabilityDetailSheet({
@@ -81,13 +83,15 @@ function DetailBody({
   onAction: (action: ConnectAction) => void;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
-  // One credential input per required header, keyed by header name.
-  const [headers, setHeaders] = useState<Record<string, string>>({});
-  useEffect(() => setHeaders({}), [item.id]);
+  // API-key reconnect reveals the credential form in place of the button.
+  const [reconnecting, setReconnecting] = useState(false);
+  useEffect(() => setReconnecting(false), [item.id]);
 
   const canDisable = item.enabled && item.source !== "built_in" && item.source !== "configured";
   const keyPageUrl = item.installUrl ?? item.homepageUrl;
-  const apiKeyReady = plan.mode !== "api_key" || plan.fields.every((field) => headers[field.name]?.trim());
+  // An enabled credentialed item whose connection is no longer active can be
+  // repaired in place — otherwise "Needs attention" is a dead end.
+  const needsReconnect = item.enabled && plan.mode !== "enable" && connection !== null && connection.status !== "active";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -144,6 +148,36 @@ function DetailBody({
         {item.enabled ? (
           <div className="space-y-3">
             <ConnectionStatus connection={connection} plan={plan} />
+            {/* Reconnect is the primary repair action when the connection broke;
+                Disable drops to secondary. Healthy items show only Disable. */}
+            {needsReconnect && connection ? (
+              plan.mode === "oauth" ? (
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => onAction({ type: "reconnect_oauth", item, connectionId: connection.id })}
+                >
+                  {busy ? <Loader2Icon className="animate-spin" /> : <RefreshCwIcon />}
+                  Reconnect {item.name}
+                </Button>
+              ) : plan.mode === "api_key" && reconnecting ? (
+                <CredentialForm
+                  fields={plan.fields}
+                  itemName={item.name}
+                  keyPageUrl={keyPageUrl}
+                  submitLabel="Reconnect"
+                  submitIcon={<RefreshCwIcon />}
+                  busy={busy}
+                  onSubmit={(next) => onAction({ type: "reconnect_api_key", item, connectionId: connection.id, headers: next })}
+                />
+              ) : (
+                <Button type="button" className="w-full" disabled={busy} onClick={() => setReconnecting(true)}>
+                  <RefreshCwIcon />
+                  Reconnect {item.name}
+                </Button>
+              )
+            ) : null}
             {canDisable ? (
               <Button
                 type="button"
@@ -152,7 +186,7 @@ function DetailBody({
                 disabled={busy}
                 onClick={() => onAction({ type: "disable", item })}
               >
-                {busy ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
+                {busy && !needsReconnect ? <Loader2Icon className="animate-spin" /> : <TrashIcon />}
                 Disable
               </Button>
             ) : (
@@ -160,44 +194,15 @@ function DetailBody({
             )}
           </div>
         ) : plan.mode === "api_key" ? (
-          <form
-            className="space-y-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (apiKeyReady && !busy) onAction({ type: "api_key", item, headers });
-            }}
-          >
-            {plan.fields.map((field) => (
-              <div key={field.name} className="space-y-1.5">
-                <Label htmlFor={`cred-${field.name}`} className="text-xs text-fg-muted">{field.label}</Label>
-                <Input
-                  id={`cred-${field.name}`}
-                  type="password"
-                  autoComplete="off"
-                  value={headers[field.name] ?? ""}
-                  onChange={(event) => setHeaders((current) => ({ ...current, [field.name]: event.target.value }))}
-                  placeholder={`Paste your ${field.label}`}
-                />
-              </div>
-            ))}
-            {keyPageUrl ? (
-              <a
-                href={keyPageUrl}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-              >
-                Get your {plan.fields[0]?.label ?? "credentials"}
-                <ExternalLinkIcon className="size-3" />
-              </a>
-            ) : (
-              <p className="text-xs text-fg-subtle">Stored encrypted and used only to reach {item.name}.</p>
-            )}
-            <Button type="submit" className="w-full" disabled={busy || !apiKeyReady}>
-              {busy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              Connect {item.name}
-            </Button>
-          </form>
+          <CredentialForm
+            fields={plan.fields}
+            itemName={item.name}
+            keyPageUrl={keyPageUrl}
+            submitLabel={`Connect ${item.name}`}
+            submitIcon={<PlugIcon />}
+            busy={busy}
+            onSubmit={(next) => onAction({ type: "api_key", item, headers: next })}
+          />
         ) : plan.mode === "oauth" ? (
           <div className="space-y-2">
             <Button
@@ -228,6 +233,71 @@ function DetailBody({
         </div>
       </div>
     </div>
+  );
+}
+
+// The labeled credential form, shared by first-time connect and reconnect. It
+// owns its own header state so it starts empty each time it mounts (a fresh
+// sheet, or the reveal on reconnect) — credentials are never prefilled.
+function CredentialForm({
+  fields,
+  itemName,
+  keyPageUrl,
+  submitLabel,
+  submitIcon,
+  busy,
+  onSubmit,
+}: {
+  fields: { name: string; label: string }[];
+  itemName: string;
+  keyPageUrl: string | null;
+  submitLabel: string;
+  submitIcon: ReactNode;
+  busy: boolean;
+  onSubmit: (headers: Record<string, string>) => void;
+}) {
+  const [headers, setHeaders] = useState<Record<string, string>>({});
+  const ready = fields.every((field) => headers[field.name]?.trim());
+
+  return (
+    <form
+      className="space-y-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (ready && !busy) onSubmit(headers);
+      }}
+    >
+      {fields.map((field) => (
+        <div key={field.name} className="space-y-1.5">
+          <Label htmlFor={`cred-${field.name}`} className="text-xs text-fg-muted">{field.label}</Label>
+          <Input
+            id={`cred-${field.name}`}
+            type="password"
+            autoComplete="off"
+            value={headers[field.name] ?? ""}
+            onChange={(event) => setHeaders((current) => ({ ...current, [field.name]: event.target.value }))}
+            placeholder={`Paste your ${field.label}`}
+          />
+        </div>
+      ))}
+      {keyPageUrl ? (
+        <a
+          href={keyPageUrl}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+        >
+          Get your {fields[0]?.label ?? "credentials"}
+          <ExternalLinkIcon className="size-3" />
+        </a>
+      ) : (
+        <p className="text-xs text-fg-subtle">Stored encrypted and used only to reach {itemName}.</p>
+      )}
+      <Button type="submit" className="w-full" disabled={busy || !ready}>
+        {busy ? <Loader2Icon className="animate-spin" /> : submitIcon}
+        {submitLabel}
+      </Button>
+    </form>
   );
 }
 

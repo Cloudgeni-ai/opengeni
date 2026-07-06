@@ -154,6 +154,37 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         return;
       }
 
+      // Reconnect an already-enabled item whose credential lapsed. OAuth reuses
+      // the existing connection row (pass connectionId); the return handler sees
+      // item.enabled and toasts "Reconnected" without re-enabling. API-key
+      // rewrites the credential and reactivates the row in place.
+      if (action.type === "reconnect_oauth" && plan.mode === "oauth") {
+        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(selected.item.id)}`;
+        const response = await client.startConnectionOAuth(workspaceId, {
+          ...(plan.mcpUrl ? { mcpUrl: plan.mcpUrl } : {}),
+          ...(plan.providerDomain ? { providerDomain: plan.providerDomain } : {}),
+          connectionId: action.connectionId,
+          returnPath,
+        });
+        if (!response.authorizationUrl) {
+          throw new Error("The provider did not return an authorization link.");
+        }
+        window.location.assign(response.authorizationUrl);
+        return;
+      }
+
+      if (action.type === "reconnect_api_key") {
+        await client.updateConnection(workspaceId, action.connectionId, {
+          credential: { headers: action.headers },
+          status: "active",
+        });
+        await refresh();
+        onRuntimeChanged();
+        toast.success(`Reconnected ${selected.item.name}`);
+        setSelected(null);
+        return;
+      }
+
       const persisted = await persistIfRegistry(selected);
 
       if (action.type === "oauth" && plan.mode === "oauth") {
@@ -245,6 +276,15 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   async function resumeOAuthEnable(item: CapabilityCatalogItem, connectionId: string) {
     setBusyId(item.id);
     try {
+      // A reconnect returns for an item that is already enabled — the connection
+      // row was refreshed in place, so there's nothing to enable; just confirm.
+      if (item.enabled) {
+        await refresh();
+        onRuntimeChanged();
+        toast.success(`Reconnected ${item.name}`);
+        setSelected(null);
+        return;
+      }
       const plan = capabilityConnectPlan(item);
       const providerDomain = plan.mode === "oauth" ? plan.providerDomain : item.providerDomain ?? "";
       await client.enableCapability(workspaceId, item.id, {
