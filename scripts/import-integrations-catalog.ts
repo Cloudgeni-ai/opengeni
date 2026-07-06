@@ -115,6 +115,10 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       skipped.push({ domain, mcpUrl: mcpUrl ?? null, reason: "dead_demo_domain" });
       continue;
     }
+    if (!mcpUrl) {
+      skipped.push({ domain, mcpUrl: null, reason: "missing_url" });
+      continue;
+    }
     const importable = importableMcpUrl(mcpUrl);
     if (!importable.ok) {
       skipped.push({ domain, mcpUrl: mcpUrl ?? null, reason: importable.reason });
@@ -164,6 +168,9 @@ export async function importIntegrationsCatalog(input: {
   storeLogos?: boolean;
 }): Promise<ImportCatalogResult> {
   const normalized = normalizeCatalogSnapshot(input.snapshot);
+  if (normalized.rows.length === 0) {
+    throw new Error("catalog import produced zero importable rows; aborting before DB writes to avoid marking registry entries stale");
+  }
   const batch = await createImportBatch(input.db, {
     source: SOURCE,
     snapshotDate: normalized.generatedAt ? new Date(normalized.generatedAt) : new Date(),
@@ -610,8 +617,9 @@ if (import.meta.main) {
     process.exit(0);
   }
   const settings = getSettings();
+  const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
-    searchPath: dbSearchPath(settings),
+    ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
   try {

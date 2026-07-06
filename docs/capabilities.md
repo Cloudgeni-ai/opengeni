@@ -94,7 +94,8 @@ live-consumes integrations.sh at request time. Operators run
 reviewed snapshot or precomputed `importRows` file. The importer writes global
 capability rows, records an `import_batches` provenance row with MIT
 attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
-Rows removed from a later snapshot are marked `stale`, not deleted.
+Rows removed from a later snapshot are marked `stale`, not deleted, and are
+excluded from default workspace catalog listings.
 
 Imported logos are fetched during import, validated as images below 512KB, and
 stored through OpenGeni object storage under `catalog-assets/...`; catalog rows

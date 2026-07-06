@@ -1816,19 +1816,16 @@ export async function markStaleRegistryCatalogItems(db: Database, activeKeys: It
     return 0;
   }
   const now = new Date();
-  for (const row of stale) {
-    await db.update(schema.capabilityCatalogItems).set({
-      stale: true,
-      staleAt: now,
-      importBatchId,
-      updatedAt: now,
-    }).where(and(
-      eq(schema.capabilityCatalogItems.source, registryCapabilitySource),
-      eq(schema.capabilityCatalogItems.providerDomain, row.providerDomain),
-      eq(schema.capabilityCatalogItems.mcpUrl, row.mcpUrl),
-    ));
-  }
-  return stale.length;
+  const updated = await db.update(schema.capabilityCatalogItems).set({
+    stale: true,
+    staleAt: now,
+    importBatchId,
+    updatedAt: now,
+  }).where(and(
+    eq(schema.capabilityCatalogItems.source, registryCapabilitySource),
+    inArray(schema.capabilityCatalogItems.id, stale.map((row) => row.id)),
+  )).returning({ id: schema.capabilityCatalogItems.id });
+  return updated.length;
 }
 
 export async function upsertCapabilityCatalogItem(db: Database, input: CreateCapabilityCatalogItemInput): Promise<CapabilityCatalogItem> {
@@ -1905,7 +1902,16 @@ export async function upsertCapabilityCatalogItem(db: Database, input: CreateCap
 export async function listCapabilityCatalogItems(db: Database, workspaceId: string): Promise<CapabilityCatalogItem[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb.select().from(schema.capabilityCatalogItems)
-      .where(or(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), isNull(schema.capabilityCatalogItems.workspaceId)))
+      .where(or(
+        eq(schema.capabilityCatalogItems.workspaceId, workspaceId),
+        and(
+          isNull(schema.capabilityCatalogItems.workspaceId),
+          or(
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            eq(schema.capabilityCatalogItems.stale, false),
+          ),
+        ),
+      ))
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
     return rows.map(mapCapabilityCatalogItem);
   });
@@ -1918,6 +1924,7 @@ export async function getCapabilityCatalogItem(db: Database, workspaceId: string
         eq(schema.capabilityCatalogItems.id, capabilityId),
         or(eq(schema.capabilityCatalogItems.workspaceId, workspaceId), isNull(schema.capabilityCatalogItems.workspaceId)),
       ))
+      .orderBy(asc(sql`(${schema.capabilityCatalogItems.workspaceId} is null)`))
       .limit(1);
     return row ? mapCapabilityCatalogItem(row) : null;
   });
