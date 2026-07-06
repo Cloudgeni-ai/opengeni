@@ -286,6 +286,27 @@ describe("connections routes", () => {
     expect((await updated.json() as { connection: { providerDomain: string } }).connection.providerDomain).toBe("other-example.com");
   });
 
+  test("a providerDomain that canonicalizes to empty is rejected, not stored blank", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", ["connections:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    // "   " passes the contract's min(1) but trims to "" — an empty stored
+    // domain would silently break enable-time connectionRef matching.
+    const created = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "   ",
+        kind: "api_key",
+        credential: { headers: { authorization: "Bearer X" } },
+      }),
+    });
+    expect(created.status).toBe(400);
+  });
+
   test("PATCH cannot clear a re-auth signal without a fresh credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
