@@ -22,6 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { HTTPException } from "hono/http-exception";
+import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -716,10 +717,6 @@ function canonicalMcpResource(value: string | undefined): string {
   }
   url.hash = "";
   return url.toString();
-}
-
-function canonicalProviderDomain(value: string): string {
-  return value.trim().toLowerCase().replace(/^www\./, "");
 }
 
 function safeReturnPath(value: string): string {

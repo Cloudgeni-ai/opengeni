@@ -24,6 +24,7 @@ import {
   integrationBaseUrl,
   startMcpOAuth,
 } from "../integrations/oauth-client";
+import { canonicalProviderDomain } from "../integrations/provider-domain";
 
 export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
@@ -52,7 +53,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       subjectId,
-      providerDomain: payload.providerDomain,
+      providerDomain: canonicalProviderDomain(payload.providerDomain),
       kind: payload.kind,
       credentialEncrypted: encryptCredentialBundle(key, payload.credential),
       grantedScopes: payload.grantedScopes,
@@ -96,7 +97,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionId: c.req.param("connectionId"),
       visibleToSubjectId: grant.subjectId,
       updatedBySubjectId: grant.subjectId,
-      ...(payload.providerDomain !== undefined ? { providerDomain: payload.providerDomain } : {}),
+      ...(payload.providerDomain !== undefined ? { providerDomain: canonicalProviderDomain(payload.providerDomain) } : {}),
       ...(subjectId !== undefined ? { subjectId } : {}),
       ...(payload.kind !== undefined ? { kind: payload.kind } : {}),
       ...(payload.status !== undefined ? { status: payload.status } : {}),

@@ -257,6 +257,35 @@ describe("connections routes", () => {
     expect((await revoked.json() as { connection: { status: string } }).connection.status).toBe("revoked");
   });
 
+  test("providerDomain is canonicalized on create and update", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const headers = {
+      authorization: await bearer(workspace, "subject-a", ["connections:read", "connections:write"]),
+      "content-type": "application/json",
+    };
+    const created = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerDomain: "WWW.Example.COM",
+        kind: "api_key",
+        credential: { headers: { authorization: "Bearer X" } },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = await created.json() as { connection: { id: string; providerDomain: string } };
+    expect(createdBody.connection.providerDomain).toBe("example.com");
+
+    const updated = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/${createdBody.connection.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ providerDomain: "  WWW.Other-Example.COM  " }),
+    });
+    expect(updated.status).toBe(200);
+    expect((await updated.json() as { connection: { providerDomain: string } }).connection.providerDomain).toBe("other-example.com");
+  });
+
   test("PATCH cannot clear a re-auth signal without a fresh credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
