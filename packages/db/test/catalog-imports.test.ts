@@ -5,8 +5,10 @@ import { importIntegrationsCatalog } from "../../../scripts/import-integrations-
 import {
   createDb,
   createImportBatch,
+  enableCapabilityInstallation,
   getCapabilityCatalogItem,
   listCapabilityCatalogItems,
+  listEnabledMcpCapabilityServers,
   listRegistryCatalogSurfaceKeys,
   markStaleRegistryCatalogItems,
   upsertCapabilityCatalogItem,
@@ -192,6 +194,51 @@ describe("catalog import persistence", () => {
       workspaceId: ws.workspaceId,
       accountId: ws.accountId,
     });
+  }, 180_000);
+
+  test("listEnabledMcpCapabilityServers returns one entry when workspace and global rows share a capability id", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-03T23:41:44.132Z"),
+      snapshotRef: "enabled-server-dedupe",
+      attributionNote: "MIT attribution",
+    });
+    const capabilityId = "mcp:integrations-sh:enabled-dedupe";
+    await upsertRegistryCapabilityCatalogItem(db, registryRow({
+      id: capabilityId,
+      importBatchId: batch.id,
+      providerDomain: "enabled-dedupe.example",
+      mcpUrl: "https://global.enabled-dedupe.example/mcp",
+      name: "Global Enabled Dedupe",
+      tier: "community",
+      provenance: "discovered",
+    }));
+    await upsertCapabilityCatalogItem(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      id: capabilityId,
+      kind: "mcp",
+      source: "manual",
+      name: "Workspace Enabled Dedupe",
+      endpointUrl: "https://workspace.enabled-dedupe.example/mcp",
+      category: "custom",
+      tags: ["mcp", "workspace"],
+    });
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+
+    const servers = await listEnabledMcpCapabilityServers(db, ws.workspaceId);
+    const matching = servers.filter((server) => server.capabilityId === capabilityId);
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0]?.url).toBe("https://workspace.enabled-dedupe.example/mcp");
   }, 180_000);
 
   test("markStaleRegistryCatalogItems marks multiple removed registry rows in one call", async () => {

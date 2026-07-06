@@ -2018,7 +2018,19 @@ export async function listEnabledMcpCapabilityServers(db: Database, workspaceId:
     ))
     .orderBy(asc(schema.capabilityCatalogItems.name)));
 
-  return rows.flatMap(({ item, installation }) => {
+  // A workspace-scoped catalog row and a global registry row can share the
+  // same capability id; the join then matches one installation twice. Keep
+  // one row per installation, preferring the workspace-scoped catalog row
+  // (same precedence as getCapabilityCatalogItem).
+  const preferredByInstallation = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    const existing = preferredByInstallation.get(row.installation.id);
+    if (!existing || (existing.item.workspaceId === null && row.item.workspaceId !== null)) {
+      preferredByInstallation.set(row.installation.id, row);
+    }
+  }
+
+  return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
     if (!item.endpointUrl || !mcpConnectivityOk(installation.metadata)) {
       return [];
     }
