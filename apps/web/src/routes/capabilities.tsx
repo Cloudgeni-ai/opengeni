@@ -145,7 +145,10 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
         client.listConnections(workspaceId).catch(() => null),
       ]);
       setItems(catalog.items);
-      setConnections(conns);
+      // Don't clobber previously-loaded connections with null on a failed refetch
+      // (that would flip healthy items to "unverified" until the next reload); a
+      // first-load failure leaves the prior null = "not loaded", which is correct.
+      if (conns !== null) setConnections(conns);
       setLoadError(null);
     } catch (error) {
       setLoadError(error instanceof Error ? error : new Error(String(error)));
