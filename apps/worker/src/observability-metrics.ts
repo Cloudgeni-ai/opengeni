@@ -5,8 +5,10 @@ import type { RuntimeMetricsHooks } from "@opengeni/runtime";
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "preempted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
+export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
+const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -192,6 +194,31 @@ export function recordSandboxLeaseGauges(observability: Observability, counts: P
       value: counts[liveness] ?? 0,
     });
   }
+}
+
+export function recordCreditBalanceGauges(observability: Observability, balances: CreditBalanceGauge[]): void {
+  const previous = creditBalanceGaugeAccounts.get(observability) ?? new Set<string>();
+  const current = new Set<string>();
+  for (const balance of balances) {
+    current.add(balance.accountId);
+    observability.setGauge({
+      name: "opengeni_credit_balance_micros",
+      help: "Current credit balance in micros by account.",
+      labels: { account_id: balance.accountId },
+      value: balance.balanceMicros,
+    });
+  }
+  for (const accountId of previous) {
+    if (!current.has(accountId)) {
+      observability.setGauge({
+        name: "opengeni_credit_balance_micros",
+        help: "Current credit balance in micros by account.",
+        labels: { account_id: accountId },
+        value: 0,
+      });
+    }
+  }
+  creditBalanceGaugeAccounts.set(observability, current);
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {

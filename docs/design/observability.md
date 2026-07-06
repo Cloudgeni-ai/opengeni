@@ -56,14 +56,16 @@ work. The domain metric set (all `opengeni_` prefixed, bounded label values only
 
 **Queue & billing:**
 - `opengeni_turns_queued` gauge
+- `opengeni_credit_balance_micros{account_id}` gauge
 - `opengeni_credit_micros_total{kind}` counter (usage | grant | topup | refund)
 
 **Deploy marker:** `opengeni_build_info{version, revision}` gauge=1 — dashboards
 join against it instead of hard-coding SHAs.
 
 Cardinality rule: no user ids, session ids, workspace ids, or free-form strings as
-label values, ever. Session-scoped detail already has a home (the durable
-`session_events` log); metrics are aggregates.
+label values, ever. `account_id` is allowed only for managed-account billing
+gauges where cardinality is intentionally small. Session-scoped detail already
+has a home (the durable `session_events` log); metrics are aggregates.
 
 ## Log hygiene
 

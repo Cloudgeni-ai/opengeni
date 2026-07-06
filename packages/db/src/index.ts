@@ -5713,6 +5713,22 @@ export async function countSandboxLeasesByLiveness(db: Database): Promise<Record
   return counts;
 }
 
+export type CreditBalanceByAccount = {
+  accountId: string;
+  balanceMicros: number;
+};
+
+export async function listCreditBalancesByAccount(db: Database): Promise<CreditBalanceByAccount[]> {
+  const rows = await rawRows<{ account_id: string; balance_micros: number | string }>(db, sql`
+    select account_id, balance_micros
+    from opengeni_private.credit_balance_by_account()
+  `);
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    balanceMicros: Number(row.balance_micros),
+  }));
+}
+
 // Cross-workspace live Modal lease read for the provider-side orphan sweep. The
 // SECURITY DEFINER function is the sanctioned RLS bypass; see migration 0036.
 export async function listLiveModalSandboxLeaseAttributions(db: Database): Promise<LiveModalSandboxLeaseAttribution[]> {

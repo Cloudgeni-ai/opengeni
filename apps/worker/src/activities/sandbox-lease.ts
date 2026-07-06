@@ -37,6 +37,7 @@ import {
   countSandboxLeasesByLiveness,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
+  listCreditBalancesByAccount,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
@@ -63,6 +64,7 @@ import {
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import {
+  recordCreditBalanceGauges,
   recordCreditMicros,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
@@ -174,7 +176,7 @@ export function createSandboxLeaseActivities(
     if (!settings.sandboxOwnershipEnabled) {
       return { examined: 0, terminated: 0, skipped: 0, metered: 0, forceDrained: 0, modalOrphansTerminated: 0 };
     }
-    await refreshQueueAndLeaseGauges(db, observability);
+    await refreshQueueLeaseAndCreditGauges(db, observability);
 
     // (0) Warm-meter tick (P2.1) — accrue warm-seconds for every WARM viewer-only
     // box (turn-held boxes meter on the turn heartbeat, so the list fn excludes
@@ -229,7 +231,7 @@ export function createSandboxLeaseActivities(
       });
     }
 
-    await refreshQueueAndLeaseGauges(db, observability);
+    await refreshQueueLeaseAndCreditGauges(db, observability);
 
     if (drainable.length > 0 || metered.accrued > 0 || forceDrained > 0 || modalOrphansTerminated > 0) {
       observability.info("sandbox reaper swept", {
@@ -299,7 +301,7 @@ async function accrueWarmTick(
   return { accrued, workspaceIds };
 }
 
-async function refreshQueueAndLeaseGauges(
+async function refreshQueueLeaseAndCreditGauges(
   db: ActivityServices["db"],
   observability: ActivityServices["observability"],
 ): Promise<void> {
@@ -314,6 +316,13 @@ async function refreshQueueAndLeaseGauges(
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
   } catch (error) {
     observability.warn("sandbox reaper: sandbox-lease gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    recordCreditBalanceGauges(observability, await listCreditBalancesByAccount(db));
+  } catch (error) {
+    observability.warn("sandbox reaper: credit-balance gauge refresh failed", {
       error: error instanceof Error ? error.message : String(error),
     });
   }
