@@ -1,6 +1,34 @@
-import type { CapabilityCatalogItem, CapabilityKind, CreateCapabilityInput } from "@/types";
+import type { CapabilityCatalogItem, CapabilityKind, CapabilitySource, CreateCapabilityInput } from "@/types";
 
 export type CapabilityFilter = "all" | CapabilityKind;
+
+// Human copy for every taxonomy value that used to leak enum slugs into the UI
+// (doctrine: no internal taxonomy in user-facing labels). Codes appear at most
+// as fallbacks for values we don't recognize.
+
+/** Singular human label for a capability kind ("MCP server", "API"…). */
+export function capabilityKindLabel(kind: CapabilityKind): string {
+  switch (kind) {
+    case "pack": return "Pack";
+    case "mcp": return "MCP server";
+    case "api": return "API";
+    case "skill": return "Skill";
+    case "plugin": return "Plugin";
+    default: return kind;
+  }
+}
+
+/** Human label for where a catalog item came from. */
+export function capabilitySourceLabel(source: CapabilitySource | string): string {
+  switch (source) {
+    case "built_in": return "Built in";
+    case "configured": return "Configured";
+    case "public_registry":
+    case "registry": return "Public registry";
+    case "manual": return "Added";
+    default: return String(source).replaceAll("_", " ");
+  }
+}
 
 export type CapabilityFormState = {
   kind: Exclude<CapabilityKind, "pack">;
@@ -54,14 +82,101 @@ export function filterCapabilityCatalogItems(items: CapabilityCatalogItem[], fil
 
 export function capabilityErrorToast(error: unknown, fallbackTitle: string): { title: string; description: string } {
   const description = cleanApiErrorMessage(error instanceof Error ? error.message : String(error));
+  // The raw "requires credentials; pass them in the enable request 'headers'
+  // field" 422 is an API-only contract detail — never surface it verbatim. The
+  // UI collects credentials in the connect sheet before enabling, so this only
+  // fires as a fallback; translate it to plain language.
+  if (isMissingCredentialsError(error)) {
+    return { title: "Credentials needed", description: "This integration needs to be connected before it can be enabled." };
+  }
   if (/^MCP capability ".+" could not be enabled because OpenGeni could not initialize /.test(description)) {
-    return { title: "MCP connection failed", description };
+    return { title: "Connection failed", description };
   }
   return { title: fallbackTitle, description };
 }
 
+/**
+ * The enable-path 422 raised when a credentialed MCP is enabled without a
+ * connection ref or headers. The connect sheet catches this to route the user
+ * into the credential form instead of showing the raw API string.
+ */
+export function isMissingCredentialsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /requires credentials/i.test(message) && /headers|credential|connection/i.test(message);
+}
+
 export function cleanApiErrorMessage(message: string): string {
   return message.replace(/^API\s+\d+:\s*/i, "").trim();
+}
+
+// --- Connect plan ----------------------------------------------------------------------------
+// How a catalog item becomes usable, derived entirely from the catalog fields.
+// Only MCP servers carry credentials; every other kind just tracks/enables.
+
+export type RequiredHeaderField = {
+  /** The wire header name the broker injects (e.g. "X-API-Key"). */
+  name: string;
+  /** Human label for the input — never the word "headers". */
+  label: string;
+};
+
+export type CapabilityConnectPlan =
+  | { mode: "enable" }
+  | { mode: "oauth"; providerDomain: string; mcpUrl: string | null }
+  | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
+
+export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
+  // Non-runtime kinds and MCPs with no auth just enable/track directly.
+  if (item.kind !== "mcp") {
+    return { mode: "enable" };
+  }
+  const providerDomain = item.providerDomain ?? domainFromUrl(item.mcpUrl ?? item.endpointUrl) ?? "";
+  if (item.authKind === "oauth2") {
+    return { mode: "oauth", providerDomain, mcpUrl: item.mcpUrl ?? item.endpointUrl };
+  }
+  const requiredHeaders = stringArray((item.metadata as Record<string, unknown>).requiredHeaders);
+  if (requiredHeaders.length > 0) {
+    return { mode: "api_key", providerDomain, fields: requiredHeaders.map(headerField) };
+  }
+  return { mode: "enable" };
+}
+
+/** Short auth hint for a tile ("OAuth" / "API key"), or null when none applies. */
+export function capabilityAuthHint(item: CapabilityCatalogItem): string | null {
+  const plan = capabilityConnectPlan(item);
+  if (plan.mode === "oauth") return "OAuth";
+  if (plan.mode === "api_key") return "API key";
+  return null;
+}
+
+function headerField(name: string): RequiredHeaderField {
+  return { name, label: headerFieldLabel(name) };
+}
+
+function headerFieldLabel(name: string): string {
+  if (/api[\s_-]?key/i.test(name) || /^authorization$/i.test(name)) {
+    return "API key";
+  }
+  const cleaned = name.replace(/^x-/i, "").replaceAll(/[-_]+/g, " ").trim();
+  const titled = cleaned.replaceAll(/\b\w/g, (character) => character.toUpperCase());
+  return titled || "Credential";
+}
+
+export function domainFromUrl(url: string | null): string | null {
+  if (!url) return null;
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/** First one or two initials for the logo monogram fallback. */
+export function capabilityMonogram(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
 }
 
 export type PackConnectorSummary = {
@@ -201,7 +316,15 @@ export function capabilityCounts(items: CapabilityCatalogItem[]): Record<Capabil
 }
 
 export function capabilityFilterLabel(kind: CapabilityFilter): string {
-  return kind === "all" ? "All" : kind === "mcp" ? "MCPs" : `${kind[0]!.toUpperCase()}${kind.slice(1)}s`;
+  switch (kind) {
+    case "all": return "All";
+    case "pack": return "Packs";
+    case "mcp": return "MCP servers";
+    case "api": return "APIs";
+    case "skill": return "Skills";
+    case "plugin": return "Plugins";
+    default: return kind;
+  }
 }
 
 export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateCapabilityInput {
@@ -219,6 +342,36 @@ export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateC
     ...(item.authModel ? { authModel: item.authModel } : {}),
     metadata: item.metadata,
   };
+}
+
+/**
+ * Kind-aware validation for the "Add custom" dialog. Only MCP servers need an
+ * endpoint URL — that field is hidden for every other kind (the user's explicit
+ * complaint was being asked for an endpoint when tracking a skill).
+ */
+export function capabilityFormError(form: CapabilityFormState): string | null {
+  if (!form.name.trim()) {
+    return "Give it a name.";
+  }
+  if (form.kind === "mcp") {
+    const url = form.endpointUrl.trim();
+    if (!url) {
+      return "Enter the MCP server URL.";
+    }
+    if (!isLikelyUrl(url)) {
+      return "Enter a valid URL, including https://.";
+    }
+  }
+  return null;
+}
+
+function isLikelyUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function capabilityInputFromForm(form: CapabilityFormState): CreateCapabilityInput | null {

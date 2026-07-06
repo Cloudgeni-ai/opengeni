@@ -37,6 +37,8 @@ export type ObjectStorage = {
   createGetUrl: (args: { key: string; expiresInSeconds?: number }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
+  /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
+  getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array; contentType?: string } | null>;
   /**
    * SERVER-SIDE authenticated direct PUT (no presign + browser fetch). For an
    * in-process upload from a trusted holder of the storage credentials (e.g. the
@@ -134,19 +136,51 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         Bucket: file.bucket,
         Key: file.objectKey,
       }));
-      if (!result.Body) {
-        throw new Error(`Object body is empty: ${file.objectKey}`);
+      return await s3BodyToBytes(result.Body, file.objectKey);
+    },
+    async getObjectBytes(key) {
+      try {
+        const result = await client.send(new GetObjectCommand({
+          Bucket: settings.objectStorageBucket,
+          Key: key,
+        }));
+        const bytes = await s3BodyToBytes(result.Body, key);
+        return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
+      } catch (error) {
+        if (isS3NotFound(error)) {
+          return null;
+        }
+        throw error;
       }
-      if (typeof result.Body.transformToByteArray === "function") {
-        return await result.Body.transformToByteArray();
-      }
-      const chunks: Uint8Array[] = [];
-      for await (const chunk of result.Body as AsyncIterable<Uint8Array | Buffer | string>) {
-        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-      }
-      return Buffer.concat(chunks);
     },
   };
+}
+
+async function s3BodyToBytes(body: unknown, objectKey: string): Promise<Uint8Array> {
+  if (!body) {
+    throw new Error(`Object body is empty: ${objectKey}`);
+  }
+  const withTransform = body as { transformToByteArray?: () => Promise<Uint8Array> };
+  if (typeof withTransform.transformToByteArray === "function") {
+    return await withTransform.transformToByteArray();
+  }
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of body as AsyncIterable<Uint8Array | Buffer | string>) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+function isS3NotFound(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const name = "name" in error ? (error as { name?: unknown }).name : undefined;
+  if (name === "NoSuchKey" || name === "NotFound") {
+    return true;
+  }
+  const metadata = "$metadata" in error ? (error as { $metadata?: { httpStatusCode?: number } }).$metadata : undefined;
+  return metadata?.httpStatusCode === 404;
 }
 
 function createGcsObjectStorage(settings: Settings): ObjectStorage {
@@ -207,7 +241,24 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
       const [bytes] = await bucket.file(file.objectKey).download();
       return bytes;
     },
+    async getObjectBytes(key) {
+      try {
+        const file = bucket.file(key);
+        const [metadata] = await file.getMetadata();
+        const [bytes] = await file.download();
+        return { bytes, ...(metadata.contentType ? { contentType: metadata.contentType } : {}) };
+      } catch (error) {
+        if (isGcsNotFound(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
   };
+}
+
+function isGcsNotFound(error: unknown): boolean {
+  return Boolean(error) && typeof error === "object" && (error as { code?: unknown }).code === 404;
 }
 
 function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null {
@@ -272,7 +323,23 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
     async getFileBytes(file) {
       return await azureDownloadToBytes(await containerClient.getBlobClient(file.objectKey).download());
     },
+    async getObjectBytes(key) {
+      try {
+        const download = await containerClient.getBlobClient(key).download();
+        const bytes = await azureDownloadToBytes(download);
+        return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
+      } catch (error) {
+        if (isAzureNotFound(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
   };
+}
+
+function isAzureNotFound(error: unknown): boolean {
+  return Boolean(error) && typeof error === "object" && (error as { statusCode?: unknown }).statusCode === 404;
 }
 
 function azureSharedKeyCredential(settings: Settings): StorageSharedKeyCredential {

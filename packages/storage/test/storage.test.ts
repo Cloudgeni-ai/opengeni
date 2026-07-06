@@ -76,3 +76,63 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
     process.env = original;
   }
 }
+
+describe("getObjectBytes (S3-compatible)", () => {
+  function startFakeS3(objects: Record<string, { body: string; contentType: string }>) {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        const key = decodeURIComponent(url.pathname.replace(/^\/test-bucket\//, ""));
+        const object = objects[key];
+        if (!object) {
+          return new Response(
+            `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>not found</Message><Key>${key}</Key><RequestId>req-1</RequestId></Error>`,
+            { status: 404, headers: { "content-type": "application/xml" } },
+          );
+        }
+        return new Response(object.body, { status: 200, headers: { "content-type": object.contentType } });
+      },
+    });
+    return { url: `http://127.0.0.1:${server.port}`, close: () => server.stop(true) };
+  }
+
+  test("returns bytes and content type for an existing object", async () => {
+    const fake = startFakeS3({ "catalog-assets/logos/example.com/abc.png": { body: "logo-bytes", contentType: "image/png" } });
+    try {
+      const storage = withEnv({
+        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+        OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+      }, () => createObjectStorage(getSettings()));
+      const result = await storage!.getObjectBytes("catalog-assets/logos/example.com/abc.png");
+      expect(result).not.toBeNull();
+      expect(Buffer.from(result!.bytes).toString("utf8")).toBe("logo-bytes");
+      expect(result!.contentType).toBe("image/png");
+    } finally {
+      fake.close();
+    }
+  });
+
+  test("returns null for a missing object instead of throwing", async () => {
+    const fake = startFakeS3({});
+    try {
+      const storage = withEnv({
+        OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: fake.url,
+        OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+        OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+      }, () => createObjectStorage(getSettings()));
+      const result = await storage!.getObjectBytes("catalog-assets/logos/missing.com/zzz.png");
+      expect(result).toBeNull();
+    } finally {
+      fake.close();
+    }
+  });
+});
