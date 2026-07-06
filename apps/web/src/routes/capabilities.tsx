@@ -561,7 +561,13 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
   const packBusyId = busyId?.startsWith("pack:") ? busyId.slice("pack:".length) : null;
 
   return (
-    <div className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-8">
+    // The app shell (RailShell) hands each route a fixed-height overflow-hidden
+    // flex column, so the PAGE never body-scrolls — the route must own its own
+    // vertical scroll. This root IS that scroll viewport (min-h-0 so it can
+    // shrink inside the flex parent, overflow-y-auto so the tall catalog grid
+    // scrolls); the centered max-width column lives inside it.
+    <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
       <PageHeader
         icon={<PlugIcon className="size-4" />}
         title="Capabilities"
@@ -691,6 +697,7 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
             )}
           </section>
         ) : null}
+      </div>
       </div>
 
       <CapabilityDetailSheet
