@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/storage",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "license": "Apache-2.0",
   "main": "./src/index.ts",
