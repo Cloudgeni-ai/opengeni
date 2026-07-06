@@ -678,7 +678,7 @@ describe("capability catalog helpers", () => {
       new Error('API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.'),
       "Capability update failed",
     )).toEqual({
-      title: "MCP connection failed",
+      title: "Connection failed",
       description: 'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
     });
   });
