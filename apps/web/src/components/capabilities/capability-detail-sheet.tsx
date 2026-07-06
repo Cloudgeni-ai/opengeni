@@ -134,11 +134,12 @@ function DetailBody({
             </MetaRow>
           ) : null}
         </dl>
-      </div>
 
-      {/* Action area */}
-      <div className="space-y-3 border-t border-border bg-surface/40 p-5">
-        {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
+        {/* Action — flows directly after the content so a sparse item stays a
+            compact top-flowing column, with no dead void before a bottom-pinned
+            button. The whole body scrolls only when content actually overflows. */}
+        <div className="space-y-3 border-t border-border pt-5">
+          {errorMessage ? <Notice tone="failed">{errorMessage}</Notice> : null}
 
         {item.enabled ? (
           <div className="space-y-3">
@@ -224,6 +225,7 @@ function DetailBody({
             {item.kind === "mcp" || item.kind === "pack" ? "Enable" : "Track"}
           </Button>
         )}
+        </div>
       </div>
     </div>
   );

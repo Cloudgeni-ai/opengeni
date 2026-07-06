@@ -572,6 +572,14 @@ function EnabledCard({
   const plan = capabilityConnectPlan(item);
   const needsAttention = plan.mode !== "enable" && connection !== null && connection.status !== "active";
   const canDisable = item.source !== "built_in" && item.source !== "configured";
+  // A broken connection ("Needs attention") is the actionable state, so it wins
+  // the single status slot over staleness — which only gates discovery, still
+  // runs fine, and so reads as quiet neutral text, never an amber alert.
+  const status = needsAttention
+    ? { label: "Needs attention", dot: "bg-status-waiting", text: "text-status-waiting" }
+    : item.stale
+      ? { label: "No longer in registry", dot: "bg-fg-subtle/60", text: "text-fg-subtle" }
+      : { label: plan.mode === "enable" ? "Enabled" : "Connected", dot: "bg-status-idle", text: "text-fg-subtle" };
 
   return (
     <div className="flex items-center gap-3 rounded-xl border border-border bg-surface/50 p-3">
@@ -579,9 +587,9 @@ function EnabledCard({
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-fg">{item.name}</div>
-          <div className={cn("flex items-center gap-1.5 text-2xs", needsAttention ? "text-status-waiting" : "text-fg-subtle")}>
-            <span className={cn("size-1.5 rounded-full", needsAttention ? "bg-status-waiting" : "bg-status-idle")} />
-            {item.stale ? "No longer in registry" : needsAttention ? "Needs attention" : plan.mode === "enable" ? "Enabled" : "Connected"}
+          <div className={cn("flex items-center gap-1.5 text-2xs", status.text)}>
+            <span className={cn("size-1.5 rounded-full", status.dot)} />
+            {status.label}
             <span aria-hidden className="text-fg-subtle/50">·</span>
             <span className="truncate">{capabilityKindLabel(item.kind)}</span>
           </div>
