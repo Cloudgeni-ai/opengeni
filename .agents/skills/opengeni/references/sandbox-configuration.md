@@ -73,7 +73,7 @@ Inspect `docker/sandbox.Dockerfile` for what the agent can use. The current imag
 
 ## Modal Sandbox Setup
 
-Modal configuration is separate from Docker image configuration. Current knobs include app name, timeout, optional image ref, optional Modal token pair, and optional Modal environment.
+Modal configuration is separate from Docker image configuration. Current knobs include app name, timeout, optional image ref, optional Modal token pair, optional Modal environment, and an optional private-registry image secret.
 
 Typical shape:
 
@@ -85,9 +85,21 @@ OPENGENI_MODAL_TIMEOUT_SECONDS=900
 # OPENGENI_MODAL_TOKEN_ID=...
 # OPENGENI_MODAL_TOKEN_SECRET=...
 # OPENGENI_MODAL_ENVIRONMENT=...
+# OPENGENI_MODAL_IMAGE_REGISTRY_SECRET=my-registry-credentials
 ```
 
 When explaining Modal, say OpenGeni selects the Modal sandbox backend through the OpenAI Agents SDK extension. Do not imply that all Docker-only mounting or networking behavior is identical unless runtime code proves it.
+
+### Private-registry sandbox images
+
+By default `OPENGENI_MODAL_IMAGE_REF` (and any pack `sandboxImage` that overrides it) is
+pulled UNAUTHENTICATED — the Agents-extension backend calls `Image.fromRegistry(tag)` with
+no secret, so the image must be a PUBLIC registry tag. To run a PRIVATE image (a cloud-hosted
+ACR/ECR/GCR digest), set `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET` to the name of a Modal Secret
+holding `REGISTRY_USERNAME` + `REGISTRY_PASSWORD`. The worker resolves that Secret and pre-builds
+`fromRegistry(tag, secret)` ONCE at boot (before any turn creates a box); unset behavior is
+byte-identical to the public path. Resume/attach turns never pull the image, so they are
+unaffected either way.
 
 ## Local And None
 

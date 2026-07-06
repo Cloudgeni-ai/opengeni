@@ -4,6 +4,7 @@ import { createNatsEventBus } from "@opengeni/events";
 import { createObservability, logStartupDependencyRetry, type Observability } from "@opengeni/observability";
 import { Connection, ScheduleAlreadyRunning, ScheduleOverlapPolicy, Client as TemporalClient } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
+import { ensureModalRegistryImage } from "@opengeni/runtime";
 import { createActivities, type ActivityDependencies } from "./activities";
 import type { WakeSessionWorkflowSignal } from "./activities/types";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
@@ -33,6 +34,18 @@ export async function createOpenGeniWorker(options: WorkerOptions = {}): Promise
 }> {
   const settings = options.settings ?? getSettings();
   const observability = options.activityDependencies?.observability ?? createObservability(settings, { component: "worker" });
+  // Pre-resolve a PRIVATE-registry sandbox image before any turn creates a box.
+  // No-op unless OPENGENI_MODAL_IMAGE_REGISTRY_SECRET + OPENGENI_MODAL_IMAGE_REF are
+  // both set (so non-modal / public-image deployments are byte-unchanged and never
+  // load the modal SDK here). Memoized in the provider, so this runs once per process.
+  await retryStartupDependency(
+    "Modal private-registry image",
+    () => ensureModalRegistryImage(settings),
+    {
+      ...startupRetryOptions(settings),
+      onRetry: (event) => logStartupDependencyRetry(observability, event),
+    },
+  );
   const connection = await retryStartupDependency(
     "Temporal",
     () => NativeConnection.connect({ address: settings.temporalHost }),

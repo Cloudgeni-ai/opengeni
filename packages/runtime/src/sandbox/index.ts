@@ -55,12 +55,14 @@ export {
   type ProviderConstructionContext,
 } from "./providers";
 export {
+  ensureModalRegistryImage,
   modalSandboxAttributionEnvironment,
   modalSandboxAttributionTags,
   sweepModalOrphanSandboxes,
   tagModalSandbox,
   terminateModalSandboxById,
   type LiveModalSandboxLeaseAttribution,
+  type ModalModuleLoader,
   type ModalOrphanSweepResult,
   type ModalSandboxAttribution,
 } from "./providers/modal";

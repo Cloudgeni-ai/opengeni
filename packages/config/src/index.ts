@@ -317,6 +317,15 @@ const SettingsSchema = z.object({
   dockerNetwork: z.string().optional(),
   modalAppName: z.string().default("opengeni-sandbox"),
   modalImageRef: z.string().optional(),
+  // Name of a Modal Secret (containing REGISTRY_USERNAME + REGISTRY_PASSWORD) used
+  // to authenticate the pull of `modalImageRef` from a PRIVATE registry. When UNSET
+  // (the default), the sandbox image is pulled UNAUTHENTICATED — i.e. it must be a
+  // PUBLIC registry tag, which is the only shape the Agents-extension Modal backend
+  // supports out of the box (`Image.fromRegistry(tag)` with no secret). Set this to
+  // run a private image (e.g. a cloud-hosted ACR/ECR/GCR digest): the runtime resolves
+  // the named Secret and builds the image via `fromRegistry(tag, secret)` before the
+  // first sandbox is created. Knob: OPENGENI_MODAL_IMAGE_REGISTRY_SECRET.
+  modalImageRegistrySecret: z.string().optional(),
   // Modal's hard sandbox lifetime (timeoutMs = this * 1000), counted from each
   // create/resume — it is the BACKSTOP that reclaims a box if the reaper/worker is
   // down, NOT the warm-window controller (that's sandboxIdleGraceMs). It must
@@ -968,6 +977,7 @@ export function getSettings(): Settings {
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
     modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),

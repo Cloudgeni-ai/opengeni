@@ -87,8 +87,9 @@ export const modalProvider: ProviderRegistration = {
     if (settings.modalWorkspacePersistence) {
       options.workspacePersistence = settings.modalWorkspacePersistence;
     }
-    if (settings.modalImageRef) {
-      options.image = ModalImageSelector.fromTag(settings.modalImageRef);
+    const imageSelector = resolveModalImageSelector(settings);
+    if (imageSelector) {
+      options.image = imageSelector;
     }
     if (settings.modalTokenId) {
       options.tokenId = settings.modalTokenId;
@@ -105,6 +106,110 @@ export const modalProvider: ProviderRegistration = {
 
 type ModalModule = typeof import("modal");
 type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
+
+// --- Private-registry image resolution (OPENGENI_MODAL_IMAGE_REGISTRY_SECRET) ------
+//
+// The Agents-extension Modal backend resolves `modalImageRef` via
+// `Image.fromRegistry(tag)` with NO secret, so it can only pull PUBLIC images. To run
+// a PRIVATE image we resolve the named Modal Secret and pre-build the authenticated
+// `fromRegistry(tag, secret)` image ONCE per process, then hand the provider `build`
+// a `ModalImageSelector.fromImage(...)`. `build` is synchronous and modal is imported
+// lazily (never loaded for non-modal backends), so resolution can't happen inside
+// `build`; the worker boot awaits `ensureModalRegistryImage` first and `build` reads
+// the settled result. Modal images are lazy, workspace-scoped definitions, so an image
+// built by this module's client is usable by the ModalSandboxClient's own client.
+
+/** Loader seam so unit tests can inject a fake modal module. */
+export type ModalModuleLoader = () => Promise<
+  Pick<ModalModule, "ModalClient" | "Secret">
+>;
+
+const defaultModalLoader: ModalModuleLoader = () => import("modal");
+
+/** Settled, synchronously-readable resolved images, keyed per config. */
+const resolvedRegistryImages = new Map<string, unknown>();
+/** In-flight resolutions, for cross-call de-duplication. */
+const inFlightRegistryImages = new Map<string, Promise<void>>();
+
+function registryImageCacheKey(settings: Settings): string {
+  return [
+    settings.modalImageRef ?? "",
+    settings.modalImageRegistrySecret ?? "",
+    settings.modalEnvironment ?? "",
+  ].join("|");
+}
+
+/**
+ * Resolve + cache the private-registry Modal image. No-op unless BOTH
+ * `modalImageRef` and `modalImageRegistrySecret` are set. Memoized per
+ * (imageRef, secret, environment) so it runs once per worker process. Awaited at
+ * worker boot BEFORE the first sandbox is created; `build` then reads the resolved
+ * image and otherwise falls back to the public `fromTag` path.
+ */
+export async function ensureModalRegistryImage(
+  settings: Settings,
+  loadModal: ModalModuleLoader = defaultModalLoader,
+): Promise<void> {
+  if (!settings.modalImageRegistrySecret || !settings.modalImageRef) {
+    return;
+  }
+  const key = registryImageCacheKey(settings);
+  if (resolvedRegistryImages.has(key)) {
+    return;
+  }
+  let pending = inFlightRegistryImages.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const modal = await loadModal();
+      const client = new modal.ModalClient(modalClientOptions(settings));
+      const secret = await modal.Secret.fromName(
+        settings.modalImageRegistrySecret!,
+        settings.modalEnvironment ? { environment: settings.modalEnvironment } : undefined,
+      );
+      // fromRegistry is synchronous and returns a lazy image definition (built
+      // server-side at sandbox create); the resolved secretId travels with it.
+      const image = client.images.fromRegistry(settings.modalImageRef!, secret);
+      resolvedRegistryImages.set(key, image);
+    })().finally(() => {
+      inFlightRegistryImages.delete(key);
+    });
+    inFlightRegistryImages.set(key, pending);
+  }
+  await pending;
+}
+
+/** The resolved private-registry image for these settings, or undefined if none. */
+function cachedModalRegistryImage(settings: Settings): unknown | undefined {
+  if (!settings.modalImageRegistrySecret || !settings.modalImageRef) {
+    return undefined;
+  }
+  return resolvedRegistryImages.get(registryImageCacheKey(settings));
+}
+
+/**
+ * Choose the image selector for a Modal sandbox client from settings. Returns:
+ *  - `fromImage(resolved)` when a private-registry secret is configured AND the
+ *    image has been resolved (ensureModalRegistryImage ran at worker boot);
+ *  - `fromTag(modalImageRef)` for the public path (no secret, or cold cache — the
+ *    resume/attach paths never pull an image so the tag branch is harmless there);
+ *  - `undefined` when no image ref is set (Modal uses its default image).
+ * Exported for unit tests.
+ */
+export function resolveModalImageSelector(settings: Settings): ModalImageSelector | undefined {
+  if (!settings.modalImageRef) {
+    return undefined;
+  }
+  const registryImage = cachedModalRegistryImage(settings);
+  return registryImage
+    ? ModalImageSelector.fromImage(registryImage as Parameters<typeof ModalImageSelector.fromImage>[0])
+    : ModalImageSelector.fromTag(settings.modalImageRef);
+}
+
+/** Test-only: clear the resolved/in-flight image caches. */
+export function __resetModalRegistryImageCacheForTest(): void {
+  resolvedRegistryImages.clear();
+  inFlightRegistryImages.clear();
+}
 
 function modalClientOptions(settings: Settings): ConstructorParameters<ModalModule["ModalClient"]>[0] {
   return {
