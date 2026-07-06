@@ -170,6 +170,17 @@ describe("capabilityConnectPlan", () => {
 
   test("MCP with no auth signal just enables", () => {
     expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "none" }))).toEqual({ mode: "enable" });
+    expect(capabilityConnectPlan(item({ kind: "mcp", authKind: "unknown" }))).toEqual({ mode: "enable" });
+  });
+
+  test("credentialed MCP with no requiredHeaders still offers the api-key form (imported catalog rows)", () => {
+    // Imported rows carry authKind api_key but no requiredHeaders in metadata; they
+    // must NOT dead-end on Enable → 422, they get the generic single-field form.
+    const byKind = capabilityConnectPlan(item({ kind: "mcp", authKind: "api_key", providerDomain: "supabase.com" }));
+    expect(byKind).toEqual({ mode: "api_key", providerDomain: "supabase.com", fields: [{ name: "Authorization", label: "API key" }] });
+    // Manually-created credentialed items carry authModel credential_ref instead.
+    const byModel = capabilityConnectPlan(item({ kind: "mcp", authKind: "unknown", authModel: "credential_ref", providerDomain: "acme.com" }));
+    expect(byModel.mode).toBe("api_key");
   });
 
   test("provider domain falls back to the mcp url host", () => {

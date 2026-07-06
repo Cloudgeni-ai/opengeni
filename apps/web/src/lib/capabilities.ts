@@ -138,6 +138,14 @@ export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityCo
   if (requiredHeaders.length > 0) {
     return { mode: "api_key", providerDomain, fields: requiredHeaders.map(headerField) };
   }
+  // Imported / credential-gated MCPs carry authKind "api_key" (or authModel
+  // "credential_ref") but usually NO explicit requiredHeaders in metadata. They
+  // still need a credential before enable — the API 422s otherwise — so offer the
+  // api-key form with a single generic field instead of dead-ending on Enable
+  // then a bare "credentials needed" notice (the original Supabase-422 UX).
+  if (item.authKind === "api_key" || item.authModel === "credential_ref") {
+    return { mode: "api_key", providerDomain, fields: [GENERIC_API_KEY_FIELD] };
+  }
   return { mode: "enable" };
 }
 
