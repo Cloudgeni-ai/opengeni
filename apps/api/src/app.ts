@@ -20,6 +20,7 @@ import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
+import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
 import { registerConnectionRoutes } from "./routes/connections";
 import { registerDocumentRoutes } from "./routes/documents";
@@ -235,6 +236,7 @@ export function createApp(deps: AppDependencies): Hono {
   registerSocialRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
+  registerCatalogAssetRoutes(app, routeDeps);
   registerEnrollmentRoutes(app, routeDeps);
   registerMachineRoutes(app, routeDeps);
   registerEnvironmentRoutes(app, routeDeps);
@@ -403,6 +405,7 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\/v1\/workspaces\/[^/]+\/connections$/, label: "/v1/workspaces/:workspaceId/connections" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/connections\/oauth\/start$/, label: "/v1/workspaces/:workspaceId/connections/oauth/start" },
   { pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/, label: "/v1/workspaces/:workspaceId/connections/:connectionId" },
+  { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
   { pattern: /^\/v1\/integrations\/oauth\/callback$/, label: "/v1/integrations/oauth/callback" },
   { pattern: /^\/v1\/integrations\/oauth\/client-metadata\.json$/, label: "/v1/integrations/oauth/client-metadata.json" },
   { pattern: /^\/v1\/enrollments\/device\/start$/, label: "/v1/enrollments/device/start" },
