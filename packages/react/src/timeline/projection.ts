@@ -977,7 +977,18 @@ function looksLikeId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-/** Readable label for a tool call ("session_create" -> "session create"). */
+/**
+ * Readable label for a tool call ("session_create" -> "session create").
+ *
+ * MCP tools are namespaced `<serverId>__<toolName>` (see prefixedMcpToolName),
+ * and for catalog-imported servers that serverId is an opaque slug+hash
+ * ("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8"). De-slugging the
+ * whole thing leaked that id into the timeline; strip the server prefix and show
+ * just the tool ("list organizations"). Names without the `__` boundary (plain
+ * built-ins like "session_create") are unaffected.
+ */
 export function toolDisplayName(name: string): string {
-  return name.replace(/[_-]+/g, " ").trim();
+  const boundary = name.lastIndexOf("__");
+  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
+  return toolPart.replace(/[_-]+/g, " ").trim();
 }

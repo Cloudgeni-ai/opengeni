@@ -7,6 +7,7 @@ import {
   extractSessionRef,
   groupTimeline,
   sessionStatusFromEvents,
+  toolDisplayName,
   type AgentMessageItem,
   type SandboxItem,
   type TimelineGroup,
@@ -15,6 +16,19 @@ import {
   type UserMessageItem,
   type WorkerItem,
 } from "../src/timeline";
+
+describe("toolDisplayName", () => {
+  test("strips the MCP server-id prefix and shows only the tool", () => {
+    // Catalog-imported MCP server: <opaque slug+hash>__<tool>.
+    expect(toolDisplayName("mcp-integrations-sh-supabase-com-34ed9dcf1390-0i6tcf8__list_organizations")).toBe("list organizations");
+    expect(toolDisplayName("opengeni__set_session_title")).toBe("set session title");
+  });
+
+  test("plain built-in tool names (no __ boundary) are just de-slugged", () => {
+    expect(toolDisplayName("session_create")).toBe("session create");
+    expect(toolDisplayName("bash")).toBe("bash");
+  });
+});
 
 let sequence = 0;
 
