@@ -53,7 +53,7 @@ const publishable = topologicallySortedPackages(publishableWorkspacePackages());
 const publishableNames = new Set(publishable.map((pkg) => pkg.name));
 const ignored = changesetIgnoreSet();
 const workspaceNames = workspacePackageByName();
-const PREPUBLISH_GUARD_SCRIPT = "bun ../../scripts/prepublish-guard";
+const PREPUBLISH_GUARD_SCRIPT = "bash ../../scripts/prepublish-guard";
 
 function readPkg(pkgDir: string): PackageJson {
   return JSON.parse(readFileSync(join(repoRoot, pkgDir, "package.json"), "utf8")) as PackageJson;
