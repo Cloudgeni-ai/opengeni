@@ -243,10 +243,8 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
     },
     async getObjectBytes(key) {
       try {
-        const file = bucket.file(key);
-        const [metadata] = await file.getMetadata();
-        const [bytes] = await file.download();
-        return { bytes, ...(metadata.contentType ? { contentType: metadata.contentType } : {}) };
+        const [bytes] = await bucket.file(key).download();
+        return { bytes };
       } catch (error) {
         if (isGcsNotFound(error)) {
           return null;
