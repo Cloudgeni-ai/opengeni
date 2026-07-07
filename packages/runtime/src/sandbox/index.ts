@@ -551,6 +551,16 @@ export type EstablishedSandboxSession = {
   sessionState: unknown;
   instanceId: string;
   backendId: string;
+  /** How this establish reached a live box: warm reattach by id ("resumed"),
+   *  fresh create ("created"), or fresh create + archive hydration
+   *  ("restored"). Callers use it to emit the durable sandbox.box.* lifecycle
+   *  events — box transitions were previously unrecorded, which made both
+   *  2026-07-06 incidents near-unattributable. Optional so external/legacy
+   *  constructors of this shape stay valid. */
+  origin?: "resumed" | "created" | "restored";
+  /** Set when a warm reattach found the envelope's box GONE (provider NotFound)
+   *  and fell through to cold-restore: the id of the box that was lost. */
+  lostInstanceId?: string;
 };
 
 export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
@@ -782,6 +792,7 @@ export async function establishSandboxSessionFromEnvelope(
       sessionState: restoredState ?? resumeFallbackState,
       instanceId: readInstanceId(restored),
       backendId: client.backendId,
+      origin: workspaceArchive ? "restored" as const : "created" as const,
     };
   };
 
@@ -815,7 +826,7 @@ export async function establishSandboxSessionFromEnvelope(
     if (resumedState !== undefined) {
       try {
         const session = await client.resume(resumedState);
-        return { client, session, sessionState: resumedState, instanceId: readInstanceId(session), backendId: client.backendId };
+        return { client, session, sessionState: resumedState, instanceId: readInstanceId(session), backendId: client.backendId, origin: "resumed" };
       } catch (error) {
         // ONLY a provider NotFound (box gone) licenses a cold-restore. Anything
         // else (transient/auth/network/resume-conflict) propagates: the caller
@@ -826,10 +837,19 @@ export async function establishSandboxSessionFromEnvelope(
         // COLD-RESTORE: the box is genuinely gone. Modal does NOT restore via
         // create({ snapshot }) — passing `snapshot` to ModalSandboxClient.create()
         // THROWS (assertCoreSnapshotUnsupported). Modal's real persistence is an
-        // OPAQUE ARCHIVE captured by session.persistWorkspace() at reaper-drain
-        // time and folded onto the lease envelope (sandbox-file-persistence). The
-        // shared coldRestore() seam creates a fresh box and replays that archive.
-        return await coldRestore(resumedState);
+        // OPAQUE ARCHIVE captured by session.persistWorkspace() at drain/turn-
+        // snapshot time and folded onto the lease envelope
+        // (sandbox-file-persistence). The shared coldRestore() seam creates a
+        // fresh box and replays that archive. `lostInstanceId` carries the gone
+        // box's id so the caller can emit the durable sandbox.box.lost event.
+        const lostInstanceId = [
+          envelopeProviderState?.sandboxId,
+          envelopeProviderState?.instanceId,
+          envelopeProviderState?.id,
+          envelopeProviderState?.containerId,
+        ].find((value): value is string => typeof value === "string" && value.length > 0);
+        const restoredSession = await coldRestore(resumedState);
+        return lostInstanceId ? { ...restoredSession, lostInstanceId } : restoredSession;
       }
     }
   }

@@ -5844,18 +5844,41 @@ export interface ReapDrainable {
 export async function reapStaleLeaseHolders(db: Database, input: {
   workspaceId: string;
   viewerHolderTtlMs: number;   // delete viewer rows older than this
+  /** Delete TURN rows whose heartbeat is older than this (the lease TTL: >> the
+   *  10s turn heartbeat, so only a DEAD worker's holder ever crosses it). 0/absent
+   *  = legacy never-reap. */
+  turnHolderTtlMs?: number;
   idleGraceMs: number;         // drain-grace horizon (matches releaseLeaseHolder)
-}): Promise<{ reapedViewers: number; warmingReset: number; drained: ReapDrainable[] }> {
+}): Promise<{ reapedViewers: number; reapedTurns: number; warmingReset: number; drained: ReapDrainable[] }> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
     await scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
-      // (a) Reap stale VIEWER holders (turn holders are TTL-exempt — never reaped).
+      // (a) Reap stale VIEWER holders.
       const reaped = await tx.execute<{ lease_id: string }>(sql`
         delete from sandbox_lease_holders
         where workspace_id = ${input.workspaceId} and kind = 'viewer'
           and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
         returning lease_id
       `);
+      // (a2) Reap DEAD-WORKER turn holders. A live turn refreshes its holder
+      // every 10s — even a legit multi-day turn — but only once establish
+      // returns, so the caller passes a horizon covering the longest legitimate
+      // silent stretch (warming-budget + lease-TTL). A holder staler than that
+      // belongs to a worker that died without cleanup (SIGKILL/OOM/deploy
+      // churn); left in place it pins refcount >= 1 FOREVER, so the lease never
+      // drains, the reaper never persists /workspace, and the box rides the
+      // provider hard-timeout to an UNPERSISTED death (the 2026-07-06 staging
+      // deploy churn left holders frozen for hours). The redispatched turn
+      // re-acquires under a NEW holder id, so deleting the corpse never touches
+      // a live execution.
+      const reapedTurnRows = input.turnHolderTtlMs && input.turnHolderTtlMs > 0
+        ? await tx.execute<{ lease_id: string }>(sql`
+          delete from sandbox_lease_holders
+          where workspace_id = ${input.workspaceId} and kind = 'turn'
+            and last_heartbeat_at < now() - (${String(input.turnHolderTtlMs)} || ' milliseconds')::interval
+          returning lease_id
+        `)
+        : [];
 
       // (b) Recompute refcounts for every lease in the workspace; warm leases
       // that hit 0 (AND turn_holders=0) enter draining with a fresh grace
@@ -5923,6 +5946,7 @@ export async function reapStaleLeaseHolders(db: Database, input: {
 
       return {
         reapedViewers: reaped.length,
+        reapedTurns: reapedTurnRows.length,
         warmingReset: warmingReset.length + warmingDrain.length,
         drained: drainable.map((r) => ({
           workspaceId: input.workspaceId,
@@ -5942,11 +5966,14 @@ export async function reapStaleLeaseHolders(db: Database, input: {
 // is the sanctioned cross-workspace read).
 export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   viewerHolderTtlMs: number;
+  /** Reap DEAD-WORKER turn holders staler than this (the lease TTL; see
+   *  reapStaleLeaseHolders). 0/absent = never (legacy). */
+  turnHolderTtlMs?: number;
   idleGraceMs: number;
 }): Promise<ReapDrainable[]> {
   const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
     select workspace_id, sandbox_group_id, instance_id, lease_epoch
-    from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
+    from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
   `);
   return rows.map((r) => ({
     workspaceId: r.workspace_id,

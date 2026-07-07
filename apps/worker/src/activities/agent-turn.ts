@@ -1151,6 +1151,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxHolderId,
           );
           setupBoxSession = resolvedSandbox.established.session;
+          // Durable box-lifecycle events (sandbox-file-persistence observability):
+          // record every box transition in session_events so the NEXT box loss is
+          // attributable from the DB alone — worker logs rotate within hours, which
+          // left both 2026-07-06 incidents without a durable trace. Best-effort.
+          {
+            const established = resolvedSandbox.established;
+            if (publish && established.origin && established.origin !== "resumed") {
+              const lifecycleEvents: Array<{ type: "sandbox.box.lost" | "sandbox.box.created"; payload: unknown }> = [];
+              if (established.lostInstanceId) {
+                lifecycleEvents.push({ type: "sandbox.box.lost", payload: { sandboxId: established.lostInstanceId } });
+              }
+              lifecycleEvents.push({
+                type: "sandbox.box.created",
+                payload: {
+                  sandboxId: established.instanceId,
+                  hydrated: established.origin === "restored" ? "archive" : "none",
+                },
+              });
+              await publish(lifecycleEvents).catch(() => undefined);
+            }
+          }
           // M7 hot-swap: when the selfhosted feature is on, wrap the established
           // group box in the STABLE routing proxy before it is injected NON-OWNED
           // into the run. The SDK binds to this ONE object once and calls its

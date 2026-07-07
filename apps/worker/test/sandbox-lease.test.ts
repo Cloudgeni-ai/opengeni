@@ -575,6 +575,65 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(afterSecond?.instance_id).toBeNull();
   }, 60_000);
 
+  test("(3c) a DEAD-WORKER turn holder (heartbeat frozen past warming-budget+lease-TTL) is reaped; warming-window and live holders survive", async () => {
+    if (!available) return;
+    const spy = makeTerminateSpy();
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: spy.fn });
+    const horizonMs = REAPER_SETTINGS.sandboxWarmingTimeoutMs + REAPER_SETTINGS.sandboxLeaseTtlMs;
+
+    // (a) A SIGKILLed worker's holder: heartbeat frozen well past the horizon.
+    // Pre-fix this row was TTL-exempt FOREVER → refcount pinned → the lease
+    // never drained → the box died at the provider hard-timeout unpersisted
+    // (2026-07-06 staging deploy churn).
+    const dead = await freshWorkspace();
+    const deadLease = await insertLease(dead, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 8, instanceId: "box-deadworker",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(dead, deadLease, "turn", "turn-dead", horizonMs + 60_000);
+
+    // (b) A turn still inside its warming window (establish runs silent before
+    // the first heartbeat): stale, but NOT past the horizon — must survive.
+    const warming = await freshWorkspace();
+    const warmingLease = await insertLease(warming, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 9, instanceId: "box-warmingsilence",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(warming, warmingLease, "turn", "turn-warming", Math.max(horizonMs - 120_000, 1_000));
+
+    // (c) A live multi-day turn: fresh 10s-cadence heartbeat — must survive.
+    const live = await freshWorkspace();
+    const liveLease = await insertLease(live, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 10, instanceId: "box-liveturn",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(live, liveLease, "turn", "turn-live-hb", 1_000);
+
+    await reapSandboxLeases();
+
+    // Dead worker's holder reaped → lease drains (grace open, box untouched yet).
+    expect(await holderCount(dead.workspaceId, dead.groupId, "turn")).toBe(0);
+    const deadRow = await readRow(dead.workspaceId, dead.groupId);
+    expect(deadRow?.liveness).toBe("draining");
+    expect(deadRow?.refcount).toBe(0);
+    expect(spy.calls.some((c) => c.group === dead.groupId)).toBe(false);
+
+    // Warming-window and live holders untouched; leases stay warm.
+    expect(await holderCount(warming.workspaceId, warming.groupId, "turn")).toBe(1);
+    expect((await readRow(warming.workspaceId, warming.groupId))?.liveness).toBe("warm");
+    expect(await holderCount(live.workspaceId, live.groupId, "turn")).toBe(1);
+    expect((await readRow(live.workspaceId, live.groupId))?.liveness).toBe("warm");
+
+    // Past the grace, the drained corpse-lease terminates through the normal
+    // persist-before-terminate path — the box gets its drain-persist AFTER ALL
+    // (pre-fix it never drained, so it never persisted).
+    await admin`update sandbox_leases set expires_at = now() - interval '1 second'
+                where workspace_id = ${dead.workspaceId} and sandbox_group_id = ${dead.groupId}`;
+    await reapSandboxLeases();
+    expect(spy.calls.some((c) => c.group === dead.groupId && c.epoch === 8)).toBe(true);
+    expect((await readRow(dead.workspaceId, dead.groupId))?.liveness).toBe("cold");
+  }, 60_000);
+
   test("(3b) the drain grace holds a refcount-0 box WARM: younger-than-grace is NOT terminated, older IS (settings.sandboxIdleGraceMs)", async () => {
     if (!available) return;
     const spy = makeTerminateSpy();
