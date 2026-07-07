@@ -1441,6 +1441,36 @@ describe("DB integration", () => {
     expect(after?.embeddingModel).toBe(before?.embeddingModel);
   });
 
+  test("in-place replaces_id update stamps origin only when metadata has none", async () => {
+    const grant = await testGrant(dbClient.db);
+    const old = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Keep existing origin metadata on self-match updates.",
+    }, memoryEmbedder);
+    expect(old.memory.metadata.origin).toBeUndefined();
+
+    const stamped = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: " keep existing ORIGIN metadata on self-match updates. ",
+      replacesId: old.memory.id,
+      origin: "agent",
+    }, memoryEmbedder);
+    expect(stamped.memory.id).toBe(old.memory.id);
+    expect(stamped.memory.metadata.origin).toBe("agent");
+
+    const preserved = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Keep existing origin metadata on self-match updates.",
+      replacesId: old.memory.id,
+      origin: "human",
+    }, memoryEmbedder);
+    expect(preserved.memory.id).toBe(old.memory.id);
+    expect(preserved.memory.metadata.origin).toBe("agent");
+  });
+
   test("in-place replaces_id update clears stale embedding when text changes and embedding fails", async () => {
     const grant = await testGrant(dbClient.db);
     const old = await saveWorkspaceMemory(dbClient.db, {

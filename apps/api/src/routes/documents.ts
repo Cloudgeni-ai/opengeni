@@ -259,6 +259,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           confidence: payload.confidence,
           pinned: payload.pinned,
           replacesId: payload.replacesId ?? null,
+          metadata: payload.metadata,
           origin: "human",
         }, getDocumentServices().embedder);
         return c.json(KnowledgeMemory.parse(result.memory), 201);

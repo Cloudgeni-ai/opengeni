@@ -3311,13 +3311,18 @@ describe("API component integration", () => {
     // Create defaults to active (memory write gate: sanitized + embedded).
     const createResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
       method: "POST",
-      body: JSON.stringify({ text: "Staging deploys from main only, via opengeni-ops.", kind: "procedural" }),
+      body: JSON.stringify({
+        text: "Staging deploys from main only, via opengeni-ops.",
+        kind: "procedural",
+        metadata: { source: "rest-lifecycle" },
+      }),
       headers: { "content-type": "application/json" },
     });
     expect(createResponse.status).toBe(201);
-    const created = await createResponse.json() as { id: string; status: string; pinned: boolean; usageCount: number };
+    const created = await createResponse.json() as { id: string; status: string; pinned: boolean; usageCount: number; metadata: Record<string, unknown> };
     expect(created.status).toBe("active");
     expect(created.pinned).toBe(false);
+    expect(created.metadata).toMatchObject({ source: "rest-lifecycle", origin: "human" });
 
     // List (active) shows it.
     const listResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=active"));
@@ -3854,17 +3859,19 @@ describe("API component integration", () => {
         text: "Staging deploys from main only, via opengeni-ops.",
         kind: "procedural",
         confidence: 0.91,
-      }))) as { memory: { id: string; status: string; kind: string; createdBySessionId: string | null }; deduped: boolean };
+      }))) as { memory: { id: string; status: string; kind: string; createdBySessionId: string | null; metadata: Record<string, unknown> }; deduped: boolean };
       expect(saved.deduped).toBe(false);
       expect(saved.memory).toMatchObject({
         status: "active",
         kind: "procedural",
         createdBySessionId: session.id,
+        metadata: { origin: "agent" },
       });
       expect(await getKnowledgeMemory(dbClient.db, workspaceId, saved.memory.id)).toMatchObject({
         id: saved.memory.id,
         status: "active",
         createdBySessionId: session.id,
+        metadata: { origin: "agent" },
       });
 
       const saveEvents = (await listSessionEvents(dbClient.db, workspaceId, session.id)).filter((event) => event.type === "memory.saved");

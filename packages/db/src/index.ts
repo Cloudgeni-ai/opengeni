@@ -2755,6 +2755,7 @@ export type SaveWorkspaceMemoryInput = {
   replacesId?: string | null | undefined; // short or full id of the record this supersedes
   sessionId?: string | null | undefined; // provenance + event linkage
   origin?: WorkspaceMemoryOrigin | undefined;
+  metadata?: Record<string, unknown> | undefined;
 };
 
 export type SaveWorkspaceMemoryResult = {
@@ -2858,6 +2859,36 @@ function visibleTextHashConflictMessage(existing: Pick<KnowledgeMemory, "id"> | 
   return `Memory text duplicates an existing visible memory.${suffix} Search memory and update, archive, or supersede the existing record instead.`;
 }
 
+function hasMetadataOrigin(metadata: Record<string, unknown>): boolean {
+  return Object.prototype.hasOwnProperty.call(metadata, "origin");
+}
+
+function saveMemoryMetadata(input: SaveWorkspaceMemoryInput): Record<string, unknown> {
+  return {
+    ...(input.metadata ?? {}),
+    ...(input.origin ? { origin: input.origin } : {}),
+  };
+}
+
+function inPlaceSaveMemoryMetadata(
+  existing: Record<string, unknown>,
+  input: SaveWorkspaceMemoryInput,
+): Record<string, unknown> | undefined {
+  if (input.metadata === undefined && (!input.origin || hasMetadataOrigin(existing))) {
+    return undefined;
+  }
+  const merged = {
+    ...existing,
+    ...(input.metadata ?? {}),
+  };
+  if (hasMetadataOrigin(existing)) {
+    merged.origin = existing.origin;
+  } else if (input.origin) {
+    merged.origin = input.origin;
+  }
+  return merged;
+}
+
 // Resolve a short prefix or full uuid to the full id within a workspace. Full
 // uuid lookup is status-agnostic so correction/archive paths can still surface a
 // clear terminal-row result; prefix lookup is restricted to non-terminal rows
@@ -2957,6 +2988,7 @@ export async function saveWorkspaceMemory(
       // row live and update its text/vector metadata so the call still has an
       // observable effect.
       const normalizedTextChanged = replacesRow ? hashMemoryText(replacesRow.text) !== textHash : true;
+      const metadata = replacesRow ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input) : undefined;
       const [updated] = await scopedDb.update(schema.knowledgeMemories).set({
         text: sanitizedText,
         textHash,
@@ -2972,6 +3004,7 @@ export async function saveWorkspaceMemory(
         ...(input.kind !== undefined ? { kind } : {}),
         ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
         ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
         updatedAt: new Date(),
       }).where(and(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
@@ -3105,6 +3138,7 @@ export async function saveWorkspaceMemory(
         sourceRefs,
         confidence: confidenceToStorage(input.confidence ?? 0.5),
         pinned: input.pinned ?? false,
+        metadata: saveMemoryMetadata(input),
         createdBySessionId: input.sessionId ?? null,
         supersedesId: replacesFullId,
         ...(embedding ? { embedding, embeddingModel } : {}),
