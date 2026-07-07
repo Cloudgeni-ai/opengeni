@@ -99,6 +99,119 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
   return { running, grouped };
 }
 
+/* ----------------------------------------------------------------------------
+   Lineage nesting for the rail
+
+   The rail nests spawned worker sessions under the manager that spawned them
+   (parentSessionId). A session is a ROOT in the rail when it has no parent OR
+   its parent isn't in the loaded page (an orphan child renders at the root, as
+   before). Roots are pinned/bucketed exactly like the flat list — but a root
+   counts as "running" when it OR any descendant is active, so a manager whose
+   only activity is a live child still floats to the top.
+   -------------------------------------------------------------------------- */
+
+export type SessionTreeNode = {
+  session: Session;
+  children: SessionTreeNode[];
+  /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
+  hasActiveDescendant: boolean;
+};
+
+export type SessionForest = {
+  running: SessionTreeNode[];
+  grouped: { group: SessionRecencyGroup; label: string; sessions: SessionTreeNode[] }[];
+};
+
+/** Whether the node's own status, or any descendant, is in a live state. */
+export function nodeIsActive(node: SessionTreeNode): boolean {
+  return isRunningStatus(node.session.status) || node.hasActiveDescendant;
+}
+
+/**
+ * Build the rail forest: roots (parentSessionId null, or parent absent from the
+ * page) at the top level, spawned children nested beneath their parent, each
+ * subtree ordered most-recent-first. Running roots (self or via a live
+ * descendant) are pinned above the recency buckets. A `seen` guard makes a
+ * pathological parent cycle in the loaded page terminate rather than recurse
+ * forever.
+ */
+export function buildRailForest(sessions: Session[], now: Date = new Date()): SessionForest {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const childrenOf = new Map<string, Session[]>();
+  const roots: Session[] = [];
+  for (const session of sessions) {
+    const parentId = session.parentSessionId;
+    if (parentId && parentId !== session.id && byId.has(parentId)) {
+      const list = childrenOf.get(parentId) ?? [];
+      list.push(session);
+      childrenOf.set(parentId, list);
+    } else {
+      roots.push(session);
+    }
+  }
+
+  const build = (session: Session, seen: Set<string>): SessionTreeNode => {
+    const children = seen.has(session.id)
+      ? []
+      : (childrenOf.get(session.id) ?? [])
+          .sort((a, b) => sessionActivityTime(b) - sessionActivityTime(a))
+          .map((child) => build(child, new Set(seen).add(session.id)));
+    const hasActiveDescendant = children.some((child) => nodeIsActive(child));
+    return { session, children, hasActiveDescendant };
+  };
+
+  const rootNodes = roots.map((session) => build(session, new Set()));
+  const running = rootNodes
+    .filter((node) => nodeIsActive(node))
+    .sort((a, b) => sessionActivityTime(b.session) - sessionActivityTime(a.session));
+  const rest = rootNodes
+    .filter((node) => !nodeIsActive(node))
+    .sort((a, b) => sessionActivityTime(b.session) - sessionActivityTime(a.session));
+
+  const buckets = new Map<SessionRecencyGroup, SessionTreeNode[]>();
+  for (const node of rest) {
+    const group = recencyGroupFor(sessionActivityTime(node.session), now);
+    const list = buckets.get(group) ?? [];
+    list.push(node);
+    buckets.set(group, list);
+  }
+  const grouped: SessionForest["grouped"] = [];
+  for (const group of SESSION_GROUP_ORDER) {
+    const list = buckets.get(group);
+    if (list && list.length > 0) {
+      grouped.push({ group, label: SESSION_GROUP_LABELS[group], sessions: list });
+    }
+  }
+  return { running, grouped };
+}
+
+/** Flatten the forest to the rows currently VISIBLE, given the expanded set —
+ *  a node, then its children only when the node is expanded (depth-first). The
+ *  rail's keyboard navigation walks this. */
+export function visibleForestRows(
+  forest: SessionForest,
+  expanded: ReadonlySet<string>,
+): { node: SessionTreeNode; depth: number }[] {
+  const rows: { node: SessionTreeNode; depth: number }[] = [];
+  const walk = (node: SessionTreeNode, depth: number): void => {
+    rows.push({ node, depth });
+    if (node.children.length > 0 && expanded.has(node.session.id)) {
+      for (const child of node.children) {
+        walk(child, depth + 1);
+      }
+    }
+  };
+  for (const node of forest.running) {
+    walk(node, 0);
+  }
+  for (const bucket of forest.grouped) {
+    for (const node of bucket.sessions) {
+      walk(node, 0);
+    }
+  }
+  return rows;
+}
+
 /** Compact relative-time label, e.g. "now", "5m", "3h", "2d", "Mar 4". */
 export function relativeTimeLabel(value: string, now: Date = new Date()): string {
   const timestamp = Date.parse(value);
