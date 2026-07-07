@@ -82,6 +82,28 @@ function publicApp(dbOverride: unknown = client?.db ?? {}, overrides: Partial<Se
   } as never);
 }
 
+function publicAppWithDeps(dbOverride: unknown, overrides: Partial<Settings>, extraDeps: Record<string, unknown>) {
+  const publicSettings = testSettings({
+    authRequired: true,
+    accessKey: "deployment-key",
+    productAccessMode: "managed",
+    delegationSecret: DELEGATION_SECRET,
+    environmentsEncryptionKey: encryptionKey,
+    integrationsEnabled: true,
+    integrationsStateSecret: STATE_SECRET,
+    publicBaseUrl: "https://api.opengeni.test",
+    ...overrides,
+  }) as Settings;
+  return createApp({
+    settings: publicSettings,
+    db: dbOverride as never,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    ...extraDeps,
+  } as never);
+}
+
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
@@ -133,6 +155,8 @@ function startFakeAuthorizationServer(options: {
   clientIdMetadataDocumentSupported?: boolean;
   dcr?: boolean;
   tokenAccessToken?: string;
+  tokenStatus?: number;
+  tokenError?: string;
 } = {}): FakeAuthorizationServer {
   const tokenRequests: URLSearchParams[] = [];
   const registrations: Record<string, unknown>[] = [];
@@ -169,6 +193,12 @@ function startFakeAuthorizationServer(options: {
       if (url.pathname === "/token") {
         const body = new URLSearchParams(await request.text());
         tokenRequests.push(body);
+        if (options.tokenStatus && options.tokenStatus >= 400) {
+          return Response.json({
+            error: options.tokenError ?? "invalid_client",
+            error_description: "fake token failure",
+          }, { status: options.tokenStatus });
+        }
         return Response.json({
           access_token: options.tokenAccessToken ?? "mcp-access-token",
           refresh_token: "mcp-refresh-token",
@@ -469,6 +499,70 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth callback logs token exchange failures and redirects with a machine-readable reason", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      scopesSupported: ["documents:read"],
+      tokenStatus: 401,
+      tokenError: "invalid_client",
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="documents:read"`,
+    });
+    const errors: Array<Record<string, unknown>> = [];
+    const observability = {
+      startSpan: () => ({ end: () => undefined }),
+      recordHttpRequest: () => undefined,
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: (message: string, attributes: Record<string, unknown>) => errors.push({ message, ...attributes }),
+    };
+    const response = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        providerDomain: "mcp.example.com",
+        mcpUrl: mcp.url,
+        returnPath: "/integrations?connect_item=linear",
+      }),
+    });
+    try {
+      expect(response.status).toBe(200);
+      const body = await response.json() as { state: string };
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      const verifier = decryptEnvironmentValue(rawKey, state.encryptedPkceVerifier as string);
+
+      const callback = await publicAppWithDeps(client.db, {}, { observability })
+        .request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
+      expect(callback.status).toBe(302);
+      const location = callback.headers.get("location")!;
+      expect(location).toContain("integration_oauth=error");
+      expect(location).toContain("reason=invalid_client");
+      expect(location).toContain("connect_item=linear");
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatchObject({
+        message: "MCP OAuth callback failed",
+        "opengeni.oauth.stage": "token_exchange",
+        "opengeni.oauth.reason": "invalid_client",
+        "opengeni.oauth.provider_domain": "mcp.example.com",
+        "opengeni.oauth.client_registration_method": "cimd",
+      });
+      expect(JSON.stringify(errors)).not.toContain(verifier);
+      expect(JSON.stringify(errors)).not.toContain("abc");
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
   test("oauth reconnect preserves a subject-owned connection subject", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -655,8 +749,8 @@ describe("connections routes", () => {
     try {
       const response = await publicApp(client.db, { environment: "production" })
         .request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("private network");
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toContain("reason=tools_list_failed");
       expect(hits).toEqual(["https://1.1.1.1/token", "https://1.1.1.1/mcp"]);
       expect(privateHopHits).toBe(0);
     } finally {
@@ -804,7 +898,8 @@ describe("connections routes", () => {
       const first = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
       expect(first.status).toBe(302);
       const replay = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
-      expect(replay.status).toBe(400);
+      expect(replay.status).toBe(302);
+      expect(replay.headers.get("location")).toContain("reason=state_invalid");
 
       const expiredState = createSignedState(STATE_SECRET, {
         accountId: workspace.accountId,
@@ -824,7 +919,8 @@ describe("connections routes", () => {
         returnPath: "/integrations",
       }, Math.floor(Date.now() / 1000) - 601);
       const expired = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(expiredState)}`);
-      expect(expired.status).toBe(400);
+      expect(expired.status).toBe(302);
+      expect(expired.headers.get("location")).toContain("reason=state_invalid");
     } finally {
       mcp.close();
       as.close();

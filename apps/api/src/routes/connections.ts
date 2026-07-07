@@ -27,7 +27,7 @@ import {
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 
 export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { db, settings } = deps;
+  const { db, settings, observability } = deps;
 
   function assertIntegrationsEnabled(): void {
     if (!settings.integrationsEnabled) {
@@ -131,7 +131,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: parsed.error.issues[0]?.message ?? "invalid OAuth start request" });
     }
     const payload = parsed.data;
-    const result = await startMcpOAuth({ db, settings }, {
+    const result = await startMcpOAuth({ db, settings, observability }, {
       accountId: grant.accountId,
       workspaceId,
       subjectId: grant.subjectId,
@@ -143,7 +143,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
-    const result = await completeMcpOAuthCallback({ db, settings }, {
+    const result = await completeMcpOAuthCallback({ db, settings, observability }, {
       code: c.req.query("code"),
       state: c.req.query("state"),
       requestUrl: c.req.url,

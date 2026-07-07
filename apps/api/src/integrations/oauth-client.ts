@@ -4,6 +4,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
 import { OAuthStartResponse, type OAuthStartRequest } from "@opengeni/contracts";
 import { requireEnvironmentEncryption } from "@opengeni/core";
+import type { Observability } from "@opengeni/observability";
 import {
   consumeIntegrationOAuthStateNonce,
   createConnection,
@@ -29,6 +30,7 @@ export const oauthStateTtlMs = 10 * 60 * 1000;
 type OAuthClientDeps = {
   db: Database;
   settings: Settings;
+  observability?: Observability | undefined;
 };
 
 export type OAuthStartContext = {
@@ -107,6 +109,19 @@ type TokenResponse = {
   raw: Record<string, unknown>;
 };
 
+type OAuthCallbackStage = "state_verify" | "token_exchange" | "tools_list" | "persist";
+
+class OAuthCallbackStageError extends Error {
+  constructor(
+    readonly stage: OAuthCallbackStage,
+    readonly reason: string,
+    readonly cause: unknown,
+  ) {
+    super(errorMessage(cause));
+    this.name = "OAuthCallbackStageError";
+  }
+}
+
 export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
@@ -168,24 +183,33 @@ export async function completeMcpOAuthCallback(
   deps: OAuthClientDeps,
   input: { code?: string | undefined; state?: string | undefined; requestUrl: string },
 ): Promise<OAuthCallbackResult> {
-  const { db, settings } = deps;
+  const { db, settings, observability } = deps;
+  let state: OAuthStatePayload | null = null;
   if (!input.state) {
-    throw new HTTPException(400, { message: "missing OAuth state" });
+    const error = new OAuthCallbackStageError("state_verify", "state_invalid", new Error("missing OAuth state"));
+    logOAuthCallbackFailure(observability, error, state);
+    return { redirectTo: callbackReturnPath("/integrations", "error", { reason: error.reason }) };
   }
-  const state = readOAuthState(input.state, settings);
-  if (!input.code) {
-    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }) };
-  }
-  const consumed = await consumeIntegrationOAuthStateNonce(db, {
-    accountId: state.accountId,
-    workspaceId: state.workspaceId,
-    subjectId: state.subjectId,
-    nonce: state.nonce,
-    expiresAt: new Date(state.iat * 1000 + oauthStateTtlMs),
-    now: new Date(),
-  });
-  if (!consumed) {
-    throw new HTTPException(400, { message: "OAuth state has already been used" });
+  try {
+    state = readOAuthState(input.state, settings);
+    if (!input.code) {
+      return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "missing_code" }) };
+    }
+    const consumed = await consumeIntegrationOAuthStateNonce(db, {
+      accountId: state.accountId,
+      workspaceId: state.workspaceId,
+      subjectId: state.subjectId,
+      nonce: state.nonce,
+      expiresAt: new Date(state.iat * 1000 + oauthStateTtlMs),
+      now: new Date(),
+    });
+    if (!consumed) {
+      throw new HTTPException(400, { message: "OAuth state has already been used" });
+    }
+  } catch (error) {
+    const staged = new OAuthCallbackStageError("state_verify", "state_invalid", error);
+    logOAuthCallbackFailure(observability, staged, state);
+    return { redirectTo: callbackReturnPath(state?.returnPath ?? "/integrations", "error", { reason: staged.reason }) };
   }
 
   try {
@@ -194,15 +218,15 @@ export async function completeMcpOAuthCallback(
     const key = requireEnvironmentEncryption(settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
     const client = await clientForState(db, settings, state);
-    const token = await exchangeAuthorizationCode(settings, {
-      code: input.code,
+    const token = await stage("token_exchange", "token_exchange_failed", () => exchangeAuthorizationCode(settings, {
+      code: input.code!,
       verifier,
       redirectUri,
       resource: state.resource,
       tokenEndpoint: state.tokenEndpoint,
       client,
-    });
-    const tools = await verifyMcpToolsList(settings, state.resource, token);
+    }));
+    const tools = await stage("tools_list", "tools_list_failed", () => verifyMcpToolsList(settings, state.resource, token));
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
     const credential = credentialBundle(token, state, client);
     const metadata = {
@@ -215,8 +239,8 @@ export async function completeMcpOAuthCallback(
       mcpTools: tools,
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
-    const connection = state.connectionId
-      ? await updateConnection(db, {
+    const connection = await stage("persist", "persist_failed", () => state.connectionId
+      ? updateConnection(db, {
         workspaceId: state.workspaceId,
         connectionId: state.connectionId,
         visibleToSubjectId: state.subjectId,
@@ -230,7 +254,7 @@ export async function completeMcpOAuthCallback(
         metadata,
         updatedBySubjectId: state.subjectId,
       })
-      : await createConnection(db, {
+      : createConnection(db, {
         accountId: state.accountId,
         workspaceId: state.workspaceId,
         subjectId: null,
@@ -241,7 +265,7 @@ export async function completeMcpOAuthCallback(
         expiresAt: token.expiresAt,
         metadata,
         createdBySubjectId: state.subjectId,
-      });
+      }));
     if (!connection) {
       throw new HTTPException(409, { message: "connection changed during OAuth reconnect; start again" });
     }
@@ -251,10 +275,11 @@ export async function completeMcpOAuthCallback(
     // and leave the connection created but the capability un-enabled.
     return { redirectTo: callbackReturnPath(state.returnPath, "success", { connectionId: connection.id, providerDomain: connection.providerDomain }) };
   } catch (error) {
-    if (error instanceof HTTPException && error.status >= 400 && error.status < 500) {
-      throw error;
-    }
-    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: "oauth_callback_failed" }) };
+    const staged = error instanceof OAuthCallbackStageError
+      ? error
+      : new OAuthCallbackStageError("persist", "persist_failed", error);
+    logOAuthCallbackFailure(observability, staged, state);
+    return { redirectTo: callbackReturnPath(state.returnPath, "error", { reason: staged.reason }) };
   }
 }
 
@@ -648,7 +673,8 @@ async function exchangeAuthorizationCode(
   }
   const response = await fetchOAuth(input.tokenEndpoint, settings, { method: "POST", headers, body });
   if (!response.ok) {
-    throw new Error(`OAuth token endpoint returned HTTP ${response.status}`);
+    const oauthError = await oauthErrorFromResponse(response);
+    throw new OAuthCallbackStageError("token_exchange", oauthError ?? "token_exchange_failed", new Error(`OAuth token endpoint returned HTTP ${response.status}`));
   }
   const payload = await response.json() as Record<string, unknown>;
   const accessToken = stringValue(payload.access_token);
@@ -663,6 +689,73 @@ async function exchangeAuthorizationCode(
     ...(stringValue(payload.refresh_token) ? { refreshToken: stringValue(payload.refresh_token)! } : {}),
     ...(stringValue(payload.scope) ? { scopeText: stringValue(payload.scope)! } : {}),
   };
+}
+
+async function stage<T>(
+  stage: OAuthCallbackStage,
+  fallbackReason: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (error instanceof OAuthCallbackStageError) {
+      throw error;
+    }
+    throw new OAuthCallbackStageError(stage, fallbackReason, error);
+  }
+}
+
+function logOAuthCallbackFailure(
+  observability: Observability | undefined,
+  error: OAuthCallbackStageError,
+  state: OAuthStatePayload | null,
+): void {
+  observability?.error("MCP OAuth callback failed", {
+    "opengeni.oauth.stage": error.stage,
+    "opengeni.oauth.reason": error.reason,
+    "opengeni.oauth.provider_domain": state?.providerDomain,
+    "opengeni.oauth.resource_host": state ? safeHost(state.resource) : undefined,
+    "opengeni.oauth.authorization_server": state?.authorizationServer,
+    "opengeni.oauth.issuer": state?.issuer,
+    "opengeni.oauth.client_registration_method": state?.clientRegistrationMethod,
+    error: sanitizedError(error.cause),
+  });
+}
+
+function sanitizedError(error: unknown): string {
+  if (error instanceof HTTPException) {
+    return `HTTPException ${error.status}: ${error.message}`;
+  }
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
+  }
+  return String(error);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function safeHost(rawUrl: string): string | undefined {
+  try {
+    return new URL(rawUrl).host;
+  } catch {
+    return undefined;
+  }
+}
+
+async function oauthErrorFromResponse(response: Response): Promise<string | null> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return null;
+  }
+  const payload = await response.clone().json().catch(() => null) as Record<string, unknown> | null;
+  const error = stringValue(payload?.error);
+  if (!error || !/^[a-zA-Z0-9_.-]{1,80}$/.test(error)) {
+    return null;
+  }
+  return error;
 }
 
 async function verifyMcpToolsList(settings: Settings, resource: string, token: TokenResponse): Promise<Array<{ name: string; description?: string }>> {
