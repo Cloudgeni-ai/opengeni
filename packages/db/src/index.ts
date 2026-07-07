@@ -2727,24 +2727,39 @@ function memoryVectorLiteral(values: number[]): string {
 
 const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
 
-// Resolve a short (8-char prefix) or full uuid to the full id within a workspace.
-// Returns null when nothing matches; throws on an ambiguous prefix.
+// Resolve a short prefix or full uuid to the full id within a workspace. Full
+// uuid lookup is status-agnostic so correction/archive paths can still surface a
+// clear terminal-row result; prefix lookup is restricted to non-terminal rows
+// because short ids are shown only for records an agent can legitimately target.
+// Returns null when nothing matches; throws on an ambiguous live prefix.
 async function resolveWorkspaceMemoryId(scopedDb: Database, workspaceId: string, rawId: string): Promise<string | null> {
   const candidate = rawId.trim().toLowerCase();
   if (!/^[0-9a-f-]{4,36}$/.test(candidate)) {
     return null;
   }
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate)) {
+    const [match] = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
+      .where(and(
+        eq(schema.knowledgeMemories.workspaceId, workspaceId),
+        eq(schema.knowledgeMemories.id, candidate),
+      ))
+      .limit(1);
+    return match?.id ?? null;
+  }
   const matches = await scopedDb.select({ id: schema.knowledgeMemories.id }).from(schema.knowledgeMemories)
     .where(and(
       eq(schema.knowledgeMemories.workspaceId, workspaceId),
       sql`${schema.knowledgeMemories.id}::text like ${`${candidate}%`}`,
+      ne(schema.knowledgeMemories.status, "archived"),
+      ne(schema.knowledgeMemories.status, "superseded"),
+      ne(schema.knowledgeMemories.status, "rejected"),
     ))
     .limit(2);
   if (matches.length === 0) {
     return null;
   }
   if (matches.length > 1) {
-    throw new Error(`Ambiguous memory id "${rawId}": it matches multiple records. Use the full id.`);
+    throw new Error(`Ambiguous memory id "${rawId}": it matches multiple live memory records. Run memory_search and use the full id from the intended record.`);
   }
   return matches[0]!.id;
 }

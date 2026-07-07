@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import * as dbSchema from "../../packages/db/src/schema";
 import {
   appendSessionEvents,
   appendSessionHistoryItems,
@@ -17,6 +18,7 @@ import {
   correctWorkspaceMemory,
   searchWorkspaceMemories,
   resolveWorkspaceMemoryBlock,
+  hashMemoryText,
   MEMORY_ACTIVE_RECORD_CAP,
   type MemoryEmbedder,
   createDb,
@@ -1117,6 +1119,76 @@ describe("DB integration", () => {
     await expect(saveWorkspaceMemory(dbClient.db, {
       accountId: grant.accountId, workspaceId: grant.workspaceId, text: "Points at nothing.", replacesId: "ffffffff",
     }, memoryEmbedder)).rejects.toThrow(/does not match/i);
+  });
+
+  test("short memory id resolution ignores terminal rows but remains ambiguous across live rows", async () => {
+    const grant = await testGrant(dbClient.db);
+    const activeId = "abcddcba-0000-4000-8000-000000000001";
+    const archivedId = "abcddcba-0000-4000-8000-000000000002";
+    await dbClient.db.insert(dbSchema.knowledgeMemories).values([
+      {
+        id: activeId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        status: "active",
+        kind: "semantic",
+        scope: "workspace",
+        text: "Active row with a colliding short id.",
+        textHash: hashMemoryText("Active row with a colliding short id."),
+      },
+      {
+        id: archivedId,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        status: "archived",
+        kind: "semantic",
+        scope: "workspace",
+        text: "Archived row with the same short id.",
+        textHash: hashMemoryText("Archived row with the same short id."),
+      },
+    ]);
+
+    const archived = await correctWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      id: activeId.slice(0, 8),
+      reason: "terminal collision should not block the live row",
+    }, memoryEmbedder);
+    expect(archived.action).toBe("archived");
+    expect(archived.memory.id).toBe(activeId);
+    expect(await getKnowledgeMemory(dbClient.db, grant.workspaceId, archivedId)).toMatchObject({ status: "archived" });
+
+    const ambiguous = await testGrant(dbClient.db);
+    const firstLiveId = "feedcafe-0000-4000-8000-000000000001";
+    const secondLiveId = "feedcafe-0000-4000-8000-000000000002";
+    await dbClient.db.insert(dbSchema.knowledgeMemories).values([
+      {
+        id: firstLiveId,
+        accountId: ambiguous.accountId,
+        workspaceId: ambiguous.workspaceId,
+        status: "active",
+        kind: "semantic",
+        scope: "workspace",
+        text: "First live row with a colliding short id.",
+        textHash: hashMemoryText("First live row with a colliding short id."),
+      },
+      {
+        id: secondLiveId,
+        accountId: ambiguous.accountId,
+        workspaceId: ambiguous.workspaceId,
+        status: "approved",
+        kind: "semantic",
+        scope: "workspace",
+        text: "Second live row with a colliding short id.",
+        textHash: hashMemoryText("Second live row with a colliding short id."),
+      },
+    ]);
+    await expect(correctWorkspaceMemory(dbClient.db, {
+      accountId: ambiguous.accountId,
+      workspaceId: ambiguous.workspaceId,
+      id: firstLiveId.slice(0, 8),
+      reason: "still ambiguous across live rows",
+    }, memoryEmbedder)).rejects.toThrow(/memory_search.*full id/i);
   });
 
   test("AC-4: correct without replacement archives; with replacement supersedes", async () => {
