@@ -20,6 +20,7 @@ import {
   Loader2Icon,
   PauseIcon,
   PlayIcon,
+  Trash2Icon,
   TriangleAlertIcon,
   ZapIcon,
 } from "lucide-react";
@@ -49,21 +50,33 @@ type GoalPillMeta = {
 const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
   paused: { label: "Goal paused", icon: PauseIcon, tint: "text-status-waiting", ring: "border-status-waiting/40" },
-  // "Needs attention" wears the warning/amber hue, not paused's purple — the two
-  // states were near-indistinguishable when both leaned on status-waiting.
-  attention: { label: "Needs attention", icon: TriangleAlertIcon, tint: "text-status-running", ring: "border-status-running/50" },
+  // "Needs attention" is the requires_action state — the SAME state the subagent
+  // rows paint with the doctrine "waiting" dot (status-waiting/purple). It wears
+  // that one hue too, so a session that needs you reads as one colour across the
+  // pill and the lineage; its triangle glyph + label set it apart from paused.
+  attention: { label: "Needs attention", icon: TriangleAlertIcon, tint: "text-status-waiting", ring: "border-status-waiting/50" },
   completed: { label: "Goal completed", icon: CheckCircle2Icon, tint: "text-status-idle", ring: "border-status-idle/40" },
 };
+
+/** A session lifecycle state where the goal is NOT actively being pursued — the
+    agent is waiting on input, or the session has failed or been cancelled. In
+    all three the goal clock must freeze and the pill drops "Pursuing" for an
+    attention cue rather than a live-ticking one under a failure banner. */
+function isSessionStalled(status: SessionStatus): boolean {
+  return status === "requires_action" || status === "failed" || status === "cancelled";
+}
 
 function goalPillState(goalStatus: "active" | "paused" | "completed", sessionStatus: SessionStatus): GoalPillState {
   if (goalStatus === "completed") {
     return "completed";
   }
-  if (goalStatus === "active" && sessionStatus === "requires_action") {
-    return "attention";
-  }
   if (goalStatus === "paused") {
     return "paused";
+  }
+  // An active goal on a stalled session (needs input / failed / cancelled) is
+  // not "pursuing" — surface it as attention, never a live-ticking pursuit.
+  if (goalStatus === "active" && isSessionStalled(sessionStatus)) {
+    return "attention";
   }
   return "pursuing";
 }
@@ -148,15 +161,20 @@ export function GoalSurface({
   const children = lineage.lineage?.children ?? [];
   const record = goal.goal;
   // All hooks run unconditionally (the null-goal early return is below): the
-  // elapsed clock ticks only while the goal is actively being pursued.
-  const live = record?.status === "active" && session.status !== "requires_action";
+  // elapsed clock ticks only while the goal is actively being pursued AND the
+  // session is genuinely moving. A session that needs input, has failed, or was
+  // cancelled must NOT keep a clock ticking under its banner.
+  const live = record?.status === "active" && !isSessionStalled(session.status);
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),
-    // Freeze the clock for BOTH terminal-ish states: completed shows its final
-    // duration, paused shows time spent up to the pause (updatedAt is bumped by
-    // the pause write) — never a clock that kept counting through the pause.
-    record?.status === "completed" || record?.status === "paused" ? record.updatedAt : null,
+    // Freeze the clock whenever it stops ticking: a completed goal shows its
+    // final duration; a paused one the time up to the pause; a stalled session
+    // (needs input / failed / cancelled) freezes at the goal's last update —
+    // never a clock that kept counting past the moment work stopped.
+    record?.status === "completed" || record?.status === "paused" || isSessionStalled(session.status)
+      ? record?.updatedAt
+      : null,
   );
 
   // Hidden entirely when the session has no goal — the pill is a goal surface,
@@ -197,7 +215,10 @@ export function GoalSurface({
               </>
             ) : null}
 
-            {canToggle ? (
+            {/* The inline pause/resume toggle lives on the COLLAPSED pill only —
+                once the panel is open, its labeled Pause/Resume button owns the
+                action, so showing both would be a duplicate control. */}
+            {canToggle && !open ? (
               <button
                 type="button"
                 aria-label={record.status === "paused" ? "Resume goal" : "Pause goal"}
@@ -303,21 +324,23 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
         <MetaChip>v{record.version}</MetaChip>
       </div>
 
-      {record.status !== "completed" ? (
-        <div className="mt-3 flex justify-end">
-          {record.status === "active" ? (
-            <Button type="button" variant="ghost" size="xs" disabled={goal.updating} onClick={() => void goal.pause("Paused from the console")}>
-              {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PauseIcon className="size-3" />}
-              Pause goal
-            </Button>
-          ) : (
-            <Button type="button" size="xs" disabled={goal.updating} onClick={() => void goal.resume()}>
-              {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PlayIcon className="size-3" />}
-              Resume goal
-            </Button>
-          )}
-        </div>
-      ) : null}
+      {/* Delete lives on the left (a quiet destructive action), pause/resume on
+          the right. Delete is available in every state, including a completed
+          goal the user wants to clear off the session. */}
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <DeleteGoalButton goal={goal} />
+        {record.status === "active" ? (
+          <Button type="button" variant="ghost" size="xs" disabled={goal.updating} onClick={() => void goal.pause("Paused from the console")}>
+            {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PauseIcon className="size-3" />}
+            Pause goal
+          </Button>
+        ) : record.status === "paused" ? (
+          <Button type="button" size="xs" disabled={goal.updating} onClick={() => void goal.resume()}>
+            {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : <PlayIcon className="size-3" />}
+            Resume goal
+          </Button>
+        ) : null}
+      </div>
 
       {goal.mutationError ? (
         <div className="mt-2">
@@ -325,6 +348,45 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * A quiet destructive "Delete goal" action with a lightweight two-step confirm
+ * (it's destructive but low-stakes — the loop stops and the pill hides, no data
+ * beyond the goal record is lost, so a full modal would be overkill). On confirm
+ * it calls `deleteGoal`; the goal becomes null, which unmounts the whole surface.
+ */
+function DeleteGoalButton({ goal }: { goal: UseGoalResult }) {
+  const [confirming, setConfirming] = useState(false);
+
+  if (confirming) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+        <span className="pl-1">Delete goal?</span>
+        <Button type="button" variant="ghost" size="xs" disabled={goal.updating} onClick={() => setConfirming(false)}>
+          Cancel
+        </Button>
+        <Button type="button" variant="destructive" size="xs" disabled={goal.updating} onClick={() => void goal.deleteGoal()}>
+          {goal.updating ? <Loader2Icon className="size-3 animate-spin" /> : null}
+          Delete
+        </Button>
+      </span>
+    );
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      className="text-fg-subtle hover:text-destructive"
+      disabled={goal.updating}
+      onClick={() => setConfirming(true)}
+    >
+      <Trash2Icon className="size-3" />
+      Delete goal
+    </Button>
   );
 }
 
