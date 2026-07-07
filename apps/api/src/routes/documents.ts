@@ -311,7 +311,7 @@ function documentHttpException(error: unknown): HTTPException {
   // Workspace-memory write-gate rejections are client errors, not server faults.
   if (
     message.includes("too long")
-    || message.includes("Workspace memory is full")
+    || message.includes("visible memory is full")
     || message.includes("empty after sanitization")
     || message.includes("does not match")
     || message.includes("Ambiguous memory id")

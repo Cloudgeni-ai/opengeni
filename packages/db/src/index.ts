@@ -77,7 +77,7 @@ import {
   AGENT_VISIBLE_MEMORY_STATUSES,
   hashMemoryText,
   isMemoryTextTooLong,
-  MEMORY_ACTIVE_RECORD_CAP,
+  MEMORY_VISIBLE_RECORD_CAP,
   MEMORY_BLOCK_RECORD_LIMIT,
   MEMORY_TEXT_MAX_CHARS,
   MEMORY_NEAR_DUP_COSINE_THRESHOLD,
@@ -2605,8 +2605,8 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
           inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
           ne(schema.knowledgeMemories.id, memoryId),
         ));
-      if (Number(visibleCount) >= MEMORY_ACTIVE_RECORD_CAP) {
-        throw new Error(`Workspace memory is full (${MEMORY_ACTIVE_RECORD_CAP} active records). Correct or supersede stale memories before adding new ones.`);
+      if (Number(visibleCount) >= MEMORY_VISIBLE_RECORD_CAP) {
+        throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
       }
     }
     const [row] = await scopedDb.update(schema.knowledgeMemories).set({
@@ -2953,17 +2953,20 @@ export async function saveWorkspaceMemory(
       }
     }
 
-    // Per-workspace active-record cap: fail actionably rather than silently drop.
-    const [{ activeCount } = { activeCount: 0 }] = await scopedDb.select({
-      activeCount: sql<number>`count(*)::int`,
+    // Per-workspace visible-record cap: fail actionably rather than silently drop.
+    const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+      visibleCount: sql<number>`count(*)::int`,
     }).from(schema.knowledgeMemories)
       .where(and(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-        eq(schema.knowledgeMemories.status, "active"),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
       ));
-    const effectiveActiveCount = Number(activeCount) - (replacesRow?.status === "active" ? 1 : 0);
-    if (effectiveActiveCount >= MEMORY_ACTIVE_RECORD_CAP) {
-      throw new Error(`Workspace memory is full (${MEMORY_ACTIVE_RECORD_CAP} active records). Correct or supersede stale memories before adding new ones.`);
+    const replacesVisible = replacesRow
+      ? agentVisibleMemoryStatuses.includes(replacesRow.status as (typeof agentVisibleMemoryStatuses)[number])
+      : false;
+    const effectiveVisibleCount = Number(visibleCount) - (replacesVisible ? 1 : 0);
+    if (effectiveVisibleCount >= MEMORY_VISIBLE_RECORD_CAP) {
+      throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
     }
 
     const sourceRefs: KnowledgeSourceRef[] = input.sessionId

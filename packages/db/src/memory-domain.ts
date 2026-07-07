@@ -13,8 +13,10 @@ import type { KnowledgeMemoryKind } from "@opengeni/contracts";
 
 /** Reject writes whose sanitized text exceeds this many characters. */
 export const MEMORY_TEXT_MAX_CHARS = 4000;
-/** Per-workspace cap on active memory records; further saves error, not silently drop. */
-export const MEMORY_ACTIVE_RECORD_CAP = 2000;
+/** Per-workspace cap on agent-visible memory records (active ∪ approved). */
+export const MEMORY_VISIBLE_RECORD_CAP = 2000;
+/** @deprecated Use MEMORY_VISIBLE_RECORD_CAP. Kept for older internal callers. */
+export const MEMORY_ACTIVE_RECORD_CAP = MEMORY_VISIBLE_RECORD_CAP;
 /** Cosine similarity at/above which a candidate is treated as a near-duplicate NOOP. */
 export const MEMORY_NEAR_DUP_COSINE_THRESHOLD = 0.95;
 /** How many nearest neighbours to check for near-duplication. */

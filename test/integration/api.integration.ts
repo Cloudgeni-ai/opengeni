@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, hashMemoryText, MEMORY_ACTIVE_RECORD_CAP, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, hashMemoryText, MEMORY_VISIBLE_RECORD_CAP, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -3379,7 +3379,7 @@ describe("API component integration", () => {
         insert into knowledge_memories (account_id, workspace_id, status, kind, scope, text, text_hash)
         select (select account_id from workspaces where id = ${workspaceId}::uuid), ${workspaceId}::uuid,
                'active', 'semantic', 'workspace', 'patch-capfill ' || g, 'patch-caphash-' || g
-        from generate_series(1, ${MEMORY_ACTIVE_RECORD_CAP}) as g
+        from generate_series(1, ${MEMORY_VISIBLE_RECORD_CAP}) as g
       `);
       const activateAtCap = await app.request(workspacePath(workspaceId, `/knowledge/memories/${capped.id}`), {
         method: "PATCH",
@@ -3387,7 +3387,7 @@ describe("API component integration", () => {
         headers: { "content-type": "application/json" },
       });
       expect(activateAtCap.status).toBe(400);
-      expect(await activateAtCap.text()).toContain("Workspace memory is full");
+      expect(await activateAtCap.text()).toContain("visible memory is full");
     } finally {
       await dbClient.db.execute(dbSql`
         delete from knowledge_memories

@@ -19,7 +19,7 @@ import {
   searchWorkspaceMemories,
   resolveWorkspaceMemoryBlock,
   hashMemoryText,
-  MEMORY_ACTIVE_RECORD_CAP,
+  MEMORY_VISIBLE_RECORD_CAP,
   type MemoryEmbedder,
   createDb,
   decryptEnvironmentValue,
@@ -1379,15 +1379,19 @@ describe("DB integration", () => {
     }, memoryEmbedder)).rejects.toThrow(/not found/i);
   });
 
-  test("AC-3: per-workspace active-record cap rejects further saves", async () => {
+  test("AC-3: per-workspace visible-record cap rejects further saves", async () => {
     const grant = await testGrant(dbClient.db);
-    // Bulk-seed exactly the cap of active rows in one statement (fast), then a
-    // fresh save must be rejected actionably.
+    // Bulk-seed exactly the visible cap in one statement (fast), including an
+    // approved row so saveWorkspaceMemory must count active ∪ approved.
+    const activeFillCount = MEMORY_VISIBLE_RECORD_CAP - 1;
     await dbClient.db.execute(dbSql`
       insert into knowledge_memories (account_id, workspace_id, status, kind, scope, text, text_hash)
       select ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'active', 'semantic', 'workspace',
              'capfill ' || g, 'caphash-' || g
-      from generate_series(1, ${MEMORY_ACTIVE_RECORD_CAP}) as g
+      from generate_series(1, ${activeFillCount}) as g
+      union all
+      select ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'approved', 'semantic', 'workspace',
+             'approved capfill', 'approved-caphash'
     `);
     await expect(saveWorkspaceMemory(dbClient.db, {
       accountId: grant.accountId, workspaceId: grant.workspaceId, text: "One over the cap.",
@@ -1410,11 +1414,11 @@ describe("DB integration", () => {
     expect(replacement.superseded?.id).toBe(victim!.id);
     expect(replacement.memory.status).toBe("active");
 
-    const [{ activeCount } = { activeCount: 0 }] = await dbClient.db.execute<{ activeCount: number }>(dbSql`
-      select count(*)::int as "activeCount" from knowledge_memories
-      where workspace_id = ${grant.workspaceId}::uuid and status = 'active'
+    const [{ visibleCount } = { visibleCount: 0 }] = await dbClient.db.execute<{ visibleCount: number }>(dbSql`
+      select count(*)::int as "visibleCount" from knowledge_memories
+      where workspace_id = ${grant.workspaceId}::uuid and status in ('active', 'approved')
     `);
-    expect(Number(activeCount)).toBe(MEMORY_ACTIVE_RECORD_CAP);
+    expect(Number(visibleCount)).toBe(MEMORY_VISIBLE_RECORD_CAP);
   });
 
   test("AC-7: working-set block reflects the memory setting and record state", async () => {
