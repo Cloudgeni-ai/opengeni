@@ -2586,6 +2586,29 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
   }
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [existing] = await scopedDb.select({
+      id: schema.knowledgeMemories.id,
+      status: schema.knowledgeMemories.status,
+    }).from(schema.knowledgeMemories)
+      .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
+      .limit(1);
+    if (!existing) {
+      throw new Error(`Knowledge memory not found: ${memoryId}`);
+    }
+    const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
+    if (agentVisibleMemoryStatuses.includes(nextStatus as (typeof agentVisibleMemoryStatuses)[number])) {
+      const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
+        visibleCount: sql<number>`count(*)::int`,
+      }).from(schema.knowledgeMemories)
+        .where(and(
+          eq(schema.knowledgeMemories.workspaceId, workspaceId),
+          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+          ne(schema.knowledgeMemories.id, memoryId),
+        ));
+      if (Number(visibleCount) >= MEMORY_ACTIVE_RECORD_CAP) {
+        throw new Error(`Workspace memory is full (${MEMORY_ACTIVE_RECORD_CAP} active records). Correct or supersede stale memories before adding new ones.`);
+      }
+    }
     const [row] = await scopedDb.update(schema.knowledgeMemories).set({
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),

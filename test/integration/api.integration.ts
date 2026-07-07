@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
+import { allAccountPermissions, allWorkspacePermissions, appendSessionEvents, appendSessionHistoryItems, applyCreditLedgerEntry, bootstrapWorkspace, buildConnectionTokenResolver, consumeSessionCompactionRequest, createDb, createSession, createTurn, createWorkspaceEnvironment, dbSql, decryptEnvironmentValue, enableCapabilityInstallation, encryptEnvironmentValue, getActiveSessionHistoryItems, getBillingBalance, getCapabilityInstallation, getKnowledgeMemory, hashMemoryText, MEMORY_ACTIVE_RECORD_CAP, getSession, getPackInstallation, getScheduledTask, getSessionGoal, getWorkspaceEnvironmentValuesForRun, listSessionEvents, listScheduledTasks, listSessionTurns, listSessionMcpServersForRun, listUsageEvents, recordStripeWebhookEvent, recordUsageEvent, requireFile, requireSession, setSessionGoalStatus, setSessionStatus, sumUsageQuantity, updateScheduledTask, updateWorkspaceSettings, upsertCapabilityCatalogItem } from "@opengeni/db";
 import { appendAndPublishEvents } from "@opengeni/events";
 import { signDelegatedAccessToken, type AccessContext, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
@@ -3345,14 +3345,56 @@ describe("API component integration", () => {
     expect(pinResponse.status).toBe(200);
     expect((await pinResponse.json() as { pinned: boolean }).pinned).toBe(true);
 
-    // Edit text (re-embed) then archive.
+    // Edit text: PATCH bypasses dedup only, not sanitization/redaction/hash/embed.
+    const editedSecret = "AKIAIOSFODNN7EXAMPLE";
     const editResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
       method: "PATCH",
-      body: JSON.stringify({ text: "Staging deploys from the release branch now." }),
+      body: JSON.stringify({ text: `Staging deploys from the release branch now with ${editedSecret}.` }),
       headers: { "content-type": "application/json" },
     });
     expect(editResponse.status).toBe(200);
-    expect((await editResponse.json() as { text: string }).text).toContain("release branch");
+    const edited = await editResponse.json() as { text: string };
+    expect(edited.text).toContain("release branch");
+    expect(edited.text).toContain("[REDACTED]");
+    expect(edited.text).not.toContain(editedSecret);
+    const [editedRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${created.id}
+    `);
+    expect(editedRow?.textHash).toBe(hashMemoryText(edited.text));
+    expect(editedRow?.embeddingModel).toBeTruthy();
+    expect(editedRow?.hasEmbedding).toBe(true);
+
+    // PATCH status into the agent-visible set enforces the workspace cap.
+    const cappedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: "A proposed row to activate at cap." }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(cappedResponse.status).toBe(201);
+    const capped = await cappedResponse.json() as { id: string };
+    try {
+      await dbClient.db.execute(dbSql`
+        insert into knowledge_memories (account_id, workspace_id, status, kind, scope, text, text_hash)
+        select (select account_id from workspaces where id = ${workspaceId}::uuid), ${workspaceId}::uuid,
+               'active', 'semantic', 'workspace', 'patch-capfill ' || g, 'patch-caphash-' || g
+        from generate_series(1, ${MEMORY_ACTIVE_RECORD_CAP}) as g
+      `);
+      const activateAtCap = await app.request(workspacePath(workspaceId, `/knowledge/memories/${capped.id}`), {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(activateAtCap.status).toBe(400);
+      expect(await activateAtCap.text()).toContain("Workspace memory is full");
+    } finally {
+      await dbClient.db.execute(dbSql`
+        delete from knowledge_memories
+        where workspace_id = ${workspaceId}::uuid
+          and (text like 'patch-capfill %' or id = ${capped.id})
+      `);
+    }
 
     const archiveResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
       method: "PATCH",
