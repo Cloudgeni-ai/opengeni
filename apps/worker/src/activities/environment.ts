@@ -162,6 +162,9 @@ export async function sandboxEnvironmentForRun(
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(settings, options.scope.workspaceId);
   }
   const selections = gitCredentialSelections(resources);
+  if (selections.length > 0 && options.skipGitHubToken) {
+    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
+  }
   // NO-TOKEN SKIP (Stage D, change B): when the turn's EFFECTIVE compute backend is
   // a connected machine (selfhosted), platform git provider tokens are INERT: exec
   // routes over NATS to the user's machine, which uses ITS OWN git credentials, and
@@ -178,6 +181,61 @@ export async function sandboxEnvironmentForRun(
   // legacy request shape and standalone self-mint path. Non-GitHub providers are
   // host-brokered only: without a `gitCredentials` port there is no token value
   // to seed, and the runtime wrappers degrade to passthrough.
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  // TOKEN-BROKER (B2): the askpass helper is PROVISIONED AT SETUP (runtime) into a
+  // per-box, user-writable path in the SAME dir as the token file, instead of a
+  // baked image script at /usr/local/bin/opengeni-git-askpass. The clone-hook seed
+  // block writes both the token file AND this askpass script before the fetch, so
+  // git auth becomes correct on ANY box image (including pre-existing warm boxes on
+  // their next turn's clone hook) — no product image needs to carry the askpass.
+  // The pointer layer is the SHARED config helper so every API-direct attach
+  // surface (viewer attach, channel-A) declares the IDENTICAL env when it
+  // cold-creates the box for a repo-attached session — an attach-warmed box
+  // missing these keys kills the next repo turn on the SDK's manifest-env guard.
+  applyGitAuthPointerEnvironment(environment, minted.identity);
+  return {
+    environment,
+    ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
+    ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
+    ...(toolspaceToken ? { toolspaceToken } : {}),
+  };
+}
+
+export async function mintRunGitTokens(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<GitTokenSeeds | undefined> {
+  const selections = gitCredentialSelections(resources);
+  if (selections.length === 0) {
+    return undefined;
+  }
+  const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
+  return Object.keys(minted.gitTokens).length > 0 ? minted.gitTokens : undefined;
+}
+
+export async function mintRunGitToken(
+  settings: Settings,
+  resources: ResourceRef[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  } = {},
+): Promise<string | undefined> {
+  return (await mintRunGitTokens(settings, resources, options))?.github;
+}
+
+async function mintRunGitTokensWithIdentity(
+  settings: Settings,
+  selections: GitCredentialSelection[],
+  options: {
+    scope?: ConnectionScope;
+    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  },
+): Promise<{ gitTokens: GitTokenSeeds; identity: { name: string; email: string } | null }> {
   const gitTokens: GitTokenSeeds = {};
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
@@ -192,7 +250,7 @@ export async function sandboxEnvironmentForRun(
       if (minted.identity) {
         identity = minted.identity;
       } else if (selection.provider === "github") {
-        identity = minted.identity ?? githubAppBotIdentity(settings);
+        identity = githubAppBotIdentity(settings);
       }
     } else if (selection.provider === "github" && selection.installationId > 0) {
       token = await createGitHubAppInstallationToken(settings, {
@@ -205,23 +263,7 @@ export async function sandboxEnvironmentForRun(
       gitTokens[selection.provider] = token;
     }
   }
-  // TOKEN-BROKER (B2): the askpass helper is PROVISIONED AT SETUP (runtime) into a
-  // per-box, user-writable path in the SAME dir as the token file, instead of a
-  // baked image script at /usr/local/bin/opengeni-git-askpass. The clone-hook seed
-  // block writes both the token file AND this askpass script before the fetch, so
-  // git auth becomes correct on ANY box image (including pre-existing warm boxes on
-  // their next turn's clone hook) — no product image needs to carry the askpass.
-  // The pointer layer is the SHARED config helper so every API-direct attach
-  // surface (viewer attach, channel-A) declares the IDENTICAL env when it
-  // cold-creates the box for a repo-attached session — an attach-warmed box
-  // missing these keys kills the next repo turn on the SDK's manifest-env guard.
-  applyGitAuthPointerEnvironment(environment, identity);
-  return {
-    environment,
-    ...(gitTokens.github ? { gitToken: gitTokens.github } : {}),
-    ...(Object.keys(gitTokens).length > 0 ? { gitTokens } : {}),
-    ...(toolspaceToken ? { toolspaceToken } : {}),
-  };
+  return { gitTokens, identity };
 }
 
 type GitCredentialSelection = {

@@ -2253,6 +2253,11 @@ export type RunAgentStreamOptions = {
     // True when the caller already ran file-resource materialization for this
     // provided session and threaded any failures into the model input.
     fileDownloadsMaterialized?: boolean;
+    // Lazy sandbox provisioning injects a synthetic provided session at run start;
+    // the real box does not exist until the first sandbox op. In that path the
+    // worker provisioner runs runOwnedSandboxSetup against the un-proxied real box
+    // after establish, so runAgentStream must not run it eagerly here.
+    deferredSetup?: boolean;
   };
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
@@ -2431,13 +2436,15 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
     // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
-    await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
-      settings,
-      environment,
-      preparedInput: prepared,
-      ...(overrides.ownedSandbox.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
-      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-    });
+    if (!overrides.ownedSandbox.deferredSetup) {
+      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
+        settings,
+        environment,
+        preparedInput: prepared,
+        ...(overrides.ownedSandbox.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
+        ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+      });
+    }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
     const resourceClient = fileDownloads.length > 0
@@ -2852,9 +2859,9 @@ export async function pinProvidedSessionManifestEnvironment(
  * refresh, az login is idempotent). The connected-machine (selfhosted) branch
  * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
  *
- * `gitTokenSeedOverride` lets the lazy provisioner pass its own freshly-minted
- * run-scoped token (minted at establish time, not turn start); unset ⇒ read the
- * seed off the agent exactly as the eager path does.
+ * `gitTokenSeedsOverride` lets the lazy provisioner pass its own freshly-minted
+ * run-scoped provider tokens (minted at establish time, not turn start);
+ * unset ⇒ read the seeds off the agent exactly as the eager path does.
  */
 export async function runOwnedSandboxSetup(
   agent: Agent<any, any>,
@@ -2866,6 +2873,7 @@ export async function runOwnedSandboxSetup(
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
+    gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
   },
 ): Promise<void> {
@@ -2880,10 +2888,14 @@ export async function runOwnedSandboxSetup(
   });
   const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
-  // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
-  // repository-clone hook seeds it to the box's token file before the clone. The
-  // lazy provisioner overrides it with its own establish-time mint.
-  const ownedGitTokenSeed = opts.gitTokenSeedOverride ?? gitTokenSeedForAgent(agent);
+  // TOKEN-BROKER (B1): per-turn provider token seeds, forwarded OFF-MANIFEST so
+  // the repository-clone hook writes provider token files before the clone. The
+  // lazy provisioner overrides them with its own establish-time mint.
+  const ownedGitTokenSeeds = {
+    ...(gitTokenSeedsForAgent(agent) ?? {}),
+    ...(opts.gitTokenSeedOverride ? { github: opts.gitTokenSeedOverride } : {}),
+    ...(opts.gitTokenSeedsOverride ?? {}),
+  } satisfies GitTokenSeeds;
   const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const ownedHooks = [
     ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
@@ -2894,7 +2906,7 @@ export async function runOwnedSandboxSetup(
     environment,
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(runAs ? { runAs } : {}),
-    ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
+    ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided

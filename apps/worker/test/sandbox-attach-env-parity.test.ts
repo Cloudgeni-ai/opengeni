@@ -22,7 +22,7 @@ import { applyGitAuthPointerEnvironment, stableSandboxEnvironmentForRun } from "
 import { githubAppBotIdentity } from "@opengeni/github";
 import { testSettings } from "@opengeni/testing";
 import type { ResourceRef } from "@opengeni/contracts";
-import { sandboxEnvironmentForRun } from "../src/activities/environment";
+import { mintRunGitToken, sandboxEnvironmentForRun } from "../src/activities/environment";
 
 // The exact SDK delta predicate (validateNoEnvironmentDelta): true iff every key
 // the turn declares is present in the attach env with an equal value.
@@ -141,10 +141,8 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
       githubInstallationId: 123,
       githubRepositoryId: 456,
     };
-    // Skip the (network) mint: returns the stable base env + no gitToken. This is the
-    // exact manifest a machine-effective repo turn declares; a cloud repo turn adds
-    // GIT_ASKPASS/GIT_TERMINAL_PROMPT on top but STILL no GH_TOKEN/GITHUB_TOKEN/
-    // GIT_CONFIG_* (those keys were removed by the token broker).
+    // Skip the (network) mint: lazy/cloud and machine-effective repo turns still
+    // declare the stable git-auth pointers eagerly; only the token VALUE defers.
     const { environment: turnEnv, gitToken, gitTokens } = await sandboxEnvironmentForRun(
       settings,
       [repoResource],
@@ -168,12 +166,18 @@ describe("repo-attached turn: token VALUE is OFF the manifest, only the FILE PAT
     expect(gitToken).toBeUndefined();
     expect(gitTokens).toBeUndefined();
 
-    // The STABLE token FILE PATH matches the attach base (parity-safe pointer).
-    const attachEnv = stableSandboxEnvironmentForRun(settings, {});
+    // The STABLE pointer layer is present even when the value mint is skipped.
+    const attachEnv = applyGitAuthPointerEnvironment(
+      stableSandboxEnvironmentForRun(settings, {}),
+      githubAppBotIdentity(settings),
+    );
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe("/workspace/.opengeni/git-token");
     expect(turnEnv.OPENGENI_GIT_CREDENTIALS_DIR).toBe("/workspace/.opengeni/git-credentials");
     expect(turnEnv.OPENGENI_GIT_CLI_WRAPPER_DIR).toBe("/workspace/.opengeni/bin");
     expect(turnEnv.OPENGENI_GIT_TOKEN_FILE).toBe(attachEnv.OPENGENI_GIT_TOKEN_FILE);
+    expect(turnEnv.GIT_ASKPASS).toBe("/workspace/.opengeni/askpass");
+    expect(turnEnv.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(turnEnv).toEqual(attachEnv);
     expect(hasNoEnvironmentDelta(attachEnv, turnEnv)).toBe(true);
   });
 });
@@ -239,8 +243,10 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     }) as typeof fetch;
     try {
       const { environment: turnEnv, gitToken } = await sandboxEnvironmentForRun(settings, [repoResource], {});
+      const deferredToken = await mintRunGitToken(settings, [repoResource], {});
       // The mint really ran (through the JWT + stubbed GitHub API)…
       expect(gitToken).toBe("ghs_stub_mint");
+      expect(deferredToken).toBe("ghs_stub_mint");
       // …and its value stayed OFF the manifest.
       expect(Object.values(turnEnv)).not.toContain("ghs_stub_mint");
 

@@ -1,9 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
+import { SandboxImageConflictError, SandboxLeaseSupersededError } from "@opengeni/db";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, filterUnmaterializedSandboxFileDownloads, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, createTurnSandboxProvisioner, emitModelCallUsage, ensureTurnModalRegistryImage, filterUnmaterializedSandboxFileDownloads, historyRowsToAppend, isLazySandboxProvisionRetryable, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
@@ -523,6 +524,57 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
 
   test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
     expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
+  });
+});
+
+describe("lazy sandbox provisioner single-flight", () => {
+  test("concurrent callers share one establish promise", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { ok: true, attempt: establishes };
+    });
+
+    const results = await Promise.all(Array.from({ length: 12 }, () => provisioner.get()));
+
+    expect(establishes).toBe(1);
+    expect(results.every((result) => result === results[0])).toBe(true);
+    expect(results[0]).toEqual({ ok: true, attempt: 1 });
+  });
+
+  test("final failure rejects all waiters and resets the memo for the next op", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      throw new SandboxImageConflictError("group-1", "old", "new");
+    });
+
+    const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
+    expect(first.every((result) => result.status === "rejected")).toBe(true);
+    expect(establishes).toBe(1);
+
+    await expect(provisioner.get()).rejects.toThrow(SandboxImageConflictError);
+    expect(establishes).toBe(2);
+  });
+
+  test("transient supersession retries inside the single-flight", async () => {
+    let establishes = 0;
+    const provisioner = createTurnSandboxProvisioner(async () => {
+      establishes += 1;
+      if (establishes === 1) {
+        throw new SandboxLeaseSupersededError("group-1", 7);
+      }
+      return "ready";
+    }, { backoffMs: 1 });
+
+    await expect(provisioner.get()).resolves.toBe("ready");
+    expect(establishes).toBe(2);
+  });
+
+  test("image conflict is actionable and not retried", async () => {
+    expect(isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new"))).toBe(false);
+    expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(true);
   });
 });
 
