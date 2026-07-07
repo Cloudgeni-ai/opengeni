@@ -190,7 +190,9 @@ export function renderWorkspaceMemoryBlock(records: readonly MemoryBlockRecord[]
       cost += estimateMemoryTokens(sectionTitle) + 2; // title + blank line separator
     }
     if (usedTokens + cost > WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET) {
-      break;
+      // Skip entries that don't fit instead of stopping: one oversized entry
+      // must not starve smaller lower-priority records of the remaining budget.
+      continue;
     }
     usedTokens += cost;
     seenSections.add(record.kind);

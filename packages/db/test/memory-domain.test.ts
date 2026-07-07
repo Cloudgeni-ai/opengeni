@@ -163,6 +163,22 @@ describe("renderWorkspaceMemoryBlock", () => {
     expect(block).not.toContain("[99999999]");
   });
 
+  test("an oversized entry is skipped, not a stopping point — later entries still fill the budget", () => {
+    const block = renderWorkspaceMemoryBlock([
+      record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "semantic", text: "Small fact before." }),
+      record({
+        id: "99999999-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "oversized ".repeat(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET * 2),
+      }),
+      record({ id: "bbbbbbbb-0000-4000-8000-000000000000", kind: "semantic", text: "Small fact after." }),
+    ])!;
+    expect(block).toContain("[aaaaaaaa]");
+    expect(block).not.toContain("[99999999]");
+    expect(block).toContain("[bbbbbbbb]");
+    expect(estimateMemoryTokens(block)).toBeLessThanOrEqual(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET);
+  });
+
   test("pinned-first input order is preserved within its section", () => {
     const block = renderWorkspaceMemoryBlock([
       record({ id: "aaaaaaaa-0000-4000-8000-000000000000", kind: "preference", text: "Pinned pref.", pinned: true }),
