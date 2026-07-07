@@ -6390,6 +6390,10 @@ export interface AcquireLeaseInput {
   // (null/undefined) -> image is not enforced (legacy/cold rows, selfhosted).
   image?: string | null;
   leaseTtlMs: number;          // refresh window for expires_at (turn-heartbeat cadence)
+  // Expiry stamped only while a cold->warming spawner is allowed to create the
+  // provider box before any instance_id exists. Warm/draining/attached refreshes
+  // must continue using leaseTtlMs.
+  warmingLeaseTtlMs?: number;
   // Optional epoch fence for a re-establishing turn holder: when set, the
   // turn-arrival increment is gated on lease_epoch == expectedEpoch (split-brain).
   expectedEpoch?: number;
@@ -6511,6 +6515,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
+  const warmingLeaseTtlMs = input.warmingLeaseTtlMs ?? input.leaseTtlMs;
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) =>
     await scopedDb.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
@@ -6601,7 +6606,7 @@ export async function acquireLease(db: Database, input: AcquireLeaseInput): Prom
           returning id
         `);
         await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
-        const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, null);
+        const updated = await recomputeAndStampLease(tx, row.id, warmingLeaseTtlMs, null);
         // casRows.length === 0 cannot happen under the held row lock (defensive):
         // a lost CAS means a sibling flipped it first, so we attach.
         const role = casRows.length === 0 ? "attached" as const : "spawner" as const;

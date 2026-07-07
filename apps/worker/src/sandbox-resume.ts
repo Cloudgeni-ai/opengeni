@@ -399,6 +399,7 @@ export async function resumeBoxForTurn(
     // by acquireLease recreating the box cold on the new image.
     ...(ids.image ? { image: ids.image } : {}),
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
@@ -642,6 +643,7 @@ export async function acquireSelfhostedLeaseForTurn(
     backend: "selfhosted",
     os: "linux",
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   // FENCED: a newer epoch re-established the group concurrently. Release our

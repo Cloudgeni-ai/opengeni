@@ -182,6 +182,7 @@ export async function attachViewer(
     backend: session.sandboxBackend,
     os: session.sandboxOs,
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   // FENCED: a newer epoch re-established the box. Release our just-registered

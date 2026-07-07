@@ -116,6 +116,7 @@ export async function withChannelA<T>(
     backend: session.sandboxBackend,
     os: session.sandboxOs,
     leaseTtlMs,
+    warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
   });
 
   if (acquired.role === "fenced") {
