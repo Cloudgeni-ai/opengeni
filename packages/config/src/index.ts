@@ -81,10 +81,10 @@ export const AGENT_INSTRUCTIONS_CORE_PLACEHOLDER = "{{core}}";
  * baked into this overridable string.
  *
  * INVARIANT: with no per-workspace override and an empty environment, the
- * runtime's composed instructions are BYTE-IDENTICAL to the historical
- * hardcoded preamble. The template below is exactly the historical lines 1–11
- * joined by " ", followed by " " + the placeholder. Changing a single
- * character here changes that default; a runtime test pins it.
+ * runtime's composed instructions are byte-for-byte pinned by a runtime test.
+ * The template below is joined by " ", followed by " " + the placeholder.
+ * Changing a single character here changes that default; update the pin
+ * intentionally.
  */
 export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
@@ -94,9 +94,9 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
   "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
-  "Use Checkov, Terraform, Azure CLI, GitHub CLI, and repository tools when relevant.",
+  "Use Checkov, Terraform, Azure CLI, git provider CLIs, and repository tools when relevant; gh, glab, and az repos are pre-authenticated when the host brokers matching git credentials.",
   "When the Azure sandbox preparation profile is enabled and service-principal variables are present, the sandbox is pre-authenticated with normal Azure CLI before work starts.",
-  "Treat code-changing work as GitOps work: create a focused branch/commit/PR when GitHub credentials are available; otherwise report exact commands and blockers.",
+  "Treat code-changing work as GitOps work: create a focused branch/commit/PR when git provider credentials are available; otherwise report exact commands and blockers.",
   "Return concise, factual summaries with files changed, commands run, and remaining blockers.",
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
 ].join(" ");
@@ -302,7 +302,7 @@ const SettingsSchema = z.object({
   // the non-bypassable CORE at AGENT_INSTRUCTIONS_CORE_PLACEHOLDER (or appends
   // it when the template omits the marker), and uses the result as the agent's
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
-  // default byte-identical to the historical hardcoded preamble.
+  // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
@@ -1472,6 +1472,13 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
   }).filter((entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0));
 }
 
+const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+function prependPathEntry(pathValue: string | undefined, entry: string): string {
+  const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
+  return [entry, ...parts.filter((part) => part !== entry)].join(":");
+}
+
 /**
  * The STABLE run-scoped sandbox environment: the subset of a run's box-manifest
  * environment that is IDENTICAL whether the box is first warmed by the worker
@@ -1487,19 +1494,18 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
  * workspace environment < the backend-aware HOME default. Reserved-name validation
  * at write time keeps workspace values from colliding with platform entries.
  *
- * DELIBERATELY EXCLUDES the per-run, ROTATING GitHub App installation token
- * VALUE that `sandboxEnvironmentForRun` mints when a repository resource is
+ * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
+ * `sandboxEnvironmentForRun` mints when a repository resource is
  * attached: that token is minted FRESH per call, so it is not a stable, attach-
  * reproducible value and must not be part of the shared base. Under the token-
- * broker (B1) the token VALUE never rides the manifest at all — it is seeded to a
- * FILE inside the box (agent-managed, refreshable mid-turn via the `github_token`
- * MCP tool) and git auth flows through GIT_ASKPASS -> that file. What IS stable and
- * lives here is the token FILE PATH (`OPENGENI_GIT_TOKEN_FILE`): a constant derived
- * from HOME, so it appears IDENTICALLY on BOTH the turn AND every attach manifest
- * (the SDK's per-turn provided-session env delta stays empty even as the token
- * rotates). The attach surfaces have only the `Session` (no repo resources) and so
- * never seed a token, but the file-path pointer is harmless (an unwritten file
- * simply yields no auth); the BLOCKING attach-vs-turn error this helper fixes is
+ * broker (B1) token VALUES never ride the manifest at all — they are seeded to
+ * FILES inside the box and git/provider CLI auth reads those files. What IS stable
+ * and lives here are the token directory / GitHub alias FILE PATH and wrapper
+ * PATH entries: constants derived from HOME, so they appear IDENTICALLY on BOTH
+ * the turn AND every attach manifest (the SDK's per-turn provided-session env
+ * delta stays empty even as tokens rotate). The attach surfaces have only the
+ * `Session` (no repo resources) and so never seed a token, but unwritten files
+ * simply yield no auth; the BLOCKING attach-vs-turn error this helper fixes is
  * for the common (no-repo) and workspace-environment-attached cases.
  */
 export function stableSandboxEnvironmentForRun(
@@ -1519,14 +1525,19 @@ export function stableSandboxEnvironmentForRun(
   if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
     environment.HOME ??= descriptor.workspaceRoot;
   }
-  // TOKEN-BROKER (B1): the STABLE token FILE PATH. A constant derived from the
-  // resolved HOME (falling back to the descriptor workspaceRoot), so it is
-  // parity-safe — it joins the shared base and therefore appears IDENTICALLY on
-  // BOTH the worker-turn manifest AND every API-direct attach manifest, keeping
-  // the SDK's provided-session env delta empty. Only the PATH is stable; the token
-  // VALUE lives exclusively in the file (agent-managed, refreshable mid-turn), never
-  // the manifest env.
-  environment.OPENGENI_GIT_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/git-token`;
+  // TOKEN-BROKER (B1): the STABLE credential FILE PATHS and CLI wrapper PATH.
+  // Constants derived from the resolved HOME (falling back to the descriptor
+  // workspaceRoot), so they are parity-safe — they join the shared base and
+  // therefore appear IDENTICALLY on BOTH the worker-turn manifest AND every API-
+  // direct attach manifest. Only PATHS are stable; token VALUES live exclusively
+  // in files that runtime seeds off-manifest.
+  const home = environment.HOME ?? descriptor.workspaceRoot;
+  environment.OPENGENI_GIT_CREDENTIALS_DIR ??= `${home}/.opengeni/git-credentials`;
+  environment.OPENGENI_GIT_TOKEN_FILE ??= `${home}/.opengeni/git-token`;
+  environment.OPENGENI_GIT_CLI_WRAPPER_DIR ??= `${home}/.opengeni/bin`;
+  if (settings.sandboxBackend !== "none" && settings.sandboxBackend !== "local") {
+    environment.PATH = prependPathEntry(environment.PATH, environment.OPENGENI_GIT_CLI_WRAPPER_DIR);
+  }
   if (settings.toolspaceEnabled) {
     environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
     if (options.workspaceId) {
@@ -1543,11 +1554,40 @@ export function stableSandboxEnvironmentForRun(
  * an attach-warmed cold box carries the IDENTICAL manifest env a later repo turn
  * declares (env parity — see applyGitAuthPointerEnvironment).
  */
-export function hasGitHubRepositorySelection(resources: ReadonlyArray<{ kind: string; githubInstallationId?: unknown; githubRepositoryId?: unknown }>): boolean {
+export function hasGitHubRepositorySelection(
+  resources: ReadonlyArray<{
+    kind: string;
+    provider?: unknown;
+    installationId?: unknown;
+    repositoryId?: unknown;
+    githubInstallationId?: unknown;
+    githubRepositoryId?: unknown;
+  }>,
+): boolean {
   const positive = (value: unknown): boolean =>
     (typeof value === "number" && Number.isInteger(value) && value > 0)
     || (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0);
-  return resources.some((resource) => resource.kind === "repository" && positive(resource.githubInstallationId) && positive(resource.githubRepositoryId));
+  return resources.some((resource) =>
+    resource.kind === "repository"
+    && (
+      (positive(resource.githubInstallationId) && positive(resource.githubRepositoryId))
+      || (resource.provider === "github" && positive(resource.installationId) && positive(resource.repositoryId))
+    )
+  );
+}
+
+export function hasGitCredentialRepositorySelection(
+  resources: ReadonlyArray<{ kind: string; provider?: unknown; githubInstallationId?: unknown; githubRepositoryId?: unknown }>,
+): boolean {
+  return resources.some((resource) =>
+    resource.kind === "repository"
+    && (
+      resource.provider === "github"
+      || resource.provider === "gitlab"
+      || resource.provider === "azure_devops"
+      || hasGitHubRepositorySelection([resource])
+    )
+  );
 }
 
 /**

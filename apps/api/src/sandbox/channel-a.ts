@@ -17,7 +17,7 @@
 // IMPORT DISCIPLINE: sandbox symbols come ONLY from @opengeni/runtime/sandbox
 // (the agent-loop-free leaf) — enforced by sandbox-access-import-guard.test.ts.
 
-import { applyGitAuthPointerEnvironment, hasGitHubRepositorySelection, stableSandboxEnvironmentForRun, type Settings } from "@opengeni/config";
+import { applyGitAuthPointerEnvironment, hasGitCredentialRepositorySelection, hasGitHubRepositorySelection, stableSandboxEnvironmentForRun, type Settings } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import type { Session } from "@opengeni/contracts";
 import {
@@ -141,8 +141,11 @@ export async function withChannelA<T>(
       ? { ...settings, sandboxBackend: session.sandboxBackend }
       : settings;
     const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
-    if (hasGitHubRepositorySelection(session.resources)) {
-      applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(settings));
+    if (hasGitCredentialRepositorySelection(session.resources)) {
+      applyGitAuthPointerEnvironment(
+        environment,
+        hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(settings) : null,
+      );
     }
 
     if (acquired.role === "spawner") {

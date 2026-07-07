@@ -41,6 +41,27 @@ describe("API helpers", () => {
     });
   });
 
+  test("preserves provider-neutral repository credential metadata while normalizing", () => {
+    const [resource] = normalizeResources([{
+      kind: "repository",
+      uri: "https://gitlab.com/OpenAI/example.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-123",
+      connectionId: "conn-1",
+    }]);
+
+    expect(resource).toEqual({
+      kind: "repository",
+      uri: "https://gitlab.com/OpenAI/example.git",
+      ref: "main",
+      provider: "gitlab",
+      repositoryId: "gl-123",
+      connectionId: "conn-1",
+      mountPath: "repos/OpenAI/example",
+    });
+  });
+
   test("normalizes file resources into sandbox mount paths", () => {
     const fileId = "00000000-0000-4000-8000-000000000010";
     expect(normalizeResources([{ kind: "file", fileId }])).toEqual([{

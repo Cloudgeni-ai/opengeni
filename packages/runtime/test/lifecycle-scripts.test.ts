@@ -57,28 +57,91 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   }
 
-  test("seed block: token file 600 + askpass 755, atomic (no temp leftovers), askpass reads the token", () => {
+  test("seed block: provider token files 600 + askpass/wrappers 755, atomic, askpass reads current provider token", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
       const origin = makeOrigin(root);
       const home = join(root, "home");
       mkdirSync(home, { recursive: true });
       const target = join(root, "ws", "repos", "acme", "private");
-      const env = { HOME: home, OPENGENI_GIT_TOKEN_SEED: "tok-atomic-123" };
+      const env = {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_SEED: "tok-atomic-123",
+        OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-atomic-456",
+        OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED: "azdo-atomic-789",
+      };
       const run = runScript(cloneScriptWithTarget(target, `file://${origin}`), env);
       expect(run.status).toBe(0);
       const tokenFile = join(home, ".opengeni", "git-token");
+      const credentialDir = join(home, ".opengeni", "git-credentials");
       const askpass = join(home, ".opengeni", "askpass");
       expect(readFileSync(tokenFile, "utf8")).toBe("tok-atomic-123");
+      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe("tok-atomic-123");
+      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe("glpat-atomic-456");
+      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe("azdo-atomic-789");
       expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(statSync(join(credentialDir, "github-token")).mode & 0o777).toBe(0o600);
+      expect(statSync(join(credentialDir, "gitlab-token")).mode & 0o777).toBe(0o600);
+      expect(statSync(join(credentialDir, "azure_devops-token")).mode & 0o777).toBe(0o600);
       expect(statSync(askpass).mode & 0o777).toBe(0o755);
+      for (const tool of ["gh", "glab", "az"]) {
+        expect(statSync(join(home, ".opengeni", "bin", tool)).mode & 0o777).toBe(0o755);
+      }
       // atomic install: no pid temp files left behind
       expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(readdirSync(join(home, ".opengeni", "bin")).filter((f) => f.includes(".tmp."))).toEqual([]);
       // the askpass Password branch reads the token file
       const askOut = execFileSync("sh", [askpass, "Password for host"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
       expect(askOut).toBe("tok-atomic-123");
+      const gitlabOut = execFileSync("sh", [askpass, "Password for https://gitlab.com"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      expect(gitlabOut).toBe("glpat-atomic-456");
+      const azureOut = execFileSync("sh", [askpass, "Password for https://dev.azure.com/acme"], { env: { ...process.env, HOME: home }, encoding: "utf8" });
+      expect(azureOut).toBe("azdo-atomic-789");
       // and the clone landed as a real work tree
       expect(existsSync(join(target, "README.md"))).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("provider CLI wrappers read current token files and pass through when files are absent", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-wrappers-"));
+    try {
+      const origin = makeOrigin(root);
+      const home = join(root, "home");
+      const realbin = join(root, "realbin");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(realbin, { recursive: true });
+      const target = join(root, "ws", "repos", "acme", "private");
+      const script = cloneScriptWithTarget(target, `file://${origin}`);
+      const env = {
+        HOME: home,
+        OPENGENI_GIT_TOKEN_SEED: "ghs-wrapper-1",
+        OPENGENI_GIT_GITLAB_TOKEN_SEED: "glpat-wrapper-1",
+        OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED: "azdo-wrapper-1",
+      };
+      expect(runScript(script, env).status).toBe(0);
+
+      writeFileSync(join(realbin, "gh"), "#!/usr/bin/env sh\nprintf 'GH=%s\\n' \"${GH_TOKEN-unset}\"\n", { mode: 0o755 });
+      writeFileSync(join(realbin, "glab"), "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n", { mode: 0o755 });
+      writeFileSync(join(realbin, "az"), "#!/usr/bin/env sh\nprintf 'AZ=%s\\n' \"${AZURE_DEVOPS_EXT_PAT-unset}\"\n", { mode: 0o755 });
+
+      const wrapperPath = join(home, ".opengeni", "bin");
+      const wrapperEnv = { ...process.env, HOME: home, PATH: `${wrapperPath}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}` };
+      delete wrapperEnv.GH_TOKEN;
+      delete wrapperEnv.GITLAB_TOKEN;
+      delete wrapperEnv.AZURE_DEVOPS_EXT_PAT;
+      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=ghs-wrapper-1\n");
+      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=glpat-wrapper-1\n");
+      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=azdo-wrapper-1\n");
+
+      rmSync(join(home, ".opengeni", "git-token"), { force: true });
+      rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), { force: true });
+      rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), { force: true });
+      expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=unset\n");
+      expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=unset\n");
+      expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=unset\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

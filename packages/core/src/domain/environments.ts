@@ -14,7 +14,7 @@ export const MAX_VARIABLES_PER_ENVIRONMENT = 100;
 // Names the platform itself injects into sandboxes (sandboxEnvironmentForRun,
 // collectGitIdentityEnvironment) plus loader/startup-injection vectors. These
 // can never be set as workspace environment variables, so the run-scoped
-// GitHub auth block and git identity always win without silent collisions.
+// git auth block and git identity always win without silent collisions.
 const reservedExactNames = new Set([
   "HOME",
   "PATH",
@@ -32,6 +32,8 @@ const reservedExactNames = new Set([
   "PERL5LIB",
   "GH_TOKEN",
   "GITHUB_TOKEN",
+  "GITLAB_TOKEN",
+  "AZURE_DEVOPS_EXT_PAT",
   "GIT_ASKPASS",
   "GIT_TERMINAL_PROMPT",
 ]);

@@ -5,7 +5,7 @@ import { testSettings } from "@opengeni/testing";
 
 describe("environment variable name policy", () => {
   test("rejects platform-managed exact names", () => {
-    for (const name of ["HOME", "PATH", "GH_TOKEN", "GITHUB_TOKEN", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "BASH_ENV", "ENV", "NODE_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "IFS"]) {
+    for (const name of ["HOME", "PATH", "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "AZURE_DEVOPS_EXT_PAT", "GIT_ASKPASS", "GIT_TERMINAL_PROMPT", "BASH_ENV", "ENV", "NODE_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP", "PERL5OPT", "IFS"]) {
       expect(() => assertAllowedEnvironmentVariableName(name)).toThrow(`reserved environment variable name: ${name}`);
     }
   });

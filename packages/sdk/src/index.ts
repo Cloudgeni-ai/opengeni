@@ -141,6 +141,7 @@ export type {
   KnowledgeMemoryStatus,
   KnowledgeSourceKind,
   KnowledgeSourceRef,
+  GitCredentialProvider,
   ListApiKeysResponse,
   ListConnectionsResponse,
   ListPacksResponse,

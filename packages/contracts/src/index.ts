@@ -1079,14 +1079,30 @@ export type EntitlementsPort = {
   admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
 };
 
+export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
+export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
+
+const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
+
+export const GitCredentialRepositoryRef = z.object({
+  provider: GitCredentialProvider.optional(),
+  uri: z.string().min(1),
+  ref: z.string().min(1),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
+});
+export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
+
 // ============ P4a — Connection-credential provider (§7.6) ============
 //
 // The host-providable per-run credential-mint seam over OpenGeni's TWO
 // run-scoped credential sites in the worker:
-//   - GIT credentials: the GitHub App installation token minted in
-//     `sandboxEnvironmentForRun` (today `createGitHubAppInstallationToken`
-//     from `settings`) and injected as `GH_TOKEN`/`GITHUB_TOKEN`/the git
-//     extraheader.
+//   - GIT credentials: run-scoped provider tokens minted in
+//     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
+//     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
+//     and seeded off-manifest into sandbox token files for git + provider CLIs.
 //   - SANDBOX secrets: the decrypted workspace environment values loaded in
 //     `loadWorkspaceEnvironmentForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
@@ -1107,17 +1123,21 @@ export type EntitlementsPort = {
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
-  // The GitHub App installation the run's repository resources resolved to,
-  // and the specific repositories the token must be scoped to. Mirrors the
-  // shape `createGitHubAppInstallationToken` consumes today.
+  // Provider defaults to "github" for the legacy request shape. GitHub-only
+  // hosts can keep reading installationId/repositoryIds exactly as before;
+  // provider-aware hosts should branch on this and repositoryRefs.
+  provider?: GitCredentialProvider;
+  // Provider-neutral repository refs for hosts that broker non-GitHub tokens.
+  // For GitHub requests these are additive to the legacy fields below.
+  repositoryRefs?: GitCredentialRepositoryRef[];
+  // Legacy GitHub App installation shape retained for 0.x compatibility.
   installationId: number;
   repositoryIds: number[];
 };
 
 export type GitCredentials = {
-  // The minted installation token the activity injects as GH_TOKEN/GITHUB_TOKEN
-  // and into the git http extraheader (identical downstream handling to the
-  // self-mint path).
+  // The minted provider token the activity writes into provider-specific
+  // sandbox token files. The value never enters the manifest.
   token: string;
   // FORK-7 echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
@@ -1154,8 +1174,8 @@ export type ConnectionCredentialsPort = {
   // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
   // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
   // unset leg falls through to today's self-mint for THAT leg only.
-  gitCredentials?: (input: GitCredentialsRequest) => Promise<GitCredentials>;
-  sandboxSecrets?: (input: SandboxSecretsRequest) => Promise<SandboxSecrets>;
+  gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
+  sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
 };
 
 // ============ P4a — GitHub App API port (BYO-App, §7.6 / SPIKE-2 remainder) ===
@@ -1223,6 +1243,11 @@ export const RepositoryResourceRef = z.object({
   ref: z.string().min(1),
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
+  provider: GitCredentialProvider.optional(),
+  repositoryId: GitProviderRepositoryId.optional(),
+  installationId: GitProviderRepositoryId.optional(),
+  projectId: GitProviderRepositoryId.optional(),
+  connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
 });

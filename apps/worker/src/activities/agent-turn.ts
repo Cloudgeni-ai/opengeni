@@ -1063,6 +1063,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
+        gitTokens: sandboxGitTokens,
         toolspaceToken: sandboxToolspaceToken,
       } = await sandboxEnvironmentForRun(
         runSettings,
@@ -1397,7 +1398,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // AND the mint actually produced a token (repo resources present). The runtime
         // seeds it to the box's token file before the repository-clone runs; it never
         // touches the box/agent manifest env.
-        ...(activeSandboxBackend !== "selfhosted" && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens ? { gitTokenSeeds: sandboxGitTokens } : {}),
+        ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken ? { gitTokenSeed: sandboxGitToken } : {}),
         // Toolspace is delivered on EVERY backend including selfhosted. The git-
         // token skip does NOT transfer: that token is inert on a connected
         // machine (it uses its own git creds), but the toolspace token is the

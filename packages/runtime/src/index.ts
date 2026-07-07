@@ -1,6 +1,6 @@
 import type { ConfiguredModel, ContextCompactionMode, ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, collectSandboxEnvironment, contextInputBudgetTokens, contextServerCompactThreshold, firstPartyMcpBaseUrl, parseExposedPorts, resolveContextCompactionMode, resolveModelProvider, sandboxLifecycleHookIds } from "@opengeni/config";
-import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, prefixedMcpToolName as sharedPrefixedMcpToolName, signDelegatedAccessToken, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
+import { CAPABILITY_DESCRIPTORS, isClearedRunStateBlob, prefixedMcpToolName as sharedPrefixedMcpToolName, signDelegatedAccessToken, type GitCredentialProvider, type McpServerConnectionRef, type Permission, type ReasoningEffort, type ResourceRef, type SessionEventType, type ToolAuthNeededPayload, type ToolRef } from "@opengeni/contracts";
 import {
   Agent,
   AgentsError,
@@ -739,6 +739,8 @@ export function extractResponseOutputText(response: unknown): string {
   return parts.join("");
 }
 
+export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+
 export type BuildAgentOptions = {
   model?: Model;
   reasoningEffort?: ReasoningEffort;
@@ -808,15 +810,17 @@ export type BuildAgentOptions = {
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   workspaceEnvironment?: WorkspaceEnvironmentContext;
-  // TOKEN-BROKER (B1): the run-scoped GitHub App installation token, minted ONCE
-  // per turn by the worker (sandboxEnvironmentForRun's `gitToken`). Threaded here
-  // OFF-MANIFEST — it is NOT part of sandboxEnvironment (the manifest env), so the
-  // token VALUE never triggers the SDK's provided-session env-delta guard even
-  // though it rotates every turn. buildAgent stashes it alongside the agent's
-  // repository-clone hooks; runStream forwards it into the clone hook context, which
-  // seeds it to the box's token FILE before the clone runs. Omitted on the
-  // selfhosted path (the machine uses its own git creds) — a NO-OP there.
+  // TOKEN-BROKER (B1): the run-scoped GitHub App installation token alias,
+  // minted ONCE per turn by the worker (sandboxEnvironmentForRun's `gitToken`).
+  // Kept for back-compat; internally it maps to gitTokenSeeds.github.
   gitTokenSeed?: string;
+  // Provider-token map for GitHub/GitLab/Azure DevOps. Threaded here OFF-
+  // MANIFEST — it is NOT part of sandboxEnvironment (the manifest env), so token
+  // VALUES never trigger the SDK's provided-session env-delta guard even though
+  // they rotate every turn. buildAgent stashes them alongside the agent's
+  // repository-clone hooks; runStream forwards them into the hook context, which
+  // seeds provider token FILES before the clone/setup runs.
+  gitTokenSeeds?: GitTokenSeeds;
   // TOOLSPACE: the run-scoped delegated token to seed into
   // $OPENGENI_TOOLSPACE_TOKEN_FILE. Like gitTokenSeed, this stays off the
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
@@ -968,12 +972,12 @@ export function appendGenesisTitleDirective(instructions: string, genesisTitleHi
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
 const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
-// TOKEN-BROKER (B1): the per-turn git token seed, stashed alongside the agent's
-// repository-clone hooks (a parallel map keyed by the agent). Kept OFF the
-// manifest/defaultManifest so the rotating value never rides the SDK's provided-
-// session env; runStream reads it to build the clone hook context. Absent when
-// no repo is attached / on the selfhosted path.
-const agentGitTokenSeed = new WeakMap<object, string>();
+// TOKEN-BROKER (B1): the per-turn provider git token seeds, stashed alongside
+// the agent's repository-clone hooks (a parallel map keyed by the agent). Kept
+// OFF the manifest/defaultManifest so rotating values never ride the SDK's
+// provided-session env; runStream reads them to build the clone hook context.
+// Absent when no brokered repo is attached / on the selfhosted path.
+const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentToolspaceTokenSeed = new WeakMap<object, string>();
 // The EFFECTIVE backend the turn resolved for this agent (undefined -> the home
 // backend). Read by runStream's owned branch to keep platform box-setup hooks off
@@ -1136,10 +1140,15 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   if (options.activeSandboxBackend) {
     agentActiveSandboxBackend.set(agent, options.activeSandboxBackend);
   }
-  // TOKEN-BROKER (B1): stash the per-turn seed off-manifest so runStream can seed the
-  // clone hook without the token ever touching defaultManifest / sandboxEnvironment.
-  if (options.gitTokenSeed) {
-    agentGitTokenSeed.set(agent, options.gitTokenSeed);
+  // TOKEN-BROKER (B1): stash per-turn provider seeds off-manifest so runStream
+  // can seed the setup hook without tokens ever touching defaultManifest /
+  // sandboxEnvironment. `gitTokenSeed` remains the GitHub alias.
+  const gitTokenSeeds = {
+    ...(options.gitTokenSeeds ?? {}),
+    ...(options.gitTokenSeed ? { github: options.gitTokenSeed } : {}),
+  } satisfies GitTokenSeeds;
+  if (Object.keys(gitTokenSeeds).length > 0) {
+    agentGitTokenSeeds.set(agent, gitTokenSeeds);
   }
   if (options.toolspaceTokenSeed) {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
@@ -2398,7 +2407,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       : (ownedClient as SandboxClient);
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
-    const ownedGitTokenSeed = gitTokenSeedForAgent(agent);
+    const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
     const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
     const ownedHooks = [
       ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
@@ -2409,7 +2418,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
-      ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
+      ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     };
     // OWNED-PATH HOOKS: the SDK NEVER calls client.create/resume when handed a live
@@ -2502,7 +2511,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     : refreshedClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
-  const gitTokenSeed = gitTokenSeedForAgent(agent);
+  const gitTokenSeeds = gitTokenSeedsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const client = resourceClient
     ? withSandboxLifecycleHooks(resourceClient, [
@@ -2513,7 +2522,7 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
-      ...(gitTokenSeed ? { gitTokenSeed } : {}),
+      ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
       ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
     })
     : undefined;
@@ -3420,11 +3429,13 @@ export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
   runAs?: string;
-  // TOKEN-BROKER (B1): the run-scoped GitHub token to seed into the box's token
-  // FILE before the repository clone runs. Threaded OFF-MANIFEST — it rides ONLY
-  // the clone exec's per-call env (OPENGENI_GIT_TOKEN_SEED), NEVER the box/agent
-  // manifest env (validateNoEnvironmentDelta must never see a rotating value).
+  // TOKEN-BROKER (B1): back-compat GitHub alias for gitTokenSeeds.github.
   gitTokenSeed?: string;
+  // Provider tokens to seed into box token FILES before repository clone/setup
+  // runs. Threaded OFF-MANIFEST — they ride ONLY the setup exec command prefix,
+  // NEVER the box/agent manifest env (validateNoEnvironmentDelta must never see
+  // rotating values).
+  gitTokenSeeds?: GitTokenSeeds;
   toolspaceTokenSeed?: string;
 };
 
@@ -3522,8 +3533,8 @@ function sandboxRepositoryCloneHooksForAgent(agent: Agent<any, any>): SandboxLif
 // TOKEN-BROKER (B1): the per-turn git token seed stashed for this agent (undefined
 // when no repo is attached / on the selfhosted path). Read into the clone hook
 // context at runStream so the token is seeded off-manifest.
-function gitTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
-  return agentGitTokenSeed.get(agent);
+function gitTokenSeedsForAgent(agent: Agent<any, any>): GitTokenSeeds | undefined {
+  return agentGitTokenSeeds.get(agent);
 }
 
 function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
@@ -3586,7 +3597,152 @@ export function repositoryUsesSandboxClone(
   if (activeSandboxBackend === "selfhosted") {
     return false;
   }
-  return settings.sandboxBackend === "modal" || Boolean(resource.githubInstallationId && resource.githubRepositoryId);
+  return settings.sandboxBackend === "modal"
+    || Boolean(resource.githubInstallationId && resource.githubRepositoryId)
+    || Boolean(resource.provider);
+}
+
+const GIT_CREDENTIAL_PROVIDERS = ["github", "gitlab", "azure_devops"] as const satisfies readonly GitCredentialProvider[];
+
+function gitProviderSeedEnv(provider: GitCredentialProvider): string {
+  return `OPENGENI_GIT_${provider.toUpperCase()}_TOKEN_SEED`;
+}
+
+function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
+  const lines: string[] = [];
+  for (const provider of GIT_CREDENTIAL_PROVIDERS) {
+    const token = seeds[provider];
+    if (!token) {
+      continue;
+    }
+    lines.push(`export ${gitProviderSeedEnv(provider)}=${shellQuote(token)}`);
+    if (provider === "github") {
+      lines.push(`export OPENGENI_GIT_TOKEN_SEED=${shellQuote(token)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function gitCredentialHelperCommandLines(): string[] {
+  return [
+    // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
+    // provision git/provider-CLI helpers at SETUP (runtime) before any clone runs.
+    // Token VALUES are supplied only by the per-exec command prefix
+    // (OPENGENI_GIT_*_TOKEN_SEED), never by the box/agent manifest. Helper paths
+    // are stable manifest values from @opengeni/config.
+    "git_provider_token_file() {",
+    "  provider=\"$1\"",
+    "  case \"$provider\" in",
+    "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
+    "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
+    "  esac",
+    "}",
+    "write_git_provider_token() {",
+    "  provider=\"$1\"",
+    "  token=\"$2\"",
+    "  [ -n \"$token\" ] || return 0",
+    "  token_file=\"$(git_provider_token_file \"$provider\")\"",
+    "  mkdir -p \"$(dirname \"$token_file\")\"",
+    "  printf '%s' \"$token\" > \"$token_file.tmp.$$\"",
+    "  mv -f \"$token_file.tmp.$$\" \"$token_file\"",
+    "  if [ \"$provider\" = github ]; then",
+    "    credential_dir=\"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}\"",
+    "    mkdir -p \"$credential_dir\"",
+    "    printf '%s' \"$token\" > \"$credential_dir/github-token.tmp.$$\"",
+    "    mv -f \"$credential_dir/github-token.tmp.$$\" \"$credential_dir/github-token\"",
+    "  fi",
+    "}",
+    "seed_umask=\"$(umask)\"",
+    "umask 077",
+    "write_git_provider_token github \"${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}\"",
+    "write_git_provider_token gitlab \"${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}\"",
+    "write_git_provider_token azure_devops \"${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}\"",
+    "umask \"$seed_umask\"",
+    "git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"",
+    "mkdir -p \"$(dirname \"$git_askpass\")\"",
+    "cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
+    "#!/usr/bin/env sh",
+    "provider_for_prompt() {",
+    "  case \"$1\" in",
+    "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
+    "    *gitlab*) printf '%s\\n' gitlab ;;",
+    "    *dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
+    "    *) printf '%s\\n' github ;;",
+    "  esac",
+    "}",
+    "token_file_for_provider() {",
+    "  case \"$1\" in",
+    "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
+    "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$1-token\" ;;",
+    "  esac",
+    "}",
+    "username_for_provider() {",
+    "  case \"$1\" in",
+    "    github) printf '%s\\n' \"x-access-token\" ;;",
+    "    gitlab) printf '%s\\n' \"oauth2\" ;;",
+    "    azure_devops) printf '%s\\n' \"opengeni\" ;;",
+    "    *) printf '\\n' ;;",
+    "  esac",
+    "}",
+    "provider=\"$(provider_for_prompt \"$1\")\"",
+    "case \"$1\" in",
+    "  *Username*) username_for_provider \"$provider\" ;;",
+    "  *Password*) cat \"$(token_file_for_provider \"$provider\")\" 2>/dev/null || printf '\\n' ;;",
+    "  *) printf '\\n' ;;",
+    "esac",
+    "ASKPASS_EOF",
+    "chmod 0755 \"$git_askpass.tmp.$$\"",
+    "mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"",
+    "wrapper_dir=\"${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}\"",
+    "mkdir -p \"$wrapper_dir\"",
+    "for opengeni_git_cli_tool in gh glab az; do",
+    "  wrapper=\"$wrapper_dir/$opengeni_git_cli_tool\"",
+    "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
+    "#!/usr/bin/env sh",
+    "set -eu",
+    "tool=\"${0##*/}\"",
+    "case \"$tool\" in",
+    "  gh) provider=github; token_env=GH_TOKEN ;;",
+    "  glab) provider=gitlab; token_env=GITLAB_TOKEN ;;",
+    "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
+    "  *) provider=; token_env= ;;",
+    "esac",
+    "if [ -n \"$provider\" ]; then",
+    "  case \"$provider\" in",
+    "    github) token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
+    "    *) token_file=\"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
+    "  esac",
+    "  if [ -f \"$token_file\" ]; then",
+    "    token=\"$(cat \"$token_file\" 2>/dev/null || true)\"",
+    "    if [ -n \"$token\" ]; then",
+    "      case \"$token_env\" in",
+    "        GH_TOKEN) export GH_TOKEN=\"$token\" ;;",
+    "        GITLAB_TOKEN) export GITLAB_TOKEN=\"$token\" ;;",
+    "        AZURE_DEVOPS_EXT_PAT) export AZURE_DEVOPS_EXT_PAT=\"$token\" ;;",
+    "      esac",
+    "    fi",
+    "  fi",
+    "fi",
+    "self_real=\"$(readlink -f \"$0\" 2>/dev/null || printf '%s\\n' \"$0\")\"",
+    "old_ifs=\"$IFS\"",
+    "IFS=:",
+    "for dir in $PATH; do",
+    "  [ -n \"$dir\" ] || dir=.",
+    "  candidate=\"$dir/$tool\"",
+    "  [ -x \"$candidate\" ] || continue",
+    "  candidate_real=\"$(readlink -f \"$candidate\" 2>/dev/null || printf '%s\\n' \"$candidate\")\"",
+    "  [ \"$candidate_real\" = \"$self_real\" ] && continue",
+    "  IFS=\"$old_ifs\"",
+    "  exec \"$candidate\" \"$@\"",
+    "done",
+    "IFS=\"$old_ifs\"",
+    "printf '%s\\n' \"$tool: real command not found on PATH\" >&2",
+    "exit 127",
+    "CLI_WRAPPER_EOF",
+    "  chmod 0755 \"$wrapper.tmp.$$\"",
+    "  mv -f \"$wrapper.tmp.$$\" \"$wrapper\"",
+    "done",
+  ];
 }
 
 export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "repository" }>[]): string {
@@ -3594,52 +3750,7 @@ export function repositoryCloneCommand(resources: Extract<ResourceRef, { kind: "
     "set -eu",
     "export HOME=\"${HOME:-/workspace}\"",
     "export GIT_TERMINAL_PROMPT=\"${GIT_TERMINAL_PROMPT:-0}\"",
-    // TOKEN-BROKER (B1/B2): seed the run-scoped GitHub token into the STABLE token FILE
-    // AND provision the git-askpass helper into the box AT SETUP (runtime) BEFORE any
-    // clone runs, so GIT_ASKPASS points at a per-box, user-writable script that reads
-    // that file for the fetch below. Provisioning the askpass here (rather than relying
-    // on a baked image script at /usr/local/bin/opengeni-git-askpass) removes the
-    // image-rebuild rollout gate: the askpass is correct on ANY box image, including
-    // pre-existing warm boxes on their next turn's clone hook, and no product image has
-    // to carry it. The seed rides the per-exec env (OPENGENI_GIT_TOKEN_SEED) — NEVER the
-    // box/agent manifest (validateNoEnvironmentDelta must not see a rotating value), so
-    // this whole block is a no-op when the seed is absent (e.g. the selfhosted path,
-    // which uses its own git creds). The token file lives at $OPENGENI_GIT_TOKEN_FILE
-    // (stable, from the shared base) with a $HOME/.opengeni/git-token fallback.
-    // $GIT_ASKPASS is on the box manifest env (set by
-    // sandboxEnvironmentForRun to $HOME/.opengeni/askpass), so it is available to this
-    // exec; the askpass script we write is byte-identical to docker/opengeni-git-askpass
-    // and is written via a QUOTED heredoc (<<'ASKPASS_EOF') so NOTHING inside it expands
-    // ($1, $HOME, ${OPENGENI_GIT_TOKEN_FILE:-...}, and the literal \n in printf all land
-    // verbatim), then chmod 0755 so git can exec it.
-    //
-    // ATOMIC REWRITE: this block now re-runs at the start of EVERY turn on a warm box
-    // that other turn holders may be actively using — an in-flight `git fetch` from a
-    // concurrent turn can invoke the askpass (which cats the token file) at any moment.
-    // Both files are therefore written to a pid-suffixed temp under umask 077 and
-    // renamed into place: rename is atomic, concurrent readers keep the old inode, and
-    // the token is never observable world-readable (no post-hoc chmod window).
-    "if [ -n \"${OPENGENI_GIT_TOKEN_SEED:-}\" ]; then",
-    "  seed_umask=\"$(umask)\"",
-    "  umask 077",
-    "  git_token_file=\"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\"",
-    "  mkdir -p \"$(dirname \"$git_token_file\")\"",
-    "  printf '%s' \"$OPENGENI_GIT_TOKEN_SEED\" > \"$git_token_file.tmp.$$\"",
-    "  mv -f \"$git_token_file.tmp.$$\" \"$git_token_file\"",
-    "  git_askpass=\"${GIT_ASKPASS:-$HOME/.opengeni/askpass}\"",
-    "  mkdir -p \"$(dirname \"$git_askpass\")\"",
-    "  cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
-    "#!/usr/bin/env sh",
-    "case \"$1\" in",
-    "  *Username*) printf '%s\\n' \"x-access-token\" ;;",
-    "  *Password*) cat \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" 2>/dev/null || printf '\\n' ;;",
-    "  *) printf '\\n' ;;",
-    "esac",
-    "ASKPASS_EOF",
-    "  chmod 0755 \"$git_askpass.tmp.$$\"",
-    "  mv -f \"$git_askpass.tmp.$$\" \"$git_askpass\"",
-    "  umask \"$seed_umask\"",
-    "fi",
+    ...gitCredentialHelperCommandLines(),
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
     "    return 0",
@@ -3796,17 +3907,21 @@ export async function runRepositoryCloneHook(
   const payload = { name: "repository-clone", repositoryCount: resources.length };
   await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
   try {
-    // TOKEN-BROKER (B1): thread the run-scoped GitHub token PER-EXEC, never on the
-    // manifest. The SDK's ExecCommandArgs has no `environment` field (exec inherits
-    // the box's manifest env), so we can't hand the seed through an exec option — and
-    // we MUST NOT put it on the manifest (validateNoEnvironmentDelta would see a
-    // rotating value). We therefore inline it as an ephemeral `export` prefix on THIS
-    // exec's command text only: it lives in the command, not the box/agent manifest,
-    // and never persists. The clone command's gated seed block then writes it to the
-    // token FILE before the fetch, so GIT_ASKPASS reads it. Absent seed (e.g. the
-    // selfhosted path) -> no prefix, the clone runs byte-for-byte as before.
-    const command = context.gitTokenSeed
-      ? `export OPENGENI_GIT_TOKEN_SEED=${shellQuote(context.gitTokenSeed)}\n${repositoryCloneCommand(resources)}`
+    // TOKEN-BROKER (B1): thread run-scoped provider tokens PER-EXEC, never on
+    // the manifest. The SDK's ExecCommandArgs has no `environment` field (exec
+    // inherits the box's manifest env), so we can't hand seeds through an exec
+    // option — and we MUST NOT put them on the manifest (validateNoEnvironmentDelta
+    // would see rotating values). We inline ephemeral `export` prefixes on THIS
+    // exec's command text only. The clone command writes them to provider token
+    // FILES before fetch/CLI use. Absent seeds -> no prefix; helper wrappers still
+    // install and passthrough cleanly.
+    const gitTokenSeeds = {
+      ...(context.gitTokenSeeds ?? {}),
+      ...(context.gitTokenSeed ? { github: context.gitTokenSeed } : {}),
+    } satisfies GitTokenSeeds;
+    const seedPrefix = gitTokenSeedExportPrefix(gitTokenSeeds);
+    const command = seedPrefix
+      ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
       : repositoryCloneCommand(resources);
     if (session.exec) {
       const result = await session.exec({

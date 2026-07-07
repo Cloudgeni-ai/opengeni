@@ -19,7 +19,7 @@
 // lease's recorded data_plane_url (null until P4 mints it).
 
 import { createHash } from "node:crypto";
-import { applyGitAuthPointerEnvironment, hasGitHubRepositorySelection, resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
+import { applyGitAuthPointerEnvironment, hasGitCredentialRepositorySelection, hasGitHubRepositorySelection, resolveStreamTokenSecret, stableSandboxEnvironmentForRun } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import { githubAppBotIdentity } from "@opengeni/github";
 import { type Session, type StreamUrlRotatedPayload } from "@opengeni/contracts";
@@ -137,8 +137,11 @@ export async function sessionAttachEnvironment(
     ? { ...services.settings, sandboxBackend: session.sandboxBackend }
     : services.settings;
   const environment = stableSandboxEnvironmentForRun(settingsForSession, workspaceEnvironment?.values ?? {}, { workspaceId });
-  if (hasGitHubRepositorySelection(session.resources)) {
-    applyGitAuthPointerEnvironment(environment, githubAppBotIdentity(services.settings));
+  if (hasGitCredentialRepositorySelection(session.resources)) {
+    applyGitAuthPointerEnvironment(
+      environment,
+      hasGitHubRepositorySelection(session.resources) ? githubAppBotIdentity(services.settings) : null,
+    );
   }
   return environment;
 }
