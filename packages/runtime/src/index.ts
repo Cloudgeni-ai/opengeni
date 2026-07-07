@@ -807,6 +807,10 @@ export type BuildAgentOptions = {
   activeSandboxBackend?: Settings["sandboxBackend"];
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
+  // Workspace Memory V1 working-set block, resolved by the worker per turn.
+  // Composed after the workspace persona/CORE/toolspace substrate and before
+  // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
+  workspaceMemory?: string;
   workspaceEnvironment?: WorkspaceEnvironmentContext;
   // TOKEN-BROKER (B1): the run-scoped GitHub App installation token, minted ONCE
   // per turn by the worker (sandboxEnvironmentForRun's `gitToken`). Threaded here
@@ -939,6 +943,18 @@ export function appendSessionInstructions(composed: string, sessionInstructions?
 }
 
 /**
+ * Appends the workspace memory working-set block to the already-composed
+ * (workspace + CORE + generic substrate) instructions, joined by " ". The
+ * memory slice is workspace-ground and intentionally lands before
+ * per-session instructions. An absent/blank value is a no-op that returns the
+ * composed string byte-for-byte.
+ */
+export function appendWorkspaceMemory(composed: string, workspaceMemory?: string): string {
+  const trimmed = workspaceMemory?.trim();
+  return trimmed ? `${composed} ${trimmed}` : composed;
+}
+
+/**
  * Appends the generic programmatic-tool-calling (toolspace) directive to the
  * composed workspace + CORE instructions, joined by " ". This is GENERIC
  * substrate prompting — the same text for every host, never per-host copy.
@@ -1054,16 +1070,21 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
     //      when a toolspace token was minted for this turn (feature enabled + a
     //      per-turn seed — the mint gate, which includes selfhosted turns since
     //      they now receive the token too) — appendToolspaceInstructions,
-    //   3. + the per-session persona instructions (session-specific, so it
+    //   3. + workspace memory working set, ONLY when the workspace setting is on
+    //      and the worker resolved a nonblank block — appendWorkspaceMemory,
+    //   4. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   4. + the one-shot genesis title directive (genesis turn only).
-    // With no toolspace token, no session instructions, and no genesis hint this
-    // is byte-identical to the historical composed instructions.
+    //   5. + the one-shot genesis title directive (genesis turn only).
+    // With no toolspace token, no workspace memory, no session instructions, and
+    // no genesis hint this is byte-identical to the historical composed instructions.
     instructions: appendGenesisTitleDirective(
       appendSessionInstructions(
-        appendToolspaceInstructions(
-          composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
-          settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+        appendWorkspaceMemory(
+          appendToolspaceInstructions(
+            composeAgentInstructions(options.instructionsTemplate ?? settings.agentInstructionsTemplate, options.workspaceEnvironment),
+            settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+          ),
+          options.workspaceMemory,
         ),
         options.sessionInstructions,
       ),

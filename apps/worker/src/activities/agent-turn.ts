@@ -19,6 +19,7 @@ import {
   recordSessionActiveCodexCredential,
   recordCodexAccountUsage,
   recordCodexAccountConnectors,
+  resolveWorkspaceMemoryBlock,
   setActiveCodexCredential,
   setCodexCredentialExhausted,
   countConsecutiveReactiveRotations,
@@ -927,6 +928,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // runtime falls back to runSettings.agentInstructionsTemplate (the
       // deployment default, byte-identical to the historical preamble).
       const workspaceAgentInstructions = await resolveWorkspaceAgentInstructions(db, input.workspaceId);
+      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
       const baseRunSettings = {
         ...settingsWithPackSandboxImage(capabilitySettings, packRuntime.sandboxImage),
         openaiModel: turn.model,
@@ -1455,6 +1457,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : { computerToolMode: computerToolModeForTurn(null) }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
+        ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.

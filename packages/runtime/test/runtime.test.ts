@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, appendWorkspaceMemory, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -775,6 +775,32 @@ describe("runtime event normalization", () => {
     expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("absent workspace memory is byte-identical to today's composition", () => {
+    expect(appendWorkspaceMemory("base")).toBe("base");
+    expect(appendWorkspaceMemory("base", "   ")).toBe("base");
+
+    const base = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+    const withUndefined = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: undefined });
+    const withBlank = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], { workspaceMemory: "   " });
+    expect(withUndefined.instructions).toBe(base.instructions);
+    expect(withBlank.instructions).toBe(base.instructions);
+    expect(base.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
+  });
+
+  test("workspace memory composes after workspace persona + CORE and before per-session instructions", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+    });
+
+    expect(agent.instructions).toBe(`WORKSPACE PERSONA ${coreInstructions().join(" ")} ${workspaceMemory} SESSION RULE: always answer in French.`);
+    expect(agent.instructions.indexOf(workspaceMemory))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
   test("the genesis title directive stays LAST, after per-session instructions", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
@@ -834,6 +860,25 @@ describe("runtime event normalization", () => {
       `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} SESSION RULE: always answer in French.`,
     );
     expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
+  });
+
+  test("workspace memory composes after the toolspace directive and before the per-session slice", () => {
+    const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
+    const workspaceMemory = "## Workspace memory\n- [abcd1234] Prefer Terraform over Pulumi.";
+    const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+      instructionsTemplate: template,
+      workspaceMemory,
+      sessionInstructions: "SESSION RULE: always answer in French.",
+      toolspaceTokenSeed: "ogd_seed",
+    });
+
+    expect(agent.instructions).toBe(
+      `WORKSPACE PERSONA ${coreInstructions().join(" ")} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE} ${workspaceMemory} SESSION RULE: always answer in French.`,
+    );
+    expect(agent.instructions.indexOf(TOOLSPACE_PROGRAMMATIC_DIRECTIVE))
+      .toBeLessThan(agent.instructions.indexOf(workspaceMemory));
+    expect(agent.instructions.indexOf(workspaceMemory))
       .toBeLessThan(agent.instructions.indexOf("SESSION RULE"));
   });
 
