@@ -584,6 +584,49 @@ export function completedTurnEvents(): SessionEvent[] {
   return log.events;
 }
 
+/**
+ * A turn paused on a lapsed connection: a Linear tool call trips the broker's
+ * reauth path (`tool.auth_needed`), and a second provider needs wider scope.
+ * Each projects to a clean inline reconnect card — no `turn.completed`, because
+ * the turn is genuinely waiting on the user.
+ */
+export function authNeededEvents(): SessionEvent[] {
+  const log = new EventLog();
+  const turn = "turn-reconnect";
+  log.push("user.message", { text: "File a Linear issue for the flaky test, then log the same in Notion." });
+  log.push(
+    "agent.reasoning.delta",
+    { text: "I'll create the Linear issue first, then mirror it into the Notion database." },
+    turn,
+  );
+  log.push(
+    "tool.auth_needed",
+    {
+      serverId: "mcp-linear",
+      toolName: "create_issue",
+      providerDomain: "linear.app",
+      connectionId: "conn-linear-1",
+      reason: "refresh_failed",
+      scopes: ["issues:write"],
+      resource: "https://mcp.linear.app/sse",
+    },
+    turn,
+  );
+  log.push(
+    "tool.auth_needed",
+    {
+      serverId: "mcp-notion",
+      toolName: "create_page",
+      providerDomain: "notion.so",
+      connectionId: "conn-notion-1",
+      reason: "insufficient_scope",
+      scopes: ["databases.write"],
+    },
+    turn,
+  );
+  return log.events;
+}
+
 export function failedTurnEvents(): SessionEvent[] {
   const log = new EventLog();
   const turn = "turn-fail";

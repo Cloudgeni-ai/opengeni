@@ -33,6 +33,7 @@ import {
   createInputFromCatalogItem,
   filterCapabilityCatalogItems,
   isMissingCredentialsError,
+  normalizeProviderDomain,
   oauthResumeAction,
   registryResultsForQuery,
   resolveSheetItem,
@@ -348,6 +349,31 @@ export function CapabilitiesRoute({ workspaceId, initialSection }: { workspaceId
       } else {
         toast.error("Connection failed", { description: reason ?? undefined });
       }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, items]);
+
+  // Deep-link from an in-session reconnect card for an api-key connection:
+  // ?reconnect_domain=<domain> opens the connect sheet for the enabled item on
+  // that provider so the credential can be re-entered. Runs after the catalog
+  // loads (it resolves the item by connectionRef domain); a miss just seeds the
+  // search so the user can find it. Stripped from the URL after one read.
+  const reconnectHandled = useRef(false);
+  useEffect(() => {
+    if (reconnectHandled.current || loading) return;
+    const params = new URLSearchParams(window.location.search);
+    const domain = params.get("reconnect_domain");
+    if (!domain) return;
+    reconnectHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    const target = normalizeProviderDomain(domain);
+    const item = items.find(
+      (candidate) => candidate.enabled && candidate.connectionRef && normalizeProviderDomain(candidate.connectionRef.providerDomain) === target,
+    );
+    if (item) {
+      setSelected({ id: item.id, registry: false, snapshotFallback: false, snapshot: item });
+    } else {
+      setQuery(domain);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items]);

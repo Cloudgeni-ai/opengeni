@@ -120,6 +120,35 @@ export type NoticeItem = {
   occurredAt: string;
 };
 
+/**
+ * A tool call hit a connection whose credential lapsed — the broker asked the
+ * user to reconnect the provider before the turn can continue. Carries the
+ * structured `tool.auth_needed` payload so the renderer can draw a clean inline
+ * reconnect affordance (provider logo + one human line + a Reconnect button)
+ * and the app can start the right recovery flow (OAuth reconnect for the
+ * surviving connection, or credential re-entry for an api-key one). The `reason`
+ * shapes the human copy but is never shown raw.
+ */
+export type AuthNeededItem = {
+  kind: "auth-needed";
+  id: string;
+  turnId: string | null;
+  /** The connection's registrable domain, e.g. "linear.app". */
+  providerDomain: string;
+  /** The lapsed connection to reconnect, when the row survived. */
+  connectionId: string | null;
+  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed" | null;
+  /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
+  scopes: string[];
+  /** The OAuth `resource` (RFC 8707) the reconnect should target, when supplied. */
+  resource: string | null;
+  /** The tool whose call triggered the reauth, for context. */
+  toolName: string | null;
+  /** A pre-minted authorization URL, when the broker already produced one. */
+  authorizationUrl: string | null;
+  occurredAt: string;
+};
+
 export type TurnOutcome = "complete" | "failed" | "cancelled";
 
 export type TurnEndItem = {
@@ -141,6 +170,7 @@ export type TimelineItem =
   | SessionStatusItem
   | GoalItem
   | NoticeItem
+  | AuthNeededItem
   | TurnEndItem;
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox). */

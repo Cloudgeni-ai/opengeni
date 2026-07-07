@@ -3,6 +3,7 @@ import { CREDIT_EXHAUSTION_MESSAGE, humanizeFailureReason, isCreditExhaustion, t
 import type {
   AgentMessageItem,
   ActivityItem,
+  AuthNeededItem,
   GoalItem,
   SandboxItem,
   SessionStatusItem,
@@ -322,14 +323,22 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "tool.auth_needed": {
+        // Keep the whole structured payload — the renderer turns it into a clean
+        // inline reconnect card, and the app starts the recovery flow off the
+        // connectionId/resource. Losing it to a plain-text notice was the ugly
+        // "linear.app needs to be reconnected." line users complained about.
         closeStreamingTail();
-        const authorizationUrl = typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null;
         items.push({
-          kind: "notice",
+          kind: "auth-needed",
           id: event.id,
-          tone: "waiting",
-          text: authNeededNoticeText(payload),
-          ...(authorizationUrl ? { action: { label: "Connect", url: authorizationUrl } } : {}),
+          turnId,
+          providerDomain: typeof payload.providerDomain === "string" ? payload.providerDomain : "",
+          connectionId: typeof payload.connectionId === "string" ? payload.connectionId : null,
+          reason: authNeededReason(payload.reason),
+          scopes: stringList(payload.scopes),
+          resource: typeof payload.resource === "string" ? payload.resource : null,
+          toolName: typeof payload.toolName === "string" ? payload.toolName : null,
+          authorizationUrl: typeof payload.authorizationUrl === "string" ? payload.authorizationUrl : null,
           occurredAt: event.occurredAt,
         });
         break;
@@ -885,20 +894,14 @@ function goalText(payload: Record<string, unknown>): string | null {
   return null;
 }
 
-function authNeededNoticeText(payload: Record<string, unknown>): string {
-  const provider =
-    typeof payload.providerDomain === "string" && payload.providerDomain.trim().length > 0 ? payload.providerDomain.trim() : "This service";
-  const scopes = Array.isArray(payload.scopes)
-    ? payload.scopes.filter((scope): scope is string => typeof scope === "string" && scope.trim().length > 0)
-    : [];
+const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]);
 
-  if (payload.reason === "insufficient_scope") {
-    return scopes.length > 0 ? `${provider} needs additional access (${scopes.join(", ")}).` : `${provider} needs additional access.`;
-  }
-  if (payload.reason === "expired" || payload.reason === "refresh_failed") {
-    return `${provider} needs to be reconnected.`;
-  }
-  return `${provider} needs a connection.`;
+function authNeededReason(value: unknown): AuthNeededItem["reason"] {
+  return typeof value === "string" && AUTH_NEEDED_REASONS.has(value) ? (value as AuthNeededItem["reason"]) : null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0) : [];
 }
 
 function reasoningText(payload: unknown): string {

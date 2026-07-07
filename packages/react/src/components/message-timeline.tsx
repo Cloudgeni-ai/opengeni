@@ -6,6 +6,7 @@ import {
   PauseIcon,
   PencilLineIcon,
   PlayIcon,
+  RefreshCwIcon,
   TargetIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import {
   LightboxProvider,
   type ActivityItem,
   type AgentMessageItem,
+  type AuthNeededItem,
   type GoalItem,
   type NoticeItem,
   type TimelineGroup,
@@ -45,6 +47,14 @@ export type MessageTimelineProps = {
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Drill into a spawned worker session. */
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  /**
+   * Start the reconnect flow when a tool needs its connection reauthorized. The
+   * app supplies this (it owns the SDK client + workspace): it typically kicks
+   * off `startConnectionOAuth` and redirects, or routes to credential entry.
+   * Rejecting surfaces a calm inline error on the card; the library never draws
+   * a Reconnect button without a handler to run it.
+   */
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   /**
    * The tool-renderer registry that resolves how each tool call is drawn.
    * Defaults to {@link defaultToolRegistry}; pass a registry from
@@ -75,6 +85,7 @@ export function MessageTimeline({
   status,
   renderMessageText,
   onOpenSession,
+  onReconnect,
   toolRegistry = defaultToolRegistry,
   autoFollow = true,
   hasOlder = false,
@@ -285,6 +296,7 @@ export function MessageTimeline({
               group={group}
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
+              onReconnect={onReconnect}
               toolRegistry={toolRegistry}
               foldLiveCluster={isAgentProgress(groups[index + 1])}
             />
@@ -349,6 +361,7 @@ function TimelineGroupView({
   group,
   renderMessageText,
   onOpenSession,
+  onReconnect,
   toolRegistry,
   insideTurn = false,
   foldLiveCluster = false,
@@ -356,6 +369,7 @@ function TimelineGroupView({
   group: TimelineGroup;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   toolRegistry: ToolRegistry;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -399,6 +413,7 @@ function TimelineGroupView({
                 group={child}
                 renderMessageText={renderMessageText}
                 onOpenSession={onOpenSession}
+                onReconnect={onReconnect}
                 toolRegistry={toolRegistry}
                 insideTurn
               />
@@ -408,7 +423,7 @@ function TimelineGroupView({
       );
     }
     case "item":
-      return <TimelineRow item={group.item} renderMessageText={renderMessageText} />;
+      return <TimelineRow item={group.item} renderMessageText={renderMessageText} onReconnect={onReconnect} />;
   }
 }
 
@@ -478,9 +493,11 @@ function durationBetween(startedAt: string, endedAt: string): number | undefined
 export function TimelineRow({
   item,
   renderMessageText,
+  onReconnect,
 }: {
   item: TimelineItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
@@ -493,6 +510,8 @@ export function TimelineRow({
       return <GoalRow item={item} />;
     case "notice":
       return <NoticeRow item={item} />;
+    case "auth-needed":
+      return <AuthNeededRow item={item} onReconnect={onReconnect} />;
     default:
       return null;
   }
@@ -639,4 +658,137 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       ) : null}
     </div>
   );
+}
+
+/**
+ * The inline reconnect card: a lapsed connection surfaces as a calm, tappable
+ * affordance — provider logo, one human line, one primary Reconnect button —
+ * instead of a raw "linear.app needs to be reconnected." string. The `reason`
+ * only shapes the helper copy; no domain or enum code is shown as a label.
+ * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
+ * it, a pre-minted authorization link is offered, or the card stays informative.
+ */
+function AuthNeededRow({
+  item,
+  onReconnect,
+}: {
+  item: AuthNeededItem;
+  onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+}) {
+  const enter = useEntranceAnimation();
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const provider = providerLabel(item.providerDomain);
+
+  const start = async () => {
+    if (!onReconnect || busy) {
+      return;
+    }
+    setBusy(true);
+    setFailed(false);
+    try {
+      // On success the app redirects to consent (or routes to credential entry),
+      // so this row unmounts; a resolve without navigation just relaxes the button.
+      await onReconnect(item);
+      setBusy(false);
+    } catch {
+      setFailed(true);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
+      <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <AuthProviderLogo domain={item.providerDomain} label={provider} />
+          <div className="min-w-0">
+            <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
+            <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
+          </div>
+        </div>
+        {onReconnect ? (
+          <button
+            type="button"
+            onClick={() => void start()}
+            disabled={busy}
+            className={cn(
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
+            )}
+          >
+            <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
+            {busy ? "Reconnecting…" : "Reconnect"}
+          </button>
+        ) : item.authorizationUrl ? (
+          <a
+            href={item.authorizationUrl}
+            rel="noreferrer"
+            target="_blank"
+            className={cn(
+              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-sm font-medium text-og-accent-fg sm:w-auto",
+              "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
+            )}
+          >
+            <RefreshCwIcon className="size-3.5" aria-hidden />
+            Reconnect
+          </a>
+        ) : null}
+      </div>
+      {failed ? (
+        <p className="px-1 text-og-xs text-og-status-failed">Couldn't start reconnecting {provider}. Try again.</p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The provider's favicon in a rounded tile, with a calm letter monogram fallback
+ * when there's no domain or the icon fails to load — so the card never shows a
+ * broken-image glyph. Favicons come from a public icon service keyed on the
+ * registrable domain; a strict-CSP host simply gets the monogram.
+ */
+function AuthProviderLogo({ domain, label }: { domain: string; label: string }) {
+  const [failed, setFailed] = useState(false);
+  const host = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
+  const src = host && !failed ? `https://icons.duckduckgo.com/ip3/${host}.ico` : null;
+  return (
+    <span
+      className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-sm font-semibold text-og-fg-muted"
+      aria-hidden
+    >
+      {src ? (
+        <img src={src} alt="" loading="lazy" decoding="async" className="size-full object-contain p-1.5" onError={() => setFailed(true)} />
+      ) : (
+        <span>{label.charAt(0).toUpperCase() || "?"}</span>
+      )}
+    </span>
+  );
+}
+
+/** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
+    name for the provider — never the raw domain shown as a label. */
+function providerLabel(domain: string): string {
+  const host = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
+  const first = host.split(".")[0] ?? host;
+  if (!first) {
+    return "this service";
+  }
+  return first.charAt(0).toUpperCase() + first.slice(1);
+}
+
+/** A calm, human helper line per reauth reason — the `reason` informs the copy
+    but is never rendered as a raw enum/code. */
+function authReasonLine(reason: AuthNeededItem["reason"]): string {
+  switch (reason) {
+    case "insufficient_scope":
+      return "It needs additional access to continue.";
+    case "missing_connection":
+      return "It isn't connected yet.";
+    case "expired":
+    case "refresh_failed":
+      return "Its access expired.";
+    default:
+      return "Its connection needs attention.";
+  }
 }

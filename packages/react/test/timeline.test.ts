@@ -666,22 +666,46 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "notice", tone: "waiting" });
   });
 
-  test("tool.auth_needed becomes a waiting notice with a connect action", () => {
+  test("tool.auth_needed becomes a structured auth-needed item carrying the full payload", () => {
     reset();
     const items = buildTimeline([
       event("tool.auth_needed", {
+        serverId: "mcp-linear",
+        toolName: "create_issue",
         providerDomain: "linear.app",
-        reason: "insufficient_scope",
+        connectionId: "conn-1",
+        reason: "refresh_failed",
         scopes: ["issues:write"],
+        resource: "https://mcp.linear.app/sse",
         authorizationUrl: "https://linear.app/oauth/authorize",
-      }),
+      }, { turnId: "turn-1" }),
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
-      kind: "notice",
-      tone: "waiting",
-      text: "linear.app needs additional access (issues:write).",
-      action: { label: "Connect", url: "https://linear.app/oauth/authorize" },
+      kind: "auth-needed",
+      turnId: "turn-1",
+      providerDomain: "linear.app",
+      connectionId: "conn-1",
+      reason: "refresh_failed",
+      scopes: ["issues:write"],
+      resource: "https://mcp.linear.app/sse",
+      toolName: "create_issue",
+      authorizationUrl: "https://linear.app/oauth/authorize",
+    });
+  });
+
+  test("tool.auth_needed tolerates a sparse payload and drops an unknown reason", () => {
+    reset();
+    const items = buildTimeline([event("tool.auth_needed", { providerDomain: "supabase.com", reason: "who_knows" })]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      providerDomain: "supabase.com",
+      connectionId: null,
+      reason: null,
+      scopes: [],
+      resource: null,
+      toolName: null,
+      authorizationUrl: null,
     });
   });
 

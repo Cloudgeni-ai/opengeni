@@ -13,6 +13,7 @@ import {
   type TimelineGroup,
 } from "../src/index";
 import {
+  authNeededEvents,
   cancelledTurnEvents,
   completedTurnEvents,
   failedTurnEvents,
@@ -139,6 +140,13 @@ function Harness() {
 
             <Section title="Failed turn — folds, but the error is never hidden" hint="Failed turns start open so the error and folded context stay visible.">
               <MessageTimeline events={failedTurnEvents()} className="max-h-none" />
+            </Section>
+
+            <Section
+              title="Reconnect — a lapsed connection, inline"
+              hint="tool.auth_needed → a clean card: provider logo, one human line, a Reconnect button."
+            >
+              <MessageTimeline events={authNeededEvents()} onReconnect={() => new Promise(() => {})} className="max-h-none" />
             </Section>
 
             <Section title="Interrupted turn — cancelled mid-run">

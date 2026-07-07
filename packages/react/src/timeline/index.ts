@@ -22,6 +22,7 @@ export { buildTimeline, creditExhaustedFromEvents, extractSessionRef, groupTimel
 export type {
   ActivityItem,
   AgentMessageItem,
+  AuthNeededItem,
   GoalItem,
   NoticeItem,
   ReasoningItem,

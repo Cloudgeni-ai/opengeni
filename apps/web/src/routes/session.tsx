@@ -13,13 +13,14 @@ import {
   useSessionEvents,
   useTurnQueue,
   type AgentMessageItem,
+  type AuthNeededItem,
   type PendingApproval,
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MessagesSquareIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -49,7 +50,7 @@ import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
-import type { Session, SessionEvent } from "@/types";
+import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; sessionId: string }) {
   const context = useAppContext();
@@ -141,6 +142,55 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     }
   }, [loadError]);
 
+  // A reconnect OAuth round-trip lands back here (the reconnect card set
+  // returnPath to this session). The connection is refreshed server-side, so we
+  // just acknowledge it and strip the params — the user retries their message.
+  const oauthReturnHandled = useRef(false);
+  useEffect(() => {
+    if (oauthReturnHandled.current) {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const outcome = params.get("integration_oauth");
+    if (!outcome) {
+      return;
+    }
+    oauthReturnHandled.current = true;
+    window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "success") {
+      toast.success("Reconnected", { description: "Send your message again to continue." });
+    } else {
+      toast.error("Reconnect failed", { description: params.get("reason") ?? undefined });
+    }
+  }, []);
+
+  // Start the recovery flow for a lapsed connection surfaced inline in the
+  // timeline. OAuth connections reconnect in place (reuse the connectionId) and
+  // return to this session; api-key ones can't OAuth, so hand off to credential
+  // re-entry on the capabilities sheet for that provider. Throwing bubbles a
+  // calm inline error on the reconnect card.
+  const onReconnect = useCallback(async (item: AuthNeededItem) => {
+    const connections = await context.client.listConnections(workspaceId).catch(() => [] as ConnectionMetadata[]);
+    const connection = item.connectionId ? connections.find((candidate) => candidate.id === item.connectionId) ?? null : null;
+    if (connection?.kind === "api_key") {
+      window.location.assign(
+        `/workspaces/${encodeURIComponent(workspaceId)}/capabilities?reconnect_domain=${encodeURIComponent(item.providerDomain)}`,
+      );
+      return;
+    }
+    const returnPath = `${window.location.pathname}${window.location.search}`;
+    const response = await context.client.startConnectionOAuth(workspaceId, {
+      providerDomain: item.providerDomain,
+      ...(item.connectionId ? { connectionId: item.connectionId } : {}),
+      ...(item.resource ? { resource: item.resource } : {}),
+      returnPath,
+    });
+    if (!response.authorizationUrl) {
+      throw new Error("The provider did not return an authorization link.");
+    }
+    window.location.assign(response.authorizationUrl);
+  }, [context.client, workspaceId]);
+
   if (loading || !session) {
     if (loadError) {
       return isApiErrorStatus(loadError, 404) ? (
@@ -177,6 +227,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       onNewSession={() => void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })}
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
+      onReconnect={onReconnect}
     />
   );
 
@@ -287,6 +338,7 @@ function SessionChatPane(props: {
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
+  onReconnect: (item: AuthNeededItem) => void | Promise<void>;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(props.session.workspaceId);
@@ -405,6 +457,7 @@ function SessionChatPane(props: {
               status={props.session.status}
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
+              onReconnect={props.onReconnect}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}
