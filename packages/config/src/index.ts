@@ -544,6 +544,16 @@ const SettingsSchema = z.object({
   // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim. Knob:
   // OPENGENI_SANDBOX_IDLE_GRACE_MS.
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
+  // reaper's drain-persist only protects boxes the reaper itself kills; a box
+  // that dies any other way (Modal's hard creation-time timeout on a session
+  // busy past it, provider OOM/infra death) loses everything since the last
+  // clean drain. While a turn holds the box, the turn heartbeat and turn-end
+  // both take a snapshot when at least this interval has passed since the last
+  // one (same epoch-fenced fold-onto-lease seam as the drain), bounding the
+  // worst-case loss of ANY unclean box death to this window. 0 disables.
+  // Knob: OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS. Default 15min.
+  sandboxSnapshotIntervalMs: z.coerce.number().int().min(0).default(900_000),
   // expires_at refresh window for a held lease (>> the turn 10s heartbeat so a
   // single missed heartbeat never TTL-reaps a live turn). The warming TTL is the
   // window a cold->warming spawner has to commit warm before a reaper resets it.
@@ -1047,6 +1057,7 @@ export function getSettings(): Settings {
     sandboxLeaseReaperPeriodMs: optional("OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS"),
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
+    sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),

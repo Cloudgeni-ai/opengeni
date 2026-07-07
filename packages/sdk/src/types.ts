@@ -465,6 +465,13 @@ export const SESSION_EVENT_TYPES = [
   "session.title_set",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
+  // Sandbox durability observability (mirror of contracts SessionEventType):
+  // box lifecycle + manifest-env drift, attributable from the DB alone.
+  "sandbox.box.created",
+  "sandbox.box.lost",
+  "sandbox.box.terminated",
+  "sandbox.box.snapshot",
+  "sandbox.env.drift",
 ] as const;
 
 export type KnownSessionEventType = (typeof SESSION_EVENT_TYPES)[number];

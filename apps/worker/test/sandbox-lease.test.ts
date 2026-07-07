@@ -35,6 +35,7 @@ import {
   createDb,
   listLiveModalSandboxLeaseAttributions,
   persistDrainSnapshot,
+  persistWarmSnapshot,
   recordWarmingSandboxCreated,
   type Database,
   type DbClient,
@@ -327,6 +328,67 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 999, workspaceArchive: archive2,
     });
     expect(r3.wrote).toBe(false);
+  }, 60_000);
+
+  test("(1b-warm) persistWarmSnapshot folds a MID-SESSION snapshot onto a WARM lease: atomic throttle, epoch fence, liveness guard", async () => {
+    if (!available) return;
+    // The warm sibling of (1b): a turn HOLDS the live box and folds a snapshot
+    // without draining anything (sandbox-file-persistence, mid-session tier).
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 5, expiresInMs: 600_000,
+      instanceId: "box-warm-persist", backend: "modal", resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true } },
+    });
+
+    // First warm persist: folds archive + workspaceArchiveAt; providerState preserved.
+    const archive1 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w1\"}").toString("base64");
+    const r1 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 60_000,
+    });
+    expect(r1.wrote).toBe(true);
+    expect(r1.throttled).toBe(false);
+    expect(r1.priorArchive).toBeNull();
+    const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss1 = (row1!.resume_state as any).sessionState;
+    expect(ss1.workspaceArchive).toBe(archive1);
+    expect(Number.isFinite(Date.parse(ss1.workspaceArchiveAt))).toBe(true);
+    expect(ss1.providerState.sandboxId).toBe("sb-warm");
+
+    // Immediate second persist inside the interval: ATOMIC throttle skips it.
+    const archive2 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w2\"}").toString("base64");
+    const r2 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 60_000,
+    });
+    expect(r2.wrote).toBe(false);
+    expect(r2.throttled).toBe(true);
+
+    // Interval 0 = always write: supersedes and returns the PRIOR for GC.
+    const r3 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 0,
+    });
+    expect(r3.wrote).toBe(true);
+    expect(r3.priorArchive).toBe(archive1);
+
+    // Epoch fence: a stale-epoch persist writes ZERO rows.
+    const r4 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 999, workspaceArchive: archive1, minIntervalMs: 0,
+    });
+    expect(r4.wrote).toBe(false);
+    expect(r4.throttled).toBe(false);
+
+    // Liveness guard: a draining lease is the REAPER's to persist (drain seam),
+    // never the warm path's — zero rows written.
+    await admin`update sandbox_leases set liveness = 'draining', refcount = 0, turn_holders = 0 where sandbox_group_id = ${ids.groupId}`;
+    const r5 = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive1, minIntervalMs: 0,
+    });
+    expect(r5.wrote).toBe(false);
   }, 60_000);
 
   test("(1c) recordWarmingSandboxCreated persists provider id on a warming lease before warm commit", async () => {

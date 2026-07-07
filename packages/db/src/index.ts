@@ -6205,6 +6205,72 @@ export async function persistDrainSnapshot(db: Database, input: {
     });
 }
 
+/**
+ * MID-SESSION /workspace snapshot fold (sandbox-file-persistence). The WARM
+ * sibling of persistDrainSnapshot: a turn that HOLDS the live box folds a fresh
+ * snapshot onto its own lease without draining anything. Guarded by
+ * `liveness='warm' AND lease_epoch=expected` — a drain/re-create that raced in
+ * (different liveness or newer epoch) writes ZERO rows → wrote:false, and the
+ * caller simply skips (the snapshot belonged to a box the lease no longer
+ * tracks). `workspaceArchiveAt` rides the same sessionState merge so the
+ * throttle re-check here is ATOMIC with the write — two concurrent holders
+ * cannot double-snapshot inside one interval.
+ */
+export async function persistWarmSnapshot(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  expectedEpoch: number;
+  /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
+  workspaceArchive: string;
+  /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
+  minIntervalMs: number;
+}): Promise<{ wrote: boolean; throttled: boolean; priorArchive: string | null }> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_at: string | null }>(sql`
+        select
+          resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at
+        from sandbox_leases
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+        for update
+      `);
+      if (guard.length === 0) {
+        return { wrote: false, throttled: false, priorArchive: null };
+      }
+      const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
+      if (
+        input.minIntervalMs > 0
+        && Number.isFinite(priorAtMs)
+        && Date.now() - priorAtMs < input.minIntervalMs
+      ) {
+        return { wrote: false, throttled: true, priorArchive: null };
+      }
+      // Same defensive sessionState rebuild as persistDrainSnapshot (creates
+      // sessionState when absent, preserves its siblings, never throws on a
+      // scalar/legacy resume_state).
+      await scopedDb.execute(sql`
+        update sandbox_leases set
+          resume_state = jsonb_set(
+            case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
+            '{sessionState}',
+            (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
+                  then resume_state -> 'sessionState' else '{}'::jsonb end)
+              || jsonb_build_object(
+                'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
+                'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
+              ),
+            true
+          ),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
+      `);
+      return { wrote: true, throttled: false, priorArchive };
+    });
+}
+
 // §4.9 — non-locking snapshot for the API handshake & health.
 export async function readLease(db: Database, workspaceId: string, sandboxGroupId: string): Promise<LeaseSnapshot | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {

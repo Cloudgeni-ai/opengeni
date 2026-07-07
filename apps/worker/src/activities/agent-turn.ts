@@ -93,7 +93,7 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "./types";
-import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, type ResumedTurnSandbox } from "../sandbox-resume";
+import { resumeBoxForTurn, acquireSelfhostedLeaseForTurn, maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../sandbox-resume";
 import { wrapTurnBoxWithRouting, establishSelfhostedTurnSession, routingEnabled } from "../sandbox-routing";
 import { recordCreditMicros, runtimeMetricsHooksForObservability, turnLifecycleMetricsFor, type TurnOutcome } from "../observability-metrics";
 import { beginRecording, discardRecording, finalizeRecording, type ActiveRecording } from "./recording";
@@ -543,6 +543,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
+    // 10s but a Modal filesystem snapshot can take longer — never overlap two
+    // captures on one box. (The interval throttle itself lives in
+    // maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.)
+    let snapshotInFlight = false;
     // P4.3 on-turn recording: when the desktop tier + recording are enabled and
     // the box is desktop-capable, the turn films the SAME :0 the agent's
     // computer-use drives, finalized to storage in this activity's `finally`
@@ -1213,6 +1218,34 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           })
             .then((result) => recordCreditMicros(observability, "usage", result.costMicros))
             .catch(() => undefined);
+          // MID-SESSION snapshot (sandbox-file-persistence): while the turn holds
+          // the box, fold a fresh /workspace snapshot onto the lease every
+          // sandboxSnapshotIntervalMs, so a box death the reaper never sees
+          // (Modal hard timeout mid-busy, OOM, infra) costs at most one interval
+          // of work — a legit multi-day turn is otherwise completely unprotected
+          // (the reaper only drain-persists IDLE leases). Uses the UN-proxied box
+          // session (setupBoxSession): the routing veneer could swap mid-op and a
+          // selfhosted target has no persistWorkspace anyway. Best-effort +
+          // single-flight; throttling lives in the helper.
+          const snapshotSession = setupBoxSession;
+          if (snapshotSession && !snapshotInFlight) {
+            snapshotInFlight = true;
+            void maybePersistWarmWorkspaceSnapshot(
+              { db, settings },
+              { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId: heartbeatGroupId },
+              snapshotSession,
+              heartbeatEpoch,
+            )
+              .then(async (persisted) => {
+                if (persisted && publish) {
+                  await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "heartbeat" } }]);
+                }
+              })
+              .catch(() => undefined)
+              .finally(() => {
+                snapshotInFlight = false;
+              });
+          }
         }, 10_000);
         if ("unref" in leaseHeartbeatTimer && typeof leaseHeartbeatTimer.unref === "function") {
           leaseHeartbeatTimer.unref();
@@ -2353,6 +2386,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
       if (resolvedSandbox) {
+        // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
+        // turn's finished /workspace onto the lease before releasing the holder,
+        // so the work this turn just produced survives any unclean box death in
+        // the idle window ahead. Throttled by the same interval as the heartbeat
+        // tick (a short turn right after a snapshot skips — bounded-loss contract
+        // is the interval, not per-turn). Best-effort and time-capped by the
+        // helper's own failure discipline; never delays release on failure.
+        if (setupBoxSession && sandboxGroupId) {
+          const persisted = await maybePersistWarmWorkspaceSnapshot(
+            { db, settings },
+            { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId },
+            setupBoxSession,
+            resolvedSandbox.leaseEpoch,
+          );
+          if (persisted && publish) {
+            await publish([{ type: "sandbox.box.snapshot", payload: { trigger: "turn-end" } }]).catch(() => undefined);
+          }
+        }
         await resolvedSandbox.release().catch((releaseError) => {
           console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
         });
