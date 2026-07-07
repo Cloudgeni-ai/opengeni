@@ -517,6 +517,9 @@ export const knowledgeMemories = pgTable("knowledge_memories", {
     .on(table.workspaceId, table.pinned, table.updatedAt)
     .where(sql`${table.status} in ('active', 'approved')`),
   workspaceTextHash: index("knowledge_memories_workspace_text_hash_idx").on(table.workspaceId, table.textHash),
+  workspaceVisibleTextHashUnique: uniqueIndex("knowledge_memories_workspace_visible_text_hash_uq")
+    .on(table.workspaceId, table.textHash)
+    .where(sql`${table.status} in ('active', 'approved') and ${table.textHash} is not null`),
 }));
 
 export const sessionTurns = pgTable("session_turns", {

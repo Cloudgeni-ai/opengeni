@@ -54,6 +54,11 @@ CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_visible_idx"
   WHERE "status" IN ('active', 'approved');
 CREATE INDEX IF NOT EXISTS "knowledge_memories_workspace_text_hash_idx"
   ON "knowledge_memories" ("workspace_id", "text_hash");
+-- Enforce the exact-dedup invariant for the agent-visible set. Proposed and
+-- terminal rows remain outside the constraint because agents cannot act on them.
+CREATE UNIQUE INDEX IF NOT EXISTS "knowledge_memories_workspace_visible_text_hash_uq"
+  ON "knowledge_memories" ("workspace_id", "text_hash")
+  WHERE "status" IN ('active', 'approved') AND "text_hash" IS NOT NULL;
 
 -- Backfill text_hash for pre-existing rows using the same normalization the app
 -- applies at write time: lower(collapse-ws(trim(text))), sha256, hex-encoded.

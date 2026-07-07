@@ -2647,28 +2647,45 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
         updateEmbedding: textChanged || missingEmbedding,
       };
     }
-    const [row] = await scopedDb.update(schema.knowledgeMemories).set({
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.kind !== undefined ? { kind: input.kind } : {}),
-      ...(scope !== undefined ? { scope } : {}),
-      ...(textUpdate !== undefined
-        ? {
-          text: textUpdate.text,
-          textHash: textUpdate.textHash,
-          ...(textUpdate.updateEmbedding ? { embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
-        }
-        : {}),
-      ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
-      ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-      // Re-proposing clears review metadata; an explicit reviewedBy in the same
-      // update still wins via the later spread.
-      ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
-      ...(reviewedBy !== undefined ? { reviewedBy } : {}),
-      ...(reviewStatus ? { reviewedAt: new Date() } : {}),
-      updatedAt: new Date(),
-    }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning();
+    const nextTextHash = textUpdate?.textHash ?? existing.textHash;
+    if (!wasVisible && willBeVisible && nextTextHash) {
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
+      if (duplicate) {
+        throw new Error(visibleTextHashConflictMessage(duplicate));
+      }
+    }
+    let row: typeof schema.knowledgeMemories.$inferSelect | undefined;
+    try {
+      const rows = await scopedDb.transaction(async (tx) => await tx.update(schema.knowledgeMemories).set({
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        ...(scope !== undefined ? { scope } : {}),
+        ...(textUpdate !== undefined
+          ? {
+            text: textUpdate.text,
+            textHash: textUpdate.textHash,
+            ...(textUpdate.updateEmbedding ? { embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
+          }
+          : {}),
+        ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
+        ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+        // Re-proposing clears review metadata; an explicit reviewedBy in the same
+        // update still wins via the later spread.
+        ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
+        ...(reviewedBy !== undefined ? { reviewedBy } : {}),
+        ...(reviewStatus ? { reviewedAt: new Date() } : {}),
+        updatedAt: new Date(),
+      }).where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId))).returning());
+      row = rows[0];
+    } catch (error) {
+      if (!isVisibleTextHashUniqueViolation(error) || !nextTextHash) {
+        throw error;
+      }
+      const duplicate = await findVisibleMemoryByTextHash(scopedDb, workspaceId, nextTextHash, memoryId);
+      throw new Error(visibleTextHashConflictMessage(duplicate));
+    }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
@@ -2794,6 +2811,52 @@ function memoryVectorLiteral(values: number[]): string {
 }
 
 const agentVisibleMemoryStatuses = [...AGENT_VISIBLE_MEMORY_STATUSES];
+const visibleTextHashUniqueIndexName = "knowledge_memories_workspace_visible_text_hash_uq";
+
+function isVisibleTextHashUniqueViolation(error: unknown): boolean {
+  const candidate = error as { code?: unknown; constraint?: unknown; constraint_name?: unknown; message?: unknown; cause?: unknown } | null;
+  if (!candidate || typeof candidate !== "object") {
+    return false;
+  }
+  const constraint = candidate.constraint ?? candidate.constraint_name;
+  if (candidate.code === "23505" && constraint === visibleTextHashUniqueIndexName) {
+    return true;
+  }
+  if (
+    typeof candidate.message === "string"
+    && candidate.message.includes(visibleTextHashUniqueIndexName)
+    && (candidate.code === "23505" || candidate.message.includes("duplicate key value violates unique constraint"))
+  ) {
+    return true;
+  }
+  return isVisibleTextHashUniqueViolation(candidate.cause);
+}
+
+async function findVisibleMemoryByTextHash(
+  scopedDb: Database,
+  workspaceId: string,
+  textHash: string,
+  excludeId?: string,
+): Promise<typeof schema.knowledgeMemories.$inferSelect | null> {
+  const filters = [
+    eq(schema.knowledgeMemories.workspaceId, workspaceId),
+    eq(schema.knowledgeMemories.textHash, textHash),
+    inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+  ];
+  if (excludeId) {
+    filters.push(ne(schema.knowledgeMemories.id, excludeId));
+  }
+  const [row] = await scopedDb.select().from(schema.knowledgeMemories)
+    .where(and(...filters))
+    .orderBy(desc(schema.knowledgeMemories.updatedAt))
+    .limit(1);
+  return row ?? null;
+}
+
+function visibleTextHashConflictMessage(existing: Pick<KnowledgeMemory, "id"> | { id: string } | null): string {
+  const suffix = existing ? ` Existing memory id: ${existing.id}.` : "";
+  return `Memory text duplicates an existing visible memory.${suffix} Search memory and update, archive, or supersede the existing record instead.`;
+}
 
 // Resolve a short prefix or full uuid to the full id within a workspace. Full
 // uuid lookup is status-agnostic so correction/archive paths can still surface a
@@ -2981,7 +3044,9 @@ export async function saveWorkspaceMemory(
     }
 
     // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
-    // vector from the SAME model; similarity ≥ threshold → NOOP.
+    // vector from the SAME model; similarity ≥ threshold → NOOP. This check is
+    // advisory: cosine similarity cannot be protected by a unique index, unlike
+    // the exact text_hash gate below.
     if (embedding && embeddingModel) {
       const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
       const neighbours = await scopedDb.select({
@@ -3027,21 +3092,34 @@ export async function saveWorkspaceMemory(
     const sourceRefs: KnowledgeSourceRef[] = input.sessionId
       ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
       : [];
-    const [inserted] = await scopedDb.insert(schema.knowledgeMemories).values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      status: "active",
-      kind,
-      scope: "workspace",
-      text: sanitizedText,
-      textHash,
-      sourceRefs,
-      confidence: confidenceToStorage(input.confidence ?? 0.5),
-      pinned: input.pinned ?? false,
-      createdBySessionId: input.sessionId ?? null,
-      supersedesId: replacesFullId,
-      ...(embedding ? { embedding, embeddingModel } : {}),
-    }).returning();
+    let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
+    try {
+      const rows = await scopedDb.transaction(async (tx) => await tx.insert(schema.knowledgeMemories).values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        status: "active",
+        kind,
+        scope: "workspace",
+        text: sanitizedText,
+        textHash,
+        sourceRefs,
+        confidence: confidenceToStorage(input.confidence ?? 0.5),
+        pinned: input.pinned ?? false,
+        createdBySessionId: input.sessionId ?? null,
+        supersedesId: replacesFullId,
+        ...(embedding ? { embedding, embeddingModel } : {}),
+      }).returning());
+      inserted = rows[0];
+    } catch (error) {
+      if (!isVisibleTextHashUniqueViolation(error)) {
+        throw error;
+      }
+      const winner = await findVisibleMemoryByTextHash(scopedDb, input.workspaceId, textHash);
+      if (!winner) {
+        throw error;
+      }
+      return await dedupeToExisting(winner, "exact");
+    }
     if (!inserted) {
       throw new Error("Failed to save workspace memory");
     }

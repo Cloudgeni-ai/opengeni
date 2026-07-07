@@ -18,6 +18,7 @@ import {
   correctWorkspaceMemory,
   searchWorkspaceMemories,
   resolveWorkspaceMemoryBlock,
+  updateKnowledgeMemory,
   hashMemoryText,
   MEMORY_VISIBLE_RECORD_CAP,
   type MemoryEmbedder,
@@ -1049,6 +1050,52 @@ describe("DB integration", () => {
     expect(again.memory.id).toBe(first.memory.id);
     const all = await listKnowledgeMemories(dbClient.db, grant.workspaceId, { kind: "semantic" });
     expect(all.filter((memory) => memory.status === "active")).toHaveLength(1);
+  });
+
+  test("concurrent exact-duplicate saves converge on one visible row", async () => {
+    const grant = await testGrant(dbClient.db);
+    const text = "Concurrent saves normalize to one exact memory.";
+    const [first, second] = await Promise.all([
+      saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text,
+      }, memoryEmbedder),
+      saveWorkspaceMemory(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        text: " concurrent   SAVES normalize to one exact memory. ",
+      }, memoryEmbedder),
+    ]);
+
+    expect(new Set([first.memory.id, second.memory.id]).size).toBe(1);
+    expect([first.deduped, second.deduped].filter(Boolean)).toHaveLength(1);
+    const [{ visibleCount } = { visibleCount: 0 }] = await dbClient.db.execute<{ visibleCount: number }>(dbSql`
+      select count(*)::int as "visibleCount" from knowledge_memories
+      where workspace_id = ${grant.workspaceId}::uuid
+        and status in ('active', 'approved')
+        and text_hash = ${hashMemoryText(text)}
+    `);
+    expect(Number(visibleCount)).toBe(1);
+  });
+
+  test("activating a proposed memory that exact-dups a visible row fails actionably", async () => {
+    const grant = await testGrant(dbClient.db);
+    const active = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: "Production incidents page the SRE rotation.",
+    }, memoryEmbedder);
+    const proposed = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "proposed",
+      text: " production   INCIDENTS page the SRE rotation. ",
+    });
+
+    await expect(updateKnowledgeMemory(dbClient.db, grant.workspaceId, proposed.id, {
+      status: "active",
+    }, memoryEmbedder)).rejects.toThrow(new RegExp(`duplicates an existing visible memory.*${active.memory.id}`));
   });
 
   test("exact-duplicate save ignores proposed rows the agent cannot see", async () => {
