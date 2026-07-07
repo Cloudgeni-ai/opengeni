@@ -311,6 +311,16 @@ export async function sweepModalOrphanSandboxes(
   const maxTerminations = options.maxTerminations ?? MODAL_ORPHAN_SWEEP_LIMIT;
   const unattributedGraceMs = options.unattributedGraceMs ?? MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS;
   const liveByAttribution = new Map(liveLeases.map((lease) => [attributionKey(lease), lease]));
+  // LIVE-INSTANCE GUARD: a box that any live lease's envelope points at is NEVER
+  // an orphan, whatever its tags say. Tags are best-effort attribution (setTags
+  // is a separate call after create and can fail or lag); the lease envelope is
+  // the source of truth the turn path actually resumes by. Judging by tags alone
+  // terminated a LIVE box mid-turn at exactly creation+30min (staging session
+  // e644e8a8, 2026-07-06) — the box's unpushed work was unrecoverable because
+  // nothing outside the reaper drain persists /workspace.
+  const liveByInstanceId = new Map(
+    liveLeases.filter((lease) => lease.instanceId).map((lease) => [lease.instanceId as string, lease]),
+  );
   const ownedClient = options.client ? null : await createModalClient(settings);
   const modal = (options.client ?? ownedClient)! as ModalCpListClient;
   try {
@@ -345,6 +355,33 @@ export async function sweepModalOrphanSandboxes(
         const leaseId = tags.opengeni_lease_id;
         const workspaceId = tags.opengeni_workspace_id;
         const sandboxGroupId = tags.opengeni_sandbox_group_id;
+        const liveByInstance = info.id ? liveByInstanceId.get(info.id) : undefined;
+        if (liveByInstance) {
+          // Live-instance guard (see above): a live lease resumes this exact box
+          // by id — hard-skip it, and HEAL its attribution tags when they are
+          // missing/stale so it stops looking sweep-eligible. Best-effort: a
+          // failed re-tag must never fail the sweep (the guard, not the tags,
+          // is what protects the box now).
+          if (
+            leaseId !== liveByInstance.leaseId
+            || workspaceId !== liveByInstance.workspaceId
+            || sandboxGroupId !== liveByInstance.sandboxGroupId
+          ) {
+            try {
+              const sandbox = await modal.sandboxes.fromId(info.id);
+              await sandbox.setTags(modalSandboxAttributionTags({
+                leaseId: liveByInstance.leaseId,
+                workspaceId: liveByInstance.workspaceId,
+                sandboxGroupId: liveByInstance.sandboxGroupId,
+              }));
+            } catch {
+              // Tag healing is opportunistic; the instance guard already
+              // protects this box on every future sweep pass.
+            }
+          }
+          skipped += 1;
+          continue;
+        }
         let reason: ModalOrphanSweepTermination["reason"] | null = null;
         if (leaseId && workspaceId && sandboxGroupId) {
           const live = liveByAttribution.get(attributionKey({ leaseId, workspaceId, sandboxGroupId }));
