@@ -115,9 +115,10 @@ type ModalClientLike = InstanceType<ModalModule["ModalClient"]>;
 // `fromRegistry(tag, secret)` image ONCE per process, then hand the provider `build`
 // a `ModalImageSelector.fromImage(...)`. `build` is synchronous and modal is imported
 // lazily (never loaded for non-modal backends), so resolution can't happen inside
-// `build`; the worker boot awaits `ensureModalRegistryImage` first and `build` reads
-// the settled result. Modal images are lazy, workspace-scoped definitions, so an image
-// built by this module's client is usable by the ModalSandboxClient's own client.
+// `build`; the worker awaits `ensureModalRegistryImage` at boot for global refs and
+// at turn time for pack-scoped refs, then `build` reads the settled result. Modal
+// images are lazy, workspace-scoped definitions, so an image built by this module's
+// client is usable by the ModalSandboxClient's own client.
 
 /** Loader seam so unit tests can inject a fake modal module. */
 export type ModalModuleLoader = () => Promise<Pick<ModalModule, "ModalClient">>;
@@ -141,8 +142,9 @@ function registryImageCacheKey(settings: Settings): string {
  * Resolve + cache the private-registry Modal image. No-op unless BOTH
  * `modalImageRef` and `modalImageRegistrySecret` are set. Memoized per
  * (imageRef, secret, environment) so it runs once per worker process. Awaited at
- * worker boot BEFORE the first sandbox is created; `build` then reads the resolved
- * image and otherwise falls back to the public `fromTag` path.
+ * worker boot for the deployment-global image and at turn time for pack-scoped
+ * images BEFORE the first sandbox using that ref is created; `build` then reads the
+ * resolved image and otherwise falls back to the public `fromTag` path.
  */
 export async function ensureModalRegistryImage(
   settings: Settings,
@@ -192,7 +194,7 @@ function cachedModalRegistryImage(settings: Settings): unknown | undefined {
 /**
  * Choose the image selector for a Modal sandbox client from settings. Returns:
  *  - `fromImage(resolved)` when a private-registry secret is configured AND the
- *    image has been resolved (ensureModalRegistryImage ran at worker boot);
+ *    image has been resolved (ensureModalRegistryImage ran before create);
  *  - `fromTag(modalImageRef)` for the public path (no secret, or cold cache — the
  *    resume/attach paths never pull an image so the tag branch is harmless there);
  *  - `undefined` when no image ref is set (Modal uses its default image).

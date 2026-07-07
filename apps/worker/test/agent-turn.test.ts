@@ -1,7 +1,10 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
+import type { Settings } from "@opengeni/config";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
-import { classifyContextWindowOverflowError, computerToolModeForTurn, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { testSettings } from "@opengeni/testing";
+import { classifyContextWindowOverflowError, computerToolModeForTurn, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { settingsWithPackSandboxImage } from "../src/activities/packs";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -369,6 +372,50 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     expect(backend).toBe("selfhosted");
     expect(pointerReads).toBe(1);
     expect(kindReads).toBe(1);
+  });
+});
+
+describe("turn-time Modal private-registry warm", () => {
+  test("warms the pack-resolved Modal image ref before sandbox creation", async () => {
+    const packImage = "acr.example.com/cloudgeni/f4c-gecko@sha256:abc";
+    const runSettings = settingsWithPackSandboxImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef: undefined,
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      packImage,
+    );
+    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
+
+    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
+
+    expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
+    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
+    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe("acr-credentials-gecko");
+  });
+
+  test("keeps non-modal or public-image turns on the no-op path", async () => {
+    const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "docker",
+        modalImageRef: "acr.example.com/cloudgeni/f4c-gecko@sha256:abc",
+        modalImageRegistrySecret: "acr-credentials-gecko",
+      }),
+      "docker",
+      ensureRegistryImage,
+    );
+    await ensureTurnModalRegistryImage(
+      testSettings({
+        sandboxBackend: "modal",
+        modalImageRef: "ghcr.io/cloudgeni/public:latest",
+        modalImageRegistrySecret: undefined,
+      }),
+      "modal",
+      ensureRegistryImage,
+    );
+    expect(ensureRegistryImage).not.toHaveBeenCalled();
   });
 });
 

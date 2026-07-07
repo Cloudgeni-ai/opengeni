@@ -50,6 +50,7 @@ import {
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
+  ensureModalRegistryImage,
   findCompactionNeededError,
   SUMMARY_BUFFER_TOKENS,
   type SandboxFileDownload,
@@ -404,6 +405,27 @@ export async function resolveActiveSandboxBackend(
     console.error("active sandbox backend resolution failed (turn proceeds on home backend)", error);
     return undefined;
   }
+}
+
+/**
+ * Warm the Modal private-registry image for the image ref this turn actually
+ * resolved, not only the deployment-global OPENGENI_MODAL_IMAGE_REF warmed at
+ * worker boot. Packs can override `modalImageRef` per workspace/turn, so a
+ * private pack image must be resolved before sandbox creation or Modal falls
+ * back to the unauthenticated `fromTag` path.
+ */
+export async function ensureTurnModalRegistryImage(
+  runSettings: Settings,
+  sandboxCreationBackend: Settings["sandboxBackend"] | undefined,
+  ensureRegistryImage: (settings: Settings) => Promise<void> = ensureModalRegistryImage,
+): Promise<void> {
+  if (sandboxCreationBackend !== "modal") {
+    return;
+  }
+  if (!runSettings.modalImageRegistrySecret || !runSettings.modalImageRef) {
+    return;
+  }
+  await ensureRegistryImage(runSettings);
 }
 
 /**
@@ -999,6 +1021,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activeSandboxBackend === "selfhosted"
         && Boolean(activeSandboxPointer?.activeSandboxId)
         && Boolean(activeSandboxRecord?.enrollmentId);
+      // The backend that can actually create a sandbox for this turn. In the
+      // common path this is runSettings.sandboxBackend. A selfhosted home turn
+      // that is NOT machine-primary falls back to the deployment cloud backend
+      // so swap-away / flag-off degrade to a real group box.
+      const groupBoxBackend: Settings["sandboxBackend"] =
+        runSettings.sandboxBackend === "selfhosted" && !machinePrimary
+          ? settings.sandboxBackend
+          : runSettings.sandboxBackend;
+      const sandboxCreationBackend: Settings["sandboxBackend"] =
+        settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
+          ? groupBoxBackend
+          : runSettings.sandboxBackend;
+      await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
       // Computed exactly ONCE per turn and reused for BOTH the box manifest
       // (resumeBoxForTurn -> establishSandboxSessionFromEnvelope, below) AND the
       // agent (runtime.buildAgent, below). sandboxEnvironmentForRun mints a FRESH
@@ -1059,10 +1094,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // SelfhostedSandboxClient has no bound agentId and throws. Fall the group-box
         // backend back to the deployment default cloud backend so swap-away / flag-off
         // degrade to a genuine cloud box exactly like today (home=modal did).
-        const groupBoxBackend: Settings["sandboxBackend"] =
-          turn.sandboxBackend === "selfhosted" && !machinePrimary
-            ? settings.sandboxBackend
-            : turn.sandboxBackend;
         if (machinePrimary) {
           // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
           // establish or lease a phantom Modal home box (today's path leased + BILLED

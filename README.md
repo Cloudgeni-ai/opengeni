@@ -192,7 +192,14 @@ OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING=...
 
 AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys. GCS uses `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON. For AWS S3 and GCS file resources, OpenGeni materializes attached files in sandboxes through short-lived signed downloads.
 
-For Modal runs, configure the Modal sandbox variables in `.env.example`.
+For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
+registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
+`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, and pack-scoped
+`sandboxImage` refs are warmed at turn time after pack settings resolve. The
+registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
+`OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
+standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
+`~/.modal.toml` profile.
 
 ## Deployment
 
