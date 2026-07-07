@@ -57,6 +57,7 @@ import {
   type AppendEventInput,
 } from "@opengeni/db";
 import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
+import { z } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono } from "hono";
@@ -97,6 +98,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const parentSessionId = c.req.query("parentSessionId");
+    // "null" = roots only; a uuid = children of that session; anything else is
+    // a client error (an unvalidated value would surface as a Postgres uuid
+    // cast failure -> 500).
+    if (parentSessionId !== undefined && parentSessionId !== "null" && !z.string().uuid().safeParse(parentSessionId).success) {
+      throw new HTTPException(400, { message: "parentSessionId must be a session id or the literal \"null\"" });
+    }
     return c.json(await listSessions(db, workspaceId, {
       limit: boundedLimit(c.req.query("limit")),
       ...(parentSessionId !== undefined ? { parentSessionId: parentSessionId === "null" ? null : parentSessionId } : {}),

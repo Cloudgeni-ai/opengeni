@@ -2482,17 +2482,17 @@ export type Session = z.infer<typeof Session>;
 
 export type SessionSummary = Session;
 
-export const LineageNode: z.ZodType<{
-  session: Session;
-  children: Array<{ session: Session; children: unknown[] }>;
-}> = z.lazy(() => z.object({
-  session: Session,
-  children: z.array(LineageNode),
-}));
+// Recursive: the TS type is declared first so the schema annotation can carry
+// the FULL recursive shape (a shallow annotation loses type information for
+// contracts consumers after one level of nesting).
 export type LineageNode = {
   session: SessionSummary;
   children: LineageNode[];
 };
+export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
+  session: Session,
+  children: z.array(LineageNode),
+}));
 
 export const SessionLineageResponse = z.object({
   ancestors: z.array(Session),
