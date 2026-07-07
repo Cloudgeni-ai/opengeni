@@ -2885,14 +2885,12 @@ export async function saveWorkspaceMemory(
       };
     };
 
-    // Exact-dup gate: same normalized text among live (non-terminal) rows → NOOP.
+    // Exact-dup gate: same normalized text among agent-visible rows → NOOP.
     const exactMatches = await scopedDb.select().from(schema.knowledgeMemories)
       .where(and(
         eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
         eq(schema.knowledgeMemories.textHash, textHash),
-        ne(schema.knowledgeMemories.status, "archived"),
-        ne(schema.knowledgeMemories.status, "superseded"),
-        ne(schema.knowledgeMemories.status, "rejected"),
+        inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
       ))
       .orderBy(replacesFullId
         ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`

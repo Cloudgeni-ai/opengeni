@@ -1051,6 +1051,28 @@ describe("DB integration", () => {
     expect(all.filter((memory) => memory.status === "active")).toHaveLength(1);
   });
 
+  test("exact-duplicate save ignores proposed rows the agent cannot see", async () => {
+    const grant = await testGrant(dbClient.db);
+    const text = "Use staged rollout windows for risky API changes.";
+    const [proposed] = await dbClient.db.insert(dbSchema.knowledgeMemories).values({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "proposed",
+      kind: "semantic",
+      scope: "workspace",
+      text,
+      textHash: hashMemoryText(text),
+    }).returning({ id: dbSchema.knowledgeMemories.id });
+    const saved = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: " use   STAGED rollout windows for risky API changes. ",
+    }, memoryEmbedder);
+    expect(saved.deduped).toBe(false);
+    expect(saved.memory.status).toBe("active");
+    expect(saved.memory.id).not.toBe(proposed?.id);
+  });
+
   test("AC-3: near-duplicate (cosine >= threshold) save is a NOOP", async () => {
     const grant = await testGrant(dbClient.db);
     const embedder = collidingEmbedder("colliding-model-3072");
