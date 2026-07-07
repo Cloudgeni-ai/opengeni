@@ -2546,6 +2546,17 @@ export const SessionEventType = z.enum([
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
   "codex.account.switched",
+  // Sandbox durability observability (sandbox-file-persistence). The 2026-07
+  // incidents (mid-session box death with /workspace loss; a fatal manifest-env
+  // delta on a live box) were near-unattributable because box lifecycle left no
+  // durable trace — only worker logs, which rotate within hours. These events
+  // make every box transition and env recomputation drift readable from the DB
+  // alone. Payloads carry ids/flags/key NAMES only — never env values (secrets).
+  "sandbox.box.created", // box cold-created/cold-restored ({hydrated: "archive"|"none"})
+  "sandbox.box.lost", // resume-by-id found the box gone (provider NotFound)
+  "sandbox.box.terminated", // reaper drain terminated the box ({actor, persisted})
+  "sandbox.box.snapshot", // mid-session /workspace snapshot persisted ({trigger})
+  "sandbox.env.drift", // recomputed manifest env != live box env (key names only)
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
 

@@ -2380,6 +2380,14 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
+    // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
+    // env against the live box's baked env before applying its entry-only delta
+    // (validateNoEnvironmentDelta — session-fatal on ANY drift; killed a 4-day
+    // prod manager session 2026-07-06). Align the turn's manifest to the box's
+    // own env and REPORT the drift instead of dying on it.
+    await pinProvidedSessionManifestEnvironment(agent, session as SandboxSessionLike, {
+      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+    });
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
     const resourceClient = fileDownloads.length > 0
@@ -2480,7 +2488,9 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
 
   const rawClient = overrides.sandboxClient ?? createSandboxClient(settings, environment);
   const refreshedClient = rawClient
-    ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest)
+    ? withManifestRefreshOnResume(rawClient as SandboxClient, (agent as { defaultManifest?: Manifest }).defaultManifest, {
+      ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+    })
     : undefined;
   const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
@@ -2606,7 +2616,11 @@ export function agentsErrorRunState(error: unknown): string | null {
   }
 }
 
-export function withManifestRefreshOnResume(client: SandboxClient, targetManifest: Manifest | undefined): SandboxClient {
+export function withManifestRefreshOnResume(
+  client: SandboxClient,
+  targetManifest: Manifest | undefined,
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent"> = {},
+): SandboxClient {
   if (!targetManifest || !client.resume) {
     return client;
   }
@@ -2616,7 +2630,7 @@ export function withManifestRefreshOnResume(client: SandboxClient, targetManifes
     ...(client.create ? { create: async (...args: any[]) => await (client.create as any)(...args) } : {}),
     resume: async (state: SandboxSessionState) => {
       const session = await client.resume!(state);
-      await applyMissingManifestEntries(session, targetManifest);
+      await applyMissingManifestEntries(session, targetManifest, context);
       return session;
     },
     ...(client.delete ? { delete: async (state: SandboxSessionState) => await client.delete!(state) } : {}),
@@ -2627,7 +2641,26 @@ export function withManifestRefreshOnResume(client: SandboxClient, targetManifes
   };
 }
 
-export async function applyMissingManifestEntries(session: SandboxSessionLike, targetManifest: Manifest): Promise<void> {
+// ENV PIN (env-parity doctrine): a live box's manifest environment is
+// CREATION-TIME truth for the box's whole life. The SDK enforces exactly this
+// for provided sessions (validateNoEnvironmentDelta throws a session-fatal
+// UserError on ANY env delta), and its own buildProvidedSessionManifestDelta
+// ships entry-only deltas for the same reason: a running box's processes have
+// the old env baked into their environ, so a "refreshed" manifest env would be
+// a silent lie. So this refresh NEVER carries environment — entries only —
+// and a recompute that drifts from the baked env is REPORTED (key names only,
+// never values) instead of applied. Fresh env lands at the next cold-create
+// (drain->re-warm recycles the box regularly); rotating values ride
+// OFF-manifest (token file + GIT_ASKPASS — see TOKEN-BROKER B1/B2).
+// History: the pre-pin refresh sent the full recomputed env whenever any entry
+// needed applying, and a recompute drift on a live prod box (2026-07-06,
+// manager session with turn inputs byte-identical to the prior success) tripped
+// the SDK guard and killed the session.
+export async function applyMissingManifestEntries(
+  session: SandboxSessionLike,
+  targetManifest: Manifest,
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent"> = {},
+): Promise<void> {
   const currentManifestValue = (session as { state?: { manifest?: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> } } }).state?.manifest;
   const currentManifest = currentManifestValue ? ensureManifest(currentManifestValue) : undefined;
   const target = ensureManifest(targetManifest);
@@ -2637,6 +2670,10 @@ export async function applyMissingManifestEntries(session: SandboxSessionLike, t
     }
     throw new Error("Resumed sandbox session cannot apply new manifest entries because current manifest state is unavailable");
   }
+  // Drift detection runs on EVERY resume (even entry-less ones): it is the
+  // durable trace that makes the next env-recompute regression attributable
+  // from the DB alone instead of from rotated worker logs.
+  await reportManifestEnvironmentDrift(currentManifest, target, context);
   if (!session.applyManifest && !session.materializeEntry) {
     if (Object.keys(target.entries).length === 0) {
       return;
@@ -2660,21 +2697,20 @@ export async function applyMissingManifestEntries(session: SandboxSessionLike, t
       throw new Error(`Cannot replace existing sandbox manifest entry: ${path}`);
     }
   }
-  const environmentChanged = stableJson(currentManifest.environment) !== stableJson(target.environment);
-  if (environmentChanged && !session.applyManifest) {
-    throw new Error("Resumed sandbox session cannot refresh manifest environment because it does not support applyManifest()");
-  }
-  if (Object.keys(entries).length === 0 && !environmentChanged) {
+  if (Object.keys(entries).length === 0) {
     return;
   }
   // Carry path grants through manifest rebuilds: since @openai/agents 0.11.0
   // they gate local source materialization, and run states saved before the
   // upgrade have manifests without grants.
   const extraPathGrants = mergePathGrants(currentManifest.extraPathGrants, target.extraPathGrants);
+  // Entry-only delta: environment stays empty (ENV PIN above). An empty env is
+  // inert on every backend — provided sessions see no delta to validate, owned
+  // backends spread-merge nothing.
   const delta = new Manifest({
     root: currentManifest.root,
     entries,
-    environment: target.environment,
+    environment: {},
     ...(extraPathGrants.length ? { extraPathGrants } : {}),
   });
   if (session.applyManifest) {
@@ -2686,12 +2722,98 @@ export async function applyMissingManifestEntries(session: SandboxSessionLike, t
   }
   (session as { state?: { manifest?: Manifest } }).state!.manifest = new Manifest({
     root: currentManifest.root,
-    environment: environmentChanged ? target.environment : currentManifest.environment,
+    environment: currentManifest.environment,
     entries: {
       ...currentManifest.entries,
       ...entries,
     },
     ...(extraPathGrants.length ? { extraPathGrants } : {}),
+  });
+}
+
+/**
+ * Key-level diff of the live box's baked manifest env vs the freshly recomputed
+ * target env. Returns null when identical. Key NAMES only — values are secrets
+ * and must never leave this function's comparison.
+ */
+export function manifestEnvironmentDrift(
+  current: Manifest,
+  target: Manifest,
+): { added: string[]; removed: string[]; changed: string[] } | null {
+  const currentEnv = (current.environment ?? {}) as Record<string, unknown>;
+  const targetEnv = (target.environment ?? {}) as Record<string, unknown>;
+  const added: string[] = [];
+  const removed: string[] = [];
+  const changed: string[] = [];
+  for (const key of Object.keys(targetEnv)) {
+    if (!(key in currentEnv)) {
+      added.push(key);
+    } else if (stableJson(currentEnv[key]) !== stableJson(targetEnv[key])) {
+      changed.push(key);
+    }
+  }
+  for (const key of Object.keys(currentEnv)) {
+    if (!(key in targetEnv)) {
+      removed.push(key);
+    }
+  }
+  if (added.length === 0 && removed.length === 0 && changed.length === 0) {
+    return null;
+  }
+  return { added: added.sort(), removed: removed.sort(), changed: changed.sort() };
+}
+
+async function reportManifestEnvironmentDrift(
+  current: Manifest,
+  target: Manifest,
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent">,
+): Promise<ReturnType<typeof manifestEnvironmentDrift>> {
+  const drift = manifestEnvironmentDrift(current, target);
+  if (!drift) {
+    return null;
+  }
+  // Reporting must never break a resume: the drift itself is benign under the
+  // env pin (the box keeps running on its baked env); only the SIGNAL matters.
+  try {
+    await context.onRuntimeEvent?.({ type: "sandbox.env.drift", payload: drift });
+  } catch {
+    // Swallow: a failed emit must not fail the turn.
+  }
+  return drift;
+}
+
+/**
+ * ENV PIN for provided sessions (the ownership-inversion turn path). The SDK
+ * validates the FULL target manifest environment against a live provided
+ * session's baked env BEFORE reducing to its entry-only delta
+ * (validateNoEnvironmentDelta -> session-fatal UserError on ANY difference).
+ * So a turn resuming an existing box must declare the box's OWN env,
+ * byte-identical — never the fresh recompute. This replaces the agent's
+ * defaultManifest environment with the baked one and reports the drift (key
+ * names only) instead of letting it kill the session. Fresh env lands at the
+ * next cold-create; rotating values ride OFF-manifest (TOKEN-BROKER B1/B2).
+ */
+export async function pinProvidedSessionManifestEnvironment(
+  agent: Agent<any, any>,
+  session: SandboxSessionLike,
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent"> = {},
+): Promise<void> {
+  const holder = agent as { defaultManifest?: Manifest };
+  const currentManifestValue = (session as { state?: { manifest?: Manifest | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> } } }).state?.manifest;
+  if (!holder.defaultManifest || !currentManifestValue) {
+    return;
+  }
+  const current = ensureManifest(currentManifestValue);
+  const target = ensureManifest(holder.defaultManifest);
+  const drift = await reportManifestEnvironmentDrift(current, target, context);
+  if (!drift) {
+    return;
+  }
+  holder.defaultManifest = new Manifest({
+    ...(target.root ? { root: target.root } : {}),
+    entries: target.entries,
+    environment: current.environment,
+    ...(target.extraPathGrants?.length ? { extraPathGrants: target.extraPathGrants } : {}),
   });
 }
 
