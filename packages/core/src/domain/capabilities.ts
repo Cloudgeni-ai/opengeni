@@ -436,7 +436,7 @@ export async function validateMcpCapabilityConnection(
     };
   } catch (error) {
     throw new HTTPException(422, {
-      message: `MCP capability "${item.name}" could not be enabled because OpenGeni could not initialize ${item.endpointUrl}: ${mcpProbeErrorMessage(error)}`,
+      message: `MCP capability "${item.name}" could not be enabled because ${mcpProbeErrorMessage(error, item.endpointUrl)}`,
     });
   }
 }
@@ -461,9 +461,16 @@ async function probeStreamableHttpMcpServer(input: McpCapabilityProbeInput): Pro
   }
 }
 
-function mcpProbeErrorMessage(error: unknown): string {
+function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").trim().slice(0, 500) || "unknown error";
+  const normalized = message.replace(/\s+/g, " ").trim();
+  if (
+    /404|405|not found|unexpected token|not valid json|invalid json|failed to parse|streamable http error|unable to connect|fetch failed|econnrefused|enotfound|timeout|aborted/i
+      .test(normalized)
+  ) {
+    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpointUrl}. Check the endpoint URL or choose a different catalog entry.`;
+  }
+  return `OpenGeni could not initialize ${endpointUrl}: ${normalized.slice(0, 500) || "unknown error"}`;
 }
 
 export async function disableCapability(input: {

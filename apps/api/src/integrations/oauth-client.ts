@@ -83,6 +83,7 @@ type OAuthStatePayload = {
   workspaceId: string;
   subjectId: string;
   providerDomain: string;
+  mcpUrl: string;
   resource: string;
   requestedScopes: string[];
   authorizeScopes: string[];
@@ -127,8 +128,8 @@ export async function startMcpOAuth(
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
   const { db, settings } = deps;
-  const resource = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
-  const providerDomain = canonicalProviderDomain(context.payload.providerDomain ?? new URL(resource).hostname);
+  const mcpUrl = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  const providerDomain = canonicalProviderDomain(context.payload.providerDomain ?? new URL(mcpUrl).hostname);
   const returnPath = safeReturnPath(context.payload.returnPath ?? "/integrations");
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
@@ -140,7 +141,8 @@ export async function startMcpOAuth(
     throw new HTTPException(404, { message: "connection not found" });
   }
 
-  const discovery = await discoverMcpOAuth(resource, settings);
+  const discovery = await discoverMcpOAuth(mcpUrl, settings);
+  const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
   const client = await registerOAuthClient(db, settings, discovery.as, metadataUrl, redirectUri);
   const verifier = randomPkceVerifier();
   const authorizeScopes = chooseAuthorizeScopes(context.payload.requestedScopes, discovery.challenge.scope, discovery.prm.scopesSupported);
@@ -150,6 +152,7 @@ export async function startMcpOAuth(
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,
     providerDomain,
+    mcpUrl,
     resource,
     requestedScopes: uniqueStrings(context.payload.requestedScopes ?? []),
     authorizeScopes,
@@ -226,17 +229,19 @@ export async function completeMcpOAuthCallback(
       tokenEndpoint: state.tokenEndpoint,
       client,
     }));
-    const tools = await stage("tools_list", "tools_list_failed", () => verifyMcpToolsList(settings, state.resource, token));
+    const verification = await verifyMcpToolsListNonFatal(observability, settings, state, token);
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes);
     const credential = credentialBundle(token, state, client);
     const metadata = {
       resource: state.resource,
+      mcpUrl: state.mcpUrl,
       authorizationServer: state.authorizationServer,
       authorizationServerIssuer: state.issuer,
       tokenEndpoint: state.tokenEndpoint,
       clientId: client.clientId,
       clientRegistrationMethod: state.clientRegistrationMethod,
-      mcpTools: tools,
+      mcpToolsVerification: verification.metadata,
+      ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
     const connection = await stage("persist", "persist_failed", () => state.connectionId
@@ -273,7 +278,13 @@ export async function completeMcpOAuthCallback(
     // the enable connectionRef straight from the redirect, without a listConnections
     // round-trip that could fail (transient, or a grant lacking connections:read)
     // and leave the connection created but the capability un-enabled.
-    return { redirectTo: callbackReturnPath(state.returnPath, "success", { connectionId: connection.id, providerDomain: connection.providerDomain }) };
+    return {
+      redirectTo: callbackReturnPath(state.returnPath, "success", {
+        connectionId: connection.id,
+        providerDomain: connection.providerDomain,
+        ...(verification.metadata.status === "failed" ? { verification: "failed" } : {}),
+      }),
+    };
   } catch (error) {
     const staged = error instanceof OAuthCallbackStageError
       ? error
@@ -580,12 +591,14 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (iat === undefined || nowSeconds - iat > oauthStateTtlMs / 1000 || nowSeconds < iat) {
     throw new HTTPException(400, { message: "invalid or expired OAuth state" });
   }
+  const resource = requiredString(payload.resource, "state.resource");
   const parsed = {
     accountId: requiredString(payload.accountId, "state.accountId"),
     workspaceId: requiredString(payload.workspaceId, "state.workspaceId"),
     subjectId: requiredString(payload.subjectId, "state.subjectId"),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
-    resource: requiredString(payload.resource, "state.resource"),
+    mcpUrl: stringValue(payload.mcpUrl) ?? resource,
+    resource,
     requestedScopes: stringArray(payload.requestedScopes),
     authorizeScopes: stringArray(payload.authorizeScopes),
     encryptedPkceVerifier: requiredString(payload.encryptedPkceVerifier, "state.encryptedPkceVerifier"),
@@ -723,6 +736,24 @@ function logOAuthCallbackFailure(
   });
 }
 
+function logOAuthVerificationWarning(
+  observability: Observability | undefined,
+  error: OAuthCallbackStageError,
+  state: OAuthStatePayload,
+): void {
+  observability?.warn("MCP OAuth tools/list verification failed after token exchange", {
+    "opengeni.oauth.stage": error.stage,
+    "opengeni.oauth.reason": error.reason,
+    "opengeni.oauth.provider_domain": state.providerDomain,
+    "opengeni.oauth.resource_host": safeHost(state.resource),
+    "opengeni.oauth.mcp_host": safeHost(state.mcpUrl),
+    "opengeni.oauth.authorization_server": state.authorizationServer,
+    "opengeni.oauth.issuer": state.issuer,
+    "opengeni.oauth.client_registration_method": state.clientRegistrationMethod,
+    error: sanitizedError(error.cause),
+  });
+}
+
 function sanitizedError(error: unknown): string {
   if (error instanceof HTTPException) {
     return `HTTPException ${error.status}: ${error.message}`;
@@ -779,6 +810,42 @@ async function verifyMcpToolsList(settings: Settings, resource: string, token: T
   }
 }
 
+async function verifyMcpToolsListNonFatal(
+  observability: Observability | undefined,
+  settings: Settings,
+  state: OAuthStatePayload,
+  token: TokenResponse,
+): Promise<{
+  metadata:
+    | { status: "ok"; checkedAt: string; toolCount: number }
+    | { status: "failed"; checkedAt: string; reason: string };
+  tools?: Array<{ name: string; description?: string }>;
+}> {
+  try {
+    const tools = await stage("tools_list", "tools_list_failed", () => verifyMcpToolsList(settings, state.mcpUrl, token));
+    return {
+      metadata: {
+        status: "ok",
+        checkedAt: new Date().toISOString(),
+        toolCount: tools.length,
+      },
+      tools,
+    };
+  } catch (error) {
+    const staged = error instanceof OAuthCallbackStageError
+      ? error
+      : new OAuthCallbackStageError("tools_list", "tools_list_failed", error);
+    logOAuthVerificationWarning(observability, staged, state);
+    return {
+      metadata: {
+        status: "failed",
+        checkedAt: new Date().toISOString(),
+        reason: staged.reason,
+      },
+    };
+  }
+}
+
 function credentialBundle(token: TokenResponse, state: OAuthStatePayload, client: OAuthClientRegistration): Record<string, unknown> {
   return {
     access_token: token.accessToken,
@@ -786,6 +853,7 @@ function credentialBundle(token: TokenResponse, state: OAuthStatePayload, client
     token_type: token.tokenType,
     ...(token.expiresAt ? { expires_at: token.expiresAt.toISOString() } : {}),
     resource: state.resource,
+    mcp_url: state.mcpUrl,
     ...(token.scopeText ? { scope: token.scopeText } : state.authorizeScopes.length ? { scope: state.authorizeScopes.join(" ") } : {}),
     token_endpoint: state.tokenEndpoint,
     client_id: client.clientId,
@@ -814,6 +882,23 @@ function canonicalMcpResource(value: string | undefined): string {
   }
   url.hash = "";
   return url.toString();
+}
+
+function canonicalOAuthResource(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new HTTPException(422, { message: "MCP protected resource metadata advertised an invalid resource" });
+  }
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      url.hash = "";
+      return url.toString();
+    }
+    return trimmed;
+  } catch {
+    throw new HTTPException(422, { message: "MCP protected resource metadata advertised an invalid resource" });
+  }
 }
 
 function safeReturnPath(value: string): string {

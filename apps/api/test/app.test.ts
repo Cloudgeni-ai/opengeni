@@ -471,6 +471,22 @@ describe("API helpers", () => {
     })).rejects.toThrow("could not be enabled");
   });
 
+  test("reports invalid MCP catalog endpoints with human copy", async () => {
+    const item = capabilityItem({
+      id: "mcp:gmail",
+      kind: "mcp",
+      name: "Gmail",
+      endpointUrl: "https://gmail.googleapis.com/mcp",
+      runtime: { available: true, mcpServerId: "cap-gmail", transport: "streamable-http", notes: null },
+    });
+
+    await expect(validateMcpCapabilityConnection(item, async () => {
+      throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
+    })).rejects.toThrow(
+      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at https://gmail.googleapis.com/mcp. Check the endpoint URL or choose a different catalog entry.',
+    );
+  });
+
   test("replays SSE history across all pages", async () => {
     const events = Array.from({ length: 1005 }, (_, index) => ({
       id: `event-${index + 1}`,

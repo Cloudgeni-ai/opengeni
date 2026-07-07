@@ -154,7 +154,7 @@ function startFakeAuthorizationServer(options: {
   codeChallengeMethods?: string[];
   clientIdMetadataDocumentSupported?: boolean;
   dcr?: boolean;
-  tokenAccessToken?: string;
+  tokenAccessToken?: string | ((body: URLSearchParams) => string);
   tokenStatus?: number;
   tokenError?: string;
 } = {}): FakeAuthorizationServer {
@@ -200,7 +200,9 @@ function startFakeAuthorizationServer(options: {
           }, { status: options.tokenStatus });
         }
         return Response.json({
-          access_token: options.tokenAccessToken ?? "mcp-access-token",
+          access_token: typeof options.tokenAccessToken === "function"
+            ? options.tokenAccessToken(body)
+            : options.tokenAccessToken ?? "mcp-access-token",
           refresh_token: "mcp-refresh-token",
           token_type: "Bearer",
           expires_in: 3600,
@@ -446,7 +448,7 @@ describe("connections routes", () => {
       expect(authUrl.pathname).toBe("/authorize");
       expect(authUrl.searchParams.get("client_id")).toBe("https://api.opengeni.test/v1/integrations/oauth/client-metadata.json");
       expect(authUrl.searchParams.get("redirect_uri")).toBe("https://api.opengeni.test/v1/integrations/oauth/callback");
-      expect(authUrl.searchParams.get("resource")).toBe(mcp.url);
+      expect(authUrl.searchParams.get("resource")).toBe("urn:test:mcp");
       expect(authUrl.searchParams.get("scope")).toBe("documents:read");
       expect(authUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(authUrl.searchParams.has("code_verifier")).toBe(false);
@@ -456,7 +458,8 @@ describe("connections routes", () => {
       expect(state?.accountId).toBe(workspace.accountId);
       expect(state?.subjectId).toBe("subject-a");
       expect(state?.providerDomain).toBe("mcp.example.com");
-      expect(state?.resource).toBe(mcp.url);
+      expect(state?.mcpUrl).toBe(mcp.url);
+      expect(state?.resource).toBe("urn:test:mcp");
       expect(state?.authorizeScopes).toEqual(["documents:read"]);
       expect(typeof state?.encryptedPkceVerifier).toBe("string");
       const verifier = decryptEnvironmentValue(rawKey, state!.encryptedPkceVerifier as string);
@@ -474,7 +477,7 @@ describe("connections routes", () => {
       expect(location).toContain("providerDomain=mcp.example.com");
 
       expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("resource")).toBe(mcp.url);
+      expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
       expect(as.tokenRequests[0]!.get("redirect_uri")).toBe("https://api.opengeni.test/v1/integrations/oauth/callback");
       expect(as.tokenRequests[0]!.get("code_verifier")).toBe(verifier);
       expect(as.tokenRequests[0]!.get("client_id")).toBe("https://api.opengeni.test/v1/integrations/oauth/client-metadata.json");
@@ -487,12 +490,68 @@ describe("connections routes", () => {
       expect(loaded?.credential).toMatchObject({
         access_token: "mcp-access-token",
         refresh_token: "mcp-refresh-token",
-        resource: mcp.url,
+        resource: "urn:test:mcp",
+        mcp_url: mcp.url,
         token_endpoint: `${as.url}/token`,
         client_id: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
       });
       expect(loaded?.metadata.authorizationServerIssuer).toBe(as.url);
+      expect(loaded?.metadata.resource).toBe("urn:test:mcp");
+      expect(loaded?.metadata.mcpUrl).toBe(mcp.url);
+      expect(loaded?.metadata.mcpToolsVerification).toMatchObject({ status: "ok" });
       expect(loaded?.metadata.mcpTools).toEqual(expect.arrayContaining([expect.objectContaining({ name: "search_documents" })]));
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+      tokenAccessToken: (body) => `token-for-${body.get("resource")}`,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer token-for-urn:test:mcp",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
+    try {
+      const response = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          providerDomain: "linear.app",
+          mcpUrl: mcp.url,
+          returnPath: "/integrations?connect_item=linear",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { state: string; authorizationUrl: string };
+      expect(new URL(body.authorizationUrl).searchParams.get("resource")).toBe("urn:test:mcp");
+
+      const callback = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(callback.headers.get("location")).not.toContain("verification=failed");
+      expect(as.tokenRequests).toHaveLength(1);
+      expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "linear.app",
+        kind: "oauth2",
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "token-for-urn:test:mcp",
+        resource: "urn:test:mcp",
+        mcp_url: mcp.url,
+      });
+      expect(loaded?.metadata.mcpToolsVerification).toMatchObject({ status: "ok" });
     } finally {
       mcp.close();
       as.close();
@@ -696,7 +755,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth callback verifies MCP tools through guarded fetch redirects", async () => {
+  test("oauth callback records non-fatal tools/list verification failure after guarded fetch redirects", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const originalFetch = globalThis.fetch;
@@ -750,9 +809,20 @@ describe("connections routes", () => {
       const response = await publicApp(client.db, { environment: "production" })
         .request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`);
       expect(response.status).toBe(302);
-      expect(response.headers.get("location")).toContain("reason=tools_list_failed");
+      expect(response.headers.get("location")).toContain("integration_oauth=success");
+      expect(response.headers.get("location")).toContain("verification=failed");
       expect(hits).toEqual(["https://1.1.1.1/token", "https://1.1.1.1/mcp"]);
       expect(privateHopHits).toBe(0);
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "verify-redirect.example.com",
+        kind: "oauth2",
+      });
+      expect(loaded?.credential).toMatchObject({ access_token: "mcp-access-token" });
+      expect(loaded?.metadata.mcpToolsVerification).toMatchObject({
+        status: "failed",
+        reason: "tools_list_failed",
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }
