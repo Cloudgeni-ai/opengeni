@@ -145,7 +145,7 @@ describe("organization helpers", () => {
     return { mode: "managed", subjectId: "s", accountGrants: [], workspaceGrants: [], defaultAccountId: null, defaultWorkspaceId: null, ...patch };
   }
   function ws(id: string, accountId: string): Workspace {
-    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
+    return { id, accountId, name: id, slug: null, externalSource: null, externalId: null, agentInstructions: null, settings: {}, createdAt: "2026-06-11T00:00:00.000Z", updatedAt: "2026-06-11T00:00:00.000Z" };
   }
 
   test("derives a label, preferring an account name in grant metadata", () => {
@@ -1142,6 +1142,7 @@ describe("workspace switcher helpers", () => {
       externalSource: null,
       externalId: null,
       agentInstructions: null,
+      settings: {},
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,

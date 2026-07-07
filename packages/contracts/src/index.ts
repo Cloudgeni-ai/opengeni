@@ -1471,8 +1471,13 @@ export const KnowledgeMemory = z.object({
 });
 export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 
+// Default status is `active`: a create through this request lands an
+// agent-visible memory via the one write gate (saveWorkspaceMemory). Passing an
+// explicit `proposed`/`approved`/`rejected` status routes to the legacy curated
+// create instead (the docs-MCP memory_propose lane). pinned/replacesId apply to
+// the active (memory) path.
 export const CreateKnowledgeMemoryRequest = z.object({
-  status: KnowledgeMemoryStatus.default("proposed"),
+  status: KnowledgeMemoryStatus.default("active"),
   kind: KnowledgeMemoryKind.default("semantic"),
   scope: z.string().min(1).default("workspace"),
   text: z.string().min(1),
@@ -1480,6 +1485,8 @@ export const CreateKnowledgeMemoryRequest = z.object({
   confidence: z.number().min(0).max(1).default(0.5),
   metadata: z.record(z.string(), z.unknown()).default({}),
   createdBySessionId: z.string().uuid().optional(),
+  pinned: z.boolean().optional(),
+  replacesId: z.string().min(1).optional(),
 });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
@@ -1492,9 +1499,12 @@ export const UpdateKnowledgeMemoryRequest = z.object({
   confidence: z.number().min(0).max(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   reviewedBy: z.string().min(1).optional(),
+  // Human audit action: pin (never decays) / unpin.
+  pinned: z.boolean().optional(),
 });
 export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
 
+// GET list/filter over knowledge memories (curated + memory).
 export const KnowledgeMemorySearchRequest = z.object({
   query: z.string().min(1).optional(),
   status: KnowledgeMemoryStatus.optional(),
@@ -1503,6 +1513,32 @@ export const KnowledgeMemorySearchRequest = z.object({
   limit: z.number().int().positive().max(100).default(20),
 });
 export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
+
+export const WorkspaceMemorySearchMode = z.enum(["hybrid", "vector", "keyword"]);
+export type WorkspaceMemorySearchMode = z.infer<typeof WorkspaceMemorySearchMode>;
+
+// POST hybrid search over the workspace's agent-visible memory (active ∪ approved).
+export const WorkspaceMemorySearchRequest = z.object({
+  query: z.string().min(1),
+  kind: KnowledgeMemoryKind.optional(),
+  limit: z.number().int().positive().max(20).optional(),
+  mode: WorkspaceMemorySearchMode.optional(),
+});
+export type WorkspaceMemorySearchRequest = z.infer<typeof WorkspaceMemorySearchRequest>;
+
+export const WorkspaceMemorySearchResult = z.object({
+  memory: KnowledgeMemory,
+  score: z.number(),
+  matchType: WorkspaceMemorySearchMode,
+  vectorScore: z.number().nullable(),
+  keywordScore: z.number().nullable(),
+});
+export type WorkspaceMemorySearchResult = z.infer<typeof WorkspaceMemorySearchResult>;
+
+export const WorkspaceMemorySearchResponse = z.object({
+  results: z.array(WorkspaceMemorySearchResult),
+});
+export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
 
 export const ToolRef = z.object({
   kind: z.literal("mcp"),

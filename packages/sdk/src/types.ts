@@ -1016,8 +1016,19 @@ export type Workspace = {
   externalSource: string | null;
   externalId: string | null;
   agentInstructions: string | null;
+  settings: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+};
+
+export type WorkspaceSettings = {
+  memoryEnabled?: boolean | undefined;
+  [key: string]: unknown;
+};
+
+export type UpdateWorkspaceSettingsRequest = {
+  memoryEnabled?: boolean | undefined;
+  [key: string]: unknown;
 };
 
 export type CreateWorkspaceRequest = {
@@ -1395,7 +1406,7 @@ export type DocumentSearchResponse = {
   results: DocumentSearchResult[];
 };
 
-export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected";
+export type KnowledgeMemoryStatus = "proposed" | "approved" | "rejected" | "active" | "superseded" | "archived";
 export type KnowledgeMemoryKind = "semantic" | "episodic" | "procedural" | "decision" | "preference";
 
 export type KnowledgeSourceRef = {
@@ -1419,6 +1430,13 @@ export type KnowledgeMemory = {
   createdBySessionId: string | null;
   reviewedBy: string | null;
   reviewedAt: string | null;
+  pinned: boolean;
+  usageCount: number;
+  lastUsedAt: string | null;
+  supersedesId: string | null;
+  supersededById: string | null;
+  validFrom: string;
+  validUntil: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -1432,6 +1450,8 @@ export type CreateKnowledgeMemoryRequest = {
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
   createdBySessionId?: string | undefined;
+  pinned?: boolean | undefined;
+  replacesId?: string | undefined;
 };
 
 export type UpdateKnowledgeMemoryRequest = {
@@ -1443,6 +1463,7 @@ export type UpdateKnowledgeMemoryRequest = {
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
   reviewedBy?: string | undefined;
+  pinned?: boolean | undefined;
 };
 
 export type KnowledgeMemorySearchRequest = {
@@ -1451,6 +1472,27 @@ export type KnowledgeMemorySearchRequest = {
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   limit?: number | undefined;
+};
+
+export type WorkspaceMemorySearchMode = "hybrid" | "vector" | "keyword";
+
+export type WorkspaceMemorySearchRequest = {
+  query: string;
+  kind?: KnowledgeMemoryKind | undefined;
+  limit?: number | undefined;
+  mode?: WorkspaceMemorySearchMode | undefined;
+};
+
+export type WorkspaceMemorySearchResult = {
+  memory: KnowledgeMemory;
+  score: number;
+  matchType: WorkspaceMemorySearchMode;
+  vectorScore: number | null;
+  keywordScore: number | null;
+};
+
+export type WorkspaceMemorySearchResponse = {
+  results: WorkspaceMemorySearchResult[];
 };
 
 // --- Capability packs ---------------------------------------------------------

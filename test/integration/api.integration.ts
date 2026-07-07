@@ -3243,6 +3243,9 @@ describe("API component integration", () => {
     const proposedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
       method: "POST",
       body: JSON.stringify({
+        // Explicit `proposed` keeps this the legacy curated-review lane; the
+        // default status is now `active` (the memory write gate).
+        status: "proposed",
         text: "Use Azure Blob for production object storage.",
         kind: "decision",
         confidence: 0.92,
@@ -3293,6 +3296,112 @@ describe("API component integration", () => {
     expect(reproposed.status).toBe("proposed");
     expect(reproposed.reviewedBy).toBeNull();
     expect(reproposed.reviewedAt).toBeNull();
+  });
+
+  test("workspace memory REST lifecycle: create(active)/list/search/pin/archive/edit + settings", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    // Create defaults to active (memory write gate: sanitized + embedded).
+    const createResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ text: "Staging deploys from main only, via opengeni-ops.", kind: "procedural" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(createResponse.status).toBe(201);
+    const created = await createResponse.json() as { id: string; status: string; pinned: boolean; usageCount: number };
+    expect(created.status).toBe("active");
+    expect(created.pinned).toBe(false);
+
+    // List (active) shows it.
+    const listResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories?status=active"));
+    expect(listResponse.status).toBe(200);
+    expect((await listResponse.json() as Array<{ id: string }>).some((m) => m.id === created.id)).toBe(true);
+
+    // Hybrid search finds it and bumps usage.
+    const searchResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "how do we deploy staging" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(searchResponse.status).toBe(200);
+    const search = await searchResponse.json() as { results: Array<{ memory: { id: string; usageCount: number }; score: number }> };
+    const found = search.results.find((r) => r.memory.id === created.id);
+    expect(found).toBeTruthy();
+    expect(found!.memory.usageCount).toBe(1);
+
+    // Pin.
+    const pinResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(pinResponse.status).toBe(200);
+    expect((await pinResponse.json() as { pinned: boolean }).pinned).toBe(true);
+
+    // Edit text (re-embed) then archive.
+    const editResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ text: "Staging deploys from the release branch now." }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(editResponse.status).toBe(200);
+    expect((await editResponse.json() as { text: string }).text).toContain("release branch");
+
+    const archiveResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${created.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "archived" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(archiveResponse.status).toBe(200);
+    expect((await archiveResponse.json() as { status: string }).status).toBe("archived");
+    // Archived rows drop out of search.
+    const afterArchive = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ query: "deploy staging" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect((await afterArchive.json() as { results: Array<{ memory: { id: string } }> }).results.some((r) => r.memory.id === created.id)).toBe(false);
+
+    // Invalid params → 400 not 500.
+    const overLong = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ text: "x".repeat(5000) }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(overLong.status).toBe(400);
+    const badSearch = await app.request(workspacePath(workspaceId, "/knowledge/memories/search"), {
+      method: "POST",
+      body: JSON.stringify({ notAQuery: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(badSearch.status).toBe(400);
+
+    // Settings default off, PATCH round-trips + preserves unknown keys.
+    const beforeSettings = await app.request(workspacePath(workspaceId, ""));
+    const workspaceBefore = await beforeSettings.json() as { settings: Record<string, unknown> };
+    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
+
+    const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ someFutureKey: "keep-me" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(seedUnknown.status).toBe(200);
+    const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ memoryEnabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(enableResponse.status).toBe(200);
+    const enabled = await enableResponse.json() as { settings: Record<string, unknown> };
+    expect(enabled.settings.memoryEnabled).toBe(true);
+    expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {

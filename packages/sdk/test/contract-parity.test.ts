@@ -8,6 +8,14 @@ import {
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
+  KnowledgeMemory as ContractKnowledgeMemory,
+  KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
+  UpdateKnowledgeMemoryRequest as ContractUpdateKnowledgeMemoryRequest,
+  UpdateWorkspaceSettingsRequest as ContractUpdateWorkspaceSettingsRequest,
+  Workspace as ContractWorkspace,
+  WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
+  WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
   MachineState as ContractMachineState,
@@ -43,6 +51,13 @@ import type {
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
+  CreateKnowledgeMemoryRequest,
+  KnowledgeMemory,
+  KnowledgeMemoryStatus,
+  UpdateKnowledgeMemoryRequest,
+  UpdateWorkspaceSettingsRequest,
+  Workspace,
+  WorkspaceMemorySearchResponse,
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
@@ -188,6 +203,34 @@ describe("SDK / contracts parity", () => {
       permissions: ["sessions:read"],
       createdAt: "2026-01-01T00:00:00.000Z",
     }).success).toBe(true);
+  });
+
+  test("workspace memory shapes match the contracts (compile-time + runtime)", () => {
+    // Status enum is literal-for-literal identical (curated + memory states).
+    const statuses: readonly KnowledgeMemoryStatus[] = ContractKnowledgeMemoryStatus.options;
+    expect([...statuses].sort()).toEqual([...ContractKnowledgeMemoryStatus.options].sort());
+    expect(ContractKnowledgeMemoryStatus.options).toContain("active");
+
+    // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
+    const acceptMemory = (value: z.infer<typeof ContractKnowledgeMemory>): KnowledgeMemory => value;
+    const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
+    const acceptSearchResponse = (value: z.infer<typeof ContractWorkspaceMemorySearchResponse>): WorkspaceMemorySearchResponse => value;
+    expect([acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function")).toBe(true);
+
+    // Client -> server: SDK-sent bodies parse under the contract schemas.
+    const create: CreateKnowledgeMemoryRequest = { text: "Prefer Terraform.", kind: "preference", pinned: true };
+    const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
+    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
+    expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    // Default create status is `active` (memory lane through the write gate).
+    expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
+    // Search request requires a query and clamps limit at 20.
+    expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "how do we deploy" }).success).toBe(true);
+    expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "x", limit: 999 }).success).toBe(false);
+    // Unknown settings keys survive validation (passthrough / forward-compat).
+    expect(ContractUpdateWorkspaceSettingsRequest.parse({ futureFlag: 1 })).toHaveProperty("futureFlag", 1);
   });
 
   test("machines + metrics shapes match the contracts (compile-time + runtime, M10)", () => {

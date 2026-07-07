@@ -662,6 +662,20 @@ export async function updateWorkspace(db: Database, workspaceId: string, input: 
   return mapWorkspace(row);
 }
 
+// Deep-merge (top-level) a settings patch into workspaces.settings, atomically.
+// jsonb `||` overwrites matching keys and preserves unknown ones, so a newer
+// setting a caller doesn't know about survives the write.
+export async function updateWorkspaceSettings(db: Database, workspaceId: string, patch: Record<string, unknown>): Promise<Workspace> {
+  const [row] = await db.update(schema.workspaces).set({
+    settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+    updatedAt: new Date(),
+  }).where(eq(schema.workspaces.id, workspaceId)).returning();
+  if (!row) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  return mapWorkspace(row);
+}
+
 export async function getWorkspaceGrant(db: Database, subjectId: string, workspaceId: string): Promise<AccessGrant | null> {
   const [row] = await db.select({
     membership: schema.workspaceMemberships,
@@ -1182,6 +1196,7 @@ export type UpdateKnowledgeMemoryInput = {
   confidence?: number | undefined;
   metadata?: Record<string, unknown> | undefined;
   reviewedBy?: string | null | undefined;
+  pinned?: boolean | undefined;
 };
 
 export type ListKnowledgeMemoryOptions = {
@@ -2529,24 +2544,56 @@ export async function createKnowledgeMemory(db: Database, input: CreateKnowledge
   });
 }
 
-export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput): Promise<KnowledgeMemory> {
+export async function updateKnowledgeMemory(db: Database, workspaceId: string, memoryId: string, input: UpdateKnowledgeMemoryInput, embedder?: MemoryEmbedder): Promise<KnowledgeMemory> {
   const reviewStatus = input.status === "approved" || input.status === "rejected";
   const scope = input.scope !== undefined ? requireDbString(input.scope, "knowledge memory scope") : undefined;
-  const text = input.text !== undefined ? requireDbString(input.text, "knowledge memory text") : undefined;
   const reviewedBy = input.reviewedBy === null
     ? null
     : input.reviewedBy !== undefined
       ? requireDbString(input.reviewedBy, "knowledge memory reviewer")
       : undefined;
+
+  // A text edit is a human audit action: it bypasses the dedup/cap gates (an
+  // authorized curator's edit is intentional) but still sanitizes + redacts,
+  // recomputes text_hash, and re-embeds fail-soft so the row stays coherent.
+  let textUpdate: { text: string; textHash: string; embedding: number[] | null; embeddingModel: string | null } | undefined;
+  if (input.text !== undefined) {
+    const { text: sanitizedText } = sanitizeMemoryText(input.text);
+    if (sanitizedText.length === 0) {
+      throw new Error("Memory text is empty after sanitization; nothing to save.");
+    }
+    if (isMemoryTextTooLong(sanitizedText)) {
+      throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
+    }
+    let embedding: number[] | null = null;
+    let embeddingModel: string | null = null;
+    if (embedder) {
+      try {
+        const [vector] = await embedder.embedMany([sanitizedText]);
+        if (vector && vector.length > 0) {
+          embedding = vector;
+          embeddingModel = embedder.model;
+        }
+      } catch (error) {
+        console.warn("workspace memory edit: embedding failed; storing keyword-only", {
+          workspaceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    textUpdate = { text: sanitizedText, textHash: hashMemoryText(sanitizedText), embedding, embeddingModel };
+  }
+
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb.update(schema.knowledgeMemories).set({
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),
       ...(scope !== undefined ? { scope } : {}),
-      ...(text !== undefined ? { text } : {}),
+      ...(textUpdate !== undefined ? { text: textUpdate.text, textHash: textUpdate.textHash, embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
       ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
       ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
       // Re-proposing clears review metadata; an explicit reviewedBy in the same
       // update still wins via the later spread.
       ...(input.status === "proposed" ? { reviewedBy: null, reviewedAt: null } : {}),
