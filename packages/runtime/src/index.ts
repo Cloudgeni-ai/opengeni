@@ -180,6 +180,7 @@ export {
   elideStaleScreenshotImages,
   SCREENSHOT_OMITTED_PLACEHOLDER,
 } from "./image-history";
+export { SCREENSHOT_OMITTED_IMAGE_DATA_URL } from "./screenshot-omitted-card";
 export type { ElideStaleScreenshotsOptions, ElideStaleScreenshotsResult } from "./image-history";
 
 ensureReadableStreamFrom();

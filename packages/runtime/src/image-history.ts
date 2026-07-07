@@ -1,4 +1,5 @@
 import type { AgentInputItem } from "@openai/agents";
+import { SCREENSHOT_OMITTED_IMAGE_DATA_URL } from "./screenshot-omitted-card";
 
 export const SCREENSHOT_OMITTED_PLACEHOLDER =
   "[screenshot omitted: an older desktop frame — the full image remains in the session event log]";
@@ -59,7 +60,7 @@ function collectItemImageOccurrences(
     return;
   }
   if (item.type === "computer_call_result" || item.type === "computer_call_output") {
-    collectComputerOutputImages(item, path, placeholder, out);
+    collectComputerOutputImages(item, path, out);
     return;
   }
   if (item.type === "function_call_result" || item.type === "function_call_output") {
@@ -70,7 +71,6 @@ function collectItemImageOccurrences(
 function collectComputerOutputImages(
   item: Record<string, unknown>,
   path: PathSegment[],
-  placeholder: string,
   out: ImageOccurrence[],
 ): void {
   const output = item.output;
@@ -79,7 +79,7 @@ function collectComputerOutputImages(
   }
   for (const key of ["data", "image_url", "imageUrl"]) {
     if (isImageDataUrl(output[key])) {
-      out.push({ path: [...path, "output", key], replacement: placeholder });
+      out.push({ path: [...path, "output", key], replacement: SCREENSHOT_OMITTED_IMAGE_DATA_URL });
       return;
     }
   }
