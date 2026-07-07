@@ -170,7 +170,12 @@ function isImageAsset(asset: FileAsset | null | undefined): boolean {
 }
 
 /** Attachment previews/chips + repository/tool chips + markdown body inside the user bubble. */
-export function UserMessageBody({ workspaceId, item }: { workspaceId: string; item: UserMessageItem }) {
+export function UserMessageBody({ workspaceId, item, resolveCapabilityName }: {
+  workspaceId: string;
+  item: UserMessageItem;
+  /** Real capability name for a tool chip (from the workspace catalog), or null. */
+  resolveCapabilityName?: (mcpServerId: string) => string | null;
+}) {
   const fileResources = item.resources.filter((resource): resource is FileResource => resource.kind === "file");
   const repositoryResources = item.resources.filter((resource): resource is Extract<ResourceRef, { kind: "repository" }> => resource.kind === "repository");
   const { assets, ready } = useFileAssets(workspaceId, fileResources);
@@ -237,7 +242,7 @@ export function UserMessageBody({ workspaceId, item }: { workspaceId: string; it
               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
             >
               <WrenchIcon className="size-3.5 shrink-0" />
-              <span className="truncate">{capabilityChipLabel(tool.id)}</span>
+              <span className="truncate">{resolveCapabilityName?.(tool.id) ?? capabilityChipLabel(tool.id)}</span>
             </span>
           ))}
         </div>

@@ -192,51 +192,73 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     window.location.assign(response.authorizationUrl);
   }, [context.client, workspaceId]);
 
-  // Self-hosted provider logos for any inline reconnect card. A domain resolves
-  // to a logo only through the workspace catalog (logoAssetPath), so fetch it
-  // lazily — once an auth-needed card is actually in view — and serve the image
-  // from our own catalog-assets route via `catalogAssetUrl`, never an off-origin
-  // favicon (the CSP forbids it and it would leak which providers are connected).
+  // One lazy catalog fetch feeds two timeline resolvers: provider logos for any
+  // inline reconnect card, and real capability names for the tool chips on user
+  // messages. Both resolve only through the workspace catalog, so fetch it once —
+  // when EITHER an auth-needed card OR a message carrying tool chips is in view —
+  // and reuse the single response. Logos serve from our own catalog-assets route
+  // via `catalogAssetUrl`, never an off-origin favicon (the CSP forbids it and it
+  // would leak which providers are connected).
   const hasAuthNeeded = useMemo(() => timeline.some((item) => item.kind === "auth-needed"), [timeline]);
+  const hasToolChips = useMemo(
+    () => timeline.some((item) => item.kind === "user-message" && item.tools.length > 0),
+    [timeline],
+  );
   const [providerLogos, setProviderLogos] = useState<Map<string, string>>(() => new Map());
-  const logosRequestedRef = useRef(false);
+  // mcpServerId -> human capability name, so a chip reads "Linear" instead of a
+  // best-effort parse of the raw server id.
+  const [capabilityNames, setCapabilityNames] = useState<Map<string, string>>(() => new Map());
+  const catalogRequestedRef = useRef(false);
   useEffect(() => {
-    if (!hasAuthNeeded || logosRequestedRef.current) {
+    if ((!hasAuthNeeded && !hasToolChips) || catalogRequestedRef.current) {
       return;
     }
-    logosRequestedRef.current = true;
+    catalogRequestedRef.current = true;
     let cancelled = false;
     void context.client.listCapabilities(workspaceId)
       .then((catalog) => {
         if (cancelled) {
           return;
         }
-        const map = new Map<string, string>();
+        const logos = new Map<string, string>();
+        const names = new Map<string, string>();
         for (const cap of catalog.items) {
           const domain = cap.providerDomain ?? cap.connectionRef?.providerDomain ?? null;
           const url = context.client.catalogAssetUrl(cap.logoAssetPath);
           if (domain && url) {
             const key = normalizeProviderDomain(domain);
-            if (!map.has(key)) {
-              map.set(key, url);
+            if (!logos.has(key)) {
+              logos.set(key, url);
             }
           }
+          // A chip's tool.id IS the capability's runtime mcpServerId — map it to
+          // the item's human name so the chip resolves to the real label.
+          const mcpServerId = cap.runtime.mcpServerId;
+          if (mcpServerId && cap.name && !names.has(mcpServerId)) {
+            names.set(mcpServerId, cap.name);
+          }
         }
-        setProviderLogos(map);
+        setProviderLogos(logos);
+        setCapabilityNames(names);
       })
       .catch(() => {
-        // Leave the card on its monogram fallback and allow a later retry.
+        // Leave the card on its monogram fallback and the chips on their
+        // best-effort labels, and allow a later retry.
         if (!cancelled) {
-          logosRequestedRef.current = false;
+          catalogRequestedRef.current = false;
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [hasAuthNeeded, context.client, workspaceId]);
+  }, [hasAuthNeeded, hasToolChips, context.client, workspaceId]);
   const resolveProviderLogo = useCallback(
     (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
     [providerLogos],
+  );
+  const resolveCapabilityName = useCallback(
+    (mcpServerId: string) => capabilityNames.get(mcpServerId) ?? null,
+    [capabilityNames],
   );
 
   if (loading || !session) {
@@ -278,6 +300,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
+      resolveCapabilityName={resolveCapabilityName}
     />
   );
 
@@ -392,6 +415,8 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
+  /** Real capability name for a user-message tool chip, resolved from the catalog. */
+  resolveCapabilityName: (mcpServerId: string) => string | null;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(props.session.workspaceId);
@@ -471,14 +496,14 @@ function SessionChatPane(props: {
 
   const renderMessageText = useCallback((text: string, item: AgentMessageItem | UserMessageItem) => {
     if (item.kind === "user-message") {
-      return <UserMessageBody workspaceId={props.session.workspaceId} item={item} />;
+      return <UserMessageBody workspaceId={props.session.workspaceId} item={item} resolveCapabilityName={props.resolveCapabilityName} />;
     }
     return (
       <div data-testid="assistant-markdown">
         <MarkdownText text={text} streaming={item.streaming} />
       </div>
     );
-  }, [props.session.workspaceId]);
+  }, [props.session.workspaceId, props.resolveCapabilityName]);
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
