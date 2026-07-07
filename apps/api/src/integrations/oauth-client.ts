@@ -14,6 +14,7 @@ import {
   isPrivateAddress,
   listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  normalizeBearerScheme,
   replaceIntegrationOAuthClient,
   storeIntegrationOAuthClient,
   updateConnection,
@@ -900,7 +901,7 @@ async function verifyMcpToolsList(settings: Settings, resource: string, token: T
   try {
     const transport = new StreamableHTTPClientTransport(new URL(resource), {
       requestInit: {
-        headers: { authorization: `${token.tokenType} ${token.accessToken}` },
+        headers: { authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}` },
       },
       fetch: (url, init) => fetchOAuth(url.toString(), settings, init),
     });
