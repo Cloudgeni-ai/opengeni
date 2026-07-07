@@ -22,14 +22,14 @@ import { useWorkspaces } from "../src/hooks/use-workspaces";
 
 registerDom();
 
-function makeEvent(sequence: number, type: string): SessionEvent {
+function makeEvent(sequence: number, type: string, payload: Record<string, unknown> = {}): SessionEvent {
   return {
     id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
     sequence,
     type,
-    payload: {},
+    payload,
     occurredAt: new Date().toISOString(),
   };
 }
@@ -240,6 +240,37 @@ describe("useSessionLineage", () => {
     await flush(250);
     expect(reads).toBe(2);
     expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
+    await hook.unmount();
+  });
+
+  test("refreshes immediately and once later when a child session create tool starts", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getSessionLineage: async () => {
+        reads += 1;
+        return {
+          ancestors: [],
+          children: [{ session: { id: `child-${reads}` }, children: [] }],
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await hook.rerender([
+      makeEvent(1, "agent.toolCall.created", { name: "session_create" }),
+    ]);
+    await flush(50);
+    expect(reads).toBe(2);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
+
+    await flush(2700);
+    expect(reads).toBe(3);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-3");
     await hook.unmount();
   });
 });

@@ -1,5 +1,5 @@
 import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
 
@@ -22,15 +22,24 @@ export function isLineageRefreshEvent(event: SessionEvent): boolean {
     return true;
   }
   // A child's creation never appears on the PARENT's stream as session.created —
-  // the parent sees its own spawn as an agent.toolCall.* for session_create. The
-  // output event is when the child exists server-side; refreshing on created too
-  // keeps the "N agents" chip live while the spawn is still running.
-  if (event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output") {
+  // the parent sees its own spawn as an agent.toolCall.* for session_create.
+  // Created events are handled separately so they can refresh immediately and
+  // once after the child row has had time to commit.
+  if (event.type === "agent.toolCall.output") {
     const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
     const name = typeof payload?.name === "string" ? payload.name : typeof payload?.toolName === "string" ? payload.toolName : "";
     return name === "session_create" || name.endsWith("__session_create");
   }
   return false;
+}
+
+function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
+  if (event.type !== "agent.toolCall.created") {
+    return false;
+  }
+  const payload = event.payload as { name?: unknown; toolName?: unknown } | null | undefined;
+  const name = typeof payload?.name === "string" ? payload.name : typeof payload?.toolName === "string" ? payload.toolName : "";
+  return name === "session_create" || name.endsWith("__session_create");
 }
 
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
@@ -43,6 +52,24 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
   );
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refreshSoon = useDebouncedCallback(() => void state.refresh(), 150);
+  const delayedChildRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (delayedChildRefreshRef.current !== null) {
+        clearTimeout(delayedChildRefreshRef.current);
+      }
+    };
+  }, []);
+  const refreshAfterChildCreate = useCallback(() => {
+    void state.refresh();
+    if (delayedChildRefreshRef.current !== null) {
+      clearTimeout(delayedChildRefreshRef.current);
+    }
+    delayedChildRefreshRef.current = setTimeout(() => {
+      delayedChildRefreshRef.current = null;
+      void state.refresh();
+    }, 2500);
+  }, [state]);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -53,6 +80,14 @@ export function useSessionLineage(sessionId: string | null | undefined, options:
     // open its OWN streamEvents tail — a second live SSE connection next to the
     // session route's useSessionEvents. A caller with no feed opts into polling
     // (pollIntervalMs), never a duplicate stream.
+    { events: options.events, enabled: enabled && options.events !== undefined },
+  );
+  useSessionEventTrigger(
+    client,
+    workspaceId,
+    sessionId,
+    isSessionCreateToolCallCreated,
+    refreshAfterChildCreate,
     { events: options.events, enabled: enabled && options.events !== undefined },
   );
   return { lineage: state.data, loading: state.loading, error: state.error, refresh: state.refresh };
