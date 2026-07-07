@@ -2532,6 +2532,7 @@ export async function createKnowledgeMemory(db: Database, input: CreateKnowledge
       kind: input.kind ?? "semantic",
       scope,
       text,
+      textHash: hashMemoryText(text),
       sourceRefs: input.sourceRefs ?? [],
       confidence: confidenceToStorage(input.confidence ?? 0.5),
       metadata: input.metadata ?? {},

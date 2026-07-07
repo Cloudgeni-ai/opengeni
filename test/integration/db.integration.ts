@@ -1073,6 +1073,25 @@ describe("DB integration", () => {
     expect(saved.memory.id).not.toBe(proposed?.id);
   });
 
+  test("exact-duplicate save dedupes against approved curated memory", async () => {
+    const grant = await testGrant(dbClient.db);
+    const curated = await createKnowledgeMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      status: "approved",
+      kind: "semantic",
+      text: "Production deploys require a release manager approval.",
+    });
+    const saved = await saveWorkspaceMemory(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      text: " production  deploys REQUIRE a release manager approval. ",
+    }, memoryEmbedder);
+    expect(saved.deduped).toBe(true);
+    expect(saved.dedupeReason).toBe("exact");
+    expect(saved.memory.id).toBe(curated.id);
+  });
+
   test("AC-3: near-duplicate (cosine >= threshold) save is a NOOP", async () => {
     const grant = await testGrant(dbClient.db);
     const embedder = collidingEmbedder("colliding-model-3072");
