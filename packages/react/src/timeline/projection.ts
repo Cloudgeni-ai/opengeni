@@ -870,7 +870,13 @@ function workerCompletionPayload(value: unknown): {
   pausedReason: string | null;
 } | null {
   const payload = asRecord(value);
-  if (typeof payload.childSessionId !== "string" || typeof payload.status !== "string") {
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (
+    typeof payload.childSessionId !== "string"
+    || !uuidPattern.test(payload.childSessionId)
+    || typeof payload.status !== "string"
+    || payload.status.trim() === ""
+  ) {
     return null;
   }
   const goal = asRecord(payload.goal);

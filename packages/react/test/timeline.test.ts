@@ -132,6 +132,18 @@ describe("buildTimeline", () => {
     expect((items[0] as UserMessageItem).text).toBe("Still readable");
   });
 
+  test("leaves invalid childCompletion session ids as plain user messages", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", {
+        text: "Still readable",
+        childCompletion: { childSessionId: "not-a-uuid", status: "idle" },
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message"]);
+    expect((items[0] as UserMessageItem).text).toBe("Still readable");
+  });
+
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
     const items = buildTimeline([
