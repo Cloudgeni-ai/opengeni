@@ -178,6 +178,36 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
     expect((agent as { modelSettings: { store?: unknown } }).modelSettings.store).toBe(false);
   });
 
+  test("an accepted responses transport carries the stable session prompt_cache_key", () => {
+    const settings = multiProviderSettings();
+    const resolved = resolveTurnModel(settings, "gpt-5.5")!;
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: resolved.model,
+      compactionMode: resolved.provider.compactionMode,
+      hostedWebSearch: resolved.configured.hostedWebSearch,
+      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      contextWindowTokens: resolved.configured.contextWindowTokens,
+      promptCacheKey: "session-123",
+    });
+    expect((agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData).toEqual({
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: "session-123",
+    });
+  });
+
+  test("an excluded registry chat transport does not carry prompt_cache_key when no key is passed", () => {
+    const settings = multiProviderSettings();
+    const resolved = resolveTurnModel(settings, FIREWORKS_MODEL)!;
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: resolved.model,
+      compactionMode: resolved.provider.compactionMode,
+      hostedWebSearch: resolved.configured.hostedWebSearch,
+      encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
+      contextWindowTokens: resolved.configured.contextWindowTokens,
+    });
+    expect((agent as { modelSettings: { providerData?: Record<string, unknown> } }).modelSettings.providerData?.prompt_cache_key).toBeUndefined();
+  });
+
   test("resolveModelProvider/configuredProviders agree on the registry provider's client gating", () => {
     // Cross-check the config layer the runtime builds on: the resolved provider
     // for the Fireworks model is the chat/client provider, and the built-in

@@ -6,6 +6,7 @@ import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
   ConnectionRefreshHttpError,
+  normalizeBearerScheme,
   createConnection,
   createDb,
   consumeIntegrationOAuthStateNonce,
@@ -697,5 +698,18 @@ describe("buildConnectionTokenResolver", () => {
     });
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed", connectionId: "conn_oauth" });
     expect(counts.status).toBe(1);
+  });
+});
+
+describe("normalizeBearerScheme", () => {
+  test("canonicalizes a lowercase/absent bearer scheme to \"Bearer\" (Linear MCP rejects lowercase)", () => {
+    expect(normalizeBearerScheme("bearer")).toBe("Bearer");
+    expect(normalizeBearerScheme("BEARER")).toBe("Bearer");
+    expect(normalizeBearerScheme("Bearer")).toBe("Bearer");
+    expect(normalizeBearerScheme(null)).toBe("Bearer");
+    expect(normalizeBearerScheme("")).toBe("Bearer");
+  });
+  test("passes a non-bearer scheme through unchanged", () => {
+    expect(normalizeBearerScheme("DPoP")).toBe("DPoP");
   });
 });

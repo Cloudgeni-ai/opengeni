@@ -232,6 +232,27 @@ describe("provider-proof compaction transcript", () => {
     expect(seenInput).not.toContain("callId");
   });
 
+  test("passes prompt_cache_key through summarizer Responses calls when provided", async () => {
+    let seenKey: unknown;
+    const fakeClient = {
+      responses: {
+        create: async (request: { prompt_cache_key?: unknown }) => {
+          seenKey = request.prompt_cache_key;
+          return { output_text: "rendered summary" };
+        },
+      },
+    };
+
+    const summary = await summarizeForCompaction(
+      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
+      buildCompactionPromptInput([user("deploy it")]),
+      { client: fakeClient as any, api: "responses", model: "scripted-model", promptCacheKey: "session-123" },
+    );
+
+    expect(summary).toBe("rendered summary");
+    expect(seenKey).toBe("session-123");
+  });
+
   test("hard-trimmed transcript drops oldest items and keeps the checkpoint prompt", () => {
     const rendered = renderCompactionPromptInputForChat(
       buildCompactionPromptInput([

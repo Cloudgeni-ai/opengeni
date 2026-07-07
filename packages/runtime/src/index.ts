@@ -85,8 +85,8 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
-import { elideStaleScreenshotImages } from "./image-history";
 import { installCodexToolSearch } from "./codex-tool-search";
+import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
   SUMMARY_BUFFER_TOKENS,
@@ -177,11 +177,9 @@ export {
 } from "./context-compaction";
 export type { ClientCompactionDecision, CompactionItem } from "./context-compaction";
 export {
-  elideStaleScreenshotImages,
-  SCREENSHOT_OMITTED_PLACEHOLDER,
-} from "./image-history";
-export { SCREENSHOT_OMITTED_IMAGE_DATA_URL } from "./screenshot-omitted-card";
-export type { ElideStaleScreenshotsOptions, ElideStaleScreenshotsResult } from "./image-history";
+  modelCallUsageTelemetry,
+} from "./usage-telemetry";
+export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
 ensureReadableStreamFrom();
 
@@ -199,6 +197,7 @@ export type ModelResponseUsage = {
     outputTokens?: number;
     totalTokens?: number;
     inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
+    outputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
   };
 };
 
@@ -285,6 +284,19 @@ export type SandboxFileDownload = {
   content?: Uint8Array;
   expiresAt?: Date | string;
   sizeBytes?: number;
+};
+
+export type SandboxFileDownloadFailure = {
+  fileId: string;
+  filename: string;
+  path: string;
+  reason: string;
+  exitCode?: number;
+  output?: string;
+};
+
+export type SandboxFileDownloadMaterializationResult = {
+  failures: SandboxFileDownloadFailure[];
 };
 
 let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
@@ -653,7 +665,7 @@ function recordModelCallMetric(provider: string, outcome: "completed" | "failed"
 export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
-  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number } = {},
+  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number; promptCacheKey?: string } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
@@ -671,6 +683,7 @@ export async function summarizeForCompaction(
         model,
         max_tokens: maxTokens,
         messages: [{ role: "user", content: transcript }],
+        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
       } as any);
       const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
       const trimmed = typeof text === "string" ? text.trim() : "";
@@ -684,6 +697,7 @@ export async function summarizeForCompaction(
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
       max_output_tokens: maxTokens,
       input: transcript,
+      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
     } as any);
     const text = extractResponseOutputText(response);
     const trimmed = text.trim();
@@ -791,6 +805,11 @@ export type BuildAgentOptions = {
   // the account's ACTUALLY-connected sources (codex-rs parity). Only meaningful
   // on the codex tool-search path.
   codexConnectorNamespaces?: ReadonlySet<string>;
+  // Stable per-session routing key for provider-side prompt prefix caches. The
+  // worker passes this only for transports whose docs/API surface accept
+  // prompt_cache_key; registry providers that use a different affinity field stay
+  // unset to avoid unknown-parameter 400s.
+  promptCacheKey?: string;
   sandboxEnvironment?: Record<string, string>;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
@@ -1041,6 +1060,10 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
+  const providerData = {
+    ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
+    ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+  };
   // Native hosted tools attached to every constructed agent. webSearchEnabled
   // is ON by default and provider-unconditional on the built-in path (the live
   // Azure Responses path executes the hosted web_search tool); a registry model
@@ -1109,9 +1132,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       // function tools, which contribute none. Gated on the resolved
       // encryptedReasoning flag: the chat wire API has no encrypted_content
       // field, so registry "chat" providers turn it off.
-      ...(encryptedReasoning
-        ? { providerData: { include: ["reasoning.encrypted_content"] } }
-        : {}),
+      ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
     },
     // Explicit hosted tools (web_search when enabled). Threaded into BOTH the
     // `new Agent(baseConfig)` path (sandboxBackend === "none") and the
@@ -2220,6 +2241,9 @@ export type RunAgentStreamOptions = {
     // follow a swap onto a connected machine (the user's real computer), so it
     // runs against this pinned handle instead. Absent -> falls back to `session`.
     setupSession?: unknown;
+    // True when the caller already ran file-resource materialization for this
+    // provided session and threaded any failures into the model input.
+    fileDownloadsMaterialized?: boolean;
   };
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
@@ -2302,13 +2326,7 @@ export function contextRobustnessFilterForSettings(
   const clientCompactionMode = resolveContextCompactionMode(settings) === "client";
   const compactionThresholdTokens = clientCompactionThresholdTokens(settings);
   return ({ modelData }) => {
-    const images = elideStaleScreenshotImages(modelData.input);
-    if (images.elidedCount > 0) {
-      console.warn(
-        `per-call image history policy elided ${images.elidedCount} older screenshot image(s), keeping the last ${Math.min(3, images.imageCount)} full image(s)`,
-      );
-    }
-    let input = images.items;
+    let input = modelData.input;
     if (inputBudgetTokens !== undefined) {
       const guarded = enforceInputBudget(
         input as unknown as Array<Record<string, unknown>>,
@@ -2365,8 +2383,8 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
- * selects it; the context-robustness guard then elides stale screenshots on
- * every mode and applies hard budget trimming only on the client-compaction path.
+ * selects it; the context-robustness guard then applies hard budget trimming
+ * only on the client-compaction path and raises the proactive compaction signal.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -2455,11 +2473,12 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       // command is idempotent (skips an existing file) and atomic (tmp + rename),
       // so the per-turn re-run is safe; the turn re-signs URLs each run, so a
       // re-warmed box always gets fresh links.
-      if (fileDownloads.length > 0) {
-        await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+      if (fileDownloads.length > 0 && !overrides.ownedSandbox.fileDownloadsMaterialized) {
+        const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
         });
+        appendSandboxFileDownloadFailureNote(prepared, materialized.failures);
       }
     } else {
       // SELFHOSTED TOOLSPACE (parity): the platform setup hooks (repository clone,
@@ -2564,8 +2583,8 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
     // Built-in per-call guard chain: normalize computer calls, optionally strip
-    // provider ids, elide stale screenshots in every mode, and trim to the input
-    // budget on the client-compaction path. This runs for turn-start replay AND
+    // provider ids, trim to the input budget on the client-compaction path, and
+    // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
   };
@@ -2576,6 +2595,23 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     } as SandboxRunConfig;
   }
   return await runScopedRunner(settings).run(agent, prepared.input, runOptions);
+}
+
+function appendSandboxFileDownloadFailureNote(input: PreparedAgentInput, failures: SandboxFileDownloadFailure[]): void {
+  const note = sandboxFileDownloadFailureNote(failures);
+  if (!note) {
+    return;
+  }
+  if (typeof input.input === "string") {
+    input.input = [input.input, "", note].join("\n");
+    return;
+  }
+  if (Array.isArray(input.input)) {
+    input.input = [
+      ...input.input,
+      { type: "message", role: "user", content: note } as AgentInputItem,
+    ];
+  }
 }
 
 /**
@@ -2879,14 +2915,12 @@ export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
   context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
-): Promise<void> {
+): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
-    return;
+    return { failures: [] };
   }
-  if (!session.exec && !session.execCommand) {
-    throw new Error("Sandbox file download materialization requires command execution support");
-  }
+  const failures: SandboxFileDownloadFailure[] = [];
   for (const download of normalizedDownloads) {
     const targetPath = sandboxDownloadTargetPath(download);
     const payload = {
@@ -2896,8 +2930,22 @@ export async function materializeSandboxFileDownloads(
       expiresAt: download.expiresAt ? new Date(download.expiresAt).toISOString() : null,
     };
     await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload: { name: "file-resource-download", ...payload } });
+    if (!session.exec && !session.execCommand) {
+      const failure = sandboxFileDownloadFailure(download, targetPath, "Sandbox file download materialization requires command execution support");
+      failures.push(failure);
+      await context.onRuntimeEvent?.({
+        type: "sandbox.operation.failed",
+        payload: {
+          name: "file-resource-download",
+          ...payload,
+          error: failure.reason,
+        },
+      });
+      continue;
+    }
+    let result: unknown;
     try {
-      const result = session.exec
+      result = session.exec
         ? await session.exec({
           cmd: sandboxFileDownloadCommand(download, targetPath),
           workdir: "/workspace",
@@ -2915,17 +2963,50 @@ export async function materializeSandboxFileDownloads(
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
       await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload: { name: "file-resource-download", ...payload } });
     } catch (error) {
+      const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
+      failures.push(failure);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.failed",
         payload: {
           name: "file-resource-download",
           ...payload,
-          error: error instanceof Error ? error.message : String(error),
+          error: failure.reason,
+          ...(failure.exitCode !== undefined ? { exitCode: failure.exitCode } : {}),
+          ...(failure.output ? { output: failure.output } : {}),
         },
       });
-      throw error;
     }
   }
+  return { failures };
+}
+
+function sandboxFileDownloadFailure(
+  download: SandboxFileDownload,
+  targetPath: string,
+  error: unknown,
+  result?: unknown,
+): SandboxFileDownloadFailure {
+  const exitCode = sandboxCommandExitCode(result);
+  const output = sandboxCommandOutput(result);
+  return {
+    fileId: download.fileId,
+    filename: download.filename,
+    path: targetPath,
+    reason: error instanceof Error ? error.message : String(error),
+    ...(exitCode !== null ? { exitCode } : {}),
+    ...(output ? { output } : {}),
+  };
+}
+
+export function sandboxFileDownloadFailureNote(failures: SandboxFileDownloadFailure[]): string {
+  if (failures.length === 0) {
+    return "";
+  }
+  return [
+    "The following attached files could not be loaded into the sandbox and are unavailable this turn:",
+    ...failures.map((failure) => `- ${failure.filename} (${failure.reason})`),
+    "Continue without them or tell the user.",
+  ].join("\n");
 }
 
 export function sandboxFileDownloadsForAgent(agent: unknown): SandboxFileDownload[] {
@@ -3034,11 +3115,36 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       out.push({ type: "agent.message.delta", payload: { text: data.delta } });
       return out;
     }
+    if (data?.type === "response_done") {
+      const responseUsage = modelResponseUsageFromSdkEvent(event);
+      if (responseUsage) {
+        out.push({
+          type: "agent.model.usage",
+          payload: {
+            responseId: responseUsage.responseId ?? null,
+            ...modelCallUsageTelemetry(responseUsage.usage),
+          },
+        });
+      }
+      return out;
+    }
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
+    }
+    if (raw?.type === "response.completed") {
+      const responseUsage = modelResponseUsageFromSdkEvent(event);
+      if (responseUsage) {
+        out.push({
+          type: "agent.model.usage",
+          payload: {
+            responseId: responseUsage.responseId ?? null,
+            ...modelCallUsageTelemetry(responseUsage.usage),
+          },
+        });
+      }
     }
     return out;
   }
@@ -3153,6 +3259,7 @@ function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
     ...numberProp(raw, "outputTokens", "outputTokens", "output_tokens"),
     ...numberProp(raw, "totalTokens", "totalTokens", "total_tokens"),
     ...inputTokenDetailsProp(raw),
+    ...outputTokenDetailsProp(raw),
   };
   return Object.keys(usage).length > 0 ? usage : null;
 }
@@ -3168,6 +3275,14 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
     return {};
   }
   return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+}
+
+function outputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
+  const details = raw.outputTokensDetails ?? raw.output_tokens_details;
+  if (!details || typeof details !== "object") {
+    return {};
+  }
+  return { outputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
@@ -3388,7 +3503,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
   const targetDir = posixPath.dirname(targetPath);
   const tmpPath = `${targetPath}.opengeni-download-$$`;
   return [
-    "set -euo pipefail",
+    "set -eu",
     `mkdir -p -- ${shellQuote(targetDir)}`,
     `if [ ! -f ${shellQuote(targetPath)} ]; then`,
     `  tmp=${shellQuote(tmpPath)}`,
@@ -3906,6 +4021,10 @@ export function sandboxCommandExitCode(result: unknown): number | null {
 }
 
 export function sandboxCommandOutput(result: unknown): string {
+  if (typeof result === "string") {
+    const outputIndex = result.indexOf("Output:");
+    return outputIndex >= 0 ? result.slice(outputIndex + "Output:".length).trim() : result.trim();
+  }
   if (!result || typeof result !== "object") {
     return "";
   }
@@ -3926,7 +4045,7 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(output || `${operation} failed with exit code ${exitCode}`);
+    throw new Error(`${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`);
   }
   if (exitCode === null) {
     throw new Error(output || `${operation} did not return a command exit code`);

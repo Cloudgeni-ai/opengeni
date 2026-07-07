@@ -521,6 +521,52 @@ export function workerGoalEvents(): SessionEvent[] {
   return log.events;
 }
 
+/**
+ * Workers reporting BACK to their manager. Each arrives as a `user.message`
+ * carrying a `childCompletion` payload — projected to a `worker-completion` item
+ * and drawn as an inbound result card (completed / paused / failed), NOT a user
+ * bubble. REAL shape: db/index.ts stamps `{ childSessionId, status, goal:{...} }`.
+ */
+export function workerCompletionEvents(): SessionEvent[] {
+  const log = new EventLog();
+  log.push("user.message", {
+    text: "Login flow verified end-to-end across Chromium, Firefox, and WebKit. All 128 assertions passed; the dashboard screenshot is attached to the run. No flakes on three reruns.",
+    childCompletion: {
+      childSessionId: "9efcd759-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+      status: "idle",
+      goal: {
+        status: "completed",
+        text: "verify login flow end-to-end",
+        evidence: "128/128 assertions green on 3 consecutive runs; screenshot dashboard-2026-07-07.png captured.",
+      },
+    },
+  });
+  log.push("user.message", {
+    text: "I paused the migration worker — it needs the GHCR pull credentials before it can pull the base image, and I did not want to burn continuations retrying a blocked step.",
+    childCompletion: {
+      childSessionId: "1a2b3c4d-5e6f-4a3b-8c4d-9f8e7d6c5b4a",
+      status: "idle",
+      goal: {
+        status: "paused",
+        text: "migrate the billing service to the new Postgres cluster",
+        pausedReason: "missing GHCR pull credentials — cannot pull ghcr.io/acme/billing base image",
+      },
+    },
+  });
+  log.push("user.message", {
+    text: "The load-test worker failed: the staging target returned 503 for the whole window, so I could not gather a clean baseline.",
+    childCompletion: {
+      childSessionId: "7f6e5d4c-3b2a-4a3b-8c4d-1a2b3c4d5e6f",
+      status: "failed",
+      goal: {
+        status: "active",
+        text: "capture a p95 latency baseline against staging",
+      },
+    },
+  });
+  return log.events;
+}
+
 /* ----------------------------------------------------------------------------
    Segment C/D/E — completed / failed / cancelled turns (fold to a chip).
    These are full event runs; MessageTimeline folds them through the live pipeline.

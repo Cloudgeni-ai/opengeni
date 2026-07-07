@@ -38,6 +38,8 @@ import {
   sumUsageQuantity,
   heartbeatLeaseHolder,
   accrueWarmSeconds,
+  getMaterializedSandboxFileResources,
+  markSandboxFileResourcesMaterialized,
   SandboxLeaseSupersededError,
   buildConnectionTokenResolver,
   type AppendEventInput,
@@ -47,16 +49,21 @@ import {
   sandboxStateEntryFromRunState,
   agentsErrorRunState,
   maxTurnsExceededRunState,
+  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
   ensureModalRegistryImage,
   findCompactionNeededError,
+  materializeSandboxFileDownloads,
+  sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   type SandboxFileDownload,
+  type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type ModelResponseUsage,
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type ModelProviderApi, type RegistryProviderKind, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
@@ -130,6 +137,16 @@ export function selectCodexCredentialForTurn(args: {
     return active;
   }
   return null;
+}
+
+export function filterUnmaterializedSandboxFileDownloads(
+  downloads: SandboxFileDownload[],
+  materializedFileIds: Set<string>,
+): SandboxFileDownload[] {
+  if (downloads.length === 0 || materializedFileIds.size === 0) {
+    return downloads;
+  }
+  return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
 // Resume notice fed to the model when a turn re-enters after a graceful
@@ -277,6 +294,73 @@ export function modelUsageSourceKey(input: {
     return input.responseId;
   }
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
+type TurnEventPublisher = (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>;
+
+export async function emitModelCallUsage(input: {
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  sourceKey: string;
+  usage: ModelResponseUsage | { usage?: unknown | null } | null;
+}): Promise<void> {
+  const usage = input.usage && typeof input.usage === "object" && "usage" in input.usage
+    ? (input.usage as { usage?: unknown }).usage
+    : null;
+  if (!usage || typeof usage !== "object") {
+    return;
+  }
+  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  try {
+    input.observability.info("model call usage", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      sourceKey: input.sourceKey,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+    });
+  } catch {
+    // Usage observability is best-effort.
+  }
+  try {
+    await input.publish?.([
+      {
+        type: "agent.model.usage",
+        payload: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          sourceKey: input.sourceKey,
+          ...telemetry,
+        },
+      },
+    ], true);
+  } catch (error) {
+    input.observability.warn("model call usage event publish failed", {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export function historyRowsToAppend(
@@ -503,6 +587,28 @@ export function computerToolModeForTurn(
     return "function-text";
   }
   return "hosted";
+}
+
+/**
+ * Decide whether THIS turn may send OpenAI's `prompt_cache_key` request field.
+ *
+ * Accepted transports:
+ *   - legacy/built-in OpenAI or Azure Responses fallback (resolvedModel null);
+ *   - resolved built-in OpenAI/Azure providers;
+ *   - ChatGPT/Codex subscription backend (its strict allowlist permits the field).
+ *
+ * Registry API-key providers are intentionally excluded. Fireworks' prompt-cache
+ * docs prescribe `user` or `x-session-affinity`, not `prompt_cache_key`; Z.AI/GLM
+ * documents automatic context caching plus `user_id`. Sending OpenAI-only fields
+ * to unknown OpenAI-compatible providers risks unsupported-parameter 400s.
+ */
+export function acceptsPromptCacheKeyForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind; builtin?: boolean } } | null,
+): boolean {
+  if (!resolvedModel) {
+    return true;
+  }
+  return resolvedModel.provider.builtin === true || resolvedModel.provider.kind === "codex-subscription";
 }
 
 /**
@@ -1377,6 +1483,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // trigger is goal.continuation/turn.preempted).
       const isGenesisTurn = triggerType === "user.message"
         && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
       // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
       // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
       // may have been swapped to a connected machine (active_sandbox_id → a
@@ -1449,12 +1556,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // responses → hosted) so the runtime never string-sniffs the model instance's
             // constructor name. See {@link computerToolModeForTurn}.
             computerToolMode: computerToolModeForTurn(resolvedModel),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }
           // LEGACY global-client fallback (resolveTurnModel returned null → the model
           // is not in the registry, served by the built-in OpenAI/Azure Responses
           // client). That backend has real hosted support, so pin computerToolMode to
           // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
-          : { computerToolMode: computerToolModeForTurn(null) }),
+          : {
+            computerToolMode: computerToolModeForTurn(null),
+            promptCacheKey: input.sessionId,
+          }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
@@ -1479,8 +1590,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: resolvedModel.configured.id,
             maxOutputTokens: SUMMARY_BUFFER_TOKENS,
             ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }))
-        : undefined;
+        : promptCacheKey
+          ? ((s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) => summarizeForCompaction(s, m, {
+              maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+              ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+              promptCacheKey,
+            }))
+          : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
@@ -1504,7 +1622,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Provider-aware summarizer: when the turn's model resolved to a
             // registry provider, summarize on THAT provider's client + wire API
             // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution keeps the default built-in Responses summarizer.
+            // resolution uses the built-in Responses summarizer with the same
+            // session prompt-cache key as the main model calls.
             compactSummarizer,
             forced ? { force: true } : {},
           );
@@ -1516,6 +1635,53 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           console.error("context compaction failed (turn proceeds un-compacted)", compactError);
         }
       }
+      let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
+      let fileDownloadsMaterializedForRun = false;
+      if (
+        resolvedSandbox
+        && setupBoxSession
+        && activeSandboxBackend !== "selfhosted"
+        && fileResourceDownloads.length > 0
+      ) {
+        const boxInstanceId = resolvedSandbox.established.instanceId;
+        const alreadyMaterialized = await getMaterializedSandboxFileResources(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          expectedEpoch: resolvedSandbox.leaseEpoch,
+          instanceId: boxInstanceId,
+        });
+        const downloadsToMaterialize = filterUnmaterializedSandboxFileDownloads(
+          fileResourceDownloads,
+          alreadyMaterialized,
+        );
+        const runAs = sandboxRunAs(runSettings);
+        if (downloadsToMaterialize.length > 0) {
+          const materialized = await materializeSandboxFileDownloads(setupBoxSession as any, downloadsToMaterialize, {
+            onRuntimeEvent: async (event) => {
+              await publish!([{ type: event.type, payload: event.payload }], true);
+            },
+            ...(runAs ? { runAs } : {}),
+          });
+          fileMaterializationFailures = materialized.failures;
+          const failedFileIds = new Set(materialized.failures.map((failure) => failure.fileId));
+          const succeededFileIds = downloadsToMaterialize
+            .map((download) => download.fileId)
+            .filter((fileId) => !failedFileIds.has(fileId));
+          if (succeededFileIds.length > 0) {
+            await markSandboxFileResourcesMaterialized(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sandboxGroupId: session.sandboxGroupId,
+              expectedEpoch: resolvedSandbox.leaseEpoch,
+              instanceId: boxInstanceId,
+              fileIds: succeededFileIds,
+            });
+          }
+        }
+        fileDownloadsMaterializedForRun = true;
+      }
+      const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(fileMaterializationFailures);
       // Cross-account reasoning strip: pass THIS turn's codex account so every
       // history read path (items + run-state replay) drops reasoning produced by
       // a DIFFERENT codex account. effectiveCodexCredentialId is the resolved
@@ -1537,6 +1703,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           trigger,
           runSettings,
           { currentCodexCredentialId: effectiveCodexCredentialId },
+          unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {},
         );
         runInput = prepared.input;
         // Slice index = the length of the model-facing (active) history this turn
@@ -1618,6 +1785,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // established box — never through the routing proxy, which would
                 // re-route those execs onto a machine swapped in mid-turn.
                 ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
+                ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
               },
             }
             : {}),
@@ -1637,9 +1805,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            let modelUsageEventContext: Record<string, unknown> | null = null;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               responseUsageCount += 1;
+              const responseSourceKey = modelUsageSourceKey({
+                responseId: responseUsage.responseId,
+                dispatchId,
+                positionalKey: `response-${responseUsageCount}`,
+              });
+              await emitModelCallUsage({
+                observability,
+                publish: null,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+                usage: responseUsage,
+              });
+              modelUsageEventContext = {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+              };
               const observed = responseUsage.usage?.inputTokens;
               if (typeof observed === "number" && observed > 0) {
                 lastInputTokensObserved = observed;
@@ -1654,11 +1851,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 isCodexTurn,
                 usage: responseUsage.usage,
-                sourceKey: modelUsageSourceKey({
-                  responseId: responseUsage.responseId,
-                  dispatchId,
-                  positionalKey: `response-${responseUsageCount}`,
-                }),
+                sourceKey: responseSourceKey,
                 observability,
               });
               await reconcileConversationTruth();
@@ -1690,6 +1883,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
+              if (event.type === "agent.model.usage" && modelUsageEventContext && event.payload && typeof event.payload === "object") {
+                event.payload = { ...modelUsageEventContext, ...event.payload };
+              }
               await batcher.push(event);
             }
           }
@@ -1705,6 +1901,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (typeof aggregateInput === "number" && aggregateInput > 0) {
             lastInputTokensObserved = aggregateInput;
           }
+          const aggregateSourceKey = modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" });
           await recordModelUsageAndDebitCredits(settings, db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1713,8 +1910,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: turn.model,
             isCodexTurn,
             usage: stream.state.usage,
-            sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
+            sourceKey: aggregateSourceKey,
             observability,
+          });
+          await emitModelCallUsage({
+            observability,
+            publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            sourceKey: aggregateSourceKey,
+            usage: { usage: stream.state.usage },
           });
         }
         if (lastInputTokensObserved !== null) {
@@ -2052,6 +2262,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityError = error;
         await flushRuntimeBatcher();
         if (preemptTurnId) {
+          await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [{
+            turnId: preemptTurnId,
+            type: "turn.cancelled",
+            payload: {
+              triggerEventId: input.triggerEventId,
+              reason: error.message || "activity_cancelled",
+            },
+          }]).catch(() => undefined);
           await finishTurn(db, input.workspaceId, preemptTurnId, "cancelled").catch(() => undefined);
           turnMetricOutcome = "cancelled";
         }

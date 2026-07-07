@@ -74,6 +74,23 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // A steering message must not mark in-flight tools complete; it only
         // ends whatever text was streaming. Turn lifecycle events finalize.
         closeStreamingTail();
+        const childCompletion = workerCompletionPayload(payload.childCompletion);
+        if (childCompletion) {
+          items.push({
+            kind: "worker-completion",
+            id: event.id,
+            turnId,
+            occurredAt: event.occurredAt,
+            childSessionId: childCompletion.childSessionId,
+            childStatus: childCompletion.childStatus,
+            goalStatus: childCompletion.goalStatus,
+            goalText: childCompletion.goalText,
+            evidence: childCompletion.evidence,
+            pausedReason: childCompletion.pausedReason,
+            text: typeof payload.text === "string" ? payload.text : "",
+          });
+          break;
+        }
         items.push({
           kind: "user-message",
           id: event.id,
@@ -837,6 +854,34 @@ function toolRefs(value: unknown): import("@opengeni/sdk").ToolRef[] {
     const record = asRecord(entry);
     return record.kind === "mcp" && typeof record.id === "string";
   });
+}
+
+function workerCompletionPayload(value: unknown): {
+  childSessionId: string;
+  childStatus: string;
+  goalStatus: string | null;
+  goalText: string | null;
+  evidence: string | null;
+  pausedReason: string | null;
+} | null {
+  const payload = asRecord(value);
+  if (typeof payload.childSessionId !== "string" || typeof payload.status !== "string") {
+    return null;
+  }
+  const goal = asRecord(payload.goal);
+  return {
+    childSessionId: payload.childSessionId,
+    childStatus: payload.status,
+    goalStatus: typeof goal.status === "string" ? goal.status : null,
+    goalText: typeof goal.text === "string" ? goal.text : null,
+    evidence: typeof goal.evidence === "string" ? goal.evidence : null,
+    // Console pauses and several server paths put the human explanation on
+    // `rationale`, not `pausedReason` — same fallback the goal pill uses, so a
+    // paused worker card never shows "Worker paused" with the reason missing.
+    pausedReason: typeof goal.pausedReason === "string"
+      ? goal.pausedReason
+      : typeof goal.rationale === "string" ? goal.rationale : null,
+  };
 }
 
 function isSessionStatus(value: unknown): value is SessionStatus {

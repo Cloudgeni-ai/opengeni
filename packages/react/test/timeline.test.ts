@@ -14,6 +14,7 @@ import {
   type TurnEndItem,
   type ToolCallItem,
   type UserMessageItem,
+  type WorkerCompletionItem,
   type WorkerItem,
 } from "../src/timeline";
 
@@ -91,6 +92,46 @@ function flattenActivityIds(group: TurnGroup | undefined): string[] {
 }
 
 describe("buildTimeline", () => {
+  test("projects childCompletion user messages as worker-completion items", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", {
+        text: "Worker finished",
+        childCompletion: {
+          childSessionId: "22222222-3333-4444-9555-666666666672",
+          status: "idle",
+          goal: {
+            status: "completed",
+            text: "Ship the patch",
+            evidence: "Tests passed",
+            pausedReason: "none",
+          },
+        },
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["worker-completion"]);
+    const completion = items[0] as WorkerCompletionItem;
+    expect(completion.childSessionId).toBe("22222222-3333-4444-9555-666666666672");
+    expect(completion.childStatus).toBe("idle");
+    expect(completion.goalStatus).toBe("completed");
+    expect(completion.goalText).toBe("Ship the patch");
+    expect(completion.evidence).toBe("Tests passed");
+    expect(completion.pausedReason).toBe("none");
+    expect(completion.text).toBe("Worker finished");
+  });
+
+  test("leaves malformed childCompletion payloads as plain user messages", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.message", {
+        text: "Still readable",
+        childCompletion: { childSessionId: "22222222-3333-4444-9555-666666666672" },
+      }),
+    ]);
+    expect(items.map((item) => item.kind)).toEqual(["user-message"]);
+    expect((items[0] as UserMessageItem).text).toBe("Still readable");
+  });
+
   test("accumulates streaming deltas into one agent message and finalizes on completed", () => {
     reset();
     const items = buildTimeline([

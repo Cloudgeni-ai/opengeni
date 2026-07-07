@@ -1,0 +1,67 @@
+{
+  "items": [
+    {
+      "kind": "worker-completion",
+      "id": "00000000-0000-4000-8000-000000000801",
+      "turnId": "33333333-4444-4555-9666-777777777801",
+      "occurredAt": "2026-01-02T17:00:01.000Z",
+      "childSessionId": "22222222-3333-4444-9555-666666666672",
+      "childStatus": "idle",
+      "goalStatus": "completed",
+      "goalText": "Investigate the failing check",
+      "evidence": "All package checks passed",
+      "pausedReason": "none",
+      "text": "Worker 22222222-3333-4444-9555-666666666672 finished."
+    },
+    {
+      "kind": "user-message",
+      "id": "00000000-0000-4000-8000-000000000802",
+      "occurredAt": "2026-01-02T17:00:02.000Z",
+      "text": "Malformed completion remains a normal message.",
+      "pending": false,
+      "resources": [],
+      "tools": []
+    }
+  ],
+  "groups": [
+    {
+      "kind": "item",
+      "item": {
+        "kind": "worker-completion",
+        "id": "00000000-0000-4000-8000-000000000801",
+        "turnId": "33333333-4444-4555-9666-777777777801",
+        "occurredAt": "2026-01-02T17:00:01.000Z",
+        "childSessionId": "22222222-3333-4444-9555-666666666672",
+        "childStatus": "idle",
+        "goalStatus": "completed",
+        "goalText": "Investigate the failing check",
+        "evidence": "All package checks passed",
+        "pausedReason": "none",
+        "text": "Worker 22222222-3333-4444-9555-666666666672 finished."
+      }
+    },
+    {
+      "kind": "item",
+      "item": {
+        "kind": "user-message",
+        "id": "00000000-0000-4000-8000-000000000802",
+        "occurredAt": "2026-01-02T17:00:02.000Z",
+        "text": "Malformed completion remains a normal message.",
+        "pending": false,
+        "resources": [],
+        "tools": []
+      }
+    }
+  ],
+  "facets": {
+    "itemKinds": {
+      "user-message": 1,
+      "worker-completion": 1
+    },
+    "groupKinds": {
+      "item": 2
+    },
+    "activityItemKinds": {},
+    "turnOutcomes": {}
+  }
+}

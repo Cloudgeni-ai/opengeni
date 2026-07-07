@@ -2565,6 +2565,26 @@ export const Session = z.object({
 });
 export type Session = z.infer<typeof Session>;
 
+export type SessionSummary = Session;
+
+// Recursive: the TS type is declared first so the schema annotation can carry
+// the FULL recursive shape (a shallow annotation loses type information for
+// contracts consumers after one level of nesting).
+export type LineageNode = {
+  session: SessionSummary;
+  children: LineageNode[];
+};
+export const LineageNode: z.ZodType<LineageNode> = z.lazy(() => z.object({
+  session: Session,
+  children: z.array(LineageNode),
+}));
+
+export const SessionLineageResponse = z.object({
+  ancestors: z.array(Session),
+  children: z.array(LineageNode),
+});
+export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
+
 export const SessionEventType = z.enum([
   "session.created",
   "session.status.changed",
@@ -2586,6 +2606,7 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.usage",
   "tool.auth_needed",
   "agent.updated",
   "sandbox.operation.started",

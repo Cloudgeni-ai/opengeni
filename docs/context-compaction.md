@@ -113,10 +113,10 @@ Turn-start client compaction runs before reading history for a fresh
 `user.message` or `goal.continuation` turn. Manual `/compact` sets the existing
 durable request flag and forces this same rebuild on the next turn.
 
-The per-model-call filter still performs screenshot elision and the existing
-input budget guard. In client mode, when the single threshold is crossed
-mid-turn, it throws `CompactionNeededError`. `agent-turn.ts` handles that error
-through the same recovery loop as provider context-window overflow:
+The per-model-call filter still performs the existing input budget guard. In
+client mode, when the single threshold is crossed mid-turn, it throws
+`CompactionNeededError`. `agent-turn.ts` handles that error through the same
+recovery loop as provider context-window overflow:
 
 - If no model/tool progress was persisted, compact and retry inside the same
   activity, bounded by a per-turn recovery cap.
