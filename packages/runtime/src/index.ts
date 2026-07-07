@@ -85,8 +85,8 @@ import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:pa
 import { fileURLToPath } from "node:url";
 
 import { computerCallNormalizingFetch, normalizeComputerCallActions, sanitizeHistoryItemsForModel } from "./history-sanitizer";
-import { elideStaleScreenshotImages } from "./image-history";
 import { installCodexToolSearch } from "./codex-tool-search";
+import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
   SUMMARY_BUFFER_TOKENS,
@@ -177,11 +177,9 @@ export {
 } from "./context-compaction";
 export type { ClientCompactionDecision, CompactionItem } from "./context-compaction";
 export {
-  elideStaleScreenshotImages,
-  SCREENSHOT_OMITTED_PLACEHOLDER,
-} from "./image-history";
-export { SCREENSHOT_OMITTED_IMAGE_DATA_URL } from "./screenshot-omitted-card";
-export type { ElideStaleScreenshotsOptions, ElideStaleScreenshotsResult } from "./image-history";
+  modelCallUsageTelemetry,
+} from "./usage-telemetry";
+export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
 ensureReadableStreamFrom();
 
@@ -199,6 +197,7 @@ export type ModelResponseUsage = {
     outputTokens?: number;
     totalTokens?: number;
     inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
+    outputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
   };
 };
 
@@ -2297,13 +2296,7 @@ export function contextRobustnessFilterForSettings(
   const clientCompactionMode = resolveContextCompactionMode(settings) === "client";
   const compactionThresholdTokens = clientCompactionThresholdTokens(settings);
   return ({ modelData }) => {
-    const images = elideStaleScreenshotImages(modelData.input);
-    if (images.elidedCount > 0) {
-      console.warn(
-        `per-call image history policy elided ${images.elidedCount} older screenshot image(s), keeping the last ${Math.min(3, images.imageCount)} full image(s)`,
-      );
-    }
-    let input = images.items;
+    let input = modelData.input;
     if (inputBudgetTokens !== undefined) {
       const guarded = enforceInputBudget(
         input as unknown as Array<Record<string, unknown>>,
@@ -2360,8 +2353,8 @@ function composeCallModelInputFilters(filters: CallModelInputFilter[]): CallMode
  * The model-input filter applied before every model call. The computer_call
  * action/actions normalizer is ALWAYS on (the Azure endpoint 400s without it);
  * the provider-item-id strip is layered on top when the configured policy
- * selects it; the context-robustness guard then elides stale screenshots on
- * every mode and applies hard budget trimming only on the client-compaction path.
+ * selects it; the context-robustness guard then applies hard budget trimming
+ * only on the client-compaction path and raises the proactive compaction signal.
  */
 export function callModelInputFilterForSettings(
   settings: Settings,
@@ -2560,8 +2553,8 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     stream: true,
     maxTurns: settings.agentMaxModelCallsPerTurn,
     // Built-in per-call guard chain: normalize computer calls, optionally strip
-    // provider ids, elide stale screenshots in every mode, and trim to the input
-    // budget on the client-compaction path. This runs for turn-start replay AND
+    // provider ids, trim to the input budget on the client-compaction path, and
+    // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
   };
@@ -3092,11 +3085,36 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       out.push({ type: "agent.message.delta", payload: { text: data.delta } });
       return out;
     }
+    if (data?.type === "response_done") {
+      const responseUsage = modelResponseUsageFromSdkEvent(event);
+      if (responseUsage) {
+        out.push({
+          type: "agent.model.usage",
+          payload: {
+            responseId: responseUsage.responseId ?? null,
+            ...modelCallUsageTelemetry(responseUsage.usage),
+          },
+        });
+      }
+      return out;
+    }
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
     const raw = (event as any).data?.event;
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
+    }
+    if (raw?.type === "response.completed") {
+      const responseUsage = modelResponseUsageFromSdkEvent(event);
+      if (responseUsage) {
+        out.push({
+          type: "agent.model.usage",
+          payload: {
+            responseId: responseUsage.responseId ?? null,
+            ...modelCallUsageTelemetry(responseUsage.usage),
+          },
+        });
+      }
     }
     return out;
   }
@@ -3211,6 +3229,7 @@ function usageFromResponse(response: any): ModelResponseUsage["usage"] | null {
     ...numberProp(raw, "outputTokens", "outputTokens", "output_tokens"),
     ...numberProp(raw, "totalTokens", "totalTokens", "total_tokens"),
     ...inputTokenDetailsProp(raw),
+    ...outputTokenDetailsProp(raw),
   };
   return Object.keys(usage).length > 0 ? usage : null;
 }
@@ -3226,6 +3245,14 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
     return {};
   }
   return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+}
+
+function outputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
+  const details = raw.outputTokensDetails ?? raw.output_tokens_details;
+  if (!details || typeof details !== "object") {
+    return {};
+  }
+  return { outputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {

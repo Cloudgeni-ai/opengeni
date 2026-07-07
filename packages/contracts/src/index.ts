@@ -2521,6 +2521,7 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.usage",
   "tool.auth_needed",
   "agent.updated",
   "sandbox.operation.started",

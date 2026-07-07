@@ -46,6 +46,7 @@ import {
   sandboxStateEntryFromRunState,
   agentsErrorRunState,
   maxTurnsExceededRunState,
+  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
@@ -59,6 +60,7 @@ import {
   type SandboxFileDownloadFailure,
   type OpenGeniRuntime,
   type ComputerToolMode,
+  type ModelResponseUsage,
 } from "@opengeni/runtime";
 import { calculateModelUsageCostMicros, configuredModelPricing, configuredStaticUsageLimits, sandboxWarmRateMicrosPerSecond, type ModelUsageInput, type ModelProviderApi, type RegistryProviderKind, type Settings } from "@opengeni/config";
 import { CancelledFailure } from "@temporalio/activity";
@@ -279,6 +281,73 @@ export function modelUsageSourceKey(input: {
     return input.responseId;
   }
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
+type TurnEventPublisher = (events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>, immediate?: boolean) => Promise<void>;
+
+export async function emitModelCallUsage(input: {
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  sourceKey: string;
+  usage: ModelResponseUsage | { usage?: unknown | null } | null;
+}): Promise<void> {
+  const usage = input.usage && typeof input.usage === "object" && "usage" in input.usage
+    ? (input.usage as { usage?: unknown }).usage
+    : null;
+  if (!usage || typeof usage !== "object") {
+    return;
+  }
+  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  try {
+    input.observability.info("model call usage", {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      provider: input.provider,
+      providerApi: input.providerApi,
+      model: input.model,
+      sourceKey: input.sourceKey,
+      inputTokens: telemetry.inputTokens,
+      outputTokens: telemetry.outputTokens,
+      cachedTokens: telemetry.cachedTokens,
+      reasoningTokens: telemetry.reasoningTokens,
+    });
+  } catch {
+    // Usage observability is best-effort.
+  }
+  try {
+    await input.publish?.([
+      {
+        type: "agent.model.usage",
+        payload: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          sourceKey: input.sourceKey,
+          ...telemetry,
+        },
+      },
+    ], true);
+  } catch (error) {
+    input.observability.warn("model call usage event publish failed", {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 export function historyRowsToAppend(
@@ -1658,9 +1727,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
+            let modelUsageEventContext: Record<string, unknown> | null = null;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
               responseUsageCount += 1;
+              const responseSourceKey = modelUsageSourceKey({
+                responseId: responseUsage.responseId,
+                dispatchId,
+                positionalKey: `response-${responseUsageCount}`,
+              });
+              await emitModelCallUsage({
+                observability,
+                publish: null,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+                usage: responseUsage,
+              });
+              modelUsageEventContext = {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: responseSourceKey,
+              };
               const observed = responseUsage.usage?.inputTokens;
               if (typeof observed === "number" && observed > 0) {
                 lastInputTokensObserved = observed;
@@ -1675,11 +1773,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 model: turn.model,
                 isCodexTurn,
                 usage: responseUsage.usage,
-                sourceKey: modelUsageSourceKey({
-                  responseId: responseUsage.responseId,
-                  dispatchId,
-                  positionalKey: `response-${responseUsageCount}`,
-                }),
+                sourceKey: responseSourceKey,
                 observability,
               });
               await reconcileConversationTruth();
@@ -1711,6 +1805,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
+              if (event.type === "agent.model.usage" && modelUsageEventContext && event.payload && typeof event.payload === "object") {
+                event.payload = { ...modelUsageEventContext, ...event.payload };
+              }
               await batcher.push(event);
             }
           }
@@ -1726,6 +1823,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (typeof aggregateInput === "number" && aggregateInput > 0) {
             lastInputTokensObserved = aggregateInput;
           }
+          const aggregateSourceKey = modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" });
           await recordModelUsageAndDebitCredits(settings, db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
@@ -1734,8 +1832,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: turn.model,
             isCodexTurn,
             usage: stream.state.usage,
-            sourceKey: modelUsageSourceKey({ responseId: null, dispatchId, positionalKey: "aggregate" }),
+            sourceKey: aggregateSourceKey,
             observability,
+          });
+          await emitModelCallUsage({
+            observability,
+            publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            sourceKey: aggregateSourceKey,
+            usage: { usage: stream.state.usage },
           });
         }
         if (lastInputTokensObserved !== null) {

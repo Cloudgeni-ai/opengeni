@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE, RunContext, RunRawModelStreamEvent, getAllMcpTools, invalidateServerToolsCache } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS, getSettings } from "@opengeni/config";
 import { CLEARED_RUN_STATE_BLOB } from "@opengeni/contracts";
-import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, SCREENSHOT_OMITTED_PLACEHOLDER, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
+import { applyMissingManifestEntries, pinProvidedSessionManifestEnvironment, azureCliLoginCommand, azureOpenAIDefaultQuery, buildOpenGeniAgent, buildManifest, composeAgentInstructions, coreInstructions, appendToolspaceInstructions, TOOLSPACE_PROGRAMMATIC_DIRECTIVE, GENESIS_TITLE_DIRECTIVE, lazySkillSourceWithPackSkills, deserializeSandboxSessionStateEnvelope, ensureReadableStreamFrom, materializeSandboxFileDownloads, repositoryCloneCommand, repositoryUsesSandboxClone, mcpToolErrorOutput, modelCallUsageTelemetry, modelResponseUsageFromSdkEvent, normalizeSdkEvent, normalizeToolOutputForEvent, prepareRunInput, stripProviderItemIdsFilter, callModelInputFilterForSettings, prefixedMcpToolName, prepareAgentTools, runAzureCliLoginHook, runRepositoryCloneHook, runToolspaceTokenSeedHook, sandboxCommandExitCode, sandboxFileDownloadsForAgent, sandboxRunAs, toolspaceTokenSeedCommand, withSandboxFileDownloads, withSandboxLifecycleHooks, type ResolveConnectionCredentialInput, type ResolveConnectionCredentialResult } from "../src/index";
 import { Manifest } from "@openai/agents/sandbox";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
@@ -52,7 +52,7 @@ describe("runtime event normalization", () => {
   });
 
   test("extracts model usage from streamed response completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent({
+    const event = {
       type: "raw_model_stream_event",
       data: {
         type: "response_done",
@@ -63,10 +63,12 @@ describe("runtime event normalization", () => {
             outputTokens: 5,
             totalTokens: 15,
             inputTokensDetails: { cached_tokens: 3 },
+            outputTokensDetails: { reasoning_tokens: 2 },
           },
         },
       },
-    } as any);
+    } as any;
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-1",
@@ -75,12 +77,25 @@ describe("runtime event normalization", () => {
         outputTokens: 5,
         totalTokens: 15,
         inputTokensDetails: { cached_tokens: 3 },
+        outputTokensDetails: { reasoning_tokens: 2 },
       },
     });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-1",
+          inputTokens: 10,
+          outputTokens: 5,
+          cachedTokens: 3,
+          reasoningTokens: 2,
+        },
+      },
+    ]);
   });
 
   test("extracts model usage from raw Responses completion events", () => {
-    const usage = modelResponseUsageFromSdkEvent(new RunRawModelStreamEvent({
+    const event = new RunRawModelStreamEvent({
       type: "model",
       providerData: {
         rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
@@ -94,10 +109,12 @@ describe("runtime event normalization", () => {
             output_tokens: 8,
             total_tokens: 28,
             input_tokens_details: { cached_tokens: 4 },
+            output_tokens_details: { reasoning_tokens: 6 },
           },
         },
       },
-    } as any));
+    } as any);
+    const usage = modelResponseUsageFromSdkEvent(event);
 
     expect(usage).toEqual({
       responseId: "resp-2",
@@ -106,7 +123,44 @@ describe("runtime event normalization", () => {
         outputTokens: 8,
         totalTokens: 28,
         inputTokensDetails: { cached_tokens: 4 },
+        outputTokensDetails: { reasoning_tokens: 6 },
       },
+    });
+    expect(normalizeSdkEvent(event)).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: {
+          responseId: "resp-2",
+          inputTokens: 20,
+          outputTokens: 8,
+          cachedTokens: 4,
+          reasoningTokens: 6,
+        },
+      },
+    ]);
+  });
+
+  test("normalizes model-call usage telemetry fields defensively", () => {
+    expect(modelCallUsageTelemetry({
+      inputTokens: 100,
+      outputTokens: 20,
+      inputTokensDetails: { cached_tokens: 80 },
+      outputTokensDetails: { reasoning_tokens: 7 },
+    })).toEqual({
+      inputTokens: 100,
+      outputTokens: 20,
+      cachedTokens: 80,
+      reasoningTokens: 7,
+    });
+    expect(modelCallUsageTelemetry({
+      inputTokens: 50,
+      outputTokens: 10,
+      inputTokensDetails: { cached_input_tokens: 30 },
+    })).toEqual({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedTokens: 30,
+      reasoningTokens: null,
     });
   });
 
@@ -2384,39 +2438,41 @@ describe("provider item id stripping", () => {
     expect(preserved.id).toBe("cu_abc");
   });
 
-  test("callModelInputFilterForSettings elides stale screenshots in server mode without budget trimming", async () => {
+  test("callModelInputFilterForSettings preserves screenshot history prefixes across successive calls", async () => {
     const filter = callModelInputFilterForSettings(testSettings({
       openaiProvider: "openai",
       contextCompactionMode: "auto",
       contextWindowTokens: 100,
       contextReservedOutputTokens: 0,
     }))!;
-    const oldHuge = { type: "message", role: "assistant", content: "x".repeat(10_000) } as any;
     const image = (n: number) => `data:image/png;base64,${Buffer.from(`server-${n}`).toString("base64")}`;
-    const out = await filter({
-      modelData: {
-        input: [
-          { type: "message", role: "user", content: "old" },
-          oldHuge,
-          { type: "function_call_result", callId: "a", output: image(1) },
-          { type: "function_call_result", callId: "b", output: image(2) },
-          { type: "function_call_result", callId: "c", output: image(3) },
-          { type: "function_call_result", callId: "d", output: image(4) },
-          { type: "message", role: "user", content: "recent" },
-        ] as any,
-      },
+    const prefix = [
+      { type: "message", role: "user", content: "old" },
+      { type: "function_call_result", callId: "a", output: image(1) },
+      { type: "function_call_result", callId: "b", output: image(2) },
+      { type: "function_call_result", callId: "c", output: image(3) },
+      { type: "function_call_result", callId: "d", output: image(4) },
+    ] as any;
+    const first = await filter({
+      modelData: { input: prefix },
+      agent: {} as any,
+      context: undefined,
+    });
+    const secondInput = [
+      ...prefix,
+      { type: "function_call_result", callId: "e", output: image(5) },
+    ] as any;
+    const second = await filter({
+      modelData: { input: secondInput },
       agent: {} as any,
       context: undefined,
     });
 
-    // Server mode: image policy is always safe and always on.
-    expect((out.input[2] as any).output).toBe(SCREENSHOT_OMITTED_PLACEHOLDER);
-    expect((out.input[3] as any).output).toBe(image(2));
-    expect((out.input[4] as any).output).toBe(image(3));
-    expect((out.input[5] as any).output).toBe(image(4));
-    // Budget guard is client-mode only, so the oversized assistant item remains.
-    expect(out.input).toHaveLength(7);
-    expect(out.input).toContainEqual(oldHuge);
+    expect(first.input).toEqual(prefix);
+    expect(second.input.slice(0, prefix.length)).toEqual(first.input);
+    expect((second.input[1] as any).output).toBe(image(1));
+    expect((second.input[4] as any).output).toBe(image(4));
+    expect((second.input[5] as any).output).toBe(image(5));
   });
 
   test("callModelInputFilterForSettings applies budget trimming only in client mode", async () => {

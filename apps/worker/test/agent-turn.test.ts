@@ -3,7 +3,7 @@ import { CancelledFailure } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { classifyContextWindowOverflowError, computerToolModeForTurn, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
@@ -288,6 +288,68 @@ describe("model usage source key (re-dispatch charge stability)", () => {
     // the key falls back to the positional value rather than throwing.
     expect(modelUsageSourceKey({ responseId: null, dispatchId: null, positionalKey: "aggregate" }))
       .toBe("aggregate");
+  });
+});
+
+describe("model call usage observability", () => {
+  test("logs and emits normalized cache/reasoning usage fields", async () => {
+    const infos: Array<Record<string, unknown>> = [];
+    const events: Array<{ type: string; payload: unknown }> = [];
+    const observability = {
+      info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+      warn: mock(),
+    };
+
+    await emitModelCallUsage({
+      observability: observability as any,
+      publish: async (batch) => {
+        events.push(...batch.map((event) => ({ type: event.type, payload: event.payload })));
+      },
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.5",
+      sourceKey: "resp-1",
+      usage: {
+        responseId: "resp-1",
+        usage: {
+          inputTokens: 1200,
+          outputTokens: 100,
+          totalTokens: 1300,
+          inputTokensDetails: { cached_tokens: 1024 },
+          outputTokensDetails: { reasoning_tokens: 12 },
+        },
+      },
+    });
+
+    expect(infos[0]).toMatchObject({
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.5",
+      sourceKey: "resp-1",
+      inputTokens: 1200,
+      outputTokens: 100,
+      cachedTokens: 1024,
+      reasoningTokens: 12,
+    });
+    expect(events).toEqual([
+      {
+        type: "agent.model.usage",
+        payload: expect.objectContaining({
+          provider: "openai",
+          providerApi: "responses",
+          model: "gpt-5.5",
+          sourceKey: "resp-1",
+          inputTokens: 1200,
+          outputTokens: 100,
+          cachedTokens: 1024,
+          reasoningTokens: 12,
+        }),
+      },
+    ]);
   });
 });
 
