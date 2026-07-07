@@ -434,7 +434,10 @@ function TimelineGroupView({
         <TurnSummary
           items={activityItems}
           outcome={group.outcome}
-          failureText={group.failureText}
+          // One loud error at the top; nested sub-turn chips stay calm — the
+          // parent already renders the failure reason, so clear it here exactly
+          // as the nested activity-cluster case does.
+          failureText={insideTurn ? undefined : group.failureText}
           durationMs={durationBetween(group.startedAt, group.endedAt)}
           defaultOpen={!insideTurn && group.outcome === "failed" ? true : undefined}
           bare={insideTurn}
