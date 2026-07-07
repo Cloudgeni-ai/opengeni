@@ -545,9 +545,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
-    // captures on one box. (The interval throttle itself lives in
-    // maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.)
-    let snapshotInFlight = false;
+    // captures on one box. The in-flight capture's promise is held so the
+    // turn-end persist can await it (its capture predates the turn's final
+    // writes; landing after the fresher turn-end capture started would make
+    // the atomic DB throttle discard the fresher one). Interval throttling
+    // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
+    let snapshotInFlight: Promise<void> | null = null;
     // P4.3 on-turn recording: when the desktop tier + recording are enabled and
     // the box is desktop-capable, the turn films the SAME :0 the agent's
     // computer-use drives, finalized to storage in this activity's `finally`
@@ -1250,8 +1253,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // single-flight; throttling lives in the helper.
           const snapshotSession = setupBoxSession;
           if (snapshotSession && !snapshotInFlight) {
-            snapshotInFlight = true;
-            void maybePersistWarmWorkspaceSnapshot(
+            snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
               { db, settings },
               { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId: heartbeatGroupId },
               snapshotSession,
@@ -1264,7 +1266,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               })
               .catch(() => undefined)
               .finally(() => {
-                snapshotInFlight = false;
+                snapshotInFlight = null;
               });
           }
         }, 10_000);
@@ -2417,13 +2419,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (setupBoxSession && sandboxGroupId) {
           // Single-flight vs the heartbeat capture: the timer is already cleared
           // above, but a capture it launched may still be in flight — and that
-          // capture predates the turn's final writes. If it landed AFTER our
-          // fresher turn-end capture started, the atomic DB throttle would
-          // discard the fresher one. Wait the in-flight capture out (bounded —
-          // never holds the release hostage), THEN attempt; the throttle decides.
-          const snapshotWaitDeadline = Date.now() + 30_000;
-          while (snapshotInFlight && Date.now() < snapshotWaitDeadline) {
-            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+          // capture predates the turn's final writes. Await it (it never
+          // rejects; its own failure discipline caps its runtime), THEN
+          // attempt; the atomic throttle decides in capture order.
+          if (snapshotInFlight) {
+            await snapshotInFlight;
           }
           const persisted = await maybePersistWarmWorkspaceSnapshot(
             { db, settings },

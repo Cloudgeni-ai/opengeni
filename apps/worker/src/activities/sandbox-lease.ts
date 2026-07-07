@@ -41,6 +41,7 @@ import {
   listCreditBalancesByAccount,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
+  listSessionIdsInGroup,
   persistDrainSnapshot,
   readLease,
   reapStaleLeaseHoldersGlobal,
@@ -518,18 +519,22 @@ async function terminateDrainableBox(
   });
   if (wentCold) {
     // Durable termination record (sandbox-file-persistence observability): who
-    // ended this box and whether its /workspace was captured first. Keyed on
-    // sandbox_group_id == session_id (true for every session-owned group; the
-    // insert simply fails FK-silently for any group that is not a session).
-    // Best-effort: attribution must never affect the drain outcome.
+    // ended this box and whether its /workspace was captured first, appended to
+    // every session sharing the group's box. Best-effort: attribution must
+    // never affect the drain outcome.
     try {
-      await appendSessionEvents(db, row.workspaceId, row.sandboxGroupId, [{
-        type: "sandbox.box.terminated",
-        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
-      }]);
-    } catch {
-      // Non-session group or event-write failure — the observability log line
-      // above (terminate outcome) remains the fallback trace.
+      const sessionIds = await listSessionIdsInGroup(db, row.workspaceId, row.sandboxGroupId);
+      for (const sessionId of sessionIds) {
+        await appendSessionEvents(db, row.workspaceId, sessionId, [{
+          type: "sandbox.box.terminated",
+          payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
+        }]);
+      }
+    } catch (eventError) {
+      observability.warn("sandbox reaper: box-terminated event write failed (drain outcome unaffected)", {
+        sandboxGroupId: row.sandboxGroupId,
+        error: eventError instanceof Error ? eventError.message : String(eventError),
+      });
     }
   }
   return wentCold;

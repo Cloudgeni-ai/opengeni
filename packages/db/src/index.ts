@@ -6202,34 +6202,61 @@ export async function persistDrainSnapshot(db: Database, input: {
       if (input.workspaceArchive === null) {
         return { wrote: true, priorArchive: null };
       }
-      // (2) Merge the NEW archive into resume_state.sessionState.workspaceArchive.
-      // jsonb_set's create_missing does NOT create intermediate objects, so a
-      // direct set of '{sessionState,workspaceArchive}' is a silent no-op when
-      // `sessionState` is absent (a null resume_state, or a legacy flat envelope).
-      // Instead: rebuild `sessionState` as (existing sessionState OR '{}') merged
-      // (||) with `{workspaceArchive: <b64>}` — this CREATES sessionState if absent
-      // AND preserves its existing siblings (providerState/manifest/exposedPorts).
-      // The archive is bound as a jsonb string scalar (to_jsonb(text)). Re-asserting
-      // the CAS guard keeps the write atomic with the FOR UPDATE lock above.
-      await scopedDb.execute(sql`
-        update sandbox_leases set
-          resume_state = jsonb_set(
-            -- Defensive: only treat resume_state / its sessionState as an object
-            -- when it actually IS one; a null/scalar (legacy or malformed envelope)
-            -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
-            case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
-            '{sessionState}',
-            (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-                  then resume_state -> 'sessionState' else '{}'::jsonb end)
-              || jsonb_build_object('workspaceArchive', to_jsonb(${input.workspaceArchive}::text)),
-            true
-          ),
-          updated_at = now()
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
-      `);
+      await foldWorkspaceArchiveOntoLease(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+        expectedEpoch: input.expectedEpoch,
+        workspaceArchive: input.workspaceArchive,
+        livenessGuard: "draining",
+      });
       return { wrote: true, priorArchive };
     });
+}
+
+/**
+ * The ONE archive-fold write, shared by the drain seam (persistDrainSnapshot)
+ * and the mid-session seam (persistWarmSnapshot) — the two differ only in
+ * their CAS guard (draining@refcount0 vs warm) and their read-side semantics.
+ *
+ * Merges the NEW archive (+ its workspaceArchiveAt timestamp, the throttle
+ * baseline for mid-session snapshots) into resume_state.sessionState.
+ * jsonb_set's create_missing does NOT create intermediate objects, so a direct
+ * set of '{sessionState,workspaceArchive}' is a silent no-op when
+ * `sessionState` is absent (a null resume_state, or a legacy flat envelope).
+ * Instead: rebuild `sessionState` as (existing sessionState OR '{}') merged
+ * (||) with the fold — this CREATES sessionState if absent AND preserves its
+ * existing siblings (providerState/manifest/exposedPorts). The archive is
+ * bound as a jsonb string scalar (to_jsonb(text)). Re-asserting the caller's
+ * CAS guard keeps the write atomic with its FOR UPDATE lock.
+ */
+async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
+  workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
+  workspaceArchive: string;
+  livenessGuard: "draining" | "warm";
+}): Promise<void> {
+  const livenessGuard = input.livenessGuard === "draining"
+    ? sql`liveness = 'draining' and refcount = 0`
+    : sql`liveness = 'warm'`;
+  await scopedDb.execute(sql`
+    update sandbox_leases set
+      resume_state = jsonb_set(
+        -- Defensive: only treat resume_state / its sessionState as an object
+        -- when it actually IS one; a null/scalar (legacy or malformed envelope)
+        -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
+        case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
+        '{sessionState}',
+        (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
+              then resume_state -> 'sessionState' else '{}'::jsonb end)
+          || jsonb_build_object(
+            'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
+            'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
+          ),
+        true
+      ),
+      updated_at = now()
+    where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
+      and ${livenessGuard} and lease_epoch = ${input.expectedEpoch}
+  `);
 }
 
 /**
@@ -6274,26 +6301,13 @@ export async function persistWarmSnapshot(db: Database, input: {
       ) {
         return { wrote: false, throttled: true, priorArchive: null };
       }
-      // Same defensive sessionState rebuild as persistDrainSnapshot (creates
-      // sessionState when absent, preserves its siblings, never throws on a
-      // scalar/legacy resume_state).
-      await scopedDb.execute(sql`
-        update sandbox_leases set
-          resume_state = jsonb_set(
-            case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
-            '{sessionState}',
-            (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-                  then resume_state -> 'sessionState' else '{}'::jsonb end)
-              || jsonb_build_object(
-                'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-                'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
-              ),
-            true
-          ),
-          updated_at = now()
-        where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
-          and liveness = 'warm' and lease_epoch = ${input.expectedEpoch}
-      `);
+      await foldWorkspaceArchiveOntoLease(scopedDb, {
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.sandboxGroupId,
+        expectedEpoch: input.expectedEpoch,
+        workspaceArchive: input.workspaceArchive,
+        livenessGuard: "warm",
+      });
       return { wrote: true, throttled: false, priorArchive };
     });
 }
