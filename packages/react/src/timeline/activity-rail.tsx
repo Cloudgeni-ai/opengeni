@@ -1,4 +1,4 @@
-import { BotIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
+import { ArrowRightIcon, BotIcon, BrainIcon, SquareTerminalIcon } from "lucide-react";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
 import { defaultToolRegistry } from "./tool-renderers";
@@ -164,9 +164,18 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
   // A worker is a first-class actor but still a STEP on the rail — a borderless
   // row (no card), aligned to its sibling tool rows: the chevron column is an
   // empty spacer (a worker doesn't expand), then the bot glyph, then the title
-  // with a quiet prompt/id beneath, and one right-gutter affordance.
-  return (
-    <div className="flex items-start gap-2 px-1.5 py-1.5">
+  // with a quiet prompt beneath, and one right-gutter affordance.
+  //
+  // Once the worker's session id is known, the WHOLE row is a clean, clickable
+  // deep-link into that child session (a trailing arrow brightens on hover) —
+  // the spawn moment itself is the affordance, not a small side button. A
+  // still-in-flight spawn (no id yet) or a failed/cancelled worker is inert, so
+  // there is never a dead click target. The gutter mirrors the worker-completion
+  // card's calm language: red chip on failure, "interrupted" on cancel.
+  const sessionId = item.workerSessionId;
+  const deepLink = Boolean(sessionId) && Boolean(onOpenSession) && !failed && !cancelled;
+  const inner = (
+    <>
       <span className="size-3.5 shrink-0" aria-hidden />
       <span className={cn("mt-px shrink-0", failed ? "text-og-status-failed" : "text-og-accent")}>
         <BotIcon className="size-3.5" />
@@ -178,13 +187,7 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
           {title}
         </span>
         {item.prompt ? <p className="mt-0.5 truncate text-og-sm text-og-fg-muted">{truncate(item.prompt, 140)}</p> : null}
-        {item.workerSessionId ? (
-          <p className="mt-1 font-og-mono text-og-xs text-og-fg-subtle">{item.workerSessionId.slice(0, 8)}</p>
-        ) : null}
       </div>
-      {/* Right gutter: failed gets a red chip; cancelled gets a calm "interrupted"
-          chip (no dot, no red); a live complete worker shows a quiet "Open session"
-          affordance (borderless, matching the worker-completion deep-link). */}
       {failed ? (
         <span className="inline-flex shrink-0 self-center items-center gap-1.5 font-og-mono text-og-xs leading-none text-og-status-failed">
           <span className="size-1.5 rounded-full bg-og-status-failed" />
@@ -194,19 +197,29 @@ function WorkerRow({ item, onOpenSession }: { item: WorkerItem; onOpenSession?: 
         <span className="og-cancelled-chip shrink-0 self-center font-og-mono text-og-xs leading-none text-og-fg-subtle">
           interrupted
         </span>
-      ) : item.workerSessionId && onOpenSession ? (
-        <button
-          type="button"
-          onClick={() => item.workerSessionId && onOpenSession(item.workerSessionId)}
-          className={cn(
-            "-my-0.5 -mr-1 inline-flex shrink-0 self-center items-center gap-1 rounded-og-sm px-2 py-1 text-og-sm font-medium text-og-fg-muted pointer-coarse:py-2",
-            "outline-none transition-colors duration-150 hover:bg-og-surface-1 hover:text-og-fg",
-            "focus-visible:ring-2 focus-visible:ring-og-accent",
-          )}
-        >
-          Open session
-        </button>
+      ) : deepLink ? (
+        <ArrowRightIcon
+          aria-hidden
+          className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle transition-[transform,color] duration-150 group-hover/worker:translate-x-0.5 group-hover/worker:text-og-fg"
+        />
       ) : null}
-    </div>
+    </>
   );
+
+  if (deepLink && sessionId && onOpenSession) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenSession(sessionId)}
+        className={cn(
+          "group/worker -mx-1.5 flex w-full items-start gap-2 rounded-og-sm px-1.5 py-1.5 text-left",
+          "outline-none transition-colors duration-150 hover:bg-og-surface-1 focus-visible:ring-2 focus-visible:ring-og-accent",
+          "pointer-coarse:py-2.5",
+        )}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return <div className="flex items-start gap-2 px-1.5 py-1.5">{inner}</div>;
 }
