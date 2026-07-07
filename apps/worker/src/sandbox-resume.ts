@@ -31,6 +31,7 @@ import {
   readLease,
   recordWarmingSandboxCreated,
   releaseLeaseHolder,
+  touchLeaseHolder,
   SandboxLeaseSupersededError,
   type Database,
   type LeaseHolderKind,
@@ -318,11 +319,15 @@ export async function resumeBoxForTurn(
   // The release closure is created eagerly so the caller can always release in
   // finally, even if establish/commit throws after the holder was registered.
   let released = false;
+  let holderLivenessTimer: ReturnType<typeof setInterval> | undefined;
   const release = async (): Promise<void> => {
     if (released) {
       return;
     }
     released = true;
+    if (holderLivenessTimer) {
+      clearInterval(holderLivenessTimer);
+    }
     await releaseLeaseHolder(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
@@ -349,6 +354,29 @@ export async function resumeBoxForTurn(
     ...(ids.image ? { image: ids.image } : {}),
     leaseTtlMs,
   });
+
+  // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
+  // registered until release. The dead-worker turn-holder reap judges liveness
+  // by last_heartbeat_at, and the full turn heartbeat (heartbeatLeaseHolder in
+  // agent-turn) only starts AFTER this function returns — while waitForWarm,
+  // establish/cold-restore, and the display stack can legitimately run for
+  // many minutes in here, COMPOUNDING past any fixed reap horizon. With this
+  // loop no live holder is ever silent for more than one tick, so the reap
+  // horizon is pure defense-in-depth, not a tuned guess about path lengths.
+  // Epoch-free by design (touch only refreshes our own row's timestamp);
+  // best-effort (a transient DB error must never fail the resume).
+  holderLivenessTimer = setInterval(() => {
+    void touchLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      kind,
+      holderId,
+    }).catch(() => undefined);
+  }, 10_000);
+  if ("unref" in holderLivenessTimer && typeof holderLivenessTimer.unref === "function") {
+    holderLivenessTimer.unref();
+  }
 
   // FENCED: a newer epoch exists (a later turn re-established the box). Back off;
   // NEVER create(). Release our (just-registered) holder so we don't pin a stale

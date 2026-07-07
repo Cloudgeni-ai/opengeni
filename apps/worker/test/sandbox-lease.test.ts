@@ -37,6 +37,7 @@ import {
   persistDrainSnapshot,
   persistWarmSnapshot,
   recordWarmingSandboxCreated,
+  touchLeaseHolder,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -632,6 +633,40 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     await reapSandboxLeases();
     expect(spy.calls.some((c) => c.group === dead.groupId && c.epoch === 8)).toBe(true);
     expect((await readRow(dead.workspaceId, dead.groupId))?.liveness).toBe("cold");
+  }, 60_000);
+
+  test("(3d) touchLeaseHolder keeps a warmup-phase holder alive across the reap horizon; a released holder returns false", async () => {
+    if (!available) return;
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), { terminateBox: makeTerminateSpy().fn });
+    const horizonMs = REAPER_SETTINGS.sandboxWarmingTimeoutMs + REAPER_SETTINGS.sandboxLeaseTtlMs;
+
+    // A holder registered long ago (frozen past the horizon) whose worker is
+    // ALIVE and touching it — the holder-liveness loop's DB primitive. The
+    // touch must reset last_heartbeat_at so the (a2) reap never fires.
+    const ws = await freshWorkspace();
+    const leaseId = await insertLease(ws, {
+      liveness: "warm", refcount: 1, turnHolders: 1, leaseEpoch: 11, instanceId: "box-warmup-touch",
+      resumeBackendId: "local", resumeState: { backendId: "local", sessionState: {} },
+    });
+    await insertHolder(ws, leaseId, "turn", "turn-warmup", horizonMs + 60_000);
+
+    const touched = await touchLeaseHolder(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
+      kind: "turn", holderId: "turn-warmup",
+    });
+    expect(touched).toBe(true);
+
+    await reapSandboxLeases();
+    expect(await holderCount(ws.workspaceId, ws.groupId, "turn")).toBe(1);
+    expect((await readRow(ws.workspaceId, ws.groupId))?.liveness).toBe("warm");
+
+    // A holder that no longer exists (released/reaped) returns false so a
+    // stale liveness loop learns it is orphaned.
+    const gone = await touchLeaseHolder(db, {
+      accountId: ws.accountId, workspaceId: ws.workspaceId, sandboxGroupId: ws.groupId,
+      kind: "turn", holderId: "turn-never-existed",
+    });
+    expect(gone).toBe(false);
   }, 60_000);
 
   test("(3b) the drain grace holds a refcount-0 box WARM: younger-than-grace is NOT terminated, older IS (settings.sandboxIdleGraceMs)", async () => {

@@ -195,14 +195,15 @@ export function createSandboxLeaseActivities(
     // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
     const drainable: ReapDrainable[] = await reapStaleLeaseHoldersGlobal(db, {
       viewerHolderTtlMs: settings.sandboxViewerHolderTtlMs,
-      // Dead-worker turn holders: a live turn heartbeats its holder every 10s —
-      // but only AFTER resumeBoxForTurn returns, and establish/wait-for-warm can
-      // legitimately run silent up to the warming budget. So the reap horizon is
-      // warming-budget + lease-TTL: no live path (multi-day turns included — they
-      // heartbeat every 10s) is ever silent that long, while a killed worker's
-      // frozen holder — which would otherwise pin refcount >= 1 FOREVER, so the
-      // lease never drains and the box dies at the provider hard-timeout
-      // UNPERSISTED — clears within ~12 minutes.
+      // Dead-worker turn holders: a live holder is touched every 10s from the
+      // moment it is registered (resumeBoxForTurn's holder-liveness loop covers
+      // the whole warmup — waitForWarm/establish/display-stack — and the turn
+      // heartbeat covers the run), so NO live path is ever silent for more than
+      // one tick. The horizon is deliberately generous defense-in-depth (not a
+      // tuned guess about path lengths): a killed worker's frozen holder —
+      // which would otherwise pin refcount >= 1 FOREVER, so the lease never
+      // drains and the box dies at the provider hard-timeout UNPERSISTED —
+      // clears within ~12 minutes.
       turnHolderTtlMs: settings.sandboxWarmingTimeoutMs + settings.sandboxLeaseTtlMs,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });

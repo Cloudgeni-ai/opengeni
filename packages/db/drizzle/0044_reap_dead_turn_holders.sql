@@ -6,10 +6,12 @@
 -- reaper never persists /workspace, and the box rides the provider hard-timeout
 -- to an UNPERSISTED death (2026-07-06 staging deploy churn left turn holders
 -- frozen for hours). Reap turn holders whose heartbeat is older than the
--- caller-supplied horizon (the worker passes warming-budget + lease-TTL: the
--- heartbeat only starts once establish returns, so the horizon must cover the
--- longest legitimate silent stretch; a redispatched turn re-acquires under a
--- NEW holder id, so a live execution is never touched).
+-- caller-supplied horizon. A live holder is touched every 10s from the moment
+-- it is registered (the worker's holder-liveness loop covers the warmup;
+-- the turn heartbeat covers the run), so the horizon the worker passes
+-- (warming-budget + lease-TTL) is generous defense-in-depth, never a bound a
+-- live path can reach; a redispatched turn re-acquires under a NEW holder id,
+-- so a live execution is never touched.
 
 CREATE OR REPLACE FUNCTION opengeni_private.reap_sandbox_leases(
   p_viewer_holder_ttl_ms bigint,

@@ -5826,6 +5826,32 @@ export async function heartbeatLeaseHolder(db: Database, input: {
     }));
 }
 
+/**
+ * HOLDER-LIVENESS touch: refresh ONLY this holder's last_heartbeat_at. The
+ * warmup phase of a turn (acquire -> waitForWarm -> establish/cold-restore ->
+ * display stack) can legitimately run for many minutes BEFORE the full turn
+ * heartbeat (heartbeatLeaseHolder) starts, and the dead-worker turn-holder
+ * reap judges liveness by this timestamp. Touching our own holder row needs no
+ * epoch fence — supersession is handled by the fenced acquire/establish paths;
+ * a reaped/released row returns false (row gone).
+ */
+export async function touchLeaseHolder(db: Database, input: {
+  accountId: string; workspaceId: string; sandboxGroupId: string;
+  kind: LeaseHolderKind; holderId: string;
+}): Promise<boolean> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const updated = await scopedDb.execute<{ id: string }>(sql`
+        update sandbox_lease_holders set last_heartbeat_at = now()
+        where lease_id = (select id from sandbox_leases
+                          where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId})
+          and kind = ${input.kind} and holder_id = ${input.holderId}
+        returning id
+      `);
+      return updated.length > 0;
+    });
+}
+
 // §4.6 — the reaper. DB-SIDE ONLY (no provider call — the provider stop() is
 // P1.3's runtime concern). Three actions in one pass: TTL-reap stale viewer
 // holders, recompute refcounts + warm->draining, reset warming-death to cold;
@@ -5860,17 +5886,18 @@ export async function reapStaleLeaseHolders(db: Database, input: {
           and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
         returning lease_id
       `);
-      // (a2) Reap DEAD-WORKER turn holders. A live turn refreshes its holder
-      // every 10s — even a legit multi-day turn — but only once establish
-      // returns, so the caller passes a horizon covering the longest legitimate
-      // silent stretch (warming-budget + lease-TTL). A holder staler than that
-      // belongs to a worker that died without cleanup (SIGKILL/OOM/deploy
-      // churn); left in place it pins refcount >= 1 FOREVER, so the lease never
-      // drains, the reaper never persists /workspace, and the box rides the
-      // provider hard-timeout to an UNPERSISTED death (the 2026-07-06 staging
-      // deploy churn left holders frozen for hours). The redispatched turn
-      // re-acquires under a NEW holder id, so deleting the corpse never touches
-      // a live execution.
+      // (a2) Reap DEAD-WORKER turn holders. A live holder is touched every 10s
+      // from registration (the resumeBoxForTurn holder-liveness loop covers the
+      // warmup; the turn heartbeat covers the run — legit multi-day turns
+      // included), so the caller's horizon is generous defense-in-depth, never
+      // a bound a live path can reach. A holder staler than it belongs to a
+      // worker that died without cleanup (SIGKILL/OOM/deploy churn); left in
+      // place it pins refcount >= 1 FOREVER, so the lease never drains, the
+      // reaper never persists /workspace, and the box rides the provider
+      // hard-timeout to an UNPERSISTED death (the 2026-07-06 staging deploy
+      // churn left holders frozen for hours). The redispatched turn re-acquires
+      // under a NEW holder id, so deleting the corpse never touches a live
+      // execution.
       const reapedTurnRows = input.turnHolderTtlMs && input.turnHolderTtlMs > 0
         ? await tx.execute<{ lease_id: string }>(sql`
           delete from sandbox_lease_holders
