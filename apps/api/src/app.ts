@@ -3,9 +3,9 @@ import {
   configuredAllowedReasoningEfforts,
   configuredModels,
 } from "@opengeni/config";
-import { ClientConfig, type AccessGrant } from "@opengeni/contracts";
+import { ClientConfig, resolveWorkspaceMemoryEnabled, type AccessGrant } from "@opengeni/contracts";
 import { createDocumentServices, indexDocumentNow, type DocumentServices } from "@opengeni/documents";
-import { dbSql } from "@opengeni/db";
+import { dbSql, getWorkspace } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -224,10 +224,13 @@ export function createApp(deps: AppDependencies): Hono {
     const toolspace = isToolspaceGrant(routeDeps.settings, grant)
       ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
       : null;
+    const workspace = await getWorkspace(routeDeps.db, workspaceId);
+    const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOpenGeniMcpServer(routeDeps, grant, {
       requestOrigin: new URL(c.req.url).origin,
       toolspace,
+      workspaceMemoryEnabled,
     });
     try {
       await mcp.connect(transport);
