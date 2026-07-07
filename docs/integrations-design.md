@@ -104,7 +104,8 @@ DISCOVER   probe server URL unauthenticated
            → REQUIRE code_challenge_methods_supported ∋ S256, else abort with clear error
 REGISTER   priority: (1) operator pre-registered creds for this AS
            (2) CIMD if client_id_metadata_document_supported — client_id is our hosted
-               metadata URL (§5.3)
+               metadata URL (§5.3), unless this AS is in the DCR-compatibility
+               override set
            (3) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS
            (4) manual client-credential entry in UI
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
@@ -130,6 +131,8 @@ The callback route must NOT call `requireAccessGrant` — a browser redirect car
 ### 5.2.1 Authorization-server clients
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the environments key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
+
+Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a DCR client even though Linear's metadata also says `client_id_metadata_document_supported=true`.
 
 ### 5.3 Our client identity (CIMD)
 

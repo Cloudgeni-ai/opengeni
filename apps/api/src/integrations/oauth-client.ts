@@ -26,6 +26,11 @@ import { HTTPException } from "hono/http-exception";
 import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
+const dcrPreferredAuthorizationServers = new Set([
+  // Linear advertises CIMD, but its MCP docs and runtime behavior require
+  // dynamic client registration for tokens accepted by https://mcp.linear.app/mcp.
+  "https://mcp.linear.app",
+]);
 
 type OAuthClientDeps = {
   db: Database;
@@ -414,6 +419,9 @@ async function registerOAuthClient(
   if (operator) {
     return operator;
   }
+  if (prefersDynamicClientRegistration(as)) {
+    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri);
+  }
   if (as.clientIdMetadataDocumentSupported) {
     return {
       method: "cimd",
@@ -423,6 +431,15 @@ async function registerOAuthClient(
       tokenEndpointAuthMethod: "none",
     };
   }
+  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri);
+}
+
+async function getOrCreateDynamicClientRegistration(
+  db: Database,
+  settings: Settings,
+  as: AuthorizationServerMetadata,
+  redirectUri: string,
+): Promise<OAuthClientRegistration> {
   const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
   if (storedClient) {
     return {
@@ -460,6 +477,10 @@ async function registerOAuthClient(
     return dcrRegistrationFromStored(winner);
   }
   return dcr;
+}
+
+function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
+  return [as.issuer, as.authorizationServer].some((candidate) => dcrPreferredAuthorizationServers.has(normalizedIssuerKey(candidate)));
 }
 
 function dcrRegistrationFromStored(stored: {
