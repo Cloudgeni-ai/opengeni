@@ -161,6 +161,25 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
   };
 
   const rootNodes = roots.map((session) => build(session, new Set()));
+  const reachable = new Set<string>();
+  const markReachable = (node: SessionTreeNode): void => {
+    if (reachable.has(node.session.id)) {
+      return;
+    }
+    reachable.add(node.session.id);
+    for (const child of node.children) {
+      markReachable(child);
+    }
+  };
+  for (const node of rootNodes) {
+    markReachable(node);
+  }
+  for (const session of sessions) {
+    if (!reachable.has(session.id)) {
+      rootNodes.push({ session, children: [], hasActiveDescendant: false });
+      reachable.add(session.id);
+    }
+  }
   const running = rootNodes
     .filter((node) => nodeIsActive(node))
     .sort((a, b) => sessionActivityTime(b.session) - sessionActivityTime(a.session));

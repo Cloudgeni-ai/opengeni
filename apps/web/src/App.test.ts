@@ -144,6 +144,16 @@ describe("rail session grouping", () => {
     expect(forest.grouped.flatMap((bucket) => bucket.sessions).map((node) => node.session.id)).toEqual(["orphan"]);
   });
 
+  test("buildRailForest keeps sessions in a parent cycle visible at the root", () => {
+    const forest = buildRailForest([
+      railSession({ id: "a", parentSessionId: "b", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      railSession({ id: "b", parentSessionId: "a", updatedAt: "2026-06-19T11:00:00.000Z" }),
+    ], NOW);
+    const roots = forest.grouped.flatMap((bucket) => bucket.sessions);
+    expect(roots.map((node) => node.session.id)).toEqual(["b", "a"]);
+    expect(roots.flatMap((node) => node.children)).toEqual([]);
+  });
+
   test("buildRailForest pins a manager whose only activity is a live child", () => {
     const forest = buildRailForest([
       railSession({ id: "manager", status: "idle", updatedAt: "2026-06-01T10:00:00.000Z" }),
