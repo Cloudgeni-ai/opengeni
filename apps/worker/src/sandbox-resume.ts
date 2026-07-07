@@ -305,8 +305,15 @@ export async function maybePersistWarmWorkspaceSnapshot(
       return false;
     }
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    // On timeout the race settles on `undefined` while persistWorkspace() keeps
+    // running orphaned. Swallow its LATE settlement: an un-awaited rejection
+    // after the race resolved would surface as an unhandledRejection and can
+    // take down the whole worker process — which would defeat the very hang-
+    // guard this timeout exists to provide.
+    const capture = persistable.persistWorkspace();
+    capture.catch(() => undefined);
     const bytes = await Promise.race([
-      persistable.persistWorkspace(),
+      capture,
       new Promise<undefined>((resolve) => {
         timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
