@@ -1,0 +1,40 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000801",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Worker 22222222-3333-4444-9555-666666666672 finished.",
+      "childCompletion": {
+        "childSessionId": "22222222-3333-4444-9555-666666666672",
+        "status": "idle",
+        "goal": {
+          "status": "completed",
+          "text": "Investigate the failing check",
+          "evidence": "All package checks passed",
+          "rationale": "The worker reached a terminal idle state.",
+          "pausedReason": "none"
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T17:00:01.000Z",
+    "turnId": "33333333-4444-4555-9666-777777777801"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000802",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666671",
+    "sequence": 2,
+    "type": "user.message",
+    "payload": {
+      "text": "Malformed completion remains a normal message.",
+      "childCompletion": {
+        "childSessionId": "22222222-3333-4444-9555-666666666673"
+      }
+    },
+    "occurredAt": "2026-01-02T17:00:02.000Z",
+    "turnId": "33333333-4444-4555-9666-777777777802"
+  }
+]

@@ -33,6 +33,7 @@ export type {
   TurnEndItem,
   ToolCallItem,
   UserMessageItem,
+  WorkerCompletionItem,
   WorkerItem,
 } from "./types";
 

@@ -16,6 +16,7 @@ import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { usePacks } from "../src/hooks/use-packs";
 import { useSessionControl } from "../src/hooks/use-session-control";
+import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 
@@ -210,6 +211,35 @@ describe("useTurnQueue", () => {
     });
     await flush(250);
     expect(listCalls).toBe(2);
+    await hook.unmount();
+  });
+});
+
+describe("useSessionLineage", () => {
+  test("loads lineage and refreshes on session lineage events", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getSessionLineage: async () => {
+        reads += 1;
+        return {
+          ancestors: [],
+          children: [{ session: { id: `child-${reads}` }, children: [] }],
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) => useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-1");
+    await hook.rerender([makeEvent(1, "agent.message.delta")]);
+    await flush(200);
+    expect(reads).toBe(1);
+    await hook.rerender([makeEvent(1, "agent.message.delta"), makeEvent(2, "session.status.changed")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-2");
     await hook.unmount();
   });
 });

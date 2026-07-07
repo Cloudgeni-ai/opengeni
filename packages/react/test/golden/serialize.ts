@@ -63,6 +63,20 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         workerSessionId: item.workerSessionId,
         ...(item.mode ? { mode: item.mode } : {}),
       };
+    case "worker-completion":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        childSessionId: item.childSessionId,
+        childStatus: item.childStatus,
+        goalStatus: item.goalStatus,
+        goalText: item.goalText,
+        evidence: item.evidence,
+        pausedReason: item.pausedReason,
+        text: item.text,
+      };
     case "sandbox":
       return {
         kind: item.kind,
