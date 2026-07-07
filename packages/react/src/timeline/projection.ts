@@ -875,7 +875,12 @@ function workerCompletionPayload(value: unknown): {
     goalStatus: typeof goal.status === "string" ? goal.status : null,
     goalText: typeof goal.text === "string" ? goal.text : null,
     evidence: typeof goal.evidence === "string" ? goal.evidence : null,
-    pausedReason: typeof goal.pausedReason === "string" ? goal.pausedReason : null,
+    // Console pauses and several server paths put the human explanation on
+    // `rationale`, not `pausedReason` — same fallback the goal pill uses, so a
+    // paused worker card never shows "Worker paused" with the reason missing.
+    pausedReason: typeof goal.pausedReason === "string"
+      ? goal.pausedReason
+      : typeof goal.rationale === "string" ? goal.rationale : null,
   };
 }
 
