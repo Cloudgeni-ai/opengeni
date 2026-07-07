@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { MarkdownText } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
+import { capabilityChipLabel } from "@/lib/capabilities";
 import type { SessionFailureSummary } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { repositoryDisplayName } from "@/lib/session-tools";
@@ -235,8 +236,8 @@ export function UserMessageBody({ workspaceId, item }: { workspaceId: string; it
               key={`${tool.kind}:${tool.id}`}
               className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-2 py-1 text-xs text-fg-muted"
             >
-              <WrenchIcon className="size-3.5" />
-              <span>{tool.id}</span>
+              <WrenchIcon className="size-3.5 shrink-0" />
+              <span className="truncate">{capabilityChipLabel(tool.id)}</span>
             </span>
           ))}
         </div>
