@@ -16,7 +16,7 @@ describe("integrations.sh catalog import normalization", () => {
     const normalized = normalizeCatalogSnapshot(snapshot);
 
     expect(normalized.generatedAt).toBe("2026-07-03T23:41:44.132Z");
-    expect(normalized.rows).toHaveLength(11);
+    expect(normalized.rows).toHaveLength(8);
     expect(normalized.quarantined).toHaveLength(1);
     expect(normalized.quarantined[0]?.row.domain).toBe("activepieces.com");
     expect(normalized.quarantined[0]?.reason).toContain("manual confirmation");
@@ -30,8 +30,10 @@ describe("integrations.sh catalog import normalization", () => {
     expect(acko?.authKind).toBe("none");
 
     const bump = normalized.rows.filter((row) => row.domain === "bump.sh");
-    expect(bump).toHaveLength(3);
-    expect(new Set(bump.map((row) => row.mcpUrl)).size).toBe(3);
+    expect(bump).toHaveLength(1);
+    expect(bump[0]?.mcpUrl).toBe("https://developers.bump.sh/doc/portal/mcp");
+    expect(normalized.skipped.filter((skip) => skip.domain === "bump.sh" && skip.reason === "duplicate_domain_name"))
+      .toHaveLength(2);
   });
 
   test("applies importability filters and dedupes by domain plus MCP URL", () => {
@@ -59,6 +61,64 @@ describe("integrations.sh catalog import normalization", () => {
       "templated_url",
       "transport_not_streamable_http",
     ].sort());
+  });
+
+  test("strips raw control characters from all string fields", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-03T00:00:00.000Z",
+      importRows: [
+        row({
+          domain: "control.example\u0000",
+          name: "Control\u0007 Example",
+          mcpUrl: "https://control.example/mcp\u0001",
+          scopesHint: ["read\u0002write", "keeps\ttab\nnewline"],
+          credentialFacts: [{ setup: "bad\u001Fvalue" }],
+        }),
+      ],
+    });
+
+    expect(normalized.cleaning.controlCharacterFields).toBe(6);
+    expect(normalized.rows[0]).toMatchObject({
+      domain: "control.example",
+      name: "Control Example",
+      mcpUrl: "https://control.example/mcp",
+      scopesHint: ["readwrite", "keeps\ttab\nnewline"],
+      credentialFacts: [{ setup: "badvalue" }],
+    });
+  });
+
+  test("dedupes junk clusters by normalized domain plus name and keeps the best row", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-03T00:00:00.000Z",
+      importRows: [
+        row({
+          domain: "games.example",
+          name: "ABC Word Search",
+          mcpUrl: "https://games.example/discovered/mcp",
+          provenance: "discovered",
+          logoSourceUrl: null,
+        }),
+        row({
+          domain: "GAMES.EXAMPLE",
+          name: "abc   word search",
+          mcpUrl: "https://games.example/detected/mcp",
+          provenance: "detected",
+          logoSourceUrl: "https://integrations.sh/logo/games.example",
+        }),
+        row({
+          domain: "games.example",
+          name: "ABC Word Search",
+          mcpUrl: "https://games.example/other/mcp",
+          provenance: "discovered",
+          logoSourceUrl: "https://integrations.sh/logo/games.example",
+        }),
+      ],
+    });
+
+    expect(normalized.rows).toHaveLength(1);
+    expect(normalized.rows[0]?.mcpUrl).toBe("https://games.example/detected/mcp");
+    expect(normalized.cleaning.duplicateDomainNameRows).toBe(2);
+    expect(normalized.skipped.filter((skip) => skip.reason === "duplicate_domain_name")).toHaveLength(2);
   });
 
   test("derives rows from raw API plus per-domain surface docs", () => {

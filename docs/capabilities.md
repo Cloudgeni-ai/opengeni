@@ -89,16 +89,21 @@ The official MCP Registry is public metadata. Evaluate any server and its endpoi
 ## integrations.sh Snapshot Imports
 
 The integrations catalog import pipeline is offline and reviewable. It never
-live-consumes integrations.sh at request time. Operators run
-`bun scripts/import-integrations-catalog.ts --snapshot <snapshot.json>` against a
-reviewed snapshot or precomputed `importRows` file. The importer writes global
-capability rows, records an `import_batches` provenance row with MIT
-attribution, and upserts registry entries by `(provider_domain, mcp_url)`.
+live-consumes integrations.sh at request time. The reviewed source of truth is
+the committed snapshot at `data/catalog/integrations-snapshot.json`. Updating it
+is a PR workflow: run `bun run catalog:refresh`, review the snapshot diff, then
+merge. Operators import that committed snapshot with `bun run catalog:import
+--snapshot data/catalog/integrations-snapshot.json` (or the same path inside the
+application image). The importer writes global capability rows, records an
+`import_batches` provenance row with MIT attribution, and upserts registry
+entries by `(provider_domain, mcp_url)`.
 Rows removed from a later snapshot are marked `stale`, not deleted, and are
 excluded from default workspace catalog listings.
 
 Imported logos are fetched during import, validated as images below 512KB, and
 stored through OpenGeni object storage under `catalog-assets/...`; catalog rows
 store only the self-hosted `logoAssetPath`, never the third-party logo URL. The
-known-dead demo domains are skipped and flagged suspicious URLs are quarantined
-in the batch details for manual review.
+normalization pass strips raw control characters from string fields, collapses
+duplicate `(domain, name)` clusters to the best deterministic row, skips
+known-dead demo domains, and quarantines flagged suspicious URLs in the batch
+details for manual review.

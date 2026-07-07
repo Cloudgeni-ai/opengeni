@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { basename } from "node:path";
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
@@ -70,6 +70,14 @@ export type NormalizedCatalogSnapshot = {
   rows: CatalogIntegrationRow[];
   skipped: Array<{ domain: string | null; mcpUrl: string | null; reason: string }>;
   quarantined: Array<{ row: CatalogIntegrationRow; reason: string }>;
+  cleaning: {
+    inputRows: number;
+    outputRows: number;
+    skippedRows: number;
+    quarantinedRows: number;
+    duplicateDomainNameRows: number;
+    controlCharacterFields: number;
+  };
 };
 
 export type LogoStorageResult =
@@ -95,14 +103,34 @@ export async function readSnapshotFile(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
+export async function writeCleanCatalogSnapshot(path: string, snapshot: unknown): Promise<NormalizedCatalogSnapshot> {
+  const normalized = normalizeCatalogSnapshot(snapshot);
+  await writeFile(path, `${JSON.stringify({
+    generatedAt: normalized.generatedAt,
+    source: SOURCE,
+    cleanedAt: new Date().toISOString(),
+    cleaning: normalized.cleaning,
+    importRows: normalized.rows,
+    skipped: normalized.skipped,
+    quarantined: normalized.quarantined.map((item) => ({
+      row: item.row,
+      reason: item.reason,
+    })),
+  }, null, 2)}\n`);
+  return normalized;
+}
+
 export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSnapshot {
-  const root = asRecord(snapshot);
+  const controlCharacters = { count: 0 };
+  const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
+  const root = asRecord(cleanedSnapshot);
   const generatedAt = stringValue(root?.generatedAt) ?? stringValue(root?.snapshotDate) ?? null;
-  const candidates = precomputedRows(root ?? snapshot) ?? rawSurfaceRows(root);
+  const candidates = precomputedRows(root ?? cleanedSnapshot) ?? rawSurfaceRows(root);
   const skipped: NormalizedCatalogSnapshot["skipped"] = [];
   const quarantined: NormalizedCatalogSnapshot["quarantined"] = [];
-  const rows: CatalogIntegrationRow[] = [];
+  const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
   const seen = new Set<string>();
+  let duplicateDomainNameRows = 0;
 
   for (const candidate of candidates) {
     const domain = normalizeDomain(candidate.domain);
@@ -153,10 +181,37 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       quarantined.push({ row, reason: suspiciousReason });
       continue;
     }
-    rows.push(row);
+    const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(row.name)}`;
+    const existing = candidatesByDomainName.get(domainNameKey);
+    if (!existing) {
+      candidatesByDomainName.set(domainNameKey, row);
+      continue;
+    }
+    duplicateDomainNameRows += 1;
+    const winner = bestCatalogRow(existing, row);
+    const loser = winner === existing ? row : existing;
+    candidatesByDomainName.set(domainNameKey, winner);
+    skipped.push({ domain: loser.domain, mcpUrl: loser.mcpUrl, reason: "duplicate_domain_name" });
   }
 
-  return { generatedAt, rows, skipped, quarantined };
+  const rows = [...candidatesByDomainName.values()].sort((left, right) =>
+    left.domain.localeCompare(right.domain) || left.name.localeCompare(right.name) || left.mcpUrl.localeCompare(right.mcpUrl)
+  );
+
+  return {
+    generatedAt,
+    rows,
+    skipped,
+    quarantined,
+    cleaning: {
+      inputRows: candidates.length,
+      outputRows: rows.length,
+      skippedRows: skipped.length,
+      quarantinedRows: quarantined.length,
+      duplicateDomainNameRows,
+      controlCharacterFields: controlCharacters.count,
+    },
+  };
 }
 
 export async function importIntegrationsCatalog(input: {
@@ -184,6 +239,7 @@ export async function importIntegrationsCatalog(input: {
         reason: item.reason,
       })),
       skipped: normalized.skipped,
+      cleaning: normalized.cleaning,
     },
   });
   const logoFailures: ImportCatalogResult["logoFailures"] = [];
@@ -230,6 +286,7 @@ export async function importIntegrationsCatalog(input: {
         reason: item.reason,
       })),
       skipped: normalized.skipped,
+      cleaning: normalized.cleaning,
       logoFailures,
     },
   });
@@ -325,7 +382,7 @@ function rawSurfaceRows(root: UnknownRecord | null): UnknownRecord[] {
   if (!root) {
     return [];
   }
-  const flatEntries = arrayValue(root.api ?? root.catalog ?? root.flatCatalog ?? root.entries).filter(isRecord);
+  const flatEntries = arrayValue(root.api ?? root.catalog ?? root.flatCatalog ?? root.entries ?? root.data).filter(isRecord);
   const surfaceDocs = surfaceDocEntries(root.surfaceDocs ?? root.surfaces ?? root.domains);
   const flatByDomain = new Map<string, UnknownRecord>();
   for (const entry of flatEntries) {
@@ -501,6 +558,45 @@ function normalizeProvenance(value: unknown): string {
   return raw && raw.trim() ? raw.trim() : "unknown";
 }
 
+function normalizeNameForDedupe(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function bestCatalogRow(left: CatalogIntegrationRow, right: CatalogIntegrationRow): CatalogIntegrationRow {
+  const leftScore = catalogRowQualityScore(left);
+  const rightScore = catalogRowQualityScore(right);
+  if (rightScore !== leftScore) {
+    return rightScore > leftScore ? right : left;
+  }
+  return stableRowSortKey(right) < stableRowSortKey(left) ? right : left;
+}
+
+function catalogRowQualityScore(row: CatalogIntegrationRow): number {
+  let score = 0;
+  if (row.logoSourceUrl) {
+    score += 4;
+  }
+  if (row.provenance === "detected") {
+    score += 2;
+  } else if (row.provenance !== "discovered") {
+    score += 1;
+  }
+  if (row.authKind !== "unknown") {
+    score += 1;
+  }
+  if (row.scopesHint.length > 0) {
+    score += 1;
+  }
+  if (row.credentialFacts.length > 0) {
+    score += 1;
+  }
+  return score;
+}
+
+function stableRowSortKey(row: CatalogIntegrationRow): string {
+  return `${row.domain}\n${row.name}\n${row.provenance}\n${row.logoSourceUrl ?? ""}\n${row.mcpUrl}`;
+}
+
 function normalizedContentType(value: string | null): string | null {
   return value?.split(";")[0]?.trim().toLowerCase() || null;
 }
@@ -569,6 +665,23 @@ function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function stripControlCharacters(value: unknown, counter: { count: number }): unknown {
+  if (typeof value === "string") {
+    const stripped = value.replace(/[\u0000-\u0008\u000B-\u001F]/g, "");
+    if (stripped !== value) {
+      counter.count += 1;
+    }
+    return stripped;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => stripControlCharacters(item, counter));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stripControlCharacters(item, counter)]));
+  }
+  return value;
+}
+
 function parseArgs(argv: string[]): { snapshotPath: string; dryRun: boolean; skipLogos: boolean; snapshotRef?: string } {
   let snapshotPath = "";
   let dryRun = false;
@@ -610,9 +723,12 @@ if (import.meta.main) {
   if (args.dryRun) {
     console.log(JSON.stringify({
       generatedAt: normalized.generatedAt,
+      before: normalized.cleaning.inputRows,
+      after: normalized.cleaning.outputRows,
       importable: normalized.rows.length,
       skipped: normalized.skipped.length,
       quarantined: normalized.quarantined.length,
+      cleaning: normalized.cleaning,
     }, null, 2));
     process.exit(0);
   }
@@ -633,11 +749,14 @@ if (import.meta.main) {
     });
     console.log(JSON.stringify({
       batchId: result.batch.id,
+      before: normalized.cleaning.inputRows,
+      after: normalized.cleaning.outputRows,
       imported: result.importedCount,
       skipped: result.skippedCount,
       quarantined: result.quarantinedCount,
       stale: result.staleCount,
       logoFailures: result.logoFailureCount,
+      cleaning: normalized.cleaning,
     }, null, 2));
   } finally {
     await dbClient.close();
