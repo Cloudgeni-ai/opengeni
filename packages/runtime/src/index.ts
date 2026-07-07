@@ -2428,12 +2428,14 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
-    // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
-    // env against the live box's baked env before applying its entry-only delta
-    // (validateNoEnvironmentDelta — session-fatal on ANY drift; killed a 4-day
-    // prod manager session 2026-07-06). Align the turn's manifest to the box's
-    // own env and REPORT the drift instead of dying on it.
-    await pinProvidedSessionManifestEnvironment(agent, session as SandboxSessionLike, {
+    // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
+    // against the UN-proxied established box — the ONE-TRUTH helper shared with the
+    // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
+    await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
+      settings,
+      environment,
+      preparedInput: prepared,
+      ...(overrides.ownedSandbox.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
     });
     const runAs = sandboxRunAs(settings);
@@ -2460,52 +2462,6 @@ export async function runAgentStream(agent: Agent<any, any>, input: PreparedAgen
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     };
-    // OWNED-PATH HOOKS: the SDK NEVER calls client.create/resume when handed a live
-    // provided session (SandboxRuntimeManager uses `sandboxConfig.session` directly),
-    // so the withSandboxLifecycleHooks decoration below can never fire on this branch —
-    // it only wraps create/resume. Run the beforeAgentStart hooks directly against the
-    // provided box, once per turn, BEFORE the run starts: this is what executes the
-    // repository-clone hook (which also seeds the B1 askpass + token file) and the
-    // azure-cli-login hook on lease-owned boxes. Re-running on a warm box is safe by
-    // construction: clone skips when the target is already materialized, the token
-    // seed OVERWRITES the file (the desired per-turn refresh), and az login is
-    // idempotent. A turn resumed after preemption re-enters here and re-seeds the
-    // freshly minted token — which is exactly what a >1h-old warm box needs.
-    // EXCEPT on a connected machine (effective backend "selfhosted"): the box is the
-    // user's REAL computer — the platform must not run setup against it (the clone
-    // hooks are already empty there; this keeps az login off it too).
-    if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
-      await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
-      // FILE RESOURCES: withSandboxFileDownloads below has the IDENTICAL provided-
-      // session blind spot (it too wraps only create/resume), so signed-URL file
-      // materialization must also run directly against the pinned box. The download
-      // command is idempotent (skips an existing file) and atomic (tmp + rename),
-      // so the per-turn re-run is safe; the turn re-signs URLs each run, so a
-      // re-warmed box always gets fresh links.
-      if (fileDownloads.length > 0 && !overrides.ownedSandbox.fileDownloadsMaterialized) {
-        const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
-          ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-          ...(runAs ? { runAs } : {}),
-        });
-        appendSandboxFileDownloadFailureNote(prepared, materialized.failures);
-      }
-    } else {
-      // SELFHOSTED TOOLSPACE (parity): the platform setup hooks (repository clone,
-      // az login) and file materialization stay OFF the user's real machine — but
-      // the toolspace token seed is the ONE piece of per-turn material that must
-      // reach it. It writes a scoped, own-session-bound token to
-      // $OPENGENI_TOOLSPACE_TOKEN_FILE over the SAME exec channel the clone-seed
-      // uses (off-manifest, value never on the manifest), and it grants no more
-      // than the machine owner's own authority (toolspace:call, this session, turn
-      // TTL, budgeted, approval-tools excluded) — the invariant that makes it safe
-      // to cross to a user machine when the git token is not. It is also the
-      // machine's only path to programmatic tool calling. Seed it (only) here; the
-      // hook list is empty when no toolspace token was minted for this turn.
-      const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
-      if (toolspaceHooks.length > 0) {
-        await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
-      }
-    }
     // Keep the decoration as a safety net for any session the SDK does create/resume
     // through the client during this run (it is inert for the provided session).
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
@@ -2877,6 +2833,105 @@ export async function pinProvidedSessionManifestEnvironment(
     environment: current.environment,
     ...(target.extraPathGrants?.length ? { extraPathGrants: target.extraPathGrants } : {}),
   });
+}
+
+/**
+ * The one-truth owned-path platform setup: the manifest-env pin (align the turn's
+ * manifest to the live box's baked env + report drift, NEVER die on it) plus the
+ * beforeAgentStart hooks (repository clone with B1 token/askpass seed, toolspace
+ * token seed, azure-cli-login) and signed-URL file materialization — all executed
+ * DIRECTLY against the pinned, UN-proxied established box (the SDK never calls
+ * client.create/resume for a provided session, so these decorations would never
+ * fire on their own).
+ *
+ * Extracted verbatim from `runStream`'s owned branch so both the EAGER path
+ * (runStream, before the run starts) and the LAZY path (the worker's first-op
+ * provisioner, after the box is established) run the IDENTICAL setup. A pure
+ * refactor for the eager path: same order, same gates, same idempotency
+ * (clone skips a materialized tree, token seed overwrites — the desired per-turn
+ * refresh, az login is idempotent). The connected-machine (selfhosted) branch
+ * keeps platform setup OFF the user's real box and seeds ONLY the toolspace token.
+ *
+ * `gitTokenSeedOverride` lets the lazy provisioner pass its own freshly-minted
+ * run-scoped token (minted at establish time, not turn start); unset ⇒ read the
+ * seed off the agent exactly as the eager path does.
+ */
+export async function runOwnedSandboxSetup(
+  agent: Agent<any, any>,
+  session: SandboxSessionLike,
+  setupSession: SandboxSessionLike,
+  opts: {
+    settings: Settings;
+    environment: Record<string, string>;
+    preparedInput?: PreparedAgentInput;
+    fileDownloadsMaterialized?: boolean;
+    onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
+    gitTokenSeedOverride?: string;
+  },
+): Promise<void> {
+  const { settings, environment } = opts;
+  // ENV PIN (provided sessions): the SDK validates the FULL recomputed manifest
+  // env against the live box's baked env before applying its entry-only delta
+  // (validateNoEnvironmentDelta — session-fatal on ANY drift; killed a 4-day
+  // prod manager session 2026-07-06). Align the turn's manifest to the box's
+  // own env and REPORT the drift instead of dying on it.
+  await pinProvidedSessionManifestEnvironment(agent, session, {
+    ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+  });
+  const runAs = sandboxRunAs(settings);
+  const fileDownloads = sandboxFileDownloadsForAgent(agent);
+  // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
+  // repository-clone hook seeds it to the box's token file before the clone. The
+  // lazy provisioner overrides it with its own establish-time mint.
+  const ownedGitTokenSeed = opts.gitTokenSeedOverride ?? gitTokenSeedForAgent(agent);
+  const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const ownedHooks = [
+    ...sandboxLifecycleHooksForIds(sandboxLifecycleHookIds(settings)),
+    ...sandboxToolspaceTokenHooksForAgent(agent),
+    ...sandboxRepositoryCloneHooksForAgent(agent),
+  ];
+  const ownedHookContext: SandboxLifecycleHookContext = {
+    environment,
+    ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+    ...(runAs ? { runAs } : {}),
+    ...(ownedGitTokenSeed ? { gitTokenSeed: ownedGitTokenSeed } : {}),
+    ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+  };
+  // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
+  // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
+  // askpass + token file; azure-cli-login on lease-owned boxes). Re-running on a
+  // warm box is safe by construction (clone skips a materialized tree, token seed
+  // overwrites the file, az login is idempotent). EXCEPT on a connected machine
+  // (effective backend "selfhosted"): the box is the user's REAL computer — the
+  // platform must not run setup against it (clone hooks are already empty there;
+  // this keeps az login off it too).
+  if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+    await runBeforeAgentStartHooks(setupSession, ownedHooks, ownedHookContext);
+    // FILE RESOURCES: withSandboxFileDownloads has the IDENTICAL provided-session
+    // blind spot (it too wraps only create/resume), so signed-URL file
+    // materialization must also run directly against the pinned box. The download
+    // command is idempotent (skips an existing file) and atomic (tmp + rename).
+    if (fileDownloads.length > 0 && !opts.fileDownloadsMaterialized) {
+      const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
+        ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
+        ...(runAs ? { runAs } : {}),
+      });
+      if (opts.preparedInput) {
+        appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
+      }
+    }
+  } else {
+    // SELFHOSTED TOOLSPACE (parity): the platform setup hooks and file
+    // materialization stay OFF the user's real machine — but the toolspace token
+    // seed is the ONE piece of per-turn material that must reach it (a scoped,
+    // own-session-bound token written to $OPENGENI_TOOLSPACE_TOKEN_FILE over the
+    // same off-manifest exec channel the clone-seed uses; the machine's only path
+    // to programmatic tool calling). Seed it (only) here.
+    const toolspaceHooks = sandboxToolspaceTokenHooksForAgent(agent);
+    if (toolspaceHooks.length > 0) {
+      await runBeforeAgentStartHooks(setupSession, toolspaceHooks, ownedHookContext);
+    }
+  }
 }
 
 function mergePathGrants(
