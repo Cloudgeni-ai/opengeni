@@ -445,6 +445,8 @@ export const SESSION_EVENT_TYPES = [
   "goal.paused",
   "goal.resumed",
   "goal.continuation",
+  "memory.saved",
+  "memory.corrected",
   // Channel-B desktop pixel-plane signals (mirror of contracts SessionEventType;
   // the contract-parity test asserts sorted equality).
   "stream.url.rotated",

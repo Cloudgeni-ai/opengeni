@@ -96,7 +96,7 @@ export function buildDocumentsMcpServer(
   }, async ({ query, kind, scope, limit }) => ({
     content: [{ type: "text", text: JSON.stringify(await listKnowledgeMemories(db, workspaceId, {
       ...(query ? { query } : {}),
-      status: "approved",
+      status: ["active", "approved"],
       ...(kind ? { kind } : {}),
       ...(scope ? { scope } : {}),
       ...(limit ? { limit } : {}),

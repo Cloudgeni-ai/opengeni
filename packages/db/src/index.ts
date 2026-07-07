@@ -1201,7 +1201,7 @@ export type UpdateKnowledgeMemoryInput = {
 
 export type ListKnowledgeMemoryOptions = {
   query?: string | undefined;
-  status?: KnowledgeMemoryStatus | undefined;
+  status?: KnowledgeMemoryStatus | KnowledgeMemoryStatus[] | undefined;
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   limit?: number | undefined;
@@ -2621,7 +2621,9 @@ export async function listKnowledgeMemories(db: Database, workspaceId: string, o
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
     if (options.status) {
-      conditions.push(eq(schema.knowledgeMemories.status, options.status));
+      conditions.push(Array.isArray(options.status)
+        ? inArray(schema.knowledgeMemories.status, options.status)
+        : eq(schema.knowledgeMemories.status, options.status));
     }
     if (options.kind) {
       conditions.push(eq(schema.knowledgeMemories.kind, options.kind));

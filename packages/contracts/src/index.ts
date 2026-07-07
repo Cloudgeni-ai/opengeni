@@ -2599,6 +2599,8 @@ export const SessionEventType = z.enum([
   "goal.paused",
   "goal.resumed",
   "goal.continuation",
+  "memory.saved",
+  "memory.corrected",
   // Channel-B desktop pixel-plane signals (07-channel-b §1.2). The pixel socket
   // carries opaque RFB and cannot carry a control message the client can act on,
   // so these ride the durable, sequenced, gap-filled Channel-A SSE spine.
