@@ -8,11 +8,11 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { LockIcon, MenuIcon, PanelRightIcon, PencilIcon } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
-import { useEffect, useRef, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
 
 import { ConnectionPill } from "@/components/common";
 import { RailFooter } from "@/components/rail/rail-footer";
-import { useRail } from "@/components/rail/rail-context";
+import { RAIL_DEFAULT_WIDTH, RAIL_MAX_WIDTH, RAIL_MIN_WIDTH, useRail } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
@@ -64,6 +64,35 @@ function RailBody() {
   );
 }
 
+/**
+ * The drag handle on the expanded rail's right edge. A quiet, wide-ish hit area
+ * straddling the border: at rest it's invisible (the border is the only line);
+ * on hover it thickens into a stronger line, and while dragging it wears the
+ * brand tint. Double-click snaps back to the default width. Keyboard users get
+ * the collapse toggle elsewhere; this is a pointer affordance (hidden from the
+ * a11y tree beyond its separator role + label).
+ */
+function RailResizeHandle({ onStart, active }: { onStart: (event: ReactPointerEvent) => void; active: boolean }) {
+  const rail = useRail();
+  return (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      onPointerDown={onStart}
+      onDoubleClick={() => rail.setWidth(RAIL_DEFAULT_WIDTH)}
+      className="group absolute inset-y-0 -right-1 z-20 w-2 cursor-col-resize touch-none select-none"
+    >
+      <span
+        className={cn(
+          "absolute inset-y-0 right-1 w-px transition-[width,background-color] duration-150",
+          active ? "w-0.5 bg-brand/70" : "bg-transparent group-hover:w-0.5 group-hover:bg-border-strong",
+        )}
+      />
+    </div>
+  );
+}
+
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -71,6 +100,36 @@ export function RailShell({ children }: { children: ReactNode }) {
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
   const hamburgerRef = useRef<HTMLButtonElement>(null);
+
+  // Live width while the reader drags the resize handle. Held locally (not in
+  // context) so we don't write localStorage on every pointer move — the chosen
+  // width is committed once on pointer-up. `null` means "not resizing".
+  const [liveWidth, setLiveWidth] = useState<number | null>(null);
+  const resizing = liveWidth !== null;
+  const startResize = useCallback((event: ReactPointerEvent) => {
+    // Ignore anything but a primary-button / touch drag.
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = rail.width;
+    const clamp = (w: number) => Math.min(RAIL_MAX_WIDTH, Math.max(RAIL_MIN_WIDTH, Math.round(w)));
+    setLiveWidth(startWidth);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    const onMove = (moveEvent: PointerEvent) => setLiveWidth(clamp(startWidth + (moveEvent.clientX - startX)));
+    const onUp = (upEvent: PointerEvent) => {
+      rail.setWidth(clamp(startWidth + (upEvent.clientX - startX)));
+      setLiveWidth(null);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [rail]);
 
   // Close the mobile drawer on route change.
   useEffect(() => {
@@ -101,17 +160,24 @@ export function RailShell({ children }: { children: ReactNode }) {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex h-full min-h-0 w-full flex-1 overflow-hidden">
-        {/* Fixed desktop rail. */}
+        {/* Fixed desktop rail — user-resizable when expanded. */}
         {!rail.isMobile ? (
           <nav
             aria-label="Primary"
             data-collapsed={rail.collapsed}
+            style={rail.collapsed ? undefined : { width: resizing ? liveWidth! : rail.width }}
             className={cn(
-              "motion-safe:transition-[width] motion-safe:duration-150 shrink-0 border-r border-border",
-              rail.collapsed ? "w-[56px]" : "w-[260px]",
+              "relative shrink-0 border-r border-border",
+              // Animate the collapse/expand toggle, but never while dragging — a
+              // transition there would lag the handle behind the pointer.
+              !resizing && "motion-safe:transition-[width] motion-safe:duration-150",
+              rail.collapsed && "w-[56px]",
             )}
           >
             <RailBody />
+            {/* The drag handle only exists on the expanded desktop rail; the
+                collapsed strip and the mobile drawer are fixed-width. */}
+            {!rail.collapsed ? <RailResizeHandle onStart={startResize} active={resizing} /> : null}
           </nav>
         ) : null}
 
