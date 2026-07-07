@@ -462,6 +462,19 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
+  // --- lazy sandbox provisioning rollout flag, default OFF ---
+  // Only effective when sandboxOwnershipEnabled is ALSO on (lazy provisioning is a
+  // property of the owned path — the SDK never creates/resumes an injected session,
+  // so we control when the box is established). When TRUE, a turn does NOT provision
+  // its box at turn start: the lease acquire + resume-by-id + hooks + downloads +
+  // heartbeat + recording are deferred to an in-process single-flight provisioner
+  // that runs the FIRST time a sandbox op is dispatched (via the routing proxy's
+  // resolveActiveBackend). A turn whose model never calls a sandbox-backed tool ends
+  // with NO lease row and ZERO warm-seconds. When FALSE (or ownership off) the turn
+  // provisions eagerly exactly as today — byte-for-byte. EnvBoolean (NOT
+  // z.coerce.boolean(), which coerces "false" -> true and would turn the flag ON the
+  // moment anyone set the env var to disable it).
+  sandboxLazyProvisionEnabled: EnvBoolean.default(false),
   // --- bring-your-own-compute (selfhosted 11th backend) rollout flag, default OFF ---
   // The keystone flag for the whole selfhosted feature (the enrollment device-flow,
   // the NATS control plane, the relay stream tier). When FALSE the enrollment routes
@@ -1048,6 +1061,7 @@ export function getSettings(): Settings {
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
+    sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),

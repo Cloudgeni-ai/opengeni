@@ -230,3 +230,14 @@ export async function establishSelfhostedTurnSession(
 export function routingEnabled(settings: Settings): boolean {
   return settings.sandboxSelfhostedEnabled === true;
 }
+
+/** Whether the turn should defer sandbox provisioning to the first dispatched op
+ *  (the in-process single-flight provisioner behind the routing proxy's
+ *  resolveActiveBackend). Lazy is a property of the OWNED path only — the SDK never
+ *  creates/resumes an injected session, so we own establish timing — hence gated on
+ *  BOTH flags. With either off the turn provisions eagerly at turn start, exactly as
+ *  today. NB: under lazy the box is ALWAYS wrapped in the routing proxy (the proxy's
+ *  resolver IS the establish seam), independent of `routingEnabled`. */
+export function lazyProvisionEnabled(settings: Settings): boolean {
+  return settings.sandboxLazyProvisionEnabled === true && settings.sandboxOwnershipEnabled === true;
+}
