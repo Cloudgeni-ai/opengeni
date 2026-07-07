@@ -321,7 +321,7 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (!bytes || bytes.length === 0) {
       return false;
     }
-    const { wrote, priorArchive } = await persistWarmSnapshot(db, {
+    const { wrote, priorArchiveForGc } = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.sandboxGroupId,
@@ -332,9 +332,9 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (!wrote) {
       return false;
     }
-    // Keep-latest-per-lease GC, same as the drain seam: best-effort delete of
-    // the superseded snapshot image while the session's client is live.
-    await deletePriorPersistedSnapshot(persistable, priorArchive);
+    // Warm snapshots retain a 2-deep restore window. Only the two-ago archive
+    // returned by persistWarmSnapshot is GC-eligible.
+    await deletePriorPersistedSnapshot(persistable, priorArchiveForGc);
     return true;
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow

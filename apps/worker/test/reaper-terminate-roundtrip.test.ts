@@ -123,7 +123,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
       // A persistArchive call must precede the terminate (delete) call.
       expect(deleteCalls).toHaveLength(0);
       persistedArchives.push(archiveBase64);
-      return { wrote: true, priorArchive: null };
+      return { wrote: true, priorArchive: null, priorArchivePrev: null };
     };
 
     // Pre-fix this threw the Modal UserError; post-fix it resolves cleanly.
@@ -177,7 +177,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     const persistCalls: Array<string | null> = [];
     const persistArchive = async (archiveBase64: string | null) => {
       persistCalls.push(archiveBase64);
-      return { wrote: true as const, priorArchive: null };
+      return { wrote: true as const, priorArchive: null, priorArchivePrev: null };
     };
 
     // A fully-populated selfhosted lease envelope: resumeState present, backend
@@ -249,7 +249,7 @@ describe("reaper terminate envelope→resume round-trip preserves sandboxId", ()
     const lease = { sandboxGroupId: "group-nosnap", leaseEpoch: 1, backend: "modal", resumeBackendId: "modal", resumeState };
     const settings = testSettings({ sandboxBackend: "modal", sandboxOwnershipEnabled: true });
 
-    const persistArchive = async () => ({ wrote: true as const, priorArchive: null });
+    const persistArchive = async () => ({ wrote: true as const, priorArchive: null, priorArchivePrev: null });
 
     // The snapshot failure must propagate (so the caller skips + leaves the lease
     // draining); the box is NEVER terminated with un-captured files. The failing

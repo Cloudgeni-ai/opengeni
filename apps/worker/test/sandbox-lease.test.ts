@@ -305,6 +305,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(r1.wrote).toBe(true);
     expect(r1.priorArchive).toBeNull();
+    expect(r1.priorArchivePrev).toBeNull();
     // The archive is folded at resume_state.sessionState.workspaceArchive AND the
     // existing providerState sibling is preserved (resume-by-id still works).
     const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
@@ -321,6 +322,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(r2.wrote).toBe(true);
     expect(r2.priorArchive).toBe(archive1);
+    expect(r2.priorArchivePrev).toBeNull();
 
     // Epoch fence: a stale-epoch persist writes ZERO rows (wrote:false) so the
     // reaper leaves the (re-armed/superseded) box RUNNING — never terminates it.
@@ -350,7 +352,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     expect(r1.wrote).toBe(true);
     expect(r1.throttled).toBe(false);
-    expect(r1.priorArchive).toBeNull();
+    expect(r1.priorArchiveForGc).toBeNull();
     const [row1] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
     const ss1 = (row1!.resume_state as any).sessionState;
     expect(ss1.workspaceArchive).toBe(archive1);
@@ -366,13 +368,30 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(r2.wrote).toBe(false);
     expect(r2.throttled).toBe(true);
 
-    // Interval 0 = always write: supersedes and returns the PRIOR for GC.
+    // Interval 0 = always write: shifts current to previous and returns only the
+    // two-ago archive for GC, retaining a 2-deep restore fallback.
     const r3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
       expectedEpoch: 5, workspaceArchive: archive2, minIntervalMs: 0,
     });
     expect(r3.wrote).toBe(true);
-    expect(r3.priorArchive).toBe(archive1);
+    expect(r3.priorArchiveForGc).toBeNull();
+    const [row3] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss3 = (row3!.resume_state as any).sessionState;
+    expect(ss3.workspaceArchive).toBe(archive2);
+    expect(ss3.workspaceArchivePrev).toBe(archive1);
+
+    const archive3 = Buffer.from("MODAL_SANDBOX_FS_SNAPSHOT_V1\n{\"snapshot_id\":\"im-w3\"}").toString("base64");
+    const r3b = await persistWarmSnapshot(db, {
+      accountId: ids.accountId, workspaceId: ids.workspaceId, sandboxGroupId: ids.groupId,
+      expectedEpoch: 5, workspaceArchive: archive3, minIntervalMs: 0,
+    });
+    expect(r3b.wrote).toBe(true);
+    expect(r3b.priorArchiveForGc).toBe(archive1);
+    const [row3b] = await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    const ss3b = (row3b!.resume_state as any).sessionState;
+    expect(ss3b.workspaceArchive).toBe(archive3);
+    expect(ss3b.workspaceArchivePrev).toBe(archive2);
 
     // Epoch fence: a stale-epoch persist writes ZERO rows.
     const r4 = await persistWarmSnapshot(db, {

@@ -7209,7 +7209,7 @@ export async function persistDrainSnapshot(db: Database, input: {
   /** base64 of the provider snapshot-ref / tar archive from persistWorkspace().
    *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
   workspaceArchive: string | null;
-}): Promise<{ wrote: boolean; priorArchive: string | null }> {
+}): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -7219,21 +7219,24 @@ export async function persistDrainSnapshot(db: Database, input: {
       // (1) Lock + read the PRIOR archive under the CAS guard (draining AND
       // refcount=0 AND lease_epoch=expected). A miss (re-armed / newer epoch /
       // vanished) returns no row → wrote:false, the caller must NOT terminate.
-      const guard = await scopedDb.execute<{ prior_archive: string | null }>(sql`
-        select resume_state #>> '{sessionState,workspaceArchive}' as prior_archive
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null }>(sql`
+        select
+          resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining' and refcount = 0 and lease_epoch = ${input.expectedEpoch}
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, priorArchive: null };
+        return { wrote: false, priorArchive: null, priorArchivePrev: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       // null workspaceArchive = pure CAS-check (re-arm guard for no-archive backends).
       // The FOR UPDATE lock above is the only synchronization needed; no write.
       if (input.workspaceArchive === null) {
-        return { wrote: true, priorArchive: null };
+        return { wrote: true, priorArchive: null, priorArchivePrev: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -7241,8 +7244,9 @@ export async function persistDrainSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "draining",
+        clearPreviousArchive: true,
       });
-      return { wrote: true, priorArchive };
+      return { wrote: true, priorArchive, priorArchivePrev };
     });
 }
 
@@ -7266,6 +7270,8 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
   workspaceId: string; sandboxGroupId: string; expectedEpoch: number;
   workspaceArchive: string;
   livenessGuard: "draining" | "warm";
+  priorCurrentArchive?: string | null;
+  clearPreviousArchive?: boolean;
 }): Promise<void> {
   const livenessGuard = input.livenessGuard === "draining"
     ? sql`liveness = 'draining' and refcount = 0`
@@ -7278,12 +7284,19 @@ async function foldWorkspaceArchiveOntoLease(scopedDb: Database, input: {
         -- starts from '{}' so jsonb_set never throws "cannot set path in scalar".
         case when jsonb_typeof(resume_state) = 'object' then resume_state else '{}'::jsonb end,
         '{sessionState}',
-        (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
-              then resume_state -> 'sessionState' else '{}'::jsonb end)
-          || jsonb_build_object(
-            'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
-            'workspaceArchiveAt', to_jsonb(now()::timestamptz::text)
-          ),
+        jsonb_strip_nulls(
+          (case when jsonb_typeof(resume_state -> 'sessionState') = 'object'
+                then resume_state -> 'sessionState' else '{}'::jsonb end)
+            || jsonb_build_object(
+              'workspaceArchive', to_jsonb(${input.workspaceArchive}::text),
+              'workspaceArchiveAt', to_jsonb(now()::timestamptz::text),
+              'workspaceArchivePrev', case
+                when ${input.clearPreviousArchive ? "yes" : "no"}::text = 'yes' then null::jsonb
+                when ${input.priorCurrentArchive ?? null}::text is null then null::jsonb
+                else to_jsonb(${input.priorCurrentArchive ?? null}::text)
+              end
+            )
+        ),
         true
       ),
       updated_at = now()
@@ -7310,12 +7323,13 @@ export async function persistWarmSnapshot(db: Database, input: {
   workspaceArchive: string;
   /** Snapshots newer than this many ms are kept (throttle); 0 = always write. */
   minIntervalMs: number;
-}): Promise<{ wrote: boolean; throttled: boolean; priorArchive: string | null }> {
+}): Promise<{ wrote: boolean; throttled: boolean; priorArchiveForGc: string | null }> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_at: string | null }>(sql`
+      const guard = await scopedDb.execute<{ prior_archive: string | null; prior_archive_prev: string | null; prior_archive_at: string | null }>(sql`
         select
           resume_state #>> '{sessionState,workspaceArchive}' as prior_archive,
+          resume_state #>> '{sessionState,workspaceArchivePrev}' as prior_archive_prev,
           resume_state #>> '{sessionState,workspaceArchiveAt}' as prior_archive_at
         from sandbox_leases
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
@@ -7323,16 +7337,17 @@ export async function persistWarmSnapshot(db: Database, input: {
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, priorArchive: null };
+        return { wrote: false, throttled: false, priorArchiveForGc: null };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
+      const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
       const priorAtMs = guard[0]!.prior_archive_at ? Date.parse(guard[0]!.prior_archive_at) : Number.NaN;
       if (
         input.minIntervalMs > 0
         && Number.isFinite(priorAtMs)
         && Date.now() - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, priorArchive: null };
+        return { wrote: false, throttled: true, priorArchiveForGc: null };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -7340,8 +7355,9 @@ export async function persistWarmSnapshot(db: Database, input: {
         expectedEpoch: input.expectedEpoch,
         workspaceArchive: input.workspaceArchive,
         livenessGuard: "warm",
+        priorCurrentArchive: priorArchive,
       });
-      return { wrote: true, throttled: false, priorArchive };
+      return { wrote: true, throttled: false, priorArchiveForGc: priorArchivePrev };
   });
 }
 

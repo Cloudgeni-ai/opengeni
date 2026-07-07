@@ -424,6 +424,22 @@ export function readWorkspaceArchiveFromEnvelopeSessionState(sessionState: unkno
   }
 }
 
+function readWorkspaceArchivePairFromEnvelopeSessionState(sessionState: unknown): {
+  current?: Uint8Array;
+  previous?: Uint8Array;
+} {
+  if (!sessionState || typeof sessionState !== "object") {
+    return {};
+  }
+  const state = sessionState as { workspaceArchivePrev?: unknown };
+  const current = readWorkspaceArchiveFromEnvelopeSessionState(sessionState);
+  const previous = readWorkspaceArchiveFromEnvelopeSessionState({ workspaceArchive: state.workspaceArchivePrev });
+  return {
+    ...(current ? { current } : {}),
+    ...(previous ? { previous } : {}),
+  };
+}
+
 // The native snapshot-ref prefixes the @openai/agents-extensions modal client
 // encodes (snapshots.mjs `NATIVE_SNAPSHOT_PREFIXES`). The ref is
 // `<PREFIX>\n{"snapshot_id":"...",...}`. We re-implement the decode here because
@@ -711,7 +727,8 @@ export async function establishSandboxSessionFromEnvelope(
   //   - COLD lease re-warm (confirmDrainCold preserved a MINIMAL archive-only
   //     envelope `{ sessionState: { workspaceArchive } }` — NO sandboxId, so the
   //     warm-reattach branch must NOT try resume()-by-id; it cold-creates+hydrates).
-  const workspaceArchive = readWorkspaceArchiveFromEnvelopeSessionState(envelopeSessionState);
+  const workspaceArchives = readWorkspaceArchivePairFromEnvelopeSessionState(envelopeSessionState);
+  const workspaceArchive = workspaceArchives.current;
 
   // create() a FRESH box, THEN replay the persisted /workspace snapshot via
   // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
@@ -719,7 +736,7 @@ export async function establishSandboxSessionFromEnvelope(
   // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
   // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
   // cold-restore branch (b) below.
-  const coldRestore = async (resumeFallbackState?: unknown): Promise<EstablishedSandboxSession> => {
+  const coldRestore = async (resumeFallbackState?: unknown, skipWorkspaceHydrate = false): Promise<EstablishedSandboxSession> => {
     const createStarted = Date.now();
     let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
     try {
@@ -745,24 +762,40 @@ export async function establishSandboxSessionFromEnvelope(
         throw createCallbackError;
       }
     }
-    if (workspaceArchive) {
+    if (!skipWorkspaceHydrate && (workspaceArchive || workspaceArchives.previous)) {
       const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> }).hydrateWorkspace;
       if (typeof hydrate === "function") {
-        try {
-          // hydrateWorkspace may internally REPLACE the underlying box
-          // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
-          // the placeholder), so the instanceId must be re-read AFTER.
-          await hydrate.call(restored, workspaceArchive);
-        } catch (hydrateError) {
-          // sandbox-file-persistence: if hydrateWorkspace throws (snapshot GC'd,
-          // provider timeout, corrupt archive), the placeholder box created above is
-          // live but unhydrated — it would leak up to the full idle/hard lifetime
-          // (3600s) if we just re-throw. Best-effort delete/terminate it BEFORE
-          // re-throwing so no box leaks. The original error semantics are preserved
-          // (the re-throw propagates to the caller). This mirrors the reaper's
-          // discipline: NEVER leave an orphaned box running.
+        let hydrated = false;
+        for (const candidate of [
+          { archive: workspaceArchive, label: "current" },
+          { archive: workspaceArchives.previous, label: "previous" },
+        ]) {
+          if (!candidate.archive) {
+            continue;
+          }
+          try {
+            // hydrateWorkspace may internally REPLACE the underlying box
+            // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
+            // the placeholder), so the instanceId must be re-read AFTER.
+            await hydrate.call(restored, candidate.archive);
+            console.info(`[sandbox] cold-restore hydrated workspace from ${candidate.label} archive`);
+            hydrated = true;
+            break;
+          } catch (hydrateError) {
+            console.warn(
+              `[sandbox] cold-restore failed to hydrate workspace from ${candidate.label} archive${
+                candidate.label === "current" && workspaceArchives.previous ? "; trying previous archive" : ""
+              }`,
+              hydrateError,
+            );
+          }
+        }
+        if (!hydrated) {
+          // If both retained archives are unusable, drop the placeholder and
+          // fall through to the same clean-box behavior as an envelope with no
+          // archive. Restore failure is fail-open; it must not strand a turn.
           await terminateCreatedSandbox(client, restored, restoredState);
-          throw hydrateError;
+          return await coldRestore(resumeFallbackState, true);
         }
         const hydratedState = (restored as { state?: unknown }).state;
         const hydratedInstanceId = readInstanceId(restored);
