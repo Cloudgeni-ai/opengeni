@@ -3366,6 +3366,69 @@ describe("API component integration", () => {
     expect(editedRow?.embeddingModel).toBeTruthy();
     expect(editedRow?.hasEmbedding).toBe(true);
 
+    // Status transitions into visible memory gate existing text too.
+    const activateSecret = "AKIAIOSFODNN7EXAMPLE";
+    const proposedActiveResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: `Activate this note with ${activateSecret}.` }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedActiveResponse.status).toBe(201);
+    const proposedActive = await proposedActiveResponse.json() as { id: string };
+    const activatedResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposedActive.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "active" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(activatedResponse.status).toBe(200);
+    const activated = await activatedResponse.json() as { text: string; status: string };
+    expect(activated.status).toBe("active");
+    expect(activated.text).toContain("[REDACTED]");
+    expect(activated.text).not.toContain(activateSecret);
+    const [activatedRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${proposedActive.id}
+    `);
+    expect(activatedRow?.textHash).toBe(hashMemoryText(activated.text));
+    expect(activatedRow?.embeddingModel).toBeTruthy();
+    expect(activatedRow?.hasEmbedding).toBe(true);
+
+    const approveSecret = "AKIAIOSFODNN7EXAMPLE";
+    const proposedApprovedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
+      method: "POST",
+      body: JSON.stringify({ status: "proposed", text: `Approve this note with ${approveSecret}.` }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(proposedApprovedResponse.status).toBe(201);
+    const proposedApproved = await proposedApprovedResponse.json() as { id: string };
+    const approvedTransitionResponse = await app.request(workspacePath(workspaceId, `/knowledge/memories/${proposedApproved.id}`), {
+      method: "PATCH",
+      body: JSON.stringify({ status: "approved" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(approvedTransitionResponse.status).toBe(200);
+    const approvedTransition = await approvedTransitionResponse.json() as { text: string; status: string };
+    expect(approvedTransition.status).toBe("approved");
+    expect(approvedTransition.text).toContain("[REDACTED]");
+    expect(approvedTransition.text).not.toContain(approveSecret);
+    const [approvedTransitionRow] = await dbClient.db.execute<{ textHash: string | null; embeddingModel: string | null; hasEmbedding: boolean }>(dbSql`
+      select text_hash as "textHash", embedding_model as "embeddingModel", embedding is not null as "hasEmbedding"
+      from knowledge_memories
+      where id = ${proposedApproved.id}
+    `);
+    expect(approvedTransitionRow?.textHash).toBe(hashMemoryText(approvedTransition.text));
+    expect(approvedTransitionRow?.embeddingModel).toBeTruthy();
+    expect(approvedTransitionRow?.hasEmbedding).toBe(true);
+    for (const id of [proposedActive.id, proposedApproved.id]) {
+      const cleanupVisible = await app.request(workspacePath(workspaceId, `/knowledge/memories/${id}`), {
+        method: "PATCH",
+        body: JSON.stringify({ status: "archived" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(cleanupVisible.status).toBe(200);
+    }
+
     // PATCH status into the agent-visible set enforces the workspace cap.
     const cappedResponse = await app.request(workspacePath(workspaceId, "/knowledge/memories"), {
       method: "POST",

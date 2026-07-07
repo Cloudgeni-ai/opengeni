@@ -2557,15 +2557,14 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
   // A text edit is a human audit action: it bypasses the dedup/cap gates (an
   // authorized curator's edit is intentional) but still sanitizes + redacts,
   // recomputes text_hash, and re-embeds fail-soft so the row stays coherent.
-  let textUpdate: { text: string; textHash: string; embedding: number[] | null; embeddingModel: string | null } | undefined;
-  if (input.text !== undefined) {
-    const { text: sanitizedText } = sanitizeMemoryText(input.text);
-    if (sanitizedText.length === 0) {
-      throw new Error("Memory text is empty after sanitization; nothing to save.");
-    }
-    if (isMemoryTextTooLong(sanitizedText)) {
-      throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
-    }
+  type MemoryTextUpdate = {
+    text: string;
+    textHash: string;
+    embedding: number[] | null;
+    embeddingModel: string | null;
+    updateEmbedding: boolean;
+  };
+  const embedForMemoryUpdate = async (sanitizedText: string): Promise<{ embedding: number[] | null; embeddingModel: string | null }> => {
     let embedding: number[] | null = null;
     let embeddingModel: string | null = null;
     if (embedder) {
@@ -2582,13 +2581,29 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
         });
       }
     }
-    textUpdate = { text: sanitizedText, textHash: hashMemoryText(sanitizedText), embedding, embeddingModel };
+    return { embedding, embeddingModel };
+  };
+
+  let textUpdate: MemoryTextUpdate | undefined;
+  if (input.text !== undefined) {
+    const { text: sanitizedText } = sanitizeMemoryText(input.text);
+    if (sanitizedText.length === 0) {
+      throw new Error("Memory text is empty after sanitization; nothing to save.");
+    }
+    if (isMemoryTextTooLong(sanitizedText)) {
+      throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
+    }
+    const { embedding, embeddingModel } = await embedForMemoryUpdate(sanitizedText);
+    textUpdate = { text: sanitizedText, textHash: hashMemoryText(sanitizedText), embedding, embeddingModel, updateEmbedding: true };
   }
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [existing] = await scopedDb.select({
       id: schema.knowledgeMemories.id,
       status: schema.knowledgeMemories.status,
+      text: schema.knowledgeMemories.text,
+      textHash: schema.knowledgeMemories.textHash,
+      embedding: schema.knowledgeMemories.embedding,
     }).from(schema.knowledgeMemories)
       .where(and(eq(schema.knowledgeMemories.workspaceId, workspaceId), eq(schema.knowledgeMemories.id, memoryId)))
       .limit(1);
@@ -2596,7 +2611,9 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
       throw new Error(`Knowledge memory not found: ${memoryId}`);
     }
     const nextStatus = (input.status ?? existing.status) as KnowledgeMemoryStatus;
-    if (agentVisibleMemoryStatuses.includes(nextStatus as (typeof agentVisibleMemoryStatuses)[number])) {
+    const wasVisible = agentVisibleMemoryStatuses.includes(existing.status as (typeof agentVisibleMemoryStatuses)[number]);
+    const willBeVisible = agentVisibleMemoryStatuses.includes(nextStatus as (typeof agentVisibleMemoryStatuses)[number]);
+    if (willBeVisible) {
       const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb.select({
         visibleCount: sql<number>`count(*)::int`,
       }).from(schema.knowledgeMemories)
@@ -2609,11 +2626,38 @@ export async function updateKnowledgeMemory(db: Database, workspaceId: string, m
         throw new Error(`Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`);
       }
     }
+    if (!wasVisible && willBeVisible && textUpdate === undefined) {
+      const { text: sanitizedText } = sanitizeMemoryText(existing.text);
+      if (sanitizedText.length === 0) {
+        throw new Error("Memory text is empty after sanitization; nothing to save.");
+      }
+      if (isMemoryTextTooLong(sanitizedText)) {
+        throw new Error(`Memory text is too long (${sanitizedText.length} chars; max ${MEMORY_TEXT_MAX_CHARS}).`);
+      }
+      const textChanged = sanitizedText !== existing.text;
+      const missingEmbedding = existing.embedding == null;
+      const { embedding, embeddingModel } = textChanged || missingEmbedding
+        ? await embedForMemoryUpdate(sanitizedText)
+        : { embedding: null, embeddingModel: null };
+      textUpdate = {
+        text: sanitizedText,
+        textHash: hashMemoryText(sanitizedText),
+        embedding,
+        embeddingModel,
+        updateEmbedding: textChanged || missingEmbedding,
+      };
+    }
     const [row] = await scopedDb.update(schema.knowledgeMemories).set({
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.kind !== undefined ? { kind: input.kind } : {}),
       ...(scope !== undefined ? { scope } : {}),
-      ...(textUpdate !== undefined ? { text: textUpdate.text, textHash: textUpdate.textHash, embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
+      ...(textUpdate !== undefined
+        ? {
+          text: textUpdate.text,
+          textHash: textUpdate.textHash,
+          ...(textUpdate.updateEmbedding ? { embedding: textUpdate.embedding, embeddingModel: textUpdate.embeddingModel } : {}),
+        }
+        : {}),
       ...(input.sourceRefs !== undefined ? { sourceRefs: input.sourceRefs } : {}),
       ...(input.confidence !== undefined ? { confidence: confidenceToStorage(input.confidence) } : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
