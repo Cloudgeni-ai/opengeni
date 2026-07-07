@@ -76,6 +76,7 @@ import {
   assertConfiguredModel,
   createSessionForRequest,
   requireQueuedTurnForApi,
+  readSessionLineage,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -95,7 +96,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await listSessions(db, workspaceId, boundedLimit(c.req.query("limit"))));
+    const parentSessionId = c.req.query("parentSessionId");
+    return c.json(await listSessions(db, workspaceId, {
+      limit: boundedLimit(c.req.query("limit")),
+      ...(parentSessionId !== undefined ? { parentSessionId: parentSessionId === "null" ? null : parentSessionId } : {}),
+    }));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
@@ -106,6 +111,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await readSessionLineage(db, workspaceId, c.req.param("sessionId")));
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:

@@ -2480,6 +2480,26 @@ export const Session = z.object({
 });
 export type Session = z.infer<typeof Session>;
 
+export type SessionSummary = Session;
+
+export const LineageNode: z.ZodType<{
+  session: Session;
+  children: Array<{ session: Session; children: unknown[] }>;
+}> = z.lazy(() => z.object({
+  session: Session,
+  children: z.array(LineageNode),
+}));
+export type LineageNode = {
+  session: SessionSummary;
+  children: LineageNode[];
+};
+
+export const SessionLineageResponse = z.object({
+  ancestors: z.array(Session),
+  children: z.array(LineageNode),
+});
+export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
+
 export const SessionEventType = z.enum([
   "session.created",
   "session.status.changed",

@@ -364,9 +364,14 @@ export type Session = {
   metadata: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
+  sandboxOs: SandboxOs;
+  sandboxGroupId: string;
+  activeSandboxId: string | null;
+  activeEpoch: number;
   environmentId: string | null;
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
+  parentSessionId: string | null;
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -377,6 +382,18 @@ export type Session = {
   codexLastCredentialId?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type SessionSummary = Session;
+
+export type LineageNode = {
+  session: SessionSummary;
+  children: LineageNode[];
+};
+
+export type SessionLineageResponse = {
+  ancestors: SessionSummary[];
+  children: LineageNode[];
 };
 
 export type SessionTurnStatus =

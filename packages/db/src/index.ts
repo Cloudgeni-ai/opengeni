@@ -42,6 +42,7 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  LineageNode,
   SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
@@ -4325,14 +4326,131 @@ export async function listDistinctEnvironmentIdsInGroup(db: Database, workspaceI
   });
 }
 
-export async function listSessions(db: Database, workspaceId: string, limit = 50): Promise<Session[]> {
+export type ListSessionsOptions = {
+  limit?: number;
+  parentSessionId?: string | null;
+};
+
+export async function listSessions(db: Database, workspaceId: string, limit?: number): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, options?: ListSessionsOptions): Promise<Session[]>;
+export async function listSessions(db: Database, workspaceId: string, limitOrOptions: number | ListSessionsOptions = 50): Promise<Session[]> {
+  const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions;
+  const limit = options.limit ?? 50;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const filters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
+      const parentSessionId = options.parentSessionId;
+      if (parentSessionId === null) {
+        filters.push(isNull(schema.sessions.parentSessionId));
+      } else if (parentSessionId !== undefined) {
+        filters.push(eq(schema.sessions.parentSessionId, parentSessionId));
+      }
+    }
     const rows = await scopedDb.select().from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId))
+      .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
       .limit(limit);
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
     return rows.map((row) => mapSession(row, grouped.get(row.id) ?? []));
+  });
+}
+
+export type SessionLineage = {
+  ancestors: Session[];
+  children: LineageNode[];
+};
+
+type LineageIdRow = {
+  id: string;
+  parentSessionId: string | null;
+  depth: number;
+  path: string[];
+};
+
+/**
+ * Read the full lineage slice around a session. Every recursive step carries
+ * workspace_id as a hard predicate; a foreign parent/child id is invisible even
+ * before RLS is considered. Ancestors are capped at 10 and returned root-first.
+ * Descendants are capped at depth 5 and returned as a nested tree.
+ */
+export async function getSessionLineage(db: Database, workspaceId: string, sessionId: string): Promise<SessionLineage | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const root = await getSession(db, workspaceId, sessionId);
+    if (!root) {
+      return null;
+    }
+
+    const ancestorRows = await scopedDb.execute(sql<LineageIdRow>`
+      with recursive ancestors(id, parent_session_id, depth, path) as (
+        select ${schema.sessions.id}, ${schema.sessions.parentSessionId}, 0, array[${schema.sessions.id}]
+        from ${schema.sessions}
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = ${sessionId}
+        union all
+        select parent.id, parent.parent_session_id, ancestors.depth + 1, ancestors.path || parent.id
+        from ${schema.sessions} parent
+        join ancestors on ancestors.parent_session_id = parent.id
+        where parent.workspace_id = ${workspaceId}
+          and ancestors.depth < 10
+          and not parent.id = any(ancestors.path)
+      )
+      select id, parent_session_id as "parentSessionId", depth, path
+      from ancestors
+      where depth > 0
+      order by depth desc
+    `) as LineageIdRow[];
+
+    const childRows = await scopedDb.execute(sql<LineageIdRow>`
+      with recursive descendants(id, parent_session_id, depth, path) as (
+        select child.id, child.parent_session_id, 1, array[${sessionId}, child.id]
+        from ${schema.sessions} child
+        where child.workspace_id = ${workspaceId}
+          and child.parent_session_id = ${sessionId}
+        union all
+        select child.id, child.parent_session_id, descendants.depth + 1, descendants.path || child.id
+        from ${schema.sessions} child
+        join descendants on child.parent_session_id = descendants.id
+        where child.workspace_id = ${workspaceId}
+          and descendants.depth < 5
+          and not child.id = any(descendants.path)
+      )
+      select id, parent_session_id as "parentSessionId", depth, path
+      from descendants
+      order by path
+    `) as LineageIdRow[];
+
+    const lineageRows = [...ancestorRows, ...childRows];
+    const ids = [...new Set(lineageRows.map((row) => row.id))];
+    if (ids.length === 0) {
+      return { ancestors: [], children: [] };
+    }
+    const rows = await scopedDb.select().from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), inArray(schema.sessions.id, ids)));
+    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, rows.map((row) => row.id));
+    const sessionsById = new Map(rows.map((row) => [row.id, mapSession(row, grouped.get(row.id) ?? [])]));
+
+    const ancestors = ancestorRows
+      .map((row) => sessionsById.get(row.id))
+      .filter((session): session is Session => Boolean(session));
+
+    const nodesById = new Map<string, LineageNode>();
+    for (const row of childRows) {
+      const session = sessionsById.get(row.id);
+      if (session) {
+        nodesById.set(row.id, { session, children: [] });
+      }
+    }
+    const children: LineageNode[] = [];
+    for (const row of childRows) {
+      const node = nodesById.get(row.id);
+      if (!node) continue;
+      if (row.parentSessionId === sessionId) {
+        children.push(node);
+      } else {
+        nodesById.get(row.parentSessionId ?? "")?.children.push(node);
+      }
+    }
+    return { ancestors, children };
   });
 }
 

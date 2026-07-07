@@ -80,6 +80,7 @@ import type {
   Session,
   SessionEvent,
   SessionGoal,
+  SessionLineageResponse,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -205,10 +206,17 @@ export class OpenGeniClient {
     return await this.requestJson<Session>("PATCH", `/v1/workspaces/${workspaceId}/sessions/${sessionId}`, request);
   }
 
-  async listSessions(workspaceId: string, options: { limit?: number } = {}): Promise<Session[]> {
+  async listSessions(workspaceId: string, options: { limit?: number; parentSessionId?: string | null } = {}): Promise<Session[]> {
     return await this.requestJson<Session[]>("GET", `/v1/workspaces/${workspaceId}/sessions`, undefined, {
       ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") && options.parentSessionId !== undefined
+        ? { parentSessionId: options.parentSessionId === null ? "null" : String(options.parentSessionId) }
+        : {}),
     });
+  }
+
+  async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+    return await this.requestJson<SessionLineageResponse>("GET", `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`);
   }
 
   async listTurns(workspaceId: string, sessionId: string, options: { limit?: number } = {}): Promise<SessionTurn[]> {
