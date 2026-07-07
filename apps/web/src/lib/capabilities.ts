@@ -2,6 +2,40 @@ import type { CapabilityCatalogItem, CapabilityKind, CapabilitySource, Connectio
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
+/** Nice labels for the built-in (first-party) MCP servers. */
+const FIRST_PARTY_MCP_LABELS: Record<string, string> = {
+  opengeni: "OpenGeni",
+  files: "Files",
+  docs: "Docs",
+};
+
+// domain-slug suffixes that are really a TLD glued on by the slugifier
+// (linear.app -> "linear-app"); dropped so the chip reads "Linear", not "Linear App".
+const DOMAIN_TLD_SUFFIX = /-(app|com|io|org|dev|ai|co|net|so|xyz|cloud|sh)$/i;
+
+/**
+ * Human label for an MCP tool/capability id shown on a message chip. Built-in
+ * servers get their proper name; catalog-imported ids
+ * (`cap-integrations-sh-linear-app-<hash>-<hash>`) are stripped of their
+ * prefix + trailing hash segments and title-cased to the provider ("Linear").
+ * Best-effort by design — a value we can't parse is returned as-is rather than
+ * shown as raw id soup where avoidable.
+ */
+export function capabilityChipLabel(id: string): string {
+  if (FIRST_PARTY_MCP_LABELS[id]) return FIRST_PARTY_MCP_LABELS[id];
+  let slug = id.replace(/^(cap|mcp)-/, "").replace(/^integrations-sh-/, "");
+  // drop the trailing opaque hash segments the id builder appends
+  slug = slug.replace(/(-[a-z0-9]{5,}){1,3}$/i, "");
+  slug = slug.replace(DOMAIN_TLD_SUFFIX, "");
+  const label = slug
+    .split("-")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ")
+    .trim();
+  return label || id;
+}
+
 // Human copy for every taxonomy value that used to leak enum slugs into the UI
 // (doctrine: no internal taxonomy in user-facing labels). Codes appear at most
 // as fallbacks for values we don't recognize.
