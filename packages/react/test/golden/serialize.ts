@@ -97,6 +97,20 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         tone: item.tone,
         text: item.text,
       };
+    case "auth-needed":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        providerDomain: item.providerDomain,
+        connectionId: item.connectionId,
+        reason: item.reason,
+        scopes: stableValue(item.scopes),
+        resource: item.resource,
+        toolName: item.toolName,
+        authorizationUrl: item.authorizationUrl,
+      };
     case "turn-end":
       return {
         kind: item.kind,

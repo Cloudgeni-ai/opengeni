@@ -100,6 +100,7 @@ export {
 export type {
   ActivityItem,
   AgentMessageItem,
+  AuthNeededItem,
   GoalItem,
   NoticeItem,
   ReasoningItem,
