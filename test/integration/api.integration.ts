@@ -4632,6 +4632,9 @@ describe("API component integration", () => {
         url: upstream.url,
         headers: { authorization: requiredAuthorization },
       });
+      await dbClient.db.execute(dbSql`
+        update workspaces set settings = '{"memoryEnabled":true}'::jsonb where id = ${grant.workspaceId}
+      `);
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const toolspaceAuth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:run-proxy",
@@ -4643,6 +4646,14 @@ describe("API component integration", () => {
       const listed = await toolspaceClient.mcpServers[0]!.listTools();
       const toolNames = listed.map((tool) => tool.name);
       expect(toolNames).toContain("toolspace__crm__search_documents");
+      // Toolspace is a narrowed proxy surface: the bare toolspace:call bearer
+      // does not receive unpermissioned first-party session tools, including
+      // workspace memory even when the workspace setting is enabled.
+      expect(toolNames).not.toContain("set_session_title");
+      expect(toolNames).not.toContain("goal_set");
+      expect(toolNames).not.toContain("memory_search");
+      expect(toolNames).not.toContain("memory_save");
+      expect(toolNames).not.toContain("memory_correct");
       expect(toolNames).not.toContain("session_create");
       expect(toolNames).not.toContain("mcp_servers_attach");
       expect(toolNames).not.toContain("environment_set_variable");

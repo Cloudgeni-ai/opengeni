@@ -122,7 +122,11 @@ export function buildOpenGeniMcpServer(deps: ApiRouteDeps, grant: AccessGrant, o
   if (sessionId !== null && can("goals:manage")) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
-  if (sessionId !== null && options.workspaceMemoryEnabled === true) {
+  // Toolspace grants are the sandbox's narrowed proxy surface. Unlike the
+  // normal first-party worker token, a bare toolspace:call token does not see
+  // unpermissioned session tools; memory follows that title/goal parity and
+  // stays on the normal first-party MCP surface only.
+  if (!toolspaceMode && sessionId !== null && options.workspaceMemoryEnabled === true) {
     registerMemoryTools(server, deps, grant, sessionId, json);
   }
 
