@@ -49,7 +49,9 @@ type GoalPillMeta = {
 const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
   paused: { label: "Goal paused", icon: PauseIcon, tint: "text-status-waiting", ring: "border-status-waiting/40" },
-  attention: { label: "Needs attention", icon: TriangleAlertIcon, tint: "text-status-waiting", ring: "border-status-waiting/45" },
+  // "Needs attention" wears the warning/amber hue, not paused's purple — the two
+  // states were near-indistinguishable when both leaned on status-waiting.
+  attention: { label: "Needs attention", icon: TriangleAlertIcon, tint: "text-status-running", ring: "border-status-running/50" },
   completed: { label: "Goal completed", icon: CheckCircle2Icon, tint: "text-status-idle", ring: "border-status-idle/40" },
 };
 
@@ -232,7 +234,12 @@ export function GoalSurface({
             sideOffset={8}
             collisionPadding={12}
             className={cn(
-              "z-50 w-[min(24rem,calc(100vw-2rem))] rounded-xl border border-border bg-surface shadow-lg outline-none",
+              // Anchored directly above the composer, the panel opens UPWARD. On a
+              // short viewport it caps at the space available above the pill and
+              // scrolls inside itself (subagent trees can get tall) rather than
+              // overflowing off-screen or flipping down over the composer.
+              "z-50 flex max-h-[min(30rem,var(--radix-popover-content-available-height))] w-[min(24rem,calc(100vw-2rem))] flex-col overflow-y-auto overscroll-contain",
+              "rounded-xl border border-border bg-surface shadow-lg outline-none",
               "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
               "data-[side=top]:slide-in-from-bottom-1",
             )}
@@ -293,7 +300,7 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
         <MetaChip dot={record.noProgressStreak >= 2 ? "waiting" : undefined}>
           {record.noProgressStreak} stalled check{record.noProgressStreak === 1 ? "" : "s"}
         </MetaChip>
-        <MetaChip>version {record.version}</MetaChip>
+        <MetaChip>v{record.version}</MetaChip>
       </div>
 
       {record.status !== "completed" ? (
