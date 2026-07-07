@@ -12,7 +12,9 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   isPrivateAddress,
+  listConnectionsMetadata,
   loadIntegrationOAuthClient,
+  replaceIntegrationOAuthClient,
   storeIntegrationOAuthClient,
   updateConnection,
   type Database,
@@ -27,8 +29,12 @@ import { canonicalProviderDomain } from "./provider-domain";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 const dcrPreferredAuthorizationServers = new Set([
-  // Linear advertises CIMD, but its MCP docs and runtime behavior require
-  // dynamic client registration for tokens accepted by https://mcp.linear.app/mcp.
+  "https://mcp.linear.app",
+]);
+const confidentialDcrAuthorizationServers = new Set([
+  // Linear's token endpoint will issue opaque tokens to public DCR clients, but
+  // the MCP resource rejects those tokens. Register a confidential DCR client,
+  // matching known-working MCP SDK clients that request a client_secret method.
   "https://mcp.linear.app",
 ]);
 
@@ -70,6 +76,7 @@ type AuthorizationServerMetadata = {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   clientIdMetadataDocumentSupported: boolean;
+  tokenEndpointAuthMethodsSupported: string[];
   codeChallengeMethodsSupported: string[];
   raw: Record<string, unknown>;
 };
@@ -139,18 +146,21 @@ export async function startMcpOAuth(
   const baseUrl = integrationBaseUrl(settings.publicBaseUrl, context.requestUrl);
   const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
   const metadataUrl = `${baseUrl}/v1/integrations/oauth/client-metadata.json`;
-  const existing = context.payload.connectionId
-    ? await getConnectionMetadata(db, context.workspaceId, context.payload.connectionId, context.subjectId)
-    : null;
+  const existing = await existingOAuthConnectionForStart(db, {
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    providerDomain,
+    connectionId: context.payload.connectionId,
+  });
   if (context.payload.connectionId && !existing) {
     throw new HTTPException(404, { message: "connection not found" });
   }
 
   const discovery = await discoverMcpOAuth(mcpUrl, settings);
   const resource = discovery.prm.resource ? canonicalOAuthResource(discovery.prm.resource) : mcpUrl;
-  const client = await registerOAuthClient(db, settings, discovery.as, metadataUrl, redirectUri);
   const verifier = randomPkceVerifier();
   const authorizeScopes = chooseAuthorizeScopes(context.payload.requestedScopes, discovery.challenge.scope, discovery.prm.scopesSupported);
+  const client = await registerOAuthClient(db, settings, discovery.as, metadataUrl, redirectUri, authorizeScopes);
   const key = requireEnvironmentEncryption(settings);
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
     accountId: context.accountId,
@@ -400,6 +410,7 @@ async function discoverAuthorizationServerMetadata(authorizationServer: string, 
       authorizationEndpoint,
       tokenEndpoint,
       clientIdMetadataDocumentSupported: payload.client_id_metadata_document_supported === true,
+      tokenEndpointAuthMethodsSupported: stringArray(payload.token_endpoint_auth_methods_supported),
       codeChallengeMethodsSupported: stringArray(payload.code_challenge_methods_supported),
       raw: payload,
       ...(stringValue(payload.registration_endpoint) ? { registrationEndpoint: stringValue(payload.registration_endpoint)! } : {}),
@@ -414,13 +425,14 @@ async function registerOAuthClient(
   as: AuthorizationServerMetadata,
   metadataUrl: string,
   redirectUri: string,
+  scopes: string[],
 ): Promise<OAuthClientRegistration> {
   const operator = operatorClientForAs(settings, as);
   if (operator) {
     return operator;
   }
   if (prefersDynamicClientRegistration(as)) {
-    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri);
+    return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
   }
   if (as.clientIdMetadataDocumentSupported) {
     return {
@@ -431,7 +443,7 @@ async function registerOAuthClient(
       tokenEndpointAuthMethod: "none",
     };
   }
-  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri);
+  return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes);
 }
 
 async function getOrCreateDynamicClientRegistration(
@@ -439,9 +451,11 @@ async function getOrCreateDynamicClientRegistration(
   settings: Settings,
   as: AuthorizationServerMetadata,
   redirectUri: string,
+  scopes: string[],
 ): Promise<OAuthClientRegistration> {
+  const requiredAuthMethod = requiredDcrTokenEndpointAuthMethod(as);
   const storedClient = await loadIntegrationOAuthClient(db, settings, as.issuer);
-  if (storedClient) {
+  if (storedClient && storedDcrClientSatisfiesPolicy(storedClient, requiredAuthMethod, scopes)) {
     return {
       method: "dcr",
       issuer: storedClient.issuer,
@@ -456,19 +470,19 @@ async function getOrCreateDynamicClientRegistration(
       message: "manual OAuth client credentials are required for this authorization server",
     });
   }
-  const dcr = await dynamicClientRegistration(settings, as, redirectUri);
+  const dcr = await dynamicClientRegistration(settings, as, redirectUri, scopes, requiredAuthMethod);
   const key = dcr.clientSecret ? requireEnvironmentEncryption(settings) : null;
-  const storedWinner = await storeIntegrationOAuthClient(db, {
+  const storeInput = {
     issuer: as.issuer,
     authorizationServer: as.authorizationServer,
     clientId: dcr.clientId,
     clientSecretEncrypted: dcr.clientSecret && key ? encryptEnvironmentValue(key, dcr.clientSecret) : null,
     tokenEndpointAuthMethod: dcr.tokenEndpointAuthMethod,
-    metadata: {
-      registrationEndpoint: as.registrationEndpoint,
-      registeredAt: new Date().toISOString(),
-    },
-  });
+    metadata: registrationMetadata(as, scopes),
+  };
+  const storedWinner = requiredAuthMethod
+    ? await replaceIntegrationOAuthClient(db, storeInput)
+    : await storeIntegrationOAuthClient(db, storeInput);
   if (storedWinner.clientId !== dcr.clientId) {
     const winner = await loadIntegrationOAuthClient(db, settings, as.issuer);
     if (!winner) {
@@ -481,6 +495,50 @@ async function getOrCreateDynamicClientRegistration(
 
 function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
   return [as.issuer, as.authorizationServer].some((candidate) => dcrPreferredAuthorizationServers.has(normalizedIssuerKey(candidate)));
+}
+
+function requiresConfidentialDynamicClient(as: AuthorizationServerMetadata): boolean {
+  return [as.issuer, as.authorizationServer].some((candidate) => confidentialDcrAuthorizationServers.has(normalizedIssuerKey(candidate)));
+}
+
+function requiredDcrTokenEndpointAuthMethod(as: AuthorizationServerMetadata): OAuthClientRegistration["tokenEndpointAuthMethod"] | null {
+  if (!requiresConfidentialDynamicClient(as)) {
+    return null;
+  }
+  if (as.tokenEndpointAuthMethodsSupported.includes("client_secret_basic")) {
+    return "client_secret_basic";
+  }
+  if (as.tokenEndpointAuthMethodsSupported.includes("client_secret_post")) {
+    return "client_secret_post";
+  }
+  throw new HTTPException(422, { message: "authorization server requires confidential DCR but does not advertise a supported client secret auth method" });
+}
+
+function storedDcrClientSatisfiesPolicy(
+  stored: { clientSecret: string | null; tokenEndpointAuthMethod: string; metadata: Record<string, unknown> },
+  requiredAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"] | null,
+  scopes: string[],
+): boolean {
+  if (!registeredScopesMatch(stored.metadata, scopes)) {
+    return false;
+  }
+  return requiredAuthMethod ? Boolean(stored.clientSecret) && stored.tokenEndpointAuthMethod === requiredAuthMethod : true;
+}
+
+function registeredScopesMatch(metadata: Record<string, unknown>, scopes: string[]): boolean {
+  return stableScopeKey(stringArray(metadata.registeredScopes)) === stableScopeKey(scopes);
+}
+
+function stableScopeKey(scopes: string[]): string {
+  return uniqueStrings(scopes).sort().join(" ");
+}
+
+function registrationMetadata(as: AuthorizationServerMetadata, scopes: string[]): Record<string, unknown> {
+  return {
+    registrationEndpoint: as.registrationEndpoint,
+    registeredAt: new Date().toISOString(),
+    registeredScopes: uniqueStrings(scopes),
+  };
 }
 
 function dcrRegistrationFromStored(stored: {
@@ -544,6 +602,8 @@ async function dynamicClientRegistration(
   settings: Settings,
   as: AuthorizationServerMetadata,
   redirectUri: string,
+  scopes: string[],
+  tokenEndpointAuthMethod: OAuthClientRegistration["tokenEndpointAuthMethod"] | null,
 ): Promise<OAuthClientRegistration> {
   if (!as.registrationEndpoint) {
     throw new HTTPException(422, { message: "authorization server does not support dynamic client registration" });
@@ -555,9 +615,10 @@ async function dynamicClientRegistration(
     body: JSON.stringify({
       client_name: "OpenGeni",
       redirect_uris: [redirectUri],
-      token_endpoint_auth_method: "none",
+      token_endpoint_auth_method: tokenEndpointAuthMethod ?? "none",
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
+      ...(scopes.length ? { scope: scopes.join(" ") } : {}),
     }),
   });
   if (!response.ok) {
@@ -577,6 +638,27 @@ async function dynamicClientRegistration(
     ...(clientSecret ? { clientSecret } : {}),
     tokenEndpointAuthMethod: tokenAuthMethod(stringValue(payload.token_endpoint_auth_method), Boolean(clientSecret)),
   };
+}
+
+async function existingOAuthConnectionForStart(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    providerDomain: string;
+    connectionId?: string | undefined;
+  },
+) {
+  if (input.connectionId) {
+    return await getConnectionMetadata(db, input.workspaceId, input.connectionId, input.subjectId);
+  }
+  const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
+  return visible.find((connection) =>
+    connection.subjectId === null &&
+    connection.kind === "oauth2" &&
+    connection.status === "active" &&
+    connection.providerDomain === input.providerDomain
+  ) ?? null;
 }
 
 function buildAuthorizationUrl(input: {
@@ -698,12 +780,14 @@ async function exchangeAuthorizationCode(
   body.set("redirect_uri", input.redirectUri);
   body.set("code_verifier", input.verifier);
   body.set("resource", input.resource);
-  body.set("client_id", input.client.clientId);
   const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded", accept: "application/json" };
   if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_post") {
+    body.set("client_id", input.client.clientId);
     body.set("client_secret", input.client.clientSecret);
   } else if (input.client.clientSecret && input.client.tokenEndpointAuthMethod === "client_secret_basic") {
     headers.authorization = `Basic ${Buffer.from(`${input.client.clientId}:${input.client.clientSecret}`).toString("base64")}`;
+  } else {
+    body.set("client_id", input.client.clientId);
   }
   const response = await fetchOAuth(input.tokenEndpoint, settings, { method: "POST", headers, body });
   if (!response.ok) {

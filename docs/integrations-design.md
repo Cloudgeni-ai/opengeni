@@ -107,6 +107,7 @@ REGISTER   priority: (1) operator pre-registered creds for this AS
                metadata URL (§5.3), unless this AS is in the DCR-compatibility
                override set
            (3) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS
+               and registered with the same resolved scope used for authorization
            (4) manual client-credential entry in UI
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
            resource = canonical MCP server URI (RFC 8707, ALWAYS sent),
@@ -132,7 +133,7 @@ The callback route must NOT call `requireAccessGrant` — a browser redirect car
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the environments key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
-Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a DCR client even though Linear's metadata also says `client_id_metadata_document_supported=true`.
+Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt.
 
 ### 5.3 Our client identity (CIMD)
 

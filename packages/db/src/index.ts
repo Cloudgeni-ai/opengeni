@@ -1281,6 +1281,8 @@ export type StoreIntegrationOAuthClientInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type ReplaceIntegrationOAuthClientInput = StoreIntegrationOAuthClientInput;
+
 export type ConsumeOAuthStateNonceInput = {
   accountId: string;
   workspaceId: string;
@@ -2419,6 +2421,34 @@ export async function storeIntegrationOAuthClient(
     throw new Error(`OAuth client registration conflict winner not found for issuer ${input.issuer}`);
   }
   return mapStoredIntegrationOAuthClient(winner);
+}
+
+export async function replaceIntegrationOAuthClient(
+  db: Database,
+  input: ReplaceIntegrationOAuthClientInput,
+): Promise<StoredIntegrationOAuthClient> {
+  const [row] = await db.insert(schema.integrationOauthClients).values({
+    issuer: input.issuer,
+    authorizationServer: input.authorizationServer,
+    clientId: input.clientId,
+    clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+    tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+    metadata: input.metadata ?? {},
+  }).onConflictDoUpdate({
+    target: schema.integrationOauthClients.issuer,
+    set: {
+      authorizationServer: input.authorizationServer,
+      clientId: input.clientId,
+      clientSecretEncrypted: input.clientSecretEncrypted ?? null,
+      tokenEndpointAuthMethod: input.tokenEndpointAuthMethod ?? "none",
+      metadata: input.metadata ?? {},
+      updatedAt: new Date(),
+    },
+  }).returning();
+  if (!row) {
+    throw new Error(`OAuth client registration replacement failed for issuer ${input.issuer}`);
+  }
+  return mapStoredIntegrationOAuthClient(row);
 }
 
 function mapStoredIntegrationOAuthClient(row: typeof schema.integrationOauthClients.$inferSelect): StoredIntegrationOAuthClient {

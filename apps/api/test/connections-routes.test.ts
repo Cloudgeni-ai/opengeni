@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
@@ -8,6 +9,8 @@ import {
   encryptEnvironmentValue,
   getConnectionMetadata,
   loadConnectionCredentialForBroker,
+  loadIntegrationOAuthClient,
+  replaceIntegrationOAuthClient,
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
@@ -145,6 +148,7 @@ function requestHeaderValue(headers: HeadersInit | undefined, name: string): str
 type FakeAuthorizationServer = {
   url: string;
   tokenRequests: URLSearchParams[];
+  tokenRequestAuthHeaders: Array<string | null>;
   registrations: Record<string, unknown>[];
   close: () => void;
 };
@@ -152,6 +156,7 @@ type FakeAuthorizationServer = {
 function startFakeAuthorizationServer(options: {
   scopesSupported?: string[];
   codeChallengeMethods?: string[];
+  tokenEndpointAuthMethodsSupported?: string[];
   clientIdMetadataDocumentSupported?: boolean;
   issuer?: string;
   dcr?: boolean;
@@ -160,6 +165,7 @@ function startFakeAuthorizationServer(options: {
   tokenError?: string;
 } = {}): FakeAuthorizationServer {
   const tokenRequests: URLSearchParams[] = [];
+  const tokenRequestAuthHeaders: Array<string | null> = [];
   const registrations: Record<string, unknown>[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -180,20 +186,25 @@ function startFakeAuthorizationServer(options: {
           authorization_endpoint: `${origin}/authorize`,
           token_endpoint: `${origin}/token`,
           code_challenge_methods_supported: options.codeChallengeMethods ?? ["S256"],
+          token_endpoint_auth_methods_supported: options.tokenEndpointAuthMethodsSupported ?? ["none"],
           client_id_metadata_document_supported: options.clientIdMetadataDocumentSupported ?? true,
           ...(options.dcr ? { registration_endpoint: `${origin}/register` } : {}),
         });
       }
       if (url.pathname === "/register") {
-        registrations.push(await request.json() as Record<string, unknown>);
+        const registration = await request.json() as Record<string, unknown>;
+        registrations.push(registration);
+        const authMethod = typeof registration.token_endpoint_auth_method === "string" ? registration.token_endpoint_auth_method : "none";
         return Response.json({
           client_id: `${origin}/registered-client/${registrations.length}`,
-          token_endpoint_auth_method: "none",
+          ...(authMethod === "client_secret_basic" || authMethod === "client_secret_post" ? { client_secret: `secret-${registrations.length}` } : {}),
+          token_endpoint_auth_method: authMethod,
         }, { status: 201 });
       }
       if (url.pathname === "/token") {
         const body = new URLSearchParams(await request.text());
         tokenRequests.push(body);
+        tokenRequestAuthHeaders.push(request.headers.get("authorization"));
         if (options.tokenStatus && options.tokenStatus >= 400) {
           return Response.json({
             error: options.tokenError ?? "invalid_client",
@@ -216,6 +227,7 @@ function startFakeAuthorizationServer(options: {
   return {
     url: `http://127.0.0.1:${server.port}`,
     tokenRequests,
+    tokenRequestAuthHeaders,
     registrations,
     close: () => server.stop(true),
   };
@@ -700,6 +712,7 @@ describe("connections routes", () => {
         client_name: "OpenGeni",
         redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
         token_endpoint_auth_method: "none",
+        scope: "documents:read",
       });
       const callback = await publicApp(client.db).request(`/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`);
       expect(callback.status).toBe(302);
@@ -718,6 +731,7 @@ describe("connections routes", () => {
       clientIdMetadataDocumentSupported: true,
       dcr: true,
       scopesSupported: ["read", "write"],
+      tokenEndpointAuthMethodsSupported: ["client_secret_basic", "client_secret_post", "none"],
     });
     const mcp = startTestMcpServer({
       requiredAuthorization: "Bearer mcp-access-token",
@@ -743,7 +757,8 @@ describe("connections routes", () => {
       expect(as.registrations[0]).toMatchObject({
         client_name: "OpenGeni",
         redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
-        token_endpoint_auth_method: "none",
+        token_endpoint_auth_method: "client_secret_basic",
+        scope: "read write",
       });
 
       const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown> | null;
@@ -754,8 +769,65 @@ describe("connections routes", () => {
       expect(callback.status).toBe(302);
       expect(callback.headers.get("location")).toContain("integration_oauth=success");
       expect(as.tokenRequests).toHaveLength(1);
-      expect(as.tokenRequests[0]!.get("client_id")).toBe(`${as.url}/registered-client/1`);
+      expect(as.tokenRequests[0]!.has("client_id")).toBe(false);
+      expect(as.tokenRequests[0]!.has("client_secret")).toBe(false);
+      expect(as.tokenRequestAuthHeaders[0]).toBe(`Basic ${Buffer.from(`${as.url}/registered-client/1:secret-1`).toString("base64")}`);
       expect(as.tokenRequests[0]!.get("resource")).toBe("urn:test:mcp");
+
+      const loadedClient = await loadIntegrationOAuthClient(client.db, settings, "https://mcp.linear.app");
+      expect(loadedClient).toMatchObject({
+        clientId: `${as.url}/registered-client/1`,
+        clientSecret: "secret-1",
+        tokenEndpointAuthMethod: "client_secret_basic",
+      });
+      expect(loadedClient?.metadata.registeredScopes).toEqual(["read", "write"]);
+    } finally {
+      mcp.close();
+      as.close();
+    }
+  });
+
+  test("oauth start replaces a stored Linear DCR client missing required auth method or scopes", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await replaceIntegrationOAuthClient(client.db, {
+      issuer: "https://mcp.linear.app",
+      authorizationServer: "https://mcp.linear.app",
+      clientId: "public-linear-client",
+      tokenEndpointAuthMethod: "none",
+      metadata: { registrationEndpoint: "https://mcp.linear.app/register", registeredAt: "2026-01-01T00:00:00.000Z" },
+    });
+    const as = startFakeAuthorizationServer({
+      issuer: "https://mcp.linear.app",
+      clientIdMetadataDocumentSupported: true,
+      dcr: true,
+      scopesSupported: ["read", "write"],
+      tokenEndpointAuthMethodsSupported: ["client_secret_basic", "client_secret_post", "none"],
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource", scope="read write"`,
+    });
+    try {
+      const response = await app().request(`/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`, {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ providerDomain: "linear.app", mcpUrl: mcp.url, returnPath: "/integrations?connect_item=linear" }),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json() as { authorizationUrl: string };
+      expect(new URL(body.authorizationUrl).searchParams.get("client_id")).toBe(`${as.url}/registered-client/1`);
+
+      const loadedClient = await loadIntegrationOAuthClient(client.db, settings, "https://mcp.linear.app");
+      expect(loadedClient).toMatchObject({
+        clientId: `${as.url}/registered-client/1`,
+        clientSecret: "secret-1",
+        tokenEndpointAuthMethod: "client_secret_basic",
+      });
+      expect(loadedClient?.metadata.registeredScopes).toEqual(["read", "write"]);
     } finally {
       mcp.close();
       as.close();
