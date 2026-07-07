@@ -7,6 +7,7 @@ import {
   type CatalogIntegrationRow,
   type LogoStorage,
 } from "./import-integrations-catalog";
+import { probeCatalogSnapshot, probeMcpEndpoint } from "./integrations-catalog-probe";
 
 const fixtureUrl = new URL("./fixtures/integrations-catalog-sample.json", import.meta.url);
 
@@ -241,6 +242,90 @@ describe("integrations.sh logo storage", () => {
     });
     expect(failedFetch.ok).toBe(false);
     expect(!failedFetch.ok && failedFetch.reason).toBe("fetch_failed:network down");
+  });
+});
+
+describe("integrations.sh MCP endpoint probe", () => {
+  test("classifies a 200 JSON-RPC initialize response as real MCP", async () => {
+    const outcome = await probeMcpEndpoint("https://mcp.example/mcp", {
+      fetchImpl: async () => new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "Example", version: "1" } },
+      }), { status: 200, headers: { "content-type": "application/json" } }),
+    });
+
+    expect(outcome).toMatchObject({ status: "real", reason: "mcp_json_rpc", httpStatus: 200 });
+  });
+
+  test("classifies auth-gated MCP endpoints with WWW-Authenticate as real", async () => {
+    const outcome = await probeMcpEndpoint("https://linear.example/mcp", {
+      fetchImpl: async () => new Response("Unauthorized", {
+        status: 401,
+        headers: { "www-authenticate": "Bearer resource_metadata=\"https://linear.example/.well-known/oauth-protected-resource\"" },
+      }),
+    });
+
+    expect(outcome).toMatchObject({ status: "real", reason: "auth_challenge", httpStatus: 401 });
+  });
+
+  test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {
+    await expect(probeMcpEndpoint("https://missing.example/mcp", {
+      fetchImpl: async () => new Response("not found", { status: 404 }),
+    })).resolves.toMatchObject({ status: "junk", reason: "http_not_found" });
+
+    await expect(probeMcpEndpoint("https://html.example/mcp", {
+      fetchImpl: async () => new Response("<!doctype html><title>No MCP</title>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    })).resolves.toMatchObject({ status: "junk", reason: "html_response" });
+
+    await expect(probeMcpEndpoint("https://api.example/mcp", {
+      fetchImpl: async () => new Response(JSON.stringify({ kind: "gmail#profile", emailAddress: "me@example.com" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    })).resolves.toMatchObject({ status: "junk", reason: "non_mcp_json" });
+
+    await expect(probeMcpEndpoint("https://dns.example/mcp", {
+      fetchImpl: async () => { throw new Error("getaddrinfo ENOTFOUND dns.example"); },
+    })).resolves.toMatchObject({ status: "junk", reason: "connection_error" });
+  });
+
+  test("filters junk rows while keeping unverified rows with probe metadata", async () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-03T00:00:00.000Z",
+      importRows: [
+        row({ domain: "real.example", mcpUrl: "https://real.example/mcp" }),
+        row({ domain: "gmail.googleapis.com", mcpUrl: "https://gmail.googleapis.com/mcp" }),
+        row({ domain: "maybe.example", mcpUrl: "https://maybe.example/mcp" }),
+      ],
+    });
+    const probed = await probeCatalogSnapshot(normalized, {
+      concurrency: 2,
+      fetchImpl: async (input) => {
+        const url = String(input);
+        if (url.includes("real.example")) {
+          return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { capabilities: {} } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.includes("googleapis.com")) {
+          return new Response("not found", { status: 404 });
+        }
+        return new Response("busy", { status: 503 });
+      },
+    });
+
+    expect(probed.rows.map((candidate) => candidate.domain)).toEqual(["maybe.example", "real.example"]);
+    expect(probed.probe).toMatchObject({ kept: 2, dropped: 1, real: 1, unverified: 1, googleapisDropped: 1 });
+    expect(probed.rows.find((candidate) => candidate.domain === "maybe.example")?.probe)
+      .toMatchObject({ status: "unverified", reason: "http_status", httpStatus: 503 });
+    expect(probed.skipped.find((skip) => skip.domain === "gmail.googleapis.com")).toMatchObject({
+      reason: "probe_http_not_found",
+    });
   });
 });
 

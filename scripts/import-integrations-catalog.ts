@@ -63,6 +63,7 @@ export type CatalogIntegrationRow = {
   tier: CatalogTier;
   provenance: string;
   logoSourceUrl: string | null;
+  probe?: Record<string, unknown>;
 };
 
 export type NormalizedCatalogSnapshot = {
@@ -326,6 +327,7 @@ export function catalogRowToDbInput(row: CatalogIntegrationRow, input: {
     metadata: {
       logoSource: row.logoSourceUrl ? "integrations.sh" : "missing",
       originalLogoUrl: row.logoSourceUrl,
+      ...(row.probe ? { mcpProbe: row.probe } : {}),
     },
   };
 }
