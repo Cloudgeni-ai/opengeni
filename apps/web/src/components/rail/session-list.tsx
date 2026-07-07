@@ -258,6 +258,14 @@ function SessionGroup(props: {
   );
 }
 
+/** True when the URL-active session lives anywhere inside this node's subtree. */
+function subtreeContains(node: SessionTreeNode, id: string | null): boolean {
+  if (!id) {
+    return false;
+  }
+  return node.children.some((child) => child.session.id === id || subtreeContains(child, id));
+}
+
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
 function SessionTreeRow(props: {
   node: SessionTreeNode;
@@ -274,6 +282,11 @@ function SessionTreeRow(props: {
   const index = props.flat.indexOf(node.session);
   const childCount = node.children.length;
   const isExpanded = props.expanded.has(node.session.id);
+  // Manual collapse always wins (auto-expand runs only on navigation) — but the
+  // OPEN session must never vanish from the rail: a collapsed ancestor hiding
+  // the URL-active session carries the active accent in its place, file-tree
+  // style, so orientation survives any collapse state.
+  const representsHiddenActive = !isExpanded && childCount > 0 && subtreeContains(node, props.activeSessionId);
   return (
     <>
       <SessionRow
@@ -284,7 +297,7 @@ function SessionTreeRow(props: {
         expanded={isExpanded}
         hasActiveDescendant={node.hasActiveDescendant}
         onToggleExpand={() => props.onToggleExpand(node.session.id)}
-        active={node.session.id === props.activeSessionId}
+        active={node.session.id === props.activeSessionId || representsHiddenActive}
         focused={index >= 0 && index === props.focusIndex}
         onSelect={props.onSelect}
         onRename={props.onRename}
