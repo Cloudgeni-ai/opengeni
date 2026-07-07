@@ -17,6 +17,7 @@ import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import { SessionSandboxSwitcher } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
+import { SessionAgentsChip, SpawnedByBreadcrumb } from "@/components/session/goal-surface";
 import { WorkspaceNav } from "@/components/rail/workspace-nav";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -185,6 +186,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
       {showSessionActions && context.session ? (
         <>
           <div className="flex min-w-0 flex-1 flex-col justify-center gap-px">
+            {/* Child sessions link back to the manager that spawned them. */}
+            <SpawnedByBreadcrumb workspaceId={context.session.workspaceId} sessionId={context.session.id} />
             <SessionTitleEditor session={context.session} onRename={context.updateSessionTitle} />
             {/* One quiet metadata voice: no label-colon grammar, no separator
                 soup — the model·effort token, then the sandbox pill (its own
@@ -203,6 +206,9 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
+            {/* Sessions that spawned workers surface an "N agents" chip opening
+                the shared subagent lineage panel. */}
+            <SessionAgentsChip workspaceId={context.session.workspaceId} sessionId={context.session.id} />
             <ConnectionPill state={context.connectionState} />
             <SessionStatusBadge status={context.session.status} />
             {context.keyAuthRequired ? (

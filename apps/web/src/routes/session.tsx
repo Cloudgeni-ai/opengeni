@@ -37,7 +37,7 @@ import {
   TerminalSessionBanner,
   UserMessageBody,
 } from "@/components/session/banners";
-import { GoalCard, GoalChip } from "@/components/session/goal-card";
+import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
 import { QueueRail } from "@/components/session/queue-rail";
 import { useSandboxWorkspaceTabs } from "@/components/session/sandbox-workspace";
@@ -261,6 +261,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
   const chatPane = (
     <SessionChatPane
       session={session}
+      events={events}
       timeline={timeline}
       initialLoading={initialLoading}
       approvals={approvals}
@@ -342,8 +343,9 @@ function SessionDock(props: {
       content: (
         <ScrollArea className="h-full min-w-0">
           <div className="min-w-0 space-y-5 p-3">
+            {/* The goal moved to the floating GoalSurface above the composer; the
+                Run tab is the turn queue only. */}
             <QueueRail queue={props.queue} sessionStatus={props.session.status} />
-            <GoalCard goal={props.goal} events={props.events} />
           </div>
         </ScrollArea>
       ),
@@ -371,6 +373,7 @@ function SessionDock(props: {
 
 function SessionChatPane(props: {
   session: Session;
+  events: SessionEvent[];
   timeline: TimelineItem[];
   initialLoading: boolean;
   approvals: PendingApproval[];
@@ -479,12 +482,6 @@ function SessionChatPane(props: {
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
-      {props.goal.goal ? (
-        <div className="mx-auto flex w-full max-w-3xl shrink-0 items-center px-4 pt-3 sm:px-6">
-          <GoalChip goal={props.goal} />
-        </div>
-      ) : null}
-
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
           <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
@@ -562,6 +559,17 @@ function SessionChatPane(props: {
             })}
           </div>
         </div>
+      ) : null}
+
+      {/* The floating goal pill hovers just above the composer (hidden when the
+          session has no goal). */}
+      {!terminal ? (
+        <GoalSurface
+          session={props.session}
+          goal={props.goal}
+          events={props.events}
+          onNavigate={() => undefined}
+        />
       ) : null}
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
