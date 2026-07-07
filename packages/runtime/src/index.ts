@@ -665,7 +665,7 @@ function recordModelCallMetric(provider: string, outcome: "completed" | "failed"
 export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
-  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number } = {},
+  options: { client?: OpenAI; api?: ModelProviderApi; maxOutputTokens?: number; model?: string; maxTranscriptTokens?: number; promptCacheKey?: string } = {},
 ): Promise<string | null> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
   const api = options.api ?? "responses";
@@ -683,6 +683,7 @@ export async function summarizeForCompaction(
         model,
         max_tokens: maxTokens,
         messages: [{ role: "user", content: transcript }],
+        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
       } as any);
       const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> }).choices?.[0]?.message?.content;
       const trimmed = typeof text === "string" ? text.trim() : "";
@@ -696,6 +697,7 @@ export async function summarizeForCompaction(
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
       max_output_tokens: maxTokens,
       input: transcript,
+      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
     } as any);
     const text = extractResponseOutputText(response);
     const trimmed = text.trim();
@@ -803,6 +805,11 @@ export type BuildAgentOptions = {
   // the account's ACTUALLY-connected sources (codex-rs parity). Only meaningful
   // on the codex tool-search path.
   codexConnectorNamespaces?: ReadonlySet<string>;
+  // Stable per-session routing key for provider-side prompt prefix caches. The
+  // worker passes this only for transports whose docs/API surface accept
+  // prompt_cache_key; registry providers that use a different affinity field stay
+  // unset to avoid unknown-parameter 400s.
+  promptCacheKey?: string;
   sandboxEnvironment?: Record<string, string>;
   // The EFFECTIVE/active compute backend for this turn. `settings.sandboxBackend`
   // is the session's HOME backend (the default cloud group box it was created
@@ -1037,6 +1044,10 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
   const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   const contextWindowTokens = options.contextWindowTokens ?? settings.contextWindowTokens;
+  const providerData = {
+    ...(encryptedReasoning ? { include: ["reasoning.encrypted_content"] } : {}),
+    ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+  };
   // Native hosted tools attached to every constructed agent. webSearchEnabled
   // is ON by default and provider-unconditional on the built-in path (the live
   // Azure Responses path executes the hosted web_search tool); a registry model
@@ -1100,9 +1111,7 @@ export function buildOpenGeniAgent(settings: Settings, resources: ResourceRef[],
       // function tools, which contribute none. Gated on the resolved
       // encryptedReasoning flag: the chat wire API has no encrypted_content
       // field, so registry "chat" providers turn it off.
-      ...(encryptedReasoning
-        ? { providerData: { include: ["reasoning.encrypted_content"] } }
-        : {}),
+      ...(Object.keys(providerData).length > 0 ? { providerData } : {}),
     },
     // Explicit hosted tools (web_search when enabled). Threaded into BOTH the
     // `new Agent(baseConfig)` path (sandboxBackend === "none") and the

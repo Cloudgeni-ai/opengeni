@@ -577,6 +577,28 @@ export function computerToolModeForTurn(
 }
 
 /**
+ * Decide whether THIS turn may send OpenAI's `prompt_cache_key` request field.
+ *
+ * Accepted transports:
+ *   - legacy/built-in OpenAI or Azure Responses fallback (resolvedModel null);
+ *   - resolved built-in OpenAI/Azure providers;
+ *   - ChatGPT/Codex subscription backend (its strict allowlist permits the field).
+ *
+ * Registry API-key providers are intentionally excluded. Fireworks' prompt-cache
+ * docs prescribe `user` or `x-session-affinity`, not `prompt_cache_key`; Z.AI/GLM
+ * documents automatic context caching plus `user_id`. Sending OpenAI-only fields
+ * to unknown OpenAI-compatible providers risks unsupported-parameter 400s.
+ */
+export function acceptsPromptCacheKeyForTurn(
+  resolvedModel: { provider: { kind: RegistryProviderKind; builtin?: boolean } } | null,
+): boolean {
+  if (!resolvedModel) {
+    return true;
+  }
+  return resolvedModel.provider.builtin === true || resolvedModel.provider.kind === "codex-subscription";
+}
+
+/**
  * SELF-HEAL helper for the all-capped rotation idle (invariant 4: BOUNDED, no thrash).
  * The turn hot path never refreshes Codex usage — only the usage API route does — so a
  * window that has actually reset still reads OVER-threshold from the stale cache, which
@@ -1447,6 +1469,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // trigger is goal.continuation/turn.preempted).
       const isGenesisTurn = triggerType === "user.message"
         && (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
       // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
       // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
       // may have been swapped to a connected machine (active_sandbox_id → a
@@ -1519,12 +1542,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // responses → hosted) so the runtime never string-sniffs the model instance's
             // constructor name. See {@link computerToolModeForTurn}.
             computerToolMode: computerToolModeForTurn(resolvedModel),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }
           // LEGACY global-client fallback (resolveTurnModel returned null → the model
           // is not in the registry, served by the built-in OpenAI/Azure Responses
           // client). That backend has real hosted support, so pin computerToolMode to
           // "hosted" EXPLICITLY rather than leaving the runtime to sniff the instance.
-          : { computerToolMode: computerToolModeForTurn(null) }),
+          : {
+            computerToolMode: computerToolModeForTurn(null),
+            promptCacheKey: input.sessionId,
+          }),
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         // Per-session persona tier (session > workspace > deployment default).
@@ -1548,8 +1575,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             model: resolvedModel.configured.id,
             maxOutputTokens: SUMMARY_BUFFER_TOKENS,
             ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+            ...(promptCacheKey ? { promptCacheKey } : {}),
           }))
-        : undefined;
+        : promptCacheKey
+          ? ((s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) => summarizeForCompaction(s, m, {
+              maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+              ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
+              promptCacheKey,
+            }))
+          : undefined;
       // Pre-turn client-side context compaction (Azure path). When the
       // resolved mode is "client" and the single Codex-parity threshold is
       // crossed, this summarizes the current active history and rebuilds active
@@ -1573,7 +1607,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // Provider-aware summarizer: when the turn's model resolved to a
             // registry provider, summarize on THAT provider's client + wire API
             // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution keeps the default built-in Responses summarizer.
+            // resolution uses the built-in Responses summarizer with the same
+            // session prompt-cache key as the main model calls.
             compactSummarizer,
             forced ? { force: true } : {},
           );

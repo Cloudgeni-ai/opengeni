@@ -3,7 +3,7 @@ import { CancelledFailure } from "@temporalio/activity";
 import type { Settings } from "@opengeni/config";
 import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
-import { classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
+import { acceptsPromptCacheKeyForTurn, classifyContextWindowOverflowError, computerToolModeForTurn, emitModelCallUsage, ensureTurnModalRegistryImage, historyRowsToAppend, isWorkerShutdownCancellation, modelUsageSourceKey, resolveActiveSandboxBackend, shouldStartOnTurnRecording, WORKER_SHUTDOWN_RESUME_TEXT } from "../src/activities/agent-turn";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { withUnavailableSandboxFilesNote } from "../src/activities/run-input";
 
@@ -614,6 +614,25 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("acceptsPromptCacheKeyForTurn", () => {
+  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, builtin = false) =>
+    ({ provider: { kind, api, builtin } }) as Parameters<typeof acceptsPromptCacheKeyForTurn>[0];
+
+  test("accepts the legacy built-in OpenAI/Azure fallback", () => {
+    expect(acceptsPromptCacheKeyForTurn(null)).toBe(true);
+  });
+
+  test("accepts built-in OpenAI/Azure providers and the codex backend", () => {
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses", true))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("codex-subscription", "responses"))).toBe(true);
+  });
+
+  test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
   });
 });
 
