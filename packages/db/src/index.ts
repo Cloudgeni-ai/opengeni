@@ -6878,6 +6878,8 @@ export interface ReapDrainable {
   leaseEpoch: number;
 }
 
+let loggedLegacyReapFunctionFallback = false;
+
 export async function reapStaleLeaseHolders(db: Database, input: {
   workspaceId: string;
   viewerHolderTtlMs: number;   // delete viewer rows older than this
@@ -7009,10 +7011,29 @@ export async function reapStaleLeaseHoldersGlobal(db: Database, input: {
   turnHolderTtlMs?: number;
   idleGraceMs: number;
 }): Promise<ReapDrainable[]> {
-  const rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
-    select workspace_id, sandbox_group_id, instance_id, lease_epoch
-    from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
-  `);
+  let rows: Array<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>;
+  try {
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.turnHolderTtlMs ?? 0}, ${input.idleGraceMs})
+    `);
+  } catch (error) {
+    // Deploy normally runs migrations before rollout, but a newly-started worker
+    // may briefly hit a DB that only has the legacy 2-arg SECURITY DEFINER
+    // function. Fall back for that sweep only: viewer/warming/drain reaping stays
+    // active, dead-turn-holder reaping is skipped until migration 0044 lands.
+    if ((error as { code?: unknown })?.code !== "42883") {
+      throw error;
+    }
+    if (!loggedLegacyReapFunctionFallback) {
+      loggedLegacyReapFunctionFallback = true;
+      console.warn("sandbox lease global reaper: 3-arg reap_sandbox_leases missing; falling back to legacy 2-arg sweep");
+    }
+    rows = await rawRows<{ workspace_id: string; sandbox_group_id: string; instance_id: string | null; lease_epoch: number | string }>(db, sql`
+      select workspace_id, sandbox_group_id, instance_id, lease_epoch
+      from opengeni_private.reap_sandbox_leases(${input.viewerHolderTtlMs}, ${input.idleGraceMs})
+    `);
+  }
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     sandboxGroupId: r.sandbox_group_id,
