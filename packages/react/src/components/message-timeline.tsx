@@ -56,6 +56,14 @@ export type MessageTimelineProps = {
    */
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   /**
+   * Resolve a provider domain (from a reconnect card) to a logo URL the host
+   * serves itself — the app maps it through its catalog + `catalogAssetUrl`.
+   * Return null/undefined to fall back to a calm monogram. The library never
+   * fetches an off-origin favicon (CSP + privacy); an unresolved logo is a
+   * monogram, not an external image.
+   */
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  /**
    * The tool-renderer registry that resolves how each tool call is drawn.
    * Defaults to {@link defaultToolRegistry}; pass a registry from
    * `createDefaultToolRegistry({ entries })` to add custom tool renderers.
@@ -86,6 +94,7 @@ export function MessageTimeline({
   renderMessageText,
   onOpenSession,
   onReconnect,
+  resolveProviderLogo,
   toolRegistry = defaultToolRegistry,
   autoFollow = true,
   hasOlder = false,
@@ -297,6 +306,7 @@ export function MessageTimeline({
               renderMessageText={renderMessageText}
               onOpenSession={onOpenSession}
               onReconnect={onReconnect}
+              resolveProviderLogo={resolveProviderLogo}
               toolRegistry={toolRegistry}
               foldLiveCluster={isAgentProgress(groups[index + 1])}
             />
@@ -362,6 +372,7 @@ function TimelineGroupView({
   renderMessageText,
   onOpenSession,
   onReconnect,
+  resolveProviderLogo,
   toolRegistry,
   insideTurn = false,
   foldLiveCluster = false,
@@ -370,6 +381,7 @@ function TimelineGroupView({
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onOpenSession?: ((sessionId: string) => void) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
   toolRegistry: ToolRegistry;
   /** A completed cluster of a still-RUNNING turn (not the live tail) folds
       behind a neutral chip — the one place activity without an outcome still
@@ -414,6 +426,7 @@ function TimelineGroupView({
                 renderMessageText={renderMessageText}
                 onOpenSession={onOpenSession}
                 onReconnect={onReconnect}
+                resolveProviderLogo={resolveProviderLogo}
                 toolRegistry={toolRegistry}
                 insideTurn
               />
@@ -423,7 +436,14 @@ function TimelineGroupView({
       );
     }
     case "item":
-      return <TimelineRow item={group.item} renderMessageText={renderMessageText} onReconnect={onReconnect} />;
+      return (
+        <TimelineRow
+          item={group.item}
+          renderMessageText={renderMessageText}
+          onReconnect={onReconnect}
+          resolveProviderLogo={resolveProviderLogo}
+        />
+      );
   }
 }
 
@@ -494,10 +514,12 @@ export function TimelineRow({
   item,
   renderMessageText,
   onReconnect,
+  resolveProviderLogo,
 }: {
   item: TimelineItem;
   renderMessageText?: ((text: string, item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
   switch (item.kind) {
     case "user-message":
@@ -511,7 +533,7 @@ export function TimelineRow({
     case "notice":
       return <NoticeRow item={item} />;
     case "auth-needed":
-      return <AuthNeededRow item={item} onReconnect={onReconnect} />;
+      return <AuthNeededRow item={item} onReconnect={onReconnect} resolveProviderLogo={resolveProviderLogo} />;
     default:
       return null;
   }
@@ -671,9 +693,11 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 function AuthNeededRow({
   item,
   onReconnect,
+  resolveProviderLogo,
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
+  resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
 }) {
   const enter = useEntranceAnimation();
   const [busy, setBusy] = useState(false);
@@ -701,7 +725,7 @@ function AuthNeededRow({
     <div className={cn(enter && "animate-og-enter", "flex flex-col gap-2")} role="status">
       <div className="flex flex-col gap-3 rounded-og-lg border border-og-border bg-og-surface-1 px-3.5 py-3 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <AuthProviderLogo domain={item.providerDomain} label={provider} />
+          <AuthProviderLogo src={resolveProviderLogo?.(item.providerDomain) ?? null} label={provider} />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
@@ -743,27 +767,43 @@ function AuthNeededRow({
 }
 
 /**
- * The provider's favicon in a rounded tile, with a calm letter monogram fallback
- * when there's no domain or the icon fails to load — so the card never shows a
- * broken-image glyph. Favicons come from a public icon service keyed on the
- * registrable domain; a strict-CSP host simply gets the monogram.
+ * The provider's logo in a rounded tile, from a URL the HOST serves itself
+ * (resolved via `resolveProviderLogo` → the app's catalog assets). A missing or
+ * failed image falls back to a calm letter monogram — same as the rest of the
+ * app — so the card never shows a broken-image glyph and never reaches off-origin
+ * for a favicon (CSP + privacy).
  */
-function AuthProviderLogo({ domain, label }: { domain: string; label: string }) {
+function AuthProviderLogo({ src, label }: { src: string | null; label: string }) {
   const [failed, setFailed] = useState(false);
-  const host = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0] ?? "";
-  const src = host && !failed ? `https://icons.duckduckgo.com/ip3/${host}.ico` : null;
+  // A resolver that only returns the URL after a lazy catalog fetch means `src`
+  // can arrive on a later render; reset the error latch so it gets its attempt.
+  useEffect(() => setFailed(false), [src]);
+  const showImage = src && !failed;
   return (
     <span
       className="relative flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-og-md border border-og-border bg-og-surface-2 text-sm font-semibold text-og-fg-muted"
       aria-hidden
     >
-      {src ? (
+      {showImage ? (
         <img src={src} alt="" loading="lazy" decoding="async" className="size-full object-contain p-1.5" onError={() => setFailed(true)} />
       ) : (
-        <span>{label.charAt(0).toUpperCase() || "?"}</span>
+        <span>{monogram(label)}</span>
       )}
     </span>
   );
+}
+
+/** First one or two initials for the monogram fallback — mirrors the app's
+    `capabilityMonogram` so the reconnect tile reads like every other logo tile. */
+function monogram(label: string): string {
+  const words = label.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) {
+    return "?";
+  }
+  if (words.length === 1) {
+    return words[0]!.slice(0, 2).toUpperCase();
+  }
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
 }
 
 /** "linear.app" -> "Linear": the first domain label, capitalized. A calm human

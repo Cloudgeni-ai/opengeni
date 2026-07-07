@@ -48,6 +48,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { WorkspaceDock, type WorkspaceTab } from "@opengeni/react";
 import { useAppContext } from "@/context";
 import { useCodexModels } from "@/lib/use-codex-models";
+import { normalizeProviderDomain } from "@/lib/capabilities";
 import { isTerminalSessionStatus, projectSessionTimeline, summarizeSessionFailure } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -191,6 +192,53 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
     window.location.assign(response.authorizationUrl);
   }, [context.client, workspaceId]);
 
+  // Self-hosted provider logos for any inline reconnect card. A domain resolves
+  // to a logo only through the workspace catalog (logoAssetPath), so fetch it
+  // lazily — once an auth-needed card is actually in view — and serve the image
+  // from our own catalog-assets route via `catalogAssetUrl`, never an off-origin
+  // favicon (the CSP forbids it and it would leak which providers are connected).
+  const hasAuthNeeded = useMemo(() => timeline.some((item) => item.kind === "auth-needed"), [timeline]);
+  const [providerLogos, setProviderLogos] = useState<Map<string, string>>(() => new Map());
+  const logosRequestedRef = useRef(false);
+  useEffect(() => {
+    if (!hasAuthNeeded || logosRequestedRef.current) {
+      return;
+    }
+    logosRequestedRef.current = true;
+    let cancelled = false;
+    void context.client.listCapabilities(workspaceId)
+      .then((catalog) => {
+        if (cancelled) {
+          return;
+        }
+        const map = new Map<string, string>();
+        for (const cap of catalog.items) {
+          const domain = cap.providerDomain ?? cap.connectionRef?.providerDomain ?? null;
+          const url = context.client.catalogAssetUrl(cap.logoAssetPath);
+          if (domain && url) {
+            const key = normalizeProviderDomain(domain);
+            if (!map.has(key)) {
+              map.set(key, url);
+            }
+          }
+        }
+        setProviderLogos(map);
+      })
+      .catch(() => {
+        // Leave the card on its monogram fallback and allow a later retry.
+        if (!cancelled) {
+          logosRequestedRef.current = false;
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasAuthNeeded, context.client, workspaceId]);
+  const resolveProviderLogo = useCallback(
+    (domain: string) => providerLogos.get(normalizeProviderDomain(domain)) ?? null,
+    [providerLogos],
+  );
+
   if (loading || !session) {
     if (loadError) {
       return isApiErrorStatus(loadError, 404) ? (
@@ -228,6 +276,7 @@ export function SessionRoute({ workspaceId, sessionId }: { workspaceId: string; 
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
+      resolveProviderLogo={resolveProviderLogo}
     />
   );
 
@@ -339,6 +388,7 @@ function SessionChatPane(props: {
   onApprove: (approvalId: string) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
+  resolveProviderLogo: (providerDomain: string) => string | null;
 }) {
   const context = useAppContext();
   const codexModels = useCodexModels(props.session.workspaceId);
@@ -458,6 +508,7 @@ function SessionChatPane(props: {
               renderMessageText={renderMessageText}
               onOpenSession={props.onOpenSession}
               onReconnect={props.onReconnect}
+              resolveProviderLogo={props.resolveProviderLogo}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
               onLoadOlder={() => void props.onLoadOlder()}

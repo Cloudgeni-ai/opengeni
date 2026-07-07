@@ -39,6 +39,16 @@ import "./styles.css";
 /** One overline/eyebrow recipe, used for every uppercase section label. */
 const EYEBROW = "text-og-xs font-medium uppercase tracking-[0.1em] text-og-fg-subtle";
 
+/** Demo-only stand-in for the app's catalog-asset logos (an inline data-URI so
+    the harness needs no network). The real app resolves these via catalogAssetUrl. */
+const DEMO_PROVIDER_LOGOS: Record<string, string> = {
+  "linear.app":
+    "data:image/svg+xml;utf8," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="24" fill="#5e6ad2"/><g stroke="#fff" stroke-width="7" stroke-linecap="round"><line x1="24" y1="62" x2="62" y2="24"/><line x1="24" y1="44" x2="44" y2="24"/><line x1="38" y1="76" x2="76" y2="38"/></g></svg>`,
+    ),
+};
+
 /**
  * A demo section. The `hint` is intentionally ONE short line (never a wrapping
  * paragraph) so the gallery reads as a sleek component showcase, not docs
@@ -144,9 +154,17 @@ function Harness() {
 
             <Section
               title="Reconnect — a lapsed connection, inline"
-              hint="tool.auth_needed → a clean card: provider logo, one human line, a Reconnect button."
+              hint="tool.auth_needed → a clean card: self-hosted logo (or monogram), one human line, a Reconnect button."
             >
-              <MessageTimeline events={authNeededEvents()} onReconnect={() => new Promise(() => {})} className="max-h-none" />
+              {/* In the app the logo URL comes from our own catalog assets; here
+                  a fixture resolver serves one provider (logo) and lets the other
+                  fall back to its monogram — both states in one shot. */}
+              <MessageTimeline
+                events={authNeededEvents()}
+                onReconnect={() => new Promise(() => {})}
+                resolveProviderLogo={(domain) => DEMO_PROVIDER_LOGOS[domain] ?? null}
+                className="max-h-none"
+              />
             </Section>
 
             <Section title="Interrupted turn — cancelled mid-run">
